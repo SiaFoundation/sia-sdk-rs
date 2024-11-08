@@ -13,7 +13,7 @@ pub fn sector_root(sector: &[u8]) -> Hash256 {
     let mut params = Params::new();
     params.hash_length(32);
 
-    let mut tree_hashes = vec![[0; 32]; SECTOR_SIZE / SEGMENT_SIZE];
+    let mut tree_hashes = vec![Hash256::default(); SECTOR_SIZE / SEGMENT_SIZE];
     tree_hashes
         .par_chunks_exact_mut(4)
         .enumerate()
@@ -37,7 +37,7 @@ pub fn sector_root(sector: &[u8]) -> Hash256 {
 
             // collect results
             for j in 0..4 {
-                chunk[j] = jobs[j].to_hash().as_bytes().try_into().unwrap();
+                chunk[j] = jobs[j].to_hash().into();
             }
         });
 
@@ -49,8 +49,8 @@ pub fn sector_root(sector: &[u8]) -> Hash256 {
             for (j, input) in inputs.iter_mut().enumerate() {
                 input[0] = NODE_HASH_PREFIX[0];
                 let step = j * chunk_size / 2;
-                input[1..33].copy_from_slice(&nodes[step]);
-                input[33..65].copy_from_slice(&nodes[step + chunk_size / 4]);
+                input[1..33].copy_from_slice(nodes[step].as_ref());
+                input[33..65].copy_from_slice(nodes[step + chunk_size / 4].as_ref());
             }
 
             // hash them
@@ -61,17 +61,17 @@ pub fn sector_root(sector: &[u8]) -> Hash256 {
             hash_many(&mut jobs);
 
             // collect results
-            nodes[0] = jobs[0].to_hash().as_bytes().try_into().unwrap();
-            nodes[nodes.len() / 2] = jobs[1].to_hash().as_bytes().try_into().unwrap();
+            nodes[0] = jobs[0].to_hash().into();
+            nodes[nodes.len() / 2] = jobs[1].to_hash().into();
         });
         chunk_size *= 2;
     }
     // hash last two nodes into roots
-    Hash256::from(sum_node(
+    sum_node(
         &params,
         &tree_hashes[0],
         &tree_hashes[tree_hashes.len() / 2],
-    ))
+    )
 }
 
 #[cfg(test)]

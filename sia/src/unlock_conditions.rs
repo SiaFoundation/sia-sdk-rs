@@ -114,9 +114,7 @@ impl UnlockConditions {
             .update(&self.timelock.to_le_bytes())
             .finalize();
 
-        let mut leaf = [0u8; 32];
-        leaf.copy_from_slice(h.as_bytes());
-        acc.add_leaf(&leaf);
+        acc.add_leaf(&h.into());
 
         for key in self.public_keys.iter() {
             let mut state = p.to_state();
@@ -124,9 +122,7 @@ impl UnlockConditions {
             key.encode(&mut state).unwrap();
 
             let h = state.finalize();
-            let mut leaf = [0u8; 32];
-            leaf.copy_from_slice(h.as_bytes());
-            acc.add_leaf(&leaf);
+            acc.add_leaf(&h.into());
         }
 
         let h = p
@@ -135,11 +131,9 @@ impl UnlockConditions {
             .update(&self.signatures_required.to_le_bytes())
             .finalize();
 
-        let mut leaf = [0u8; 32];
-        leaf.copy_from_slice(h.as_bytes());
-        acc.add_leaf(&leaf);
+        acc.add_leaf(&h.into());
 
-        Address::new(acc.root())
+        Address::new(acc.root().into())
     }
 }
 
