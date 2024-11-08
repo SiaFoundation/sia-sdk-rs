@@ -1,5 +1,5 @@
 use crate::signing::PrivateKey;
-use crate::Hash256;
+use crate::types::Hash256;
 use bip39::{Error as MnemonicError, Language, Mnemonic};
 use blake2b_simd::Params;
 

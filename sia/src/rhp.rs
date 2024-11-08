@@ -1,5 +1,5 @@
 use crate::merkle::{sum_node, LEAF_HASH_PREFIX, NODE_HASH_PREFIX};
-use crate::Hash256;
+use crate::types::Hash256;
 use blake2b_simd::many::{hash_many, HashManyJob};
 use blake2b_simd::Params;
 use rayon::prelude::*;

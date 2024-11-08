@@ -1,18 +1,29 @@
-use crate::encoding::{
-    SiaDecodable, SiaDecode, SiaEncodable, SiaEncode, V1SiaDecodable, V1SiaDecode, V1SiaEncodable,
-    V1SiaEncode,
-};
-use blake2b_simd::Params;
 use core::fmt;
+
+use blake2b_simd::Params;
 use serde::{Deserialize, Serialize};
-use std::fmt::Debug;
+
+use crate::encoding::{
+    self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode, V1SiaDecodable, V1SiaDecode,
+    V1SiaEncodable, V1SiaEncode,
+};
+use crate::types::currency::Currency;
 
 // Macro to implement types used as identifiers which are 32 byte hashes and are
 // serialized with a prefix
 #[macro_export]
 macro_rules! ImplHashID {
     ($name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, SiaEncode, SiaDecode, V1SiaEncode, V1SiaDecode)]
+        #[derive(
+            Debug,
+            Clone,
+            Copy,
+            PartialEq,
+            $crate::encoding::SiaEncode,
+            $crate::encoding::SiaDecode,
+            $crate::encoding::V1SiaEncode,
+            $crate::encoding::V1SiaDecode,
+        )]
         pub struct $name([u8; 32]);
 
         impl serde::Serialize for $name {
@@ -37,18 +48,19 @@ macro_rules! ImplHashID {
 
         impl $name {
             // Example method that might be used in serialization/deserialization
-            pub fn parse_string(s: &str) -> Result<Self, $crate::HexParseError> {
+            pub fn parse_string(s: &str) -> Result<Self, $crate::types::HexParseError> {
                 let s = match s.split_once(':') {
                     Some((_prefix, suffix)) => suffix,
                     None => s,
                 };
 
                 if s.len() != 64 {
-                    return Err($crate::HexParseError::InvalidLength);
+                    return Err($crate::types::HexParseError::InvalidLength);
                 }
 
                 let mut data = [0u8; 32];
-                hex::decode_to_slice(s, &mut data).map_err($crate::HexParseError::HexError)?;
+                hex::decode_to_slice(s, &mut data)
+                    .map_err($crate::types::HexParseError::HexError)?;
                 Ok($name(data))
             }
         }
@@ -101,6 +113,11 @@ macro_rules! ImplHashID {
 
 ImplHashID!(Hash256);
 ImplHashID!(BlockID);
+ImplHashID!(SiacoinOutputID);
+ImplHashID!(SiafundOutputID);
+ImplHashID!(FileContractID);
+ImplHashID!(TransactionID);
+ImplHashID!(AttestationID);
 
 #[derive(Debug, PartialEq, SiaEncode, SiaDecode, Serialize, Deserialize)]
 
@@ -112,41 +129,6 @@ pub struct ChainIndex {
 impl fmt::Display for ChainIndex {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}:{}", self.height, hex::encode(self.id))
-    }
-}
-
-#[derive(Debug, PartialEq, Clone, SiaEncode, V1SiaEncode, SiaDecode, V1SiaDecode)]
-pub struct Leaf([u8; 64]);
-
-impl From<[u8; 64]> for Leaf {
-    fn from(data: [u8; 64]) -> Self {
-        Leaf(data)
-    }
-}
-
-impl fmt::Display for Leaf {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", hex::encode(self.0))
-    }
-}
-
-impl Serialize for Leaf {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        String::serialize(&self.to_string(), serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for Leaf {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let data = hex::decode(s).map_err(|e| serde::de::Error::custom(format!("{:?}", e)))?;
-        if data.len() != 64 {
-            return Err(serde::de::Error::custom("invalid length"));
-        }
-        Ok(Leaf(data.try_into().unwrap()))
     }
 }
 
@@ -246,6 +228,86 @@ impl fmt::Display for Address {
         buf[32..].copy_from_slice(&h.as_bytes()[..6]);
         write!(f, "{}", hex::encode(buf))
     }
+}
+
+#[derive(
+    Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, V1SiaEncode, V1SiaDecode,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct SiacoinOutput {
+    pub value: Currency,
+    pub address: Address,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+pub struct SiafundOutput {
+    pub value: u64,
+    pub address: Address,
+}
+
+impl V1SiaEncodable for SiafundOutput {
+    fn encode_v1<W: std::io::Write>(&self, w: &mut W) -> encoding::Result<()> {
+        Currency::new(self.value as u128).encode_v1(w)?;
+        self.address.encode_v1(w)?;
+        Currency::new(0).encode_v1(w) // siad encodes a "claim start," but its an error if it's non-zero.
+    }
+}
+
+impl V1SiaDecodable for SiafundOutput {
+    fn decode_v1<R: std::io::Read>(r: &mut R) -> encoding::Result<Self> {
+        let se = SiafundOutput {
+            value: Currency::decode_v1(r)?
+                .try_into()
+                .map_err(|_| encoding::Error::Custom("invalid value".to_string()))?,
+            address: Address::decode_v1(r)?,
+        };
+        Currency::decode_v1(r)?; // ignore claim start
+        Ok(se)
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, SiaEncode, V1SiaEncode, SiaDecode, V1SiaDecode)]
+pub struct Leaf([u8; 64]);
+
+impl From<[u8; 64]> for Leaf {
+    fn from(data: [u8; 64]) -> Self {
+        Leaf(data)
+    }
+}
+
+impl fmt::Display for Leaf {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", hex::encode(self.0))
+    }
+}
+
+impl Serialize for Leaf {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        String::serialize(&self.to_string(), serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Leaf {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let data = hex::decode(s).map_err(|e| serde::de::Error::custom(format!("{:?}", e)))?;
+        if data.len() != 64 {
+            return Err(serde::de::Error::custom("invalid length"));
+        }
+        Ok(Leaf(data.try_into().unwrap()))
+    }
+}
+
+/// A StateElement is a generic element within the state accumulator.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+pub struct StateElement {
+    pub leaf_index: u64,
+    pub merkle_proof: Vec<Hash256>,
 }
 
 #[cfg(test)]

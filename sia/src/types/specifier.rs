@@ -60,17 +60,14 @@ macro_rules! specifier {
     ($text:expr) => {{
         let src = $text.as_bytes();
         let len = src.len();
-        assert!(
-            len <= $crate::specifier::SPECIFIER_SIZE,
-            "specifier too long"
-        );
+        assert!(len <= $crate::types::SPECIFIER_SIZE, "specifier too long");
         let mut buf = [0; 16];
         let mut index: usize = 0;
         while index < len {
             buf[index] = src[index];
             index += 1;
         }
-        $crate::specifier::Specifier::new(buf)
+        $crate::types::Specifier::new(buf)
     }};
 }
 pub(crate) use specifier;

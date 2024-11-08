@@ -1,6 +1,6 @@
 use blake2b_simd::Params;
 
-use crate::Hash256;
+use crate::types::Hash256;
 
 pub const LEAF_HASH_PREFIX: &[u8; 1] = &[0];
 pub const NODE_HASH_PREFIX: &[u8; 1] = &[1];

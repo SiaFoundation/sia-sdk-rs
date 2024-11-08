@@ -1,8 +1,7 @@
 use core::fmt;
-use std::time::SystemTime;
 
 use crate::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
-use crate::{ChainIndex, Hash256, HexParseError};
+use crate::types::{ChainIndex, Hash256, HexParseError};
 use ed25519_dalek::{Signature as ED25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::de::Error;
 use serde::{Deserialize, Serialize};
@@ -194,14 +193,14 @@ pub struct NetworkHardforks {
 
 pub struct SigningState {
     pub index: ChainIndex,
-    pub median_timestamp: SystemTime,
+    pub median_timestamp: time::OffsetDateTime,
     pub hardforks: NetworkHardforks,
 }
 
 impl SigningState {
     pub fn new(
         index: ChainIndex,
-        median_timestamp: SystemTime,
+        median_timestamp: time::OffsetDateTime,
         hardforks: NetworkHardforks,
     ) -> Self {
         SigningState {
@@ -227,13 +226,11 @@ impl SigningState {
 mod tests {
     use std::vec;
 
-    use crate::transactions::{
-        CoveredFields, FileContract, FileContractID, FileContractRevision, SiacoinInput,
-        SiacoinOutput, SiafundInput, SiafundOutput, StorageProof, Transaction,
-        TransactionSignature,
+    use crate::types::v1::{
+        CoveredFields, FileContract, FileContractRevision, SiacoinInput, SiafundInput,
+        StorageProof, Transaction, TransactionSignature, UnlockConditions,
     };
-    use crate::unlock_conditions::UnlockConditions;
-    use crate::{Address, Currency, Leaf};
+    use crate::types::{Address, Currency, FileContractID, Leaf, SiacoinOutput, SiafundOutput};
 
     use super::*;
 
@@ -344,7 +341,7 @@ mod tests {
                 id: Default::default(),
                 height: 1,
             },
-            SystemTime::UNIX_EPOCH, // not relevant
+            time::OffsetDateTime::UNIX_EPOCH, // not relevant
             NetworkHardforks {
                 asic_height: 10,
                 foundation_height: 100,

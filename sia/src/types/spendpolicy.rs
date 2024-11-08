@@ -1,8 +1,8 @@
 use crate::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use crate::signing::{PublicKey, Signature};
 #[allow(deprecated)]
-use crate::unlock_conditions::UnlockConditions;
-use crate::{Address, Hash256};
+use crate::types::v1::UnlockConditions;
+use crate::types::{Address, Hash256};
 use blake2b_simd::Params;
 use core::fmt;
 use serde::de::{self, MapAccess, Visitor};
