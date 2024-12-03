@@ -28,3 +28,29 @@ jobs:
         run: cargo clippy -- -D warnings
       - name: Test
         run: cargo test
+  sia_js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Environment
+        run: |
+          rustup update stable
+          cargo install wasm-pack
+      - name: Test Browser JS
+        working-directory: sia_js
+        run: |
+          wasm-pack test --headless --${{matrix.browser}} -- --features=test_in_browser
+      - name: Test JS Firefox
+        working-directory: sia_js
+        run: |
+          wasm-pack test --headless --firefox -- --features=test_in_browser
+      - name: Test JS node.js
+        working-directory: sia_js
+        run: |
+          wasm-pack test --node
+      - name: Build JS node.js
+        working-directory: sia_js
+        run: wasm-pack build --target=nodejs
+      - name: Build JS browser
+        working-directory: sia_js
+        run: wasm-pack build --target=web
