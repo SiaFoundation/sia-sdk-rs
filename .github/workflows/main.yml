@@ -8,6 +8,7 @@ on:
 
 jobs:
   test:
+    name: Test SDK
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,29 +29,35 @@ jobs:
         run: cargo clippy -- -D warnings
       - name: Test
         run: cargo test
-  sia_js:
+  test_sia_js:
+    name: Test JS SDK
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment:
+          - chrome
+          - firefox
+          - node
     steps:
       - uses: actions/checkout@v4
       - name: Setup Environment
         run: |
           rustup update stable
           cargo install wasm-pack
-      - name: Test Browser JS
+      - name: Test Browser
+        if: matrix.environment != 'node'
         working-directory: sia_js
+        environment:
+          WASM_PACK_USE_BROWSER: 1
         run: |
-          wasm-pack test --headless --${{matrix.browser}} -- --features=test_in_browser
-      - name: Test JS Firefox
-        working-directory: sia_js
-        run: |
-          wasm-pack test --headless --firefox -- --features=test_in_browser
-      - name: Test JS node.js
+          wasm-pack test --headless --${{matrix.browser}}
+      - name: Test node.js
         working-directory: sia_js
         run: |
           wasm-pack test --node
-      - name: Build JS node.js
+      - name: Build node.js
         working-directory: sia_js
-        run: wasm-pack build --target=nodejs
-      - name: Build JS browser
+        run: wasm-pack build --target=node
+      - name: Build Browser
         working-directory: sia_js
         run: wasm-pack build --target=web

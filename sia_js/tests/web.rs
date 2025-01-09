@@ -7,9 +7,6 @@ use hex;
 use sia_js::Seed;
 use wasm_bindgen_test::*;
 
-#[cfg(feature = "test_in_browser")]
-wasm_bindgen_test_configure!(run_in_browser);
-
 #[wasm_bindgen_test]
 fn test_seed_derive_key() {
     const PHRASE: &str =
