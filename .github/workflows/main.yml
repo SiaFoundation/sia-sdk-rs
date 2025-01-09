@@ -41,20 +41,17 @@ jobs:
         run: |
           rustup update stable
           cargo install wasm-pack
-      - name: Test Browser
+      - name: Browser
         if: matrix.environment != 'node'
         working-directory: sia_js
         env:
           WASM_PACK_USE_BROWSER: 1
         run: |
           wasm-pack test --headless --${{matrix.environment}}
-      - name: Test node.js
+          wasm-pack build --target=web
+      - name: node.js
+        if: matrix.environment == 'node'
         working-directory: sia_js
         run: |
           wasm-pack test --node
-      - name: Build node.js
-        working-directory: sia_js
-        run: wasm-pack build --target=node
-      - name: Build Browser
-        working-directory: sia_js
-        run: wasm-pack build --target=web
+          wasm-pack build --target=node
