@@ -39,13 +39,21 @@ jobs:
           rustup update stable
           cargo install wasm-pack
       - name: Test Chrome
-        working-directory: sia_js          
+        working-directory: sia_js
+        env:
+          WASM_BINDGEN_USE_BROWSER: 1
         run: |
           wasm-pack test --headless --chrome
       - name: Test Firefox
         working-directory: sia_js
+        env:
+          WASM_BINDGEN_USE_BROWSER: 1
         run: |
           wasm-pack test --headless --firefox
+      - name: Test node.js
+        working-directory: sia_js
+        run: |
+          wasm-pack test --node
       - name: Build Browser
         working-directory: sia_js
         run: |
