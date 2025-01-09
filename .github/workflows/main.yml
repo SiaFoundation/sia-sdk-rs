@@ -32,26 +32,25 @@ jobs:
   test_sia_js:
     name: Test JS SDK
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        environment: [node, chrome, firefox]
     steps:
       - uses: actions/checkout@v4
       - name: Setup Environment
         run: |
           rustup update stable
           cargo install wasm-pack
-      - name: Browser
-        if: matrix.environment != 'node'
-        working-directory: sia_js
-        env:
-          WASM_PACK_USE_BROWSER: 1
+      - name: Test Chrome
+        working-directory: sia_js          
         run: |
-          wasm-pack test --headless --${{matrix.environment}}
+          wasm-pack test --headless --chrome
+      - name: Test Firefox
+        working-directory: sia_js
+        run: |
+          wasm-pack test --headless --firefox
+      - name: Build Browser
+        working-directory: sia_js
+        run: |
           wasm-pack build --target=web
-      - name: node.js
-        if: matrix.environment == 'node'
+      - name: Build node.js
         working-directory: sia_js
         run: |
-          wasm-pack test --node
-          wasm-pack build --target=node
+          wasm-pack build --target=nodejs
