@@ -34,10 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        environment:
-          - chrome
-          - firefox
-          - node
+        environment: [node, chrome, firefox]
     steps:
       - uses: actions/checkout@v4
       - name: Setup Environment
@@ -47,10 +44,10 @@ jobs:
       - name: Test Browser
         if: matrix.environment != 'node'
         working-directory: sia_js
-        environment:
+        env:
           WASM_PACK_USE_BROWSER: 1
         run: |
-          wasm-pack test --headless --${{matrix.browser}}
+          wasm-pack test --headless --${{matrix.environment}}
       - name: Test node.js
         working-directory: sia_js
         run: |
