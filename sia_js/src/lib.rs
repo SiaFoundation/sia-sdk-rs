@@ -39,8 +39,8 @@ impl Seed {
         Ok(Seed(seed))
     }
 
-    #[wasm_bindgen(js_name = "toString")]
-    pub fn to_string(&self) -> String {
+    #[wasm_bindgen(js_name = "toMnemonic")]
+    pub fn to_mnemonic(&self) -> String {
         self.0.to_mnemonic()
     }
 
