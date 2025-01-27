@@ -6,6 +6,10 @@ changelog = "sia/CHANGELOG.md"
 versioned_files = ["sia_derive/Cargo.toml"]
 changelog = "sia_derive/CHANGELOG.md"
 
+[packages.sia_js]
+versioned_files = ["sia_js/Cargo.toml"]
+changelog = "sia_js/CHANGELOG.md"
+
 [[workflows]]
 name = "document-change"
 
