@@ -119,7 +119,7 @@ pub(crate) const fn decode_hex_pair(hi: u8, lo: u8) -> Option<u8> {
     let hi = decode_hex_char(hi);
     let lo = decode_hex_char(lo);
     match (hi, lo) {
-        (Some(hi), Some(lo)) => Some(hi << 4 | lo),
+        (Some(hi), Some(lo)) => Some((hi << 4) | lo),
         _ => None,
     }
 }
