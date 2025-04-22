@@ -269,21 +269,21 @@ impl StorageProof {
 /// are four ways a contract can be resolved:
 ///
 /// 1. The renter can finalize the contract's current state, preventing further
-///     revisions and immediately creating its outputs.
+///    revisions and immediately creating its outputs.
 ///
 /// 2. The renter and host can jointly renew the contract. The old contract is
-///     finalized, and a portion of its funds are "rolled over" into a new contract.
+///    finalized, and a portion of its funds are "rolled over" into a new contract.
 ///
 /// 3. The host can submit a storage proof, asserting that it has faithfully
-///     stored the contract data for the agreed-upon duration. A storage proof can only be submitted after the
-///     contract's ProofHeight; this allows the renter (or host) to broadcast the
-///     latest contract revision prior to the proof.
+///    stored the contract data for the agreed-upon duration. A storage proof can only be submitted after the
+///    contract's ProofHeight; this allows the renter (or host) to broadcast the
+///    latest contract revision prior to the proof.
 ///
 /// 4. Lastly, anyone can submit a contract expiration. Typically, an expiration
-///     is only required if the host is unable or unwilling to sign a finalization or
-///     renewal. An expiration can only be submitted after the contract's
-///     ExpirationHeight; this gives the host a reasonable window of time after the
-///     ProofHeight in which to submit a storage proof.
+///    is only required if the host is unable or unwilling to sign a finalization or
+///    renewal. An expiration can only be submitted after the contract's
+///    ExpirationHeight; this gives the host a reasonable window of time after the
+///    ProofHeight in which to submit a storage proof.
 ///
 /// Once a contract has been resolved, it cannot be altered or resolved again.
 /// When a contract is resolved, its RenterOutput and HostOutput are created
