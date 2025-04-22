@@ -2,6 +2,8 @@ mod common;
 mod currency;
 mod specifier;
 mod spendpolicy; // exposed in v2 types
+
+#[allow(clippy::manual_div_ceil)]
 mod work;
 
 pub use common::*;
