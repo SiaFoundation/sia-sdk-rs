@@ -5,7 +5,7 @@ use crate::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 
 use crate::signing::{PublicKey, Signature};
 use crate::types::v2::{FileContract, SatisfiedPolicy, SiacoinElement, SiacoinInput, Transaction};
-use crate::types::{Address, ChainIndex, Currency, FileContractID, Hash256};
+use crate::types::{Address, ChainIndex, Currency, FileContractID, Hash256, Leaf};
 
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
@@ -430,10 +430,11 @@ pub struct RPCVerifySectorRequest {
     pub leaf_index: u64,
 }
 
-#[derive(Debug, PartialEq, SiaEncode, SiaDecode)]
+#[derive(Debug, PartialEq, SiaEncode, SiaDecode, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RPCVerifySectorResponse {
     pub proof: Vec<Hash256>,
-    pub leaf: [u8; 64],
+    pub leaf: Leaf,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
