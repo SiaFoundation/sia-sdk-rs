@@ -17,7 +17,7 @@ path = "src/lib.rs"
 base64 = "0.22.1"
 bip39 = "2.2.0"
 blake2b_simd = "1.0.3"
-ed25519-dalek = "2.1.1"
+ed25519-dalek = "2.2.0"
 hex = "0.4.3"
 num-bigint = "0.4.6"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }
