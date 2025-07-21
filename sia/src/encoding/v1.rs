@@ -163,20 +163,19 @@ mod tests {
         let mut encoded_bytes = Vec::new();
         value
             .encode_v1(&mut encoded_bytes)
-            .unwrap_or_else(|e| panic!("failed to encode: {:?}", e));
+            .unwrap_or_else(|e| panic!("failed to encode: {e:?}"));
 
         assert_eq!(
             encoded_bytes, expected_bytes,
-            "encoding mismatch for {:?}",
-            value
+            "encoding mismatch for {value:?}"
         );
 
         let mut bytes = &expected_bytes[..];
         let decoded =
-            T::decode_v1(&mut bytes).unwrap_or_else(|e| panic!("failed to decode: {:?}", e));
-        assert_eq!(decoded, value, "decoding mismatch for {:?}", value);
+            T::decode_v1(&mut bytes).unwrap_or_else(|e| panic!("failed to decode: {e:?}"));
+        assert_eq!(decoded, value, "decoding mismatch for {value:?}");
 
-        assert_eq!(bytes.len(), 0, "leftover bytes for {:?}", value);
+        assert_eq!(bytes.len(), 0, "leftover bytes for {value:?}");
     }
 
     #[test]

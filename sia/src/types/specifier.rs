@@ -52,7 +52,7 @@ impl fmt::Display for Specifier {
             .position(|&x| x != 0)
             .map_or(0, |pos| SPECIFIER_SIZE - pos);
         let str = str::from_utf8(&self.0[..index]).map_err(|_| fmt::Error)?;
-        write!(f, "{}", str)
+        write!(f, "{str}")
     }
 }
 

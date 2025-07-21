@@ -496,8 +496,7 @@ mod tests {
             assert_eq!(
                 opaque.address().to_string(),
                 expected_address,
-                "test case {}",
-                i
+                "test case {i}"
             );
 
             if let SpendPolicy::Threshold(n, of) = policy {
@@ -511,9 +510,7 @@ mod tests {
                     assert_eq!(
                         opaque_policy.address().to_string(),
                         expected_address,
-                        "test case {}-{}",
-                        i,
-                        j
+                        "test case {i}-{j}"
                     );
                 }
             }
@@ -590,28 +587,27 @@ mod tests {
 
         for (i, (policy, json, binary)) in test_cases.iter().enumerate() {
             let serialized_json = serde_json::to_string(&policy)
-                .unwrap_or_else(|e| panic!("failed to serialize json in test case {}: {}", i, e));
-            assert_eq!(serialized_json, *json, "test case {}", i);
+                .unwrap_or_else(|e| panic!("failed to serialize json in test case {i}: {e}"));
+            assert_eq!(serialized_json, *json, "test case {i}");
             let deserialized_json: SpendPolicy = serde_json::from_str(json)
-                .unwrap_or_else(|e| panic!("failed to deserialize json in test case {}: {}", i, e));
-            assert_eq!(deserialized_json, *policy, "test case {}", i);
+                .unwrap_or_else(|e| panic!("failed to deserialize json in test case {i}: {e}"));
+            assert_eq!(deserialized_json, *policy, "test case {i}");
 
             let mut serialized_binary = Vec::new();
             policy
                 .encode(&mut serialized_binary)
-                .unwrap_or_else(|e| panic!("failed to serialize binary in test case {}: {}", i, e));
+                .unwrap_or_else(|e| panic!("failed to serialize binary in test case {i}: {e}"));
             assert_eq!(
                 hex::encode(serialized_binary.clone()),
                 *binary,
-                "test case {}",
-                i
+                "test case {i}"
             );
 
             let deserialized_binary = SpendPolicy::decode(&mut &serialized_binary[..])
                 .unwrap_or_else(|e| {
-                    panic!("failed to deserialize binary in test case {}: {}", i, e)
+                    panic!("failed to deserialize binary in test case {i}: {e}")
                 });
-            assert_eq!(deserialized_binary, *policy, "test case {}", i);
+            assert_eq!(deserialized_binary, *policy, "test case {i}");
         }
     }
 
