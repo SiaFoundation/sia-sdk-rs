@@ -31,7 +31,7 @@ impl<'de> Deserialize<'de> for PublicKey {
             Self::PREFIX
         )))?;
         let mut pk = [0; 32];
-        hex::decode_to_slice(s, &mut pk).map_err(|e| Error::custom(format!("{:?}", e)))?;
+        hex::decode_to_slice(s, &mut pk).map_err(|e| Error::custom(format!("{e:?}")))?;
         Ok(Self::new(pk))
     }
 }
@@ -125,7 +125,7 @@ impl<'de> Deserialize<'de> for Signature {
         D: serde::Deserializer<'de>,
     {
         let buf = hex::decode(String::deserialize(deserializer)?)
-            .map_err(|e| D::Error::custom(format!("{:?}", e)))?;
+            .map_err(|e| D::Error::custom(format!("{e:?}")))?;
         if buf.len() != 64 {
             return Err(D::Error::custom("Invalid signature length"));
         }
@@ -202,7 +202,7 @@ mod tests {
             serde_json::from_str(&public_key_serialized).unwrap();
         assert_eq!(
             public_key_serialized,
-            format!("\"ed25519:{0}\"", public_key_str)
+            format!("\"ed25519:{public_key_str}\"")
         );
         assert_eq!(public_key_deserialized, public_key);
     }

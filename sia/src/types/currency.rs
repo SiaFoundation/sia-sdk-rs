@@ -33,7 +33,7 @@ impl<'de> Deserialize<'de> for Currency {
             }
 
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Self::Value, E> {
-                Currency::parse_string(s).map_err(|e| serde::de::Error::custom(format!("{:?}", e)))
+                Currency::parse_string(s).map_err(|e| serde::de::Error::custom(format!("{e:?}")))
             }
 
             fn visit_i32<E: serde::de::Error>(self, value: i32) -> Result<Self::Value, E> {
@@ -390,11 +390,11 @@ mod tests {
             let mut serialized_currency = Vec::new();
             currency
                 .encode_v1(&mut serialized_currency)
-                .unwrap_or_else(|e| panic!("failed to encode: {:?}", e));
-            assert_eq!(serialized_currency, expected, "failed for {:?}", currency);
+                .unwrap_or_else(|e| panic!("failed to encode: {e:?}"));
+            assert_eq!(serialized_currency, expected, "failed for {currency:?}");
             let deserialized_currency = Currency::decode_v1(&mut &serialized_currency[..])
-                .unwrap_or_else(|e| panic!("failed to decode: {:?}", e));
-            assert_eq!(deserialized_currency, currency, "failed for {:?}", currency);
+                .unwrap_or_else(|e| panic!("failed to decode: {e:?}"));
+            assert_eq!(deserialized_currency, currency, "failed for {currency:?}");
         }
     }
 
@@ -406,7 +406,7 @@ mod tests {
         // json
         let currency_serialized = serde_json::to_string(&currency).unwrap();
         let currency_deserialized: Currency = serde_json::from_str(&currency_serialized).unwrap();
-        assert_eq!(currency_serialized, format!("\"{}\"", currency_num));
+        assert_eq!(currency_serialized, format!("\"{currency_num}\""));
         assert_eq!(currency_deserialized, currency);
     }
 }

@@ -48,7 +48,7 @@ impl<'de> Deserialize<'de> for UnlockKey {
     {
         if deserializer.is_human_readable() {
             let s = String::deserialize(deserializer)?;
-            UnlockKey::parse_string(&s).map_err(|e| Error::custom(format!("{:?}", e)))
+            UnlockKey::parse_string(&s).map_err(|e| Error::custom(format!("{e:?}")))
         } else {
             let (algorithm, key) = <(Specifier, Vec<u8>)>::deserialize(deserializer)?;
             Ok(Self { algorithm, key })
@@ -1098,7 +1098,7 @@ mod tests {
                 .transaction
                 .whole_sig_hash(&cs, &case.parent_id, case.key_index, case.timelock)
                 .expect("encoded sig hash");
-            assert_eq!(sig_hash.to_string(), case.expected, "case {}", i)
+            assert_eq!(sig_hash.to_string(), case.expected, "case {i}")
         }
     }
 
@@ -1247,7 +1247,7 @@ mod tests {
 
         for (i, (cf, expected)) in test_cases.iter().enumerate() {
             let sig_hash = txn.partial_sig_hash(&cs, cf).expect("valid sig hash");
-            assert_eq!(sig_hash.to_string(), *expected, "case {}", i)
+            assert_eq!(sig_hash.to_string(), *expected, "case {i}")
         }
     }
 
@@ -1487,7 +1487,7 @@ mod tests {
             let pk = seed.private_key(i).public_key();
             let addr: Address = UnlockConditions::standard_unlock_conditions(pk).address();
 
-            assert_eq!(addr, expected, "index {}", i);
+            assert_eq!(addr, expected, "index {i}");
         }
     }
 

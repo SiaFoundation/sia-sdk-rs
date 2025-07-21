@@ -220,7 +220,7 @@ impl<'de> Deserialize<'de> for Address {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Address::parse_string(&s).map_err(|e| serde::de::Error::custom(format!("{:?}", e)))
+        Address::parse_string(&s).map_err(|e| serde::de::Error::custom(format!("{e:?}")))
     }
 }
 
@@ -378,7 +378,7 @@ impl<'de> Deserialize<'de> for Leaf {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        let data = hex::decode(s).map_err(|e| serde::de::Error::custom(format!("{:?}", e)))?;
+        let data = hex::decode(s).map_err(|e| serde::de::Error::custom(format!("{e:?}")))?;
         if data.len() != 64 {
             return Err(serde::de::Error::custom("invalid length"));
         }
@@ -417,7 +417,7 @@ mod tests {
         // json
         let hash_serialized = serde_json::to_string(&hash).unwrap();
         let hash_deserialized: Hash256 = serde_json::from_str(&hash_serialized).unwrap();
-        assert_eq!(hash_serialized, format!("\"{0}\"", hash_str)); // serialize
+        assert_eq!(hash_serialized, format!("\"{hash_str}\"")); // serialize
         assert_eq!(hash_deserialized, hash); // deserialize
     }
 
@@ -439,7 +439,7 @@ mod tests {
         // json
         let addr_serialized = serde_json::to_string(&address).unwrap();
         let addr_deserialized: Address = serde_json::from_str(&addr_serialized).unwrap();
-        assert_eq!(addr_serialized, format!("\"{0}{1}\"", addr_str, checksum)); // serialize
+        assert_eq!(addr_serialized, format!("\"{addr_str}{checksum}\"")); // serialize
         assert_eq!(addr_deserialized, address); // deserialize
     }
 

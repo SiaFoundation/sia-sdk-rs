@@ -133,7 +133,7 @@ mod tests {
         let seed = Seed::from_mnemonic(PHRASE).unwrap();
         for (i, expected) in test_addresses {
             let pk = seed.private_key(i);
-            assert_eq!(pk.as_bytes(), expected, "index {}", i);
+            assert_eq!(pk.as_bytes(), expected, "index {i}");
         }
     }
 
@@ -160,7 +160,7 @@ mod tests {
         let seed = Seed::from_mnemonic(PHRASE).unwrap();
         for (i, expected) in test_addresses {
             let pk = seed.private_key(i).public_key();
-            assert_eq!(pk.as_ref(), expected[32..].as_ref(), "index {}", i);
+            assert_eq!(pk.as_ref(), expected[32..].as_ref(), "index {i}");
         }
     }
 }
