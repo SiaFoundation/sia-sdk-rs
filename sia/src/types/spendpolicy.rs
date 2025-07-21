@@ -604,9 +604,7 @@ mod tests {
             );
 
             let deserialized_binary = SpendPolicy::decode(&mut &serialized_binary[..])
-                .unwrap_or_else(|e| {
-                    panic!("failed to deserialize binary in test case {i}: {e}")
-                });
+                .unwrap_or_else(|e| panic!("failed to deserialize binary in test case {i}: {e}"));
             assert_eq!(deserialized_binary, *policy, "test case {i}");
         }
     }
