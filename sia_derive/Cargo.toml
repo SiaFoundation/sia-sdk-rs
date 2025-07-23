@@ -1,5 +1,5 @@
 [package]
-name = "sia_sdk_derive"
+name = "sia-sdk-derive"
 version = "0.0.2"
 edition = "2021"
 repository = "https://github.com/SiaFoundation/sia-sdk-rs"
