@@ -1,3 +1,6 @@
+use std::error::Error;
+use std::fmt::Display;
+
 use crate::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use crate::rhp::SECTOR_SIZE;
 use blake2b_simd::Params;
@@ -755,6 +758,14 @@ pub struct RPCError {
     pub description: String,
 }
 impl_rpc_object!(RPCError, STANDARD_OBJECT_SIZE);
+
+impl Display for RPCError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.description, self.code)
+    }
+}
+
+impl Error for RPCError {}
 
 /// RPCObject is the base trait for all RPC objects.
 pub trait RPCObject: sealed::Sealed + SiaEncodable + SiaDecodable {
