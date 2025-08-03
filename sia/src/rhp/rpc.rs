@@ -603,3 +603,11 @@ pub struct RPCFundAccountsResponse {
     pub balances: Vec<Currency>,
     pub host_signature: Signature,
 }
+
+/// RPCError is the error type returned by the RPC server.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+pub struct RPCError {
+    pub code: u8,
+    pub description: String,
+}
