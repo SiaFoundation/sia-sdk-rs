@@ -1,6 +1,12 @@
 use std::marker::PhantomData;
 
-use crate::{consensus::ChainState, encoding::{SiaDecodable, SiaEncodable}, rhp::{rpc::FormContractParams, SECTOR_SIZE}, signing::{PublicKey, Signature}, types::{specifier, v2::{FileContract, Transaction}, Address, Currency, Hash256, SiacoinOutput, Specifier}};
+use crate::consensus::ChainState;
+use crate::encoding::{SiaDecodable, SiaEncodable};
+use crate::rhp::rpc::FormContractParams;
+use crate::rhp::SECTOR_SIZE;
+use crate::signing::{PublicKey, Signature};
+use crate::types::v2::{FileContract, Transaction};
+use crate::types::{specifier, Address, Currency, Hash256, SiacoinOutput, Specifier};
 
 use super::rpc::*;
 
@@ -37,14 +43,20 @@ impl<T: TransportStream> RPCWriteSectorSession<T, Request> {
         }
     }
 
-    fn start(self, prices: HostPrices, token: AccountToken, data: Vec<u8>) -> Result<RPCWriteSectorSession<T, HostFinalResponse>, RPCError> {
+    fn start(
+        self,
+        prices: HostPrices,
+        token: AccountToken,
+        data: Vec<u8>,
+    ) -> Result<RPCWriteSectorSession<T, HostFinalResponse>, RPCError> {
         let request = RPCWriteSectorRequest {
             prices,
             token,
             data,
         };
-        self.transport.write_request(specifier!("RPCWriteSector"), &request)?;
-        
+        self.transport
+            .write_request(specifier!("RPCWriteSector"), &request)?;
+
         Ok(RPCWriteSectorSession {
             transport: self.transport,
             state: PhantomData,
@@ -55,7 +67,9 @@ impl<T: TransportStream> RPCWriteSectorSession<T, Request> {
 impl<T: TransportStream> RPCWriteSectorSession<T, HostFinalResponse> {
     fn complete(self) -> Result<RPCWriteSectorResult, RPCError> {
         let response: RPCWriteSectorResponse = self.transport.read_response(32)?;
-        Ok(RPCWriteSectorResult { root: response.root })
+        Ok(RPCWriteSectorResult {
+            root: response.root,
+        })
     }
 }
 
@@ -76,7 +90,14 @@ impl<T: TransportStream> RPCReadSectorSession<T, Request> {
         }
     }
 
-    fn start(self, prices: HostPrices, token: AccountToken, root: Hash256, length: usize, offset: usize) -> Result<RPCReadSectorSession<T, HostFinalResponse>, RPCError> {
+    fn start(
+        self,
+        prices: HostPrices,
+        token: AccountToken,
+        root: Hash256,
+        length: usize,
+        offset: usize,
+    ) -> Result<RPCReadSectorSession<T, HostFinalResponse>, RPCError> {
         let request = RPCReadSectorRequest {
             prices,
             token,
@@ -84,8 +105,9 @@ impl<T: TransportStream> RPCReadSectorSession<T, Request> {
             length: length as u64,
             offset: offset as u64,
         };
-        self.transport.write_request(specifier!("RPCReadSector"), &request)?;
-        
+        self.transport
+            .write_request(specifier!("RPCReadSector"), &request)?;
+
         Ok(RPCReadSectorSession {
             transport: self.transport,
             state: PhantomData,
@@ -95,8 +117,11 @@ impl<T: TransportStream> RPCReadSectorSession<T, Request> {
 
 impl<T: TransportStream> RPCReadSectorSession<T, HostFinalResponse> {
     fn complete(self) -> Result<RPCReadSectorResult, RPCError> {
-        let response: RPCReadSectorResponse = self.transport.read_response(1024 + 8 + SECTOR_SIZE)?;
-        Ok(RPCReadSectorResult { data: response.data })
+        let response: RPCReadSectorResponse =
+            self.transport.read_response(1024 + 8 + SECTOR_SIZE)?;
+        Ok(RPCReadSectorResult {
+            data: response.data,
+        })
     }
 }
 
@@ -106,9 +131,9 @@ pub fn rpc_write_sector<T: TransportStream>(
     token: AccountToken,
     data: Vec<u8>,
 ) -> Result<RPCWriteSectorResult, RPCError> {
-    RPCWriteSectorSession::new(transport).
-        start(prices, token, data)?.
-        complete()
+    RPCWriteSectorSession::new(transport)
+        .start(prices, token, data)?
+        .complete()
 }
 
 pub fn rpc_read_sector<T: TransportStream>(
@@ -119,12 +144,13 @@ pub fn rpc_read_sector<T: TransportStream>(
     length: usize,
     offset: usize,
 ) -> Result<RPCReadSectorResult, RPCError> {
-    RPCReadSectorSession::new(transport).
-        start(prices, token, root, length, offset)?.
-        complete()
+    RPCReadSectorSession::new(transport)
+        .start(prices, token, root, length, offset)?
+        .complete()
 }
 
-struct RPCFormContractSession<T, S, B, State> where 
+struct RPCFormContractSession<T, S, B, State>
+where
     T: TransportStream,
     S: RenterContractSigner,
     B: TransactionBuilder,
@@ -147,7 +173,9 @@ pub struct RPCFormContractParams {
     host_address: Address,
 }
 
-impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder> RPCFormContractSession<T, S, B, Request> {
+impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
+    RPCFormContractSession<T, S, B, Request>
+{
     fn new(transport: T, contract_signer: S, transaction_builder: B, state: ChainState) -> Self {
         RPCFormContractSession {
             transport,
@@ -162,19 +190,22 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder> RPCForm
         }
     }
 
-    fn start(self, params: RPCFormContractParams) -> Result<RPCFormContractSession<T, S, B, ReceiveHostInputs>, RPCError> {
-        let mut contract = FileContract{
+    fn start(
+        self,
+        params: RPCFormContractParams,
+    ) -> Result<RPCFormContractSession<T, S, B, ReceiveHostInputs>, RPCError> {
+        let mut contract = FileContract {
             revision_number: 0,
             capacity: 0,
             filesize: 0,
             file_merkle_root: Hash256::default(),
             proof_height: params.contract.proof_height,
             expiration_height: params.contract.proof_height + 144,
-            renter_output: SiacoinOutput{
+            renter_output: SiacoinOutput {
                 address: params.contract.renter_address.clone(),
                 value: params.contract.allowance,
             },
-            host_output: SiacoinOutput{
+            host_output: SiacoinOutput {
                 address: params.host_address,
                 value: params.contract.collateral + params.prices.contract_price,
             },
@@ -186,26 +217,38 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder> RPCForm
             host_signature: Signature::default(),
             renter_signature: Signature::default(),
         };
-        contract.renter_signature = self.contract_signer.sign(contract.sig_hash(&self.chain_state));
+        contract.renter_signature = self
+            .contract_signer
+            .sign(contract.sig_hash(&self.chain_state));
 
         let miner_fee = self.transaction_builder.miner_fee() * Currency::new(1000);
-        let mut formation_txn = Transaction{
+        let mut formation_txn = Transaction {
             miner_fee,
             ..Default::default()
         };
 
-        let renter_fund_amount = params.contract.allowance + params.prices.contract_price + miner_fee + contract.tax(&self.chain_state);
-        let renter_basis = self.transaction_builder.fund_transaction(&mut formation_txn, renter_fund_amount)?;
+        let renter_fund_amount = params.contract.allowance
+            + params.prices.contract_price
+            + miner_fee
+            + contract.tax(&self.chain_state);
+        let renter_basis = self
+            .transaction_builder
+            .fund_transaction(&mut formation_txn, renter_fund_amount)?;
 
         let request = RPCFormContractRequest {
             prices: params.prices,
             miner_fee,
             contract: params.contract,
             basis: renter_basis,
-            renter_inputs: formation_txn.siacoin_inputs.iter().map(|si| si.parent.clone()).collect(),
+            renter_inputs: formation_txn
+                .siacoin_inputs
+                .iter()
+                .map(|si| si.parent.clone())
+                .collect(),
             renter_parents: Vec::new(),
         };
-        self.transport.write_request(specifier!("RPCFormContract"), &request)?;
+        self.transport
+            .write_request(specifier!("RPCFormContract"), &request)?;
         Ok(RPCFormContractSession {
             transport: self.transport,
             contract_signer: self.contract_signer,
@@ -219,17 +262,28 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder> RPCForm
     }
 }
 
-impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder> RPCFormContractSession<T, S, B, ReceiveHostInputs> {
-    fn receive_host_inputs(self) -> Result<RPCFormContractSession<T, S, B, SendRenterSignatures>, RPCError> {
+impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
+    RPCFormContractSession<T, S, B, ReceiveHostInputs>
+{
+    fn receive_host_inputs(
+        self,
+    ) -> Result<RPCFormContractSession<T, S, B, SendRenterSignatures>, RPCError> {
         let host_inputs_response: HostInputsResponse = self.transport.read_response(10240)?;
         let mut formation_txn = self.formation_transaction.unwrap();
         let contract = self.contract.as_ref().unwrap();
 
         let host_funding = contract.total_collateral;
-        let host_sum: Currency = host_inputs_response.host_inputs.iter().map(|si| si.parent.siacoin_output.value).sum();
+        let host_sum: Currency = host_inputs_response
+            .host_inputs
+            .iter()
+            .map(|si| si.parent.siacoin_output.value)
+            .sum();
         if host_sum < host_funding {
             // TODO: define errors correctly
-            return Err(RPCError { code: 2, description: String::from("not enough host funds") });
+            return Err(RPCError {
+                code: 2,
+                description: String::from("not enough host funds"),
+            });
         } else if host_sum > host_funding {
             formation_txn.siacoin_outputs.push(SiacoinOutput {
                 address: contract.host_output.address.clone(),
@@ -245,23 +299,33 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder> RPCForm
             chain_state: self.chain_state,
             state: PhantomData,
             contract: self.contract,
-            renter_inputs_len: self.renter_inputs_len, 
+            renter_inputs_len: self.renter_inputs_len,
             formation_transaction: Some(formation_txn),
         })
     }
 }
 
-impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder> RPCFormContractSession<T, S, B, SendRenterSignatures> {
-    fn send_renter_signatures(self) -> Result<RPCFormContractSession<T, S, B, HostFinalResponse>, RPCError> {
+impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
+    RPCFormContractSession<T, S, B, SendRenterSignatures>
+{
+    fn send_renter_signatures(
+        self,
+    ) -> Result<RPCFormContractSession<T, S, B, HostFinalResponse>, RPCError> {
         let mut formation_txn = self.formation_transaction.unwrap();
         let mut contract = self.contract.unwrap();
 
-        self.transaction_builder.sign_transaction(&mut formation_txn)?;
-        self.contract_signer.sign_revision(&self.chain_state, &mut contract);
+        self.transaction_builder
+            .sign_transaction(&mut formation_txn)?;
+        self.contract_signer
+            .sign_revision(&self.chain_state, &mut contract);
 
-        let renter_sigs_response = RenterFormContractSignaturesResponse{
+        let renter_sigs_response = RenterFormContractSignaturesResponse {
             renter_contract_signature: contract.renter_signature.clone(),
-            renter_satisfied_policies: formation_txn.siacoin_inputs[..self.renter_inputs_len.unwrap()].iter().map(|si| si.satisfied_policy.clone()).collect(),
+            renter_satisfied_policies: formation_txn.siacoin_inputs
+                [..self.renter_inputs_len.unwrap()]
+                .iter()
+                .map(|si| si.satisfied_policy.clone())
+                .collect(),
         };
         self.transport.write_response(&renter_sigs_response)?;
 
@@ -278,7 +342,9 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder> RPCForm
     }
 }
 
-impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder> RPCFormContractSession<T, S, B, HostFinalResponse> {
+impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
+    RPCFormContractSession<T, S, B, HostFinalResponse>
+{
     fn complete(self) -> Result<TransactionSetResponse, RPCError> {
         self.transport.read_response(STANDARD_TXNSET_SIZE)
     }

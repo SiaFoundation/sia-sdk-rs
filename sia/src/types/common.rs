@@ -300,7 +300,7 @@ impl fmt::Display for Address {
 /// A SiacoinOutput is a Siacoin UTXO that can be spent using the unlock conditions
 /// for Address
 #[derive(
-    Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, V1SiaEncode, V1SiaDecode, Clone
+    Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, V1SiaEncode, V1SiaDecode, Clone,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct SiacoinOutput {

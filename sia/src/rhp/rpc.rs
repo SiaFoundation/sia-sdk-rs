@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::Display;
 
-use crate::consensus::{ChainState};
+use crate::consensus::ChainState;
 use crate::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use blake2b_simd::Params;
 use serde::{Deserialize, Serialize};
@@ -9,9 +9,7 @@ use time::OffsetDateTime;
 
 use crate::signing::{PrivateKey, PublicKey, Signature};
 use crate::types::v2::{FileContract, SatisfiedPolicy, SiacoinElement, SiacoinInput, Transaction};
-use crate::types::{
-    Address, ChainIndex, Currency, FileContractID, Hash256, Leaf,
-};
+use crate::types::{Address, ChainIndex, Currency, FileContractID, Hash256, Leaf};
 
 pub trait RenterContractSigner {
     fn public_key(&self) -> PublicKey;
@@ -36,7 +34,11 @@ impl RenterContractSigner for PrivateKey {
 
 pub trait TransactionBuilder {
     fn miner_fee(&self) -> Currency;
-    fn fund_transaction(&self, transaction: &mut Transaction, amount: Currency) -> Result<ChainIndex, RPCError>;
+    fn fund_transaction(
+        &self,
+        transaction: &mut Transaction,
+        amount: Currency,
+    ) -> Result<ChainIndex, RPCError>;
     fn sign_transaction(&self, transaction: &mut Transaction) -> Result<(), RPCError>;
 }
 
@@ -160,7 +162,6 @@ pub struct AccountDeposit {
     pub amount: Currency,
 }
 
-
 /// HostInputsResponse contains the host's Siacoin inputs for funding a
 /// formation or resolution transaction.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
@@ -281,7 +282,11 @@ pub struct RPCRefreshContractRequest {
 
 impl RPCRefreshContractRequest {
     #[allow(dead_code)] // TODO: remove
-    pub fn new<S: RenterContractSigner>(signer: S, params: RPCRefreshContractRequestParams, revision_number: u64) -> Self {
+    pub fn new<S: RenterContractSigner>(
+        signer: S,
+        params: RPCRefreshContractRequestParams,
+        revision_number: u64,
+    ) -> Self {
         let mut state = Params::new().hash_length(32).to_state();
         params.refresh.contract_id.encode(&mut state).unwrap();
         revision_number.encode(&mut state).unwrap();
@@ -333,7 +338,11 @@ pub struct RPCRenewContractRequest {
 
 impl RPCRenewContractRequest {
     #[allow(dead_code)] // TODO: remove
-    pub fn new<S: RenterContractSigner>(signer: S, params: RPCRenewContractRequestParams, revision_number: u64) -> Self {
+    pub fn new<S: RenterContractSigner>(
+        signer: S,
+        params: RPCRenewContractRequestParams,
+        revision_number: u64,
+    ) -> Self {
         let mut state = Params::new().hash_length(32).to_state();
         params.renewal.contract_id.encode(&mut state).unwrap();
         revision_number.encode(&mut state).unwrap();
@@ -369,7 +378,11 @@ pub struct RPCFreeSectorsRequest {
 
 impl RPCFreeSectorsRequest {
     #[allow(dead_code)] // TODO: remove
-    pub fn new<S: RenterContractSigner>(signer: S, params: RPCFreeSectorsRequestParams,  revision_number: u64) -> Self {
+    pub fn new<S: RenterContractSigner>(
+        signer: S,
+        params: RPCFreeSectorsRequestParams,
+        revision_number: u64,
+    ) -> Self {
         let mut state = Params::new().hash_length(32).to_state();
         params.contract_id.encode(&mut state).unwrap();
         revision_number.encode(&mut state).unwrap();
@@ -478,7 +491,11 @@ pub struct RPCAppendSectorsRequest {
 
 impl RPCAppendSectorsRequest {
     #[allow(dead_code)] // TODO: remove
-    pub fn new<S: RenterContractSigner>(signer: S, params: RPCAppendSectorsRequestParams, revision_number: u64) -> Self {
+    pub fn new<S: RenterContractSigner>(
+        signer: S,
+        params: RPCAppendSectorsRequestParams,
+        revision_number: u64,
+    ) -> Self {
         let mut state = Params::new().hash_length(32).to_state();
         params.contract_id.encode(&mut state).unwrap();
         revision_number.encode(&mut state).unwrap();
@@ -564,7 +581,11 @@ pub struct RPCReplenishAccountsRequest {
 
 impl RPCReplenishAccountsRequest {
     #[allow(dead_code)] // TODO: remove
-    pub fn new<S: RenterContractSigner>(signer: S, params: RPCReplenishAccountsParams, revision_number: u64) -> Self {
+    pub fn new<S: RenterContractSigner>(
+        signer: S,
+        params: RPCReplenishAccountsParams,
+        revision_number: u64,
+    ) -> Self {
         let mut state = Params::new().hash_length(32).to_state();
         params.accounts.encode(&mut state).unwrap();
         params.target.encode(&mut state).unwrap();

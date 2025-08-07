@@ -1,6 +1,6 @@
 mod merkle;
-mod rpc;
 mod protocol;
+mod rpc;
 
 pub use merkle::*;
 pub use protocol::*;
