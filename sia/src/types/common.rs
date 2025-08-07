@@ -300,7 +300,7 @@ impl fmt::Display for Address {
 /// A SiacoinOutput is a Siacoin UTXO that can be spent using the unlock conditions
 /// for Address
 #[derive(
-    Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, V1SiaEncode, V1SiaDecode,
+    Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, V1SiaEncode, V1SiaDecode, Clone
 )]
 #[serde(rename_all = "camelCase")]
 pub struct SiacoinOutput {
@@ -387,7 +387,7 @@ impl<'de> Deserialize<'de> for Leaf {
 }
 
 /// A StateElement is a generic element within the state accumulator.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct StateElement {
     pub leaf_index: u64,

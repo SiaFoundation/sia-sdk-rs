@@ -1,8 +1,8 @@
 use std::error::Error;
 use std::fmt::Display;
 
+use crate::consensus::{ChainState};
 use crate::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
-use crate::rhp::SECTOR_SIZE;
 use blake2b_simd::Params;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -10,34 +10,39 @@ use time::OffsetDateTime;
 use crate::signing::{PrivateKey, PublicKey, Signature};
 use crate::types::v2::{FileContract, SatisfiedPolicy, SiacoinElement, SiacoinInput, Transaction};
 use crate::types::{
-    specifier, Address, ChainIndex, Currency, FileContractID, Hash256, Leaf, Specifier,
+    Address, ChainIndex, Currency, FileContractID, Hash256, Leaf,
 };
 
-const STANDARD_OBJECT_SIZE: usize = 10240; // 10 KiB
-const STANDARD_TXNSET_SIZE: usize = 262144; // 256 KiB
-const MAX_SECTOR_BATCH_SIZE: usize = 262144; // 1 TiB of sectors
-const MAX_ACCOUNT_BATCH_SIZE: usize = 1000;
-
-macro_rules! impl_rpc_object {
-    ($type:ty, $max_len:expr) => {
-        impl sealed::Sealed for $type {}
-        impl RPCObject for $type {
-            fn max_len() -> usize {
-                $max_len
-            }
-        }
-    };
+pub trait RenterContractSigner {
+    fn public_key(&self) -> PublicKey;
+    fn sign<T: AsRef<[u8]>>(&self, msg: T) -> Signature;
+    fn sign_revision(&self, state: &ChainState, contract: &mut FileContract);
 }
 
-macro_rules! impl_rpc_request {
-    ($type:ty, $rpc_id:expr, $max_len:expr) => {
-        impl_rpc_object!($type, $max_len);
-        impl RPCRequest for $type {
-            fn rpc_id(&self) -> Specifier {
-                specifier!($rpc_id)
-            }
-        }
-    };
+impl RenterContractSigner for PrivateKey {
+    fn public_key(&self) -> PublicKey {
+        self.public_key()
+    }
+
+    fn sign<T: AsRef<[u8]>>(&self, msg: T) -> Signature {
+        self.sign(msg.as_ref())
+    }
+
+    fn sign_revision(&self, state: &ChainState, contract: &mut FileContract) {
+        let sig_hash = contract.sig_hash(state);
+        contract.renter_signature = self.sign(sig_hash);
+    }
+}
+
+#[allow(dead_code)] // TODO: remove
+trait SignedRequest {
+    fn sign<S: RenterContractSigner>(&mut self, signer: S, revision_number: u64);
+}
+
+pub trait TransactionBuilder {
+    fn miner_fee(&self) -> Currency;
+    fn fund_transaction(&self, transaction: &mut Transaction, amount: Currency) -> Result<ChainIndex, RPCError>;
+    fn sign_transaction(&self, transaction: &mut Transaction) -> Result<(), RPCError>;
 }
 
 /// Contains the prices and parameters of a host.
@@ -84,7 +89,7 @@ impl HostPrices {
     pub fn is_valid(&self, host_key: &PublicKey, timestamp: OffsetDateTime) -> bool {
         self.valid_until > timestamp
             && self.tip_height > 0
-            && host_key.verify(&self.sig_hash(), &self.signature)
+            && host_key.verify(self.sig_hash(), &self.signature)
     }
 }
 
@@ -147,12 +152,8 @@ impl AccountToken {
             account: account_key.public_key(),
             valid_until: expiration_time,
 
-            signature: account_key.sign_hash(&sig_hash),
+            signature: account_key.sign(sig_hash),
         }
-    }
-
-    pub fn sig_hash(&self) -> Hash256 {
-        Self::compute_sig_hash(&self.host_key, &self.account, &self.valid_until)
     }
 }
 
@@ -164,10 +165,62 @@ pub struct AccountDeposit {
     pub amount: Currency,
 }
 
-/// RPCSettingsRequest is the request type for RPCSettings.
-#[derive(SiaEncode, SiaDecode)]
-pub struct RPCSettingsRequest {}
-impl_rpc_request!(RPCSettingsRequest, "RPCSettings", 0);
+
+/// HostInputsResponse contains the host's Siacoin inputs for funding a
+/// formation or resolution transaction.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+pub struct HostInputsResponse {
+    pub host_inputs: Vec<SiacoinInput>,
+}
+
+/// RenterFormContractSignaturesResponse contains the renter's contract signature and
+/// Siacoin input signatures for the contract formation transaction.
+///
+/// At this point, the host has enough information to broadcast the formation.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+pub struct RenterFormContractSignaturesResponse {
+    pub renter_contract_signature: Signature,
+    pub renter_satisfied_policies: Vec<SatisfiedPolicy>,
+}
+
+/// RPCFormContractThirdResponse contains the finalized formation
+/// transaction set.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+pub struct TransactionSetResponse {
+    pub basis: ChainIndex,
+    pub transaction_set: Vec<Transaction>,
+}
+
+/// HostSignatureResponse contains the host's signature for a
+/// contract revision.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+pub struct HostSignatureResponse {
+    pub host_signature: Signature,
+}
+
+/// RenterSignatureResponse contains the renter's signature for a
+/// contract revision.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+pub struct RenterSignatureResponse {
+    pub renter_signature: Signature,
+}
+
+/// RenterResolutionSignaturesResponse contains the renter's signatures for the
+/// contract resolution transaction.
+///
+/// At this point, the host has enough information to broadcast the refresh.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+pub struct RenterResolutionSignaturesResponse {
+    pub renter_renewal_signature: Signature,
+    pub renter_contract_signature: Signature,
+    pub renter_satisfied_policies: Vec<SatisfiedPolicy>,
+}
 
 /// RPCSettingsResponse is the response type for the RPC settings endpoint.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
@@ -175,12 +228,11 @@ impl_rpc_request!(RPCSettingsRequest, "RPCSettings", 0);
 pub struct RPCSettingsResponse {
     pub settings: HostSettings,
 }
-impl_rpc_object!(RPCSettingsResponse, STANDARD_OBJECT_SIZE);
 
-/// RPCFormContractParams contains the parameters for forming a new contract.
+/// FormContractParams contains the parameters for forming a new contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCFormContractParams {
+pub struct FormContractParams {
     pub renter_public_key: PublicKey,
     pub renter_address: Address,
     pub allowance: Currency,
@@ -193,48 +245,12 @@ pub struct RPCFormContractParams {
 #[serde(rename_all = "camelCase")]
 pub struct RPCFormContractRequest {
     pub prices: HostPrices,
-    pub contract: RPCFormContractParams,
+    pub contract: FormContractParams,
     pub miner_fee: Currency,
     pub basis: ChainIndex,
     pub renter_inputs: Vec<SiacoinElement>,
     pub renter_parents: Vec<Transaction>,
 }
-impl_rpc_request!(
-    RPCFormContractRequest,
-    "RPCFormContract",
-    STANDARD_OBJECT_SIZE
-);
-
-/// RPCFormContractResponse contains the host's Siacoin inputs for the contract
-/// formation transaction.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCFormContractResponse {
-    pub host_inputs: Vec<SiacoinInput>,
-}
-impl_rpc_object!(RPCFormContractResponse, STANDARD_OBJECT_SIZE);
-
-/// RPCFormContractSecondResponse contains the renter's contract signature and
-/// Siacoin input signatures for the contract formation transaction.
-///
-/// At this point, the host has enough information to broadcast the formation.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCFormContractSecondResponse {
-    pub renter_contract_signature: Signature,
-    pub renter_satisfied_policies: Vec<SatisfiedPolicy>,
-}
-impl_rpc_object!(RPCFormContractSecondResponse, STANDARD_OBJECT_SIZE);
-
-/// RPCFormContractThirdResponse contains the finalized formation
-/// transaction set.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCFormContractThirdResponse {
-    pub basis: ChainIndex,
-    pub transaction_set: Vec<Transaction>,
-}
-impl_rpc_object!(RPCFormContractThirdResponse, STANDARD_TXNSET_SIZE);
 
 /// RPCRefreshContractParams contains the parameters for refreshing a contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
@@ -258,71 +274,15 @@ pub struct RPCRefreshContractRequest {
 
     pub challenge_signature: Signature,
 }
-impl_rpc_request!(
-    RPCRefreshContractRequest,
-    "RPCRefreshContract",
-    STANDARD_OBJECT_SIZE
-);
 
-/// RPCRefreshContractPartialRequest is the request type for RPCRefreshPartial.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCRefreshContractPartialRequest {
-    pub prices: HostPrices,
-    pub refresh: RPCRefreshContractParams,
-    pub miner_fee: Currency,
-    pub basis: ChainIndex,
-    pub renter_inputs: Vec<SiacoinElement>,
-    pub renter_parents: Vec<Transaction>,
-
-    pub challenge_signature: Signature,
-}
-impl_rpc_request!(
-    RPCRefreshContractPartialRequest,
-    "RPCRefreshPartial",
-    STANDARD_OBJECT_SIZE
-);
-
-impl RPCRefreshContractRequest {
-    pub fn challenge_sig_hash(&self, revision_number: u64) -> Hash256 {
+impl SignedRequest for RPCRefreshContractRequest {
+    fn sign<S: RenterContractSigner>(&mut self, signer: S, revision_number: u64) {
         let mut state = Params::new().hash_length(32).to_state();
         self.refresh.contract_id.encode(&mut state).unwrap();
         revision_number.encode(&mut state).unwrap();
-        state.finalize().into()
+        self.challenge_signature = signer.sign(state.finalize().as_bytes());
     }
 }
-
-/// RPCRefreshContractResponse contains the host's Siacoin inputs for the contract
-/// resolution transaction.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCRefreshContractResponse {
-    pub host_inputs: Vec<SiacoinInput>,
-}
-impl_rpc_object!(RPCRefreshContractResponse, STANDARD_OBJECT_SIZE);
-
-/// RPCRefreshContractSecondResponse contains the renter's signatures for the
-/// contract refresh transaction.
-///
-/// At this point, the host has enough information to broadcast the refresh.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCRefreshContractSecondResponse {
-    pub renter_renewal_signature: Signature,
-    pub renter_contract_signature: Signature,
-    pub renter_satisfied_policies: Vec<SatisfiedPolicy>,
-}
-impl_rpc_object!(RPCRefreshContractSecondResponse, STANDARD_OBJECT_SIZE);
-
-/// RPCRefreshContractThirdResponse contains the finalized refresh
-/// transaction set.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCRefreshContractThirdResponse {
-    pub basis: ChainIndex,
-    pub transaction_set: Vec<Transaction>,
-}
-impl_rpc_object!(RPCRefreshContractThirdResponse, STANDARD_TXNSET_SIZE);
 
 /// RPCRenewContractParams contains the parameters for renewing a contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
@@ -347,52 +307,15 @@ pub struct RPCRenewContractRequest {
 
     pub challenge_signature: Signature,
 }
-impl_rpc_request!(
-    RPCRenewContractRequest,
-    "RPCRenewContract",
-    STANDARD_OBJECT_SIZE
-);
 
-impl RPCRenewContractRequest {
-    pub fn challenge_sig_hash(&self, revision_number: u64) -> Hash256 {
+impl SignedRequest for RPCRenewContractRequest {
+    fn sign<S: RenterContractSigner>(&mut self, signer: S, revision_number: u64) {
         let mut state = Params::new().hash_length(32).to_state();
         self.renewal.contract_id.encode(&mut state).unwrap();
         revision_number.encode(&mut state).unwrap();
-        state.finalize().into()
+        self.challenge_signature = signer.sign(state.finalize().as_bytes());
     }
 }
-
-/// RPCRenewContractResponse contains the host's Siacoin inputs for the
-/// contract renewal transaction.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCRenewContractResponse {
-    pub host_inputs: Vec<SiacoinInput>,
-}
-impl_rpc_object!(RPCRenewContractResponse, STANDARD_OBJECT_SIZE);
-
-/// RPCRenewContractSecondResponse contains the renter's signatures for the
-/// contract renewal transaction.
-///
-/// At this point, the host has enough information to broadcast the renewal.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCRenewContractSecondResponse {
-    pub renter_renewal_signature: Signature,
-    pub renter_contract_signature: Signature,
-    pub renter_satisfied_policies: Vec<SatisfiedPolicy>,
-}
-impl_rpc_object!(RPCRenewContractSecondResponse, STANDARD_OBJECT_SIZE);
-
-/// RPCRenewContractThirdResponse contains the finalized renewal
-/// transaction set.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCRenewContractThirdResponse {
-    pub basis: ChainIndex,
-    pub transaction_set: Vec<Transaction>,
-}
-impl_rpc_object!(RPCRenewContractThirdResponse, STANDARD_TXNSET_SIZE);
 
 /// RPCFreeSectorsRequest is the request type for removing sectors from a contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
@@ -404,18 +327,13 @@ pub struct RPCFreeSectorsRequest {
 
     pub challenge_signature: Signature,
 }
-impl_rpc_request!(
-    RPCFreeSectorsRequest,
-    "RPCFreeSectors",
-    STANDARD_OBJECT_SIZE + (32 * MAX_SECTOR_BATCH_SIZE)
-);
 
-impl RPCFreeSectorsRequest {
-    pub fn challenge_sig_hash(&self, revision_number: u64) -> Hash256 {
+impl SignedRequest for RPCFreeSectorsRequest {
+    fn sign<S: RenterContractSigner>(&mut self, signer: S, revision_number: u64) {
         let mut state = Params::new().hash_length(32).to_state();
         self.contract_id.encode(&mut state).unwrap();
         revision_number.encode(&mut state).unwrap();
-        state.finalize().into()
+        self.challenge_signature = signer.sign(state.finalize().as_bytes());
     }
 }
 
@@ -430,25 +348,6 @@ pub struct RPCFreeSectorsResponse {
     pub old_leaf_hashes: Vec<Hash256>,
     pub new_merkle_root: Hash256,
 }
-impl_rpc_object!(RPCFreeSectorsResponse, STANDARD_OBJECT_SIZE);
-
-/// RPCFreeSectorsSecondResponse contains the renter's signature for the
-/// contract revision removing the sectors.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCFreeSectorsSecondResponse {
-    pub renter_signature: Signature,
-}
-impl_rpc_object!(RPCFreeSectorsSecondResponse, 32);
-
-/// RPCFreeSectorsThirdResponse contains the host's signature for the
-/// contract revision removing the sectors.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCFreeSectorsThirdResponse {
-    pub host_signature: Signature,
-}
-impl_rpc_object!(RPCFreeSectorsThirdResponse, 32);
 
 /// RPCLatestRevisionRequest is the request type for getting the latest
 /// revision of a file contract.
@@ -457,11 +356,6 @@ impl_rpc_object!(RPCFreeSectorsThirdResponse, 32);
 pub struct RPCLatestRevisionRequest {
     pub contract_id: FileContractID,
 }
-impl_rpc_request!(
-    RPCLatestRevisionRequest,
-    "RPCLatestRevision",
-    STANDARD_OBJECT_SIZE
-);
 
 /// RPCLatestRevisionResponse contains the latest revision of a file contract,
 /// whether it is revisable, and whether it has been renewed.
@@ -475,7 +369,6 @@ pub struct RPCLatestRevisionResponse {
     pub revisable: bool,
     pub renewed: bool,
 }
-impl_rpc_object!(RPCLatestRevisionResponse, STANDARD_OBJECT_SIZE);
 
 /// RPCReadSectorRequest is the request type for reading a sector from the
 /// host.
@@ -488,7 +381,6 @@ pub struct RPCReadSectorRequest {
     pub offset: u64,
     pub length: u64,
 }
-impl_rpc_request!(RPCReadSectorRequest, "RPCReadSector", STANDARD_OBJECT_SIZE);
 
 /// RPCReadSectorResponse contains the proof and data for a sector read request.
 /// The renter must validate the proof against the root hash.
@@ -498,7 +390,6 @@ pub struct RPCReadSectorResponse {
     pub proof: Vec<Hash256>,
     pub data: Vec<u8>,
 }
-impl_rpc_object!(RPCReadSectorResponse, SECTOR_SIZE + STANDARD_OBJECT_SIZE);
 
 /// RPCWriteSectorRequest is the request type for writing a sector to the host's
 /// temporary storage.
@@ -512,11 +403,6 @@ pub struct RPCWriteSectorRequest {
     pub token: AccountToken,
     pub data: Vec<u8>,
 }
-impl_rpc_request!(
-    RPCWriteSectorRequest,
-    "RPCWriteSector",
-    STANDARD_OBJECT_SIZE + SECTOR_SIZE
-);
 
 /// RPCWriteSectorResponse contains the root hash of the written sector.
 ///
@@ -526,7 +412,6 @@ impl_rpc_request!(
 pub struct RPCWriteSectorResponse {
     pub root: Hash256,
 }
-impl_rpc_object!(RPCWriteSectorResponse, 32);
 
 /// RPCAppendSectorsRequest is the request type for appending sectors to a contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
@@ -538,18 +423,13 @@ pub struct RPCAppendSectorsRequest {
 
     pub challenge_signature: Signature,
 }
-impl_rpc_request!(
-    RPCAppendSectorsRequest,
-    "RPCAppendSectors",
-    STANDARD_OBJECT_SIZE + (32 * MAX_SECTOR_BATCH_SIZE)
-);
 
-impl RPCAppendSectorsRequest {
-    pub fn challenge_sig_hash(&self, revision_number: u64) -> Hash256 {
+impl SignedRequest for RPCAppendSectorsRequest {
+    fn sign<S: RenterContractSigner>(&mut self, signer: S, revision_number: u64) {
         let mut state = Params::new().hash_length(32).to_state();
         self.contract_id.encode(&mut state).unwrap();
         revision_number.encode(&mut state).unwrap();
-        state.finalize().into()
+        self.challenge_signature = signer.sign(state.finalize().as_bytes());
     }
 }
 
@@ -565,25 +445,6 @@ pub struct RPCAppendSectorsResponse {
     pub subtree_roots: Vec<Hash256>,
     pub new_merkle_root: Hash256,
 }
-impl_rpc_object!(RPCAppendSectorsResponse, STANDARD_OBJECT_SIZE);
-
-/// RPCAppendSectorsSecondResponse contains the renter's signature for the
-/// contract revision appending the sectors.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCAppendSectorsSecondResponse {
-    pub renter_signature: Signature,
-}
-impl_rpc_object!(RPCAppendSectorsSecondResponse, 32);
-
-/// RPCAppendSectorsThirdResponse contains the host's signature for the
-/// contract revision appending the sectors.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCAppendSectorsThirdResponse {
-    pub host_signature: Signature,
-}
-impl_rpc_object!(RPCAppendSectorsThirdResponse, 32);
 
 /// RPCSectorRootsRequest is the request type for getting the sector roots
 /// for a contract.
@@ -596,11 +457,6 @@ pub struct RPCSectorRootsRequest {
     pub offset: u64,
     pub length: u64,
 }
-impl_rpc_request!(
-    RPCSectorRootsRequest,
-    "RPCSectorRoots",
-    STANDARD_OBJECT_SIZE
-);
 
 /// RPCSectorRootsResponse contains the sector roots and a proof for a contract.
 /// The renter must validate the proof against the roots.
@@ -611,7 +467,6 @@ pub struct RPCSectorRootsResponse {
     pub roots: Vec<Hash256>,
     pub host_signature: Signature,
 }
-impl_rpc_object!(RPCSectorRootsResponse, STANDARD_OBJECT_SIZE);
 
 /// RPCAccountBalanceRequest is the request type for getting the balance of
 /// an account.
@@ -620,7 +475,6 @@ impl_rpc_object!(RPCSectorRootsResponse, STANDARD_OBJECT_SIZE);
 pub struct RPCAccountBalanceRequest {
     pub account: PublicKey,
 }
-impl_rpc_request!(RPCAccountBalanceRequest, "RPCAccountBalance", 32);
 
 /// RPCAccountBalanceResponse contains the balance of an account.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
@@ -628,7 +482,6 @@ impl_rpc_request!(RPCAccountBalanceRequest, "RPCAccountBalance", 32);
 pub struct RPCAccountBalanceResponse {
     pub balance: Currency,
 }
-impl_rpc_object!(RPCAccountBalanceResponse, 16);
 
 /// RPCReplenishAccountsRequest is the request type for replenishing accounts
 /// with Siacoin deposits.
@@ -644,20 +497,15 @@ pub struct RPCReplenishAccountsRequest {
 
     pub challenge_signature: Signature,
 }
-impl_rpc_request!(
-    RPCReplenishAccountsRequest,
-    "RPCReplenishAccounts",
-    STANDARD_OBJECT_SIZE + (32 * MAX_ACCOUNT_BATCH_SIZE)
-);
 
-impl RPCReplenishAccountsRequest {
-    pub fn challenge_sig_hash(&self, revision_number: u64) -> Hash256 {
+impl SignedRequest for RPCReplenishAccountsRequest {
+    fn sign<S: RenterContractSigner>(&mut self, signer: S, revision_number: u64) {
         let mut state = Params::new().hash_length(32).to_state();
+        self.contract_id.encode(&mut state).unwrap();
         self.accounts.encode(&mut state).unwrap();
         self.target.encode(&mut state).unwrap();
-        self.contract_id.encode(&mut state).unwrap();
         revision_number.encode(&mut state).unwrap();
-        state.finalize().into()
+        self.challenge_signature = signer.sign(state.finalize().as_bytes());
     }
 }
 
@@ -671,28 +519,6 @@ impl RPCReplenishAccountsRequest {
 pub struct RPCReplenishAccountsResponse {
     pub deposits: Vec<AccountDeposit>,
 }
-impl_rpc_object!(
-    RPCReplenishAccountsResponse,
-    8 + (32 * MAX_ACCOUNT_BATCH_SIZE)
-);
-
-/// RPCReplenishAccountsSecondResponse contains the renter's signature for the
-/// contract revision replenishing the accounts.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCReplenishAccountsSecondResponse {
-    pub renter_signature: Signature,
-}
-impl_rpc_object!(RPCReplenishAccountsSecondResponse, 32);
-
-/// RPCReplenishAccountsThirdResponse contains the host's signature for the
-/// contract revision replenishing the accounts.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCReplenishAccountsThirdResponse {
-    pub host_signature: Signature,
-}
-impl_rpc_object!(RPCReplenishAccountsThirdResponse, 32);
 
 /// RPCVerifySectorRequest is the request type for verifying the host
 /// is storing a sector.
@@ -704,11 +530,6 @@ pub struct RPCVerifySectorRequest {
     pub root: Hash256,
     pub leaf_index: u64,
 }
-impl_rpc_request!(
-    RPCVerifySectorRequest,
-    "RPCVerifySector",
-    STANDARD_OBJECT_SIZE
-);
 
 /// RPCVerifySectorResponse contains a proof that the host is storing a
 /// sector.
@@ -718,7 +539,6 @@ pub struct RPCVerifySectorResponse {
     pub proof: Vec<Hash256>,
     pub leaf: Leaf,
 }
-impl_rpc_object!(RPCVerifySectorResponse, STANDARD_OBJECT_SIZE);
 
 /// RPCFundAccountsRequest is the request type for funding accounts
 /// with Siacoin deposits.
@@ -731,11 +551,6 @@ pub struct RPCFundAccountsRequest {
     pub deposits: Vec<AccountDeposit>,
     pub renter_signature: Signature,
 }
-impl_rpc_request!(
-    RPCFundAccountsRequest,
-    "RPCFundAccounts",
-    STANDARD_OBJECT_SIZE + (32 * MAX_ACCOUNT_BATCH_SIZE)
-);
 
 /// RPCFundAccountsResponse contains the host's signature and new
 /// balance after funding the accounts.
@@ -745,10 +560,6 @@ pub struct RPCFundAccountsResponse {
     pub balances: Vec<Currency>,
     pub host_signature: Signature,
 }
-impl_rpc_object!(
-    RPCFundAccountsResponse,
-    STANDARD_OBJECT_SIZE + (16 * MAX_ACCOUNT_BATCH_SIZE)
-);
 
 /// RPCError is the error type returned by the RPC server.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
@@ -757,7 +568,6 @@ pub struct RPCError {
     pub code: u8,
     pub description: String,
 }
-impl_rpc_object!(RPCError, STANDARD_OBJECT_SIZE);
 
 impl Display for RPCError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -766,29 +576,3 @@ impl Display for RPCError {
 }
 
 impl Error for RPCError {}
-
-/// RPCObject is the base trait for all RPC objects.
-pub trait RPCObject: sealed::Sealed + SiaEncodable + SiaDecodable {
-    fn max_len() -> usize;
-}
-
-/// RPCRequest is the trait for all RPC requests.
-pub trait RPCRequest: RPCObject {
-    fn rpc_id(&self) -> Specifier;
-}
-
-/// A TransportClient is a trait for sending and receiving RPC requests and responses.
-/// It abstracts the underlying transport mechanism, allowing for different implementations
-/// (e.g., TCP, QUIC, WebTransport) to be used without changing the RPC logic.
-pub trait TransportClient {
-    fn write_request<T: RPCRequest>(&self, request: &T) -> Result<(), RPCError>;
-    fn write_response<T: RPCObject>(&self, response: &T) -> Result<(), RPCError>;
-    fn read_response<T: RPCObject>(&self) -> Result<T, RPCError>;
-}
-
-/// sealed is a module to prevent external crates from implementing
-/// the RPCObject and RPCRequest traits while still being able
-/// to implement a [TransportClient].
-mod sealed {
-    pub trait Sealed {}
-}
