@@ -387,7 +387,7 @@ impl SiaDecodable for SpendPolicy {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, Clone)]
 /// A policy that has been satisfied by a set of preimages and signatures.
 pub struct SatisfiedPolicy {
     pub policy: SpendPolicy,
