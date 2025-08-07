@@ -34,11 +34,6 @@ impl RenterContractSigner for PrivateKey {
     }
 }
 
-#[allow(dead_code)] // TODO: remove
-trait SignedRequest {
-    fn sign<S: RenterContractSigner>(&mut self, signer: S, revision_number: u64);
-}
-
 pub trait TransactionBuilder {
     fn miner_fee(&self) -> Currency;
     fn fund_transaction(&self, transaction: &mut Transaction, amount: Currency) -> Result<ChainIndex, RPCError>;
@@ -255,10 +250,19 @@ pub struct RPCFormContractRequest {
 /// RPCRefreshContractParams contains the parameters for refreshing a contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCRefreshContractParams {
+pub struct RefreshContractParams {
     pub contract_id: FileContractID,
     pub allowance: Currency,
     pub collateral: Currency,
+}
+
+pub struct RPCRefreshContractRequestParams {
+    pub prices: HostPrices,
+    pub refresh: RefreshContractParams,
+    pub miner_fee: Currency,
+    pub basis: ChainIndex,
+    pub renter_inputs: Vec<SiacoinElement>,
+    pub renter_parents: Vec<Transaction>,
 }
 
 /// RPCRefreshContractRequest is the request type for RPCRefreshContract.
@@ -266,7 +270,7 @@ pub struct RPCRefreshContractParams {
 #[serde(rename_all = "camelCase")]
 pub struct RPCRefreshContractRequest {
     pub prices: HostPrices,
-    pub refresh: RPCRefreshContractParams,
+    pub refresh: RefreshContractParams,
     pub miner_fee: Currency,
     pub basis: ChainIndex,
     pub renter_inputs: Vec<SiacoinElement>,
@@ -275,23 +279,42 @@ pub struct RPCRefreshContractRequest {
     pub challenge_signature: Signature,
 }
 
-impl SignedRequest for RPCRefreshContractRequest {
-    fn sign<S: RenterContractSigner>(&mut self, signer: S, revision_number: u64) {
+impl RPCRefreshContractRequest {
+    #[allow(dead_code)] // TODO: remove
+    pub fn new<S: RenterContractSigner>(signer: S, params: RPCRefreshContractRequestParams, revision_number: u64) -> Self {
         let mut state = Params::new().hash_length(32).to_state();
-        self.refresh.contract_id.encode(&mut state).unwrap();
+        params.refresh.contract_id.encode(&mut state).unwrap();
         revision_number.encode(&mut state).unwrap();
-        self.challenge_signature = signer.sign(state.finalize().as_bytes());
+
+        Self {
+            prices: params.prices,
+            refresh: params.refresh,
+            miner_fee: params.miner_fee,
+            basis: params.basis,
+            renter_inputs: params.renter_inputs,
+            renter_parents: params.renter_parents,
+            challenge_signature: signer.sign(state.finalize().as_bytes()),
+        }
     }
 }
 
 /// RPCRenewContractParams contains the parameters for renewing a contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCRenewContractParams {
+pub struct RenewContractParams {
     pub contract_id: FileContractID,
     pub allowance: Currency,
     pub collateral: Currency,
     pub proof_height: u64,
+}
+
+pub struct RPCRenewContractRequestParams {
+    pub prices: HostPrices,
+    pub renewal: RenewContractParams,
+    pub miner_fee: Currency,
+    pub basis: ChainIndex,
+    pub renter_inputs: Vec<SiacoinElement>,
+    pub renter_parents: Vec<Transaction>,
 }
 
 /// RPCRenewContractRequest is the request type for RPCRenewContract.
@@ -299,7 +322,7 @@ pub struct RPCRenewContractParams {
 #[serde(rename_all = "camelCase")]
 pub struct RPCRenewContractRequest {
     pub prices: HostPrices,
-    pub renewal: RPCRenewContractParams,
+    pub renewal: RenewContractParams,
     pub miner_fee: Currency,
     pub basis: ChainIndex,
     pub renter_inputs: Vec<SiacoinElement>,
@@ -308,13 +331,29 @@ pub struct RPCRenewContractRequest {
     pub challenge_signature: Signature,
 }
 
-impl SignedRequest for RPCRenewContractRequest {
-    fn sign<S: RenterContractSigner>(&mut self, signer: S, revision_number: u64) {
+impl RPCRenewContractRequest {
+    #[allow(dead_code)] // TODO: remove
+    pub fn new<S: RenterContractSigner>(signer: S, params: RPCRenewContractRequestParams, revision_number: u64) -> Self {
         let mut state = Params::new().hash_length(32).to_state();
-        self.renewal.contract_id.encode(&mut state).unwrap();
+        params.renewal.contract_id.encode(&mut state).unwrap();
         revision_number.encode(&mut state).unwrap();
-        self.challenge_signature = signer.sign(state.finalize().as_bytes());
+
+        Self {
+            prices: params.prices,
+            renewal: params.renewal,
+            miner_fee: params.miner_fee,
+            basis: params.basis,
+            renter_inputs: params.renter_inputs,
+            renter_parents: params.renter_parents,
+            challenge_signature: signer.sign(state.finalize().as_bytes()),
+        }
     }
+}
+
+pub struct RPCFreeSectorsRequestParams {
+    pub contract_id: FileContractID,
+    pub prices: HostPrices,
+    pub indices: Vec<u64>,
 }
 
 /// RPCFreeSectorsRequest is the request type for removing sectors from a contract.
@@ -328,12 +367,19 @@ pub struct RPCFreeSectorsRequest {
     pub challenge_signature: Signature,
 }
 
-impl SignedRequest for RPCFreeSectorsRequest {
-    fn sign<S: RenterContractSigner>(&mut self, signer: S, revision_number: u64) {
+impl RPCFreeSectorsRequest {
+    #[allow(dead_code)] // TODO: remove
+    pub fn new<S: RenterContractSigner>(signer: S, params: RPCFreeSectorsRequestParams,  revision_number: u64) -> Self {
         let mut state = Params::new().hash_length(32).to_state();
-        self.contract_id.encode(&mut state).unwrap();
+        params.contract_id.encode(&mut state).unwrap();
         revision_number.encode(&mut state).unwrap();
-        self.challenge_signature = signer.sign(state.finalize().as_bytes());
+
+        RPCFreeSectorsRequest {
+            contract_id: params.contract_id,
+            prices: params.prices,
+            indices: params.indices,
+            challenge_signature: signer.sign(state.finalize().as_bytes()),
+        }
     }
 }
 
@@ -413,6 +459,12 @@ pub struct RPCWriteSectorResponse {
     pub root: Hash256,
 }
 
+pub struct RPCAppendSectorsRequestParams {
+    pub prices: HostPrices,
+    pub sectors: Vec<Hash256>,
+    pub contract_id: FileContractID,
+}
+
 /// RPCAppendSectorsRequest is the request type for appending sectors to a contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
@@ -424,12 +476,18 @@ pub struct RPCAppendSectorsRequest {
     pub challenge_signature: Signature,
 }
 
-impl SignedRequest for RPCAppendSectorsRequest {
-    fn sign<S: RenterContractSigner>(&mut self, signer: S, revision_number: u64) {
+impl RPCAppendSectorsRequest {
+    #[allow(dead_code)] // TODO: remove
+    pub fn new<S: RenterContractSigner>(signer: S, params: RPCAppendSectorsRequestParams, revision_number: u64) -> Self {
         let mut state = Params::new().hash_length(32).to_state();
-        self.contract_id.encode(&mut state).unwrap();
+        params.contract_id.encode(&mut state).unwrap();
         revision_number.encode(&mut state).unwrap();
-        self.challenge_signature = signer.sign(state.finalize().as_bytes());
+        Self {
+            prices: params.prices,
+            sectors: params.sectors,
+            contract_id: params.contract_id,
+            challenge_signature: signer.sign(state.finalize().as_bytes()),
+        }
     }
 }
 
@@ -483,6 +541,12 @@ pub struct RPCAccountBalanceResponse {
     pub balance: Currency,
 }
 
+pub struct RPCReplenishAccountsParams {
+    pub accounts: Vec<PublicKey>,
+    pub target: Currency,
+    pub contract_id: FileContractID,
+}
+
 /// RPCReplenishAccountsRequest is the request type for replenishing accounts
 /// with Siacoin deposits.
 ///
@@ -498,14 +562,21 @@ pub struct RPCReplenishAccountsRequest {
     pub challenge_signature: Signature,
 }
 
-impl SignedRequest for RPCReplenishAccountsRequest {
-    fn sign<S: RenterContractSigner>(&mut self, signer: S, revision_number: u64) {
+impl RPCReplenishAccountsRequest {
+    #[allow(dead_code)] // TODO: remove
+    pub fn new<S: RenterContractSigner>(signer: S, params: RPCReplenishAccountsParams, revision_number: u64) -> Self {
         let mut state = Params::new().hash_length(32).to_state();
-        self.contract_id.encode(&mut state).unwrap();
-        self.accounts.encode(&mut state).unwrap();
-        self.target.encode(&mut state).unwrap();
+        params.accounts.encode(&mut state).unwrap();
+        params.target.encode(&mut state).unwrap();
+        params.contract_id.encode(&mut state).unwrap();
         revision_number.encode(&mut state).unwrap();
-        self.challenge_signature = signer.sign(state.finalize().as_bytes());
+
+        Self {
+            accounts: params.accounts,
+            target: params.target,
+            contract_id: params.contract_id,
+            challenge_signature: signer.sign(state.finalize().as_bytes()),
+        }
     }
 }
 
