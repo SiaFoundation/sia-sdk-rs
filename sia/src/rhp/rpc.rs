@@ -784,6 +784,24 @@ where
     renter_inputs_len: usize,
 }
 
+impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder, State> RPCFormContract<T, S, B, State> {
+    pub fn file_contract(&self) -> &FileContract {
+        &self.contract
+    }
+
+    pub fn formation_transaction(&self) -> &Transaction {
+        &self.formation_transaction
+    }
+
+    pub fn renter_inputs(&self) -> &[SiacoinInput] {
+        &self.formation_transaction.siacoin_inputs[..self.renter_inputs_len]
+    }
+
+    pub fn host_inputs(&self) -> &[SiacoinInput] {
+        &self.formation_transaction.siacoin_inputs[self.renter_inputs_len..]
+    }
+}
+
 pub struct RPCFormContractResult {
     pub basis: ChainIndex,
     pub transaction_set: Vec<Transaction>,
