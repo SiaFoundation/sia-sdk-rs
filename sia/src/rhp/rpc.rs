@@ -1,7 +1,7 @@
-use thiserror::Error;
 use std::fmt::Display;
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
+use thiserror::Error;
 
 use super::types::*;
 use crate::consensus::ChainState;
@@ -494,7 +494,6 @@ pub enum Error {
     #[error("not enough host funds {0} < {1}")]
     NotEnoughHostFunds(Currency, Currency),
 
-
     #[error("expected single file contract in response, found {0}")]
     ExpectedContractTransaction(usize),
 
@@ -510,38 +509,38 @@ pub trait TransportStream: Read + Write {
         &mut self,
         specifier: Specifier,
         request: &R,
-    ) -> Result<(), Error> where Self: Sized {
-        self.write_all(&specifier.as_ref())?;
+    ) -> Result<(), Error>
+    where
+        Self: Sized,
+    {
+        self.write_all(specifier.as_ref())?;
         request.encode(self)?;
         Ok(())
     }
 
-    fn write_response<R: SiaEncodable>(
-        &mut self,
-        response: &R,
-    ) -> Result<(), Error> where Self: Sized {
+    fn write_response<R: SiaEncodable>(&mut self, response: &R) -> Result<(), Error>
+    where
+        Self: Sized,
+    {
         self.write_all(&[0])?; // nil error
         response.encode(self)?;
         Ok(())
     }
 
-    fn read_response<R: SiaDecodable>(
-        &mut self,
-        max_size: usize,
-    ) -> Result<R, Error> {
-        let mut error_byte = [0u8;1];
+    fn read_response<R: SiaDecodable>(&mut self, max_size: usize) -> Result<R, Error> {
+        let mut error_byte = [0u8; 1];
         self.read_exact(&mut error_byte)?;
         match error_byte[0] {
             0 => {
                 let mut r = self.take(max_size as u64);
                 let resp = R::decode(&mut r)?;
                 Ok(resp)
-            },
+            }
             1 => {
                 let mut r = self.take(1024);
-                let error = RPCError::decode(&mut r).map(|e| Error::RPC(e))?;
+                let error = RPCError::decode(&mut r).map(Error::RPC)?;
                 Err(error)
-            },
+            }
             _ => Err(Error::Encoding(encoding::Error::InvalidValue)),
         }
     }
@@ -550,7 +549,7 @@ pub trait TransportStream: Read + Write {
 /// RPCSettingsRequest is the request type getting the host's current settings.
 /// It is encoded as 0 bytes.
 #[derive(Debug, PartialEq, SiaEncode, SiaDecode)]
-struct RPCSettingsRequest{}
+struct RPCSettingsRequest {}
 
 pub struct RPCSettingsResult {
     pub settings: HostSettings,
@@ -563,13 +562,11 @@ pub struct RPCSettings<TransportStream, State> {
 }
 
 impl<T: TransportStream> RPCSettings<T, RPCSettingsRequest> {
-    pub fn send_request(
-        mut transport: T,
-    ) -> Result<RPCSettings<T, RPCSettingsResponse>, Error> {
-        transport.write_request(specifier!("RPCSettings"), &RPCSettingsRequest{})?;
+    pub fn send_request(mut transport: T) -> Result<RPCSettings<T, RPCSettingsResponse>, Error> {
+        transport.write_request(specifier!("RPCSettings"), &RPCSettingsRequest {})?;
 
         Ok(RPCSettings {
-            transport: transport,
+            transport,
             state: PhantomData,
         })
     }
@@ -578,13 +575,13 @@ impl<T: TransportStream> RPCSettings<T, RPCSettingsRequest> {
 impl<T: TransportStream> RPCSettings<T, RPCSettingsResponse> {
     pub fn complete(mut self) -> Result<RPCSettingsResult, Error> {
         let response: RPCSettingsResponse = self.transport.read_response(STANDARD_OBJECT_SIZE)?;
-        Ok(RPCSettingsResult { settings: response.settings })
+        Ok(RPCSettingsResult {
+            settings: response.settings,
+        })
     }
 }
 
-pub fn rpc_settings<T: TransportStream>(
-    transport: T,
-) -> Result<RPCSettingsResult, Error> {
+pub fn rpc_settings<T: TransportStream>(transport: T) -> Result<RPCSettingsResult, Error> {
     RPCSettings::send_request(transport)?.complete()
 }
 
@@ -876,10 +873,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
             .map(|si| si.parent.siacoin_output.value)
             .sum();
         if host_sum < host_funding {
-            return Err(Error::NotEnoughHostFunds(
-                host_sum,
-                host_funding,
-            ));
+            return Err(Error::NotEnoughHostFunds(host_sum, host_funding));
         } else if host_sum > host_funding {
             formation_txn.siacoin_outputs.push(SiacoinOutput {
                 address: self.contract.host_output.address.clone(),

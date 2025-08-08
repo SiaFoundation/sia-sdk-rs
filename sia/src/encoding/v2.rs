@@ -1,5 +1,5 @@
+use super::{Error, Result};
 use std::io::{Read, Write};
-use super::{Result, Error};
 use time::{Duration, OffsetDateTime};
 
 pub trait SiaEncodable {
