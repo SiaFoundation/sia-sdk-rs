@@ -1,6 +1,6 @@
 use core::fmt;
 
-use crate::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
+use crate::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use crate::types::{Hash256, HexParseError};
 use ed25519_dalek::{Signature as ED25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::de::Error;
@@ -176,20 +176,6 @@ impl AsRef<[u8; 64]> for Signature {
 impl From<[u8; 64]> for Signature {
     fn from(buf: [u8; 64]) -> Self {
         Signature(buf)
-    }
-}
-
-/// Converts a slice of bytes into a Signature.
-/// # Panics
-/// Panics if the slice is not exactly 64 bytes long.
-impl From<&[u8]> for Signature {
-    fn from(buf: &[u8]) -> Self {
-        if buf.len() != 64 {
-            panic!("Signature must be 64 bytes long");
-        }
-        let mut sig = [0u8; 64];
-        sig.copy_from_slice(buf);
-        Signature(sig)
     }
 }
 
