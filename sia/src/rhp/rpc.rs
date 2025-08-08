@@ -784,7 +784,9 @@ where
     renter_inputs_len: usize,
 }
 
-impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder, State> RPCFormContract<T, S, B, State> {
+impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder, State>
+    RPCFormContract<T, S, B, State>
+{
     pub fn file_contract(&self) -> &FileContract {
         &self.contract
     }
@@ -795,10 +797,6 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder, State> 
 
     pub fn renter_inputs(&self) -> &[SiacoinInput] {
         &self.formation_transaction.siacoin_inputs[..self.renter_inputs_len]
-    }
-
-    pub fn host_inputs(&self) -> &[SiacoinInput] {
-        &self.formation_transaction.siacoin_inputs[self.renter_inputs_len..]
     }
 }
 
@@ -925,6 +923,10 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
 impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, RenterFormContractSignaturesResponse>
 {
+    pub fn host_inputs(&self) -> &[SiacoinInput] {
+        &self.formation_transaction.siacoin_inputs[self.renter_inputs_len..]
+    }
+
     pub fn send_renter_signatures(
         mut self,
     ) -> Result<RPCFormContract<T, S, B, TransactionSetResponse>, Error> {
