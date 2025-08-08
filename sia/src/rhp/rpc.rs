@@ -562,8 +562,10 @@ pub struct RPCSettings<TransportStream, State> {
 }
 
 impl<T: TransportStream> RPCSettings<T, RPCSettingsRequest> {
+    const RPC_ID: Specifier = specifier!("RPCSettings");
+
     pub fn send_request(mut transport: T) -> Result<RPCSettings<T, RPCSettingsResponse>, Error> {
-        transport.write_request(specifier!("RPCSettings"), &RPCSettingsRequest {})?;
+        transport.write_request(Self::RPC_ID, &RPCSettingsRequest {})?;
 
         Ok(RPCSettings {
             transport,
@@ -621,6 +623,8 @@ pub struct RPCWriteSector<TransportStream, State> {
 }
 
 impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorRequest> {
+    const RPC_ID: Specifier = specifier!("RPCWriteSector");
+
     pub fn send_request<D: AsRef<[u8]>>(
         mut transport: T,
         prices: HostPrices,
@@ -633,7 +637,7 @@ impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorRequest> {
             token,
             data_length: data.len(),
         };
-        transport.write_request(specifier!("RPCWriteSector"), &request)?;
+        transport.write_request(Self::RPC_ID, &request)?;
         transport.write_all(data)?;
 
         Ok(RPCWriteSector {
@@ -686,6 +690,7 @@ pub struct RPCReadSector<T: TransportStream, State> {
 }
 
 impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
+    const RPC_ID: Specifier = specifier!("RPCReadSector");
     pub fn send_request(
         mut transport: T,
         prices: HostPrices,
@@ -701,7 +706,7 @@ impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
             length: length as u64,
             offset: offset as u64,
         };
-        transport.write_request(specifier!("RPCReadSector"), &request)?;
+        transport.write_request(Self::RPC_ID, &request)?;
 
         Ok(RPCReadSector {
             transport,
@@ -788,6 +793,8 @@ pub struct RPCFormContractResult {
 impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, RPCFormContractRequest>
 {
+    const RPC_ID: Specifier = specifier!("RPCFormContract");
+
     pub fn send_request(
         mut transport: T,
         contract_signer: S,
@@ -844,7 +851,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
                 .collect(),
             renter_parents: Vec::new(),
         };
-        transport.write_request(specifier!("RPCFormContract"), &request)?;
+        transport.write_request(Self::RPC_ID, &request)?;
 
         Ok(RPCFormContract {
             transport,
