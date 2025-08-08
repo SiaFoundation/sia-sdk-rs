@@ -965,17 +965,16 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
 {
     pub fn complete(mut self) -> Result<RPCFormContractResult, Error> {
         let resp: TransactionSetResponse = self.transport.read_response(STANDARD_TXNSET_SIZE)?;
-        let formation_txn = resp.transaction_set.last().ok_or(Error::ExpectedTransactionSet)?;
+        let formation_txn = resp
+            .transaction_set
+            .last()
+            .ok_or(Error::ExpectedTransactionSet)?;
         if formation_txn.file_contracts.len() != 1 {
             return Err(Error::ExpectedContractTransaction(
                 formation_txn.file_contracts.len(),
             ));
         }
-        let contract = formation_txn
-            .file_contracts
-            .first()
-            .unwrap()
-            .clone();
+        let contract = formation_txn.file_contracts.first().unwrap().clone();
 
         Ok(RPCFormContractResult {
             basis: resp.basis,
