@@ -25,8 +25,10 @@ impl Specifier {
     pub const fn new(buf: [u8; SPECIFIER_SIZE]) -> Self {
         Self(buf)
     }
+}
 
-    pub fn as_bytes(&self) -> &[u8; SPECIFIER_SIZE] {
+impl AsRef<[u8]> for Specifier {
+    fn as_ref(&self) -> &[u8] {
         &self.0
     }
 }

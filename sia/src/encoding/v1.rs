@@ -1,4 +1,4 @@
-use crate::encoding::{Error, Result};
+use super::{Error, Result};
 use std::io::{Read, Write};
 
 pub trait V1SiaEncodable {

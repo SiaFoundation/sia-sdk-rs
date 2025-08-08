@@ -1,10 +1,11 @@
-use std::error::Error;
+use thiserror::Error;
 use std::fmt::Display;
+use std::io::{self, Read, Write};
 use std::marker::PhantomData;
 
 use super::types::*;
 use crate::consensus::ChainState;
-use crate::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
+use crate::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use crate::rhp::SECTOR_SIZE;
 use blake2b_simd::Params;
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ use crate::types::{
     Specifier,
 };
 
+const STANDARD_OBJECT_SIZE: usize = 1024; // 1 KiB
 const STANDARD_TXNSET_SIZE: usize = 262144; // 256 KiB
 
 pub trait RenterContractSigner {
@@ -477,15 +479,113 @@ impl Display for RPCError {
     }
 }
 
-impl Error for RPCError {}
+impl std::error::Error for RPCError {}
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("IO error: {0}")]
+    IO(#[from] io::Error),
+    #[error("Encoding error: {0}")]
+    Encoding(#[from] encoding::Error),
+
+    #[error("RPC error: {0}")]
+    RPC(#[from] RPCError),
+
+    #[error("not enough host funds {0} < {1}")]
+    NotEnoughHostFunds(Currency, Currency),
+
+
+    #[error("expected single file contract in response, found {0}")]
+    ExpectedContractTransaction(usize),
+
+    #[error("expected transaction set in response")]
+    ExpectedTransactionSet,
+}
 
 /// A TransportStream is a trait for sending and receiving RPC requests and responses.
 /// It abstracts the underlying transport mechanism, allowing for different implementations
 /// (e.g., TCP, QUIC, WebTransport) to be used without changing the RPC logic.
-pub trait TransportStream {
-    fn write_request<T: SiaEncodable>(&self, id: Specifier, request: &T) -> Result<(), RPCError>;
-    fn write_response<T: SiaEncodable>(&self, response: &T) -> Result<(), RPCError>;
-    fn read_response<T: SiaDecodable>(&self, max_len: usize) -> Result<T, RPCError>;
+pub trait TransportStream: Read + Write {
+    fn write_request<R: SiaEncodable>(
+        &mut self,
+        specifier: Specifier,
+        request: &R,
+    ) -> Result<(), Error> where Self: Sized {
+        self.write_all(&specifier.as_ref())?;
+        request.encode(self)?;
+        Ok(())
+    }
+
+    fn write_response<R: SiaEncodable>(
+        &mut self,
+        response: &R,
+    ) -> Result<(), Error> where Self: Sized {
+        self.write_all(&[0])?; // nil error
+        response.encode(self)?;
+        Ok(())
+    }
+
+    fn read_response<R: SiaDecodable>(
+        &mut self,
+        max_size: usize,
+    ) -> Result<R, Error> {
+        let mut error_byte = [0u8;1];
+        self.read_exact(&mut error_byte)?;
+        match error_byte[0] {
+            0 => {
+                let mut r = self.take(max_size as u64);
+                let resp = R::decode(&mut r)?;
+                Ok(resp)
+            },
+            1 => {
+                let mut r = self.take(1024);
+                let error = RPCError::decode(&mut r).map(|e| Error::RPC(e))?;
+                Err(error)
+            },
+            _ => Err(Error::Encoding(encoding::Error::InvalidValue)),
+        }
+    }
+}
+
+/// RPCSettingsRequest is the request type getting the host's current settings.
+/// It is encoded as 0 bytes.
+#[derive(Debug, PartialEq, SiaEncode, SiaDecode)]
+struct RPCSettingsRequest{}
+
+pub struct RPCSettingsResult {
+    pub settings: HostSettings,
+}
+
+/// RPCSettings returns the host's current settings.
+pub struct RPCSettings<TransportStream, State> {
+    transport: TransportStream,
+    state: PhantomData<State>,
+}
+
+impl<T: TransportStream> RPCSettings<T, RPCSettingsRequest> {
+    pub fn send_request(
+        mut transport: T,
+    ) -> Result<RPCSettings<T, RPCSettingsResponse>, Error> {
+        transport.write_request(specifier!("RPCSettings"), &RPCSettingsRequest{})?;
+
+        Ok(RPCSettings {
+            transport: transport,
+            state: PhantomData,
+        })
+    }
+}
+
+impl<T: TransportStream> RPCSettings<T, RPCSettingsResponse> {
+    pub fn complete(mut self) -> Result<RPCSettingsResult, Error> {
+        let response: RPCSettingsResponse = self.transport.read_response(STANDARD_OBJECT_SIZE)?;
+        Ok(RPCSettingsResult { settings: response.settings })
+    }
+}
+
+pub fn rpc_settings<T: TransportStream>(
+    transport: T,
+) -> Result<RPCSettingsResult, Error> {
+    RPCSettings::send_request(transport)?.complete()
 }
 
 /// RPCWriteSectorRequest is the request type for writing a sector to the host's
@@ -518,18 +618,18 @@ pub struct RPCWriteSectorResult {
 /// RPCWriteSector writes a sector to the host's temporary storage.
 /// The host will store the sector for 432 blocks.
 /// If the sector is not appended to a contract within that time, it will be deleted.
-pub struct RPCWriteSector<T: TransportStream, State> {
-    transport: T,
+pub struct RPCWriteSector<TransportStream, State> {
+    transport: TransportStream,
     state: PhantomData<State>,
 }
 
 impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorRequest> {
     pub fn send_request(
-        transport: T,
+        mut transport: T,
         prices: HostPrices,
         token: AccountToken,
         data: Vec<u8>,
-    ) -> Result<RPCWriteSector<T, RPCWriteSectorResponse>, RPCError> {
+    ) -> Result<RPCWriteSector<T, RPCWriteSectorResponse>, Error> {
         let request = RPCWriteSectorRequest {
             prices,
             token,
@@ -545,7 +645,7 @@ impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorRequest> {
 }
 
 impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorResponse> {
-    pub fn complete(self) -> Result<RPCWriteSectorResult, RPCError> {
+    pub fn complete(mut self) -> Result<RPCWriteSectorResult, Error> {
         let response: RPCWriteSectorResponse = self.transport.read_response(32)?;
         Ok(RPCWriteSectorResult {
             root: response.root,
@@ -588,13 +688,13 @@ pub struct RPCReadSector<T: TransportStream, State> {
 
 impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
     pub fn send_request(
-        transport: T,
+        mut transport: T,
         prices: HostPrices,
         token: AccountToken,
         root: Hash256,
         length: usize,
         offset: usize,
-    ) -> Result<RPCReadSector<T, RPCReadSectorResponse>, RPCError> {
+    ) -> Result<RPCReadSector<T, RPCReadSectorResponse>, Error> {
         let request = RPCReadSectorRequest {
             prices,
             token,
@@ -612,7 +712,7 @@ impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
 }
 
 impl<T: TransportStream> RPCReadSector<T, RPCReadSectorResponse> {
-    pub fn complete(self) -> Result<RPCReadSectorResult, RPCError> {
+    pub fn complete(mut self) -> Result<RPCReadSectorResult, Error> {
         let response: RPCReadSectorResponse =
             self.transport.read_response(1024 + 8 + SECTOR_SIZE)?;
         Ok(RPCReadSectorResult {
@@ -690,11 +790,11 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, RPCFormContractRequest>
 {
     pub fn send_request(
-        transport: T,
+        mut transport: T,
         contract_signer: S,
         transaction_builder: B,
         params: RPCFormContractParams,
-    ) -> Result<RPCFormContract<T, S, B, HostInputsResponse>, RPCError> {
+    ) -> Result<RPCFormContract<T, S, B, HostInputsResponse>, Error> {
         let mut contract = FileContract {
             revision_number: 0,
             capacity: 0,
@@ -764,8 +864,8 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, HostInputsResponse>
 {
     pub fn receive_host_inputs(
-        self,
-    ) -> Result<RPCFormContract<T, S, B, RenterFormContractSignaturesResponse>, RPCError> {
+        mut self,
+    ) -> Result<RPCFormContract<T, S, B, RenterFormContractSignaturesResponse>, Error> {
         let host_inputs_response: HostInputsResponse = self.transport.read_response(10240)?;
         let mut formation_txn = self.formation_transaction;
 
@@ -776,11 +876,10 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
             .map(|si| si.parent.siacoin_output.value)
             .sum();
         if host_sum < host_funding {
-            // TODO: define errors correctly
-            return Err(RPCError {
-                code: 2,
-                description: String::from("not enough host funds"),
-            });
+            return Err(Error::NotEnoughHostFunds(
+                host_sum,
+                host_funding,
+            ));
         } else if host_sum > host_funding {
             formation_txn.siacoin_outputs.push(SiacoinOutput {
                 address: self.contract.host_output.address.clone(),
@@ -806,8 +905,8 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, RenterFormContractSignaturesResponse>
 {
     pub fn send_renter_signatures(
-        self,
-    ) -> Result<RPCFormContract<T, S, B, TransactionSetResponse>, RPCError> {
+        mut self,
+    ) -> Result<RPCFormContract<T, S, B, TransactionSetResponse>, Error> {
         let mut formation_txn = self.formation_transaction;
         let mut contract = self.contract;
 
@@ -841,7 +940,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
 impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, TransactionSetResponse>
 {
-    pub fn complete(self) -> Result<RPCFormContractResult, RPCError> {
+    pub fn complete(mut self) -> Result<RPCFormContractResult, Error> {
         let resp: TransactionSetResponse = self.transport.read_response(STANDARD_TXNSET_SIZE)?;
         let formation_txn = resp.transaction_set.last().ok_or(RPCError {
             code: 0,
@@ -869,7 +968,7 @@ pub fn rpc_form_contract<T, S, B>(
     contract_signer: S,
     transaction_builder: B,
     params: RPCFormContractParams,
-) -> Result<RPCFormContractResult, RPCError>
+) -> Result<RPCFormContractResult, Error>
 where
     T: TransportStream,
     S: RenterContractSigner,

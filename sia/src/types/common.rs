@@ -44,7 +44,7 @@ impl BlockID {
     pub fn foundation_output_id(&self) -> SiacoinOutputID {
         let mut state = Params::new().hash_length(32).to_state();
         state.update(self.as_ref());
-        state.update(Self::FOUNDATION_OUTPUT_ID_PREFIX.as_bytes());
+        state.update(Self::FOUNDATION_OUTPUT_ID_PREFIX.as_ref());
         state.finalize().into()
     }
 
@@ -102,7 +102,7 @@ impl FileContractID {
 
     fn derive_proof_output_id<T: From<blake2b_simd::Hash>>(&self, valid: bool, i: usize) -> T {
         let mut state = Params::new().hash_length(32).to_state();
-        state.update(Self::PROOF_OUTPUT_ID_PREFIX.as_bytes());
+        state.update(Self::PROOF_OUTPUT_ID_PREFIX.as_ref());
         state.update(self.as_ref());
         state.update(&(valid as u8).to_le_bytes());
         state.update(&(i as u64).to_le_bytes());
