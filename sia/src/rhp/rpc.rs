@@ -595,7 +595,7 @@ pub fn rpc_settings<T: TransportStream>(transport: T) -> Result<RPCSettingsResul
 struct RPCWriteSectorRequest {
     pub prices: HostPrices,
     pub token: AccountToken,
-    pub data: Vec<u8>,
+    pub data_length: usize,
 }
 
 /// RPCWriteSectorResponse contains the root hash of the written sector.
@@ -621,18 +621,20 @@ pub struct RPCWriteSector<TransportStream, State> {
 }
 
 impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorRequest> {
-    pub fn send_request(
+    pub fn send_request<D: AsRef<[u8]>>(
         mut transport: T,
         prices: HostPrices,
         token: AccountToken,
-        data: Vec<u8>,
+        data: D,
     ) -> Result<RPCWriteSector<T, RPCWriteSectorResponse>, Error> {
+        let data = data.as_ref();
         let request = RPCWriteSectorRequest {
             prices,
             token,
-            data,
+            data_length: data.len(),
         };
         transport.write_request(specifier!("RPCWriteSector"), &request)?;
+        transport.write_all(data)?;
 
         Ok(RPCWriteSector {
             transport,

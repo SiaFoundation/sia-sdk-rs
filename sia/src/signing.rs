@@ -179,6 +179,21 @@ impl From<[u8; 64]> for Signature {
     }
 }
 
+/// Converts a slice of bytes into a Signature.
+/// # Errors
+/// Returns an error if the slice is not exactly 64 bytes long.
+impl TryFrom<&[u8]> for Signature {
+    type Error = encoding::Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != 64 {
+            return Err(encoding::Error::InvalidLength);
+        }
+        let mut sig = [0u8; 64];
+        sig.copy_from_slice(value);
+        Ok(Signature(sig))
+    }
+}
+
 impl fmt::Display for Signature {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", hex::encode(self.0))
