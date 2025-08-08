@@ -1,4 +1,3 @@
-
 use crate::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use blake2b_simd::Params;
 use serde::{Deserialize, Serialize};
