@@ -1,11 +1,9 @@
 use crate::merkle::{sum_node, LEAF_HASH_PREFIX, NODE_HASH_PREFIX};
+use crate::rhp::{SECTOR_SIZE, SEGMENT_SIZE};
 use crate::types::Hash256;
 use blake2b_simd::many::{hash_many, HashManyJob};
 use blake2b_simd::Params;
 use rayon::prelude::*;
-
-pub const SEGMENT_SIZE: usize = 64;
-pub const SECTOR_SIZE: usize = 1 << 22;
 
 /// Calculates the Merkle root of a sector
 pub fn sector_root(sector: &[u8]) -> Hash256 {

@@ -1,15 +1,22 @@
 use std::error::Error;
 use std::fmt::Display;
+use std::marker::PhantomData;
 
+use super::types::*;
 use crate::consensus::ChainState;
 use crate::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
+use crate::rhp::SECTOR_SIZE;
 use blake2b_simd::Params;
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
 
 use crate::signing::{PrivateKey, PublicKey, Signature};
 use crate::types::v2::{FileContract, SatisfiedPolicy, SiacoinElement, SiacoinInput, Transaction};
-use crate::types::{Address, ChainIndex, Currency, FileContractID, Hash256, Leaf};
+use crate::types::{
+    specifier, Address, ChainIndex, Currency, FileContractID, Hash256, Leaf, SiacoinOutput,
+    Specifier,
+};
+
+const STANDARD_TXNSET_SIZE: usize = 262144; // 256 KiB
 
 pub trait RenterContractSigner {
     fn public_key(&self) -> PublicKey;
@@ -42,150 +49,19 @@ pub trait TransactionBuilder {
     fn sign_transaction(&self, transaction: &mut Transaction) -> Result<(), RPCError>;
 }
 
-/// Contains the prices and parameters of a host.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct HostPrices {
-    /// The price of forming a new contract with the host.
-    pub contract_price: Currency,
-    /// The collateral per byte per block the host will
-    /// risk for stored data.
-    pub collateral: Currency,
-    /// The cost of storing a sector on the host per byte per block.
-    pub storage_price: Currency,
-    /// The cost of uploading data to the host per byte.
-    pub ingress_price: Currency,
-    /// The cost of downloading data from the host per byte.
-    pub egress_price: Currency,
-    /// The cost to remove a sector from a contract.
-    pub free_sector_price: Currency,
-    /// The current height of the host's blockchain.
-    pub tip_height: u64,
-    /// The time until which the prices are valid.
-    pub valid_until: OffsetDateTime,
-
-    pub signature: Signature,
-}
-
-impl HostPrices {
-    /// Computes the signature hash for the host prices.
-    pub fn sig_hash(&self) -> Hash256 {
-        let mut state = Params::new().hash_length(32).to_state();
-        self.contract_price.encode(&mut state).unwrap();
-        self.collateral.encode(&mut state).unwrap();
-        self.storage_price.encode(&mut state).unwrap();
-        self.ingress_price.encode(&mut state).unwrap();
-        self.egress_price.encode(&mut state).unwrap();
-        self.free_sector_price.encode(&mut state).unwrap();
-        self.tip_height.encode(&mut state).unwrap();
-        self.valid_until.encode(&mut state).unwrap();
-        state.finalize().into()
-    }
-
-    /// Checks if the prices are valid for the given host key and timestamp.
-    pub fn is_valid(&self, host_key: &PublicKey, timestamp: OffsetDateTime) -> bool {
-        self.valid_until > timestamp
-            && self.tip_height > 0
-            && host_key.verify(self.sig_hash(), &self.signature)
-    }
-}
-
-/// Contains the settings of a host, including its prices and other parameters.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct HostSettings {
-    /// The version of the protocol the host is using.
-    pub protocol_version: [u8; 3],
-    /// The current release the host is running.
-    pub release: String,
-    /// The wallet address of the host to use for contract payments.
-    pub wallet_address: Address,
-    /// If the host is accepting new contracts.
-    pub accepting_contracts: bool,
-    /// The maximum amount of collateral that the host will accept for a
-    /// single contract.
-    pub max_collateral: Currency,
-    /// The maximum duration, in blocks, that the host will accept for a contract.
-    pub max_contract_duration: u64,
-    /// The amount of storage, in sectors, that the host has available.
-    pub remaining_storage: u64,
-    /// The total amount of storage, in sectors, that the host is offering.
-    pub total_storage: u64,
-    /// The current prices of the host
-    pub prices: HostPrices,
-}
-
-/// An account token is used to pay for RPC calls that do not
-/// require a contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct AccountToken {
-    pub host_key: PublicKey,
-    pub account: PublicKey,
-    pub valid_until: OffsetDateTime,
-
-    pub signature: Signature,
-}
-
-impl AccountToken {
-    fn compute_sig_hash(
-        host_key: &PublicKey,
-        account: &PublicKey,
-        valid_until: &OffsetDateTime,
-    ) -> Hash256 {
-        let mut state = Params::new().hash_length(32).to_state();
-        host_key.encode(&mut state).unwrap();
-        account.encode(&mut state).unwrap();
-        valid_until.encode(&mut state).unwrap();
-        state.finalize().into()
-    }
-
-    pub fn new(account_key: &PrivateKey, host_key: PublicKey) -> Self {
-        let expiration_time = OffsetDateTime::now_utc() + time::Duration::minutes(5);
-        let sig_hash =
-            Self::compute_sig_hash(&host_key, &account_key.public_key(), &expiration_time);
-        AccountToken {
-            host_key,
-            account: account_key.public_key(),
-            valid_until: expiration_time,
-
-            signature: account_key.sign(sig_hash),
-        }
-    }
-}
-
-/// An AccountDeposit is an amount of Siacoin to be deposited into an account.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct AccountDeposit {
-    pub account: PublicKey,
-    pub amount: Currency,
-}
-
 /// HostInputsResponse contains the host's Siacoin inputs for funding a
 /// formation or resolution transaction.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct HostInputsResponse {
+struct HostInputsResponse {
     pub host_inputs: Vec<SiacoinInput>,
-}
-
-/// RenterFormContractSignaturesResponse contains the renter's contract signature and
-/// Siacoin input signatures for the contract formation transaction.
-///
-/// At this point, the host has enough information to broadcast the formation.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RenterFormContractSignaturesResponse {
-    pub renter_contract_signature: Signature,
-    pub renter_satisfied_policies: Vec<SatisfiedPolicy>,
 }
 
 /// RPCFormContractThirdResponse contains the finalized formation
 /// transaction set.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct TransactionSetResponse {
+struct TransactionSetResponse {
     pub basis: ChainIndex,
     pub transaction_set: Vec<Transaction>,
 }
@@ -194,7 +70,7 @@ pub struct TransactionSetResponse {
 /// contract revision.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct HostSignatureResponse {
+struct HostSignatureResponse {
     pub host_signature: Signature,
 }
 
@@ -202,7 +78,7 @@ pub struct HostSignatureResponse {
 /// contract revision.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RenterSignatureResponse {
+struct RenterSignatureResponse {
     pub renter_signature: Signature,
 }
 
@@ -212,7 +88,7 @@ pub struct RenterSignatureResponse {
 /// At this point, the host has enough information to broadcast the refresh.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RenterResolutionSignaturesResponse {
+struct RenterResolutionSignaturesResponse {
     pub renter_renewal_signature: Signature,
     pub renter_contract_signature: Signature,
     pub renter_satisfied_policies: Vec<SatisfiedPolicy>,
@@ -221,43 +97,20 @@ pub struct RenterResolutionSignaturesResponse {
 /// RPCSettingsResponse is the response type for the RPC settings endpoint.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCSettingsResponse {
+struct RPCSettingsResponse {
     pub settings: HostSettings,
-}
-
-/// FormContractParams contains the parameters for forming a new contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct FormContractParams {
-    pub renter_public_key: PublicKey,
-    pub renter_address: Address,
-    pub allowance: Currency,
-    pub collateral: Currency,
-    pub proof_height: u64,
-}
-
-/// RPCFormContractRequest is the request type for RPCFormContract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCFormContractRequest {
-    pub prices: HostPrices,
-    pub contract: FormContractParams,
-    pub miner_fee: Currency,
-    pub basis: ChainIndex,
-    pub renter_inputs: Vec<SiacoinElement>,
-    pub renter_parents: Vec<Transaction>,
 }
 
 /// RPCRefreshContractParams contains the parameters for refreshing a contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RefreshContractParams {
+struct RefreshContractParams {
     pub contract_id: FileContractID,
     pub allowance: Currency,
     pub collateral: Currency,
 }
 
-pub struct RPCRefreshContractRequestParams {
+struct RPCRefreshContractRequestParams {
     pub prices: HostPrices,
     pub refresh: RefreshContractParams,
     pub miner_fee: Currency,
@@ -269,7 +122,7 @@ pub struct RPCRefreshContractRequestParams {
 /// RPCRefreshContractRequest is the request type for RPCRefreshContract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCRefreshContractRequest {
+struct RPCRefreshContractRequest {
     pub prices: HostPrices,
     pub refresh: RefreshContractParams,
     pub miner_fee: Currency,
@@ -306,14 +159,14 @@ impl RPCRefreshContractRequest {
 /// RPCRenewContractParams contains the parameters for renewing a contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RenewContractParams {
+struct RenewContractParams {
     pub contract_id: FileContractID,
     pub allowance: Currency,
     pub collateral: Currency,
     pub proof_height: u64,
 }
 
-pub struct RPCRenewContractRequestParams {
+struct RPCRenewContractRequestParams {
     pub prices: HostPrices,
     pub renewal: RenewContractParams,
     pub miner_fee: Currency,
@@ -325,7 +178,7 @@ pub struct RPCRenewContractRequestParams {
 /// RPCRenewContractRequest is the request type for RPCRenewContract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCRenewContractRequest {
+struct RPCRenewContractRequest {
     pub prices: HostPrices,
     pub renewal: RenewContractParams,
     pub miner_fee: Currency,
@@ -359,7 +212,7 @@ impl RPCRenewContractRequest {
     }
 }
 
-pub struct RPCFreeSectorsRequestParams {
+struct RPCFreeSectorsRequestParams {
     pub contract_id: FileContractID,
     pub prices: HostPrices,
     pub indices: Vec<u64>,
@@ -368,7 +221,7 @@ pub struct RPCFreeSectorsRequestParams {
 /// RPCFreeSectorsRequest is the request type for removing sectors from a contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCFreeSectorsRequest {
+struct RPCFreeSectorsRequest {
     pub contract_id: FileContractID,
     pub prices: HostPrices,
     pub indices: Vec<u64>,
@@ -402,7 +255,7 @@ impl RPCFreeSectorsRequest {
 /// The renter must validate the response
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCFreeSectorsResponse {
+struct RPCFreeSectorsResponse {
     pub old_subtree_hashes: Vec<Hash256>,
     pub old_leaf_hashes: Vec<Hash256>,
     pub new_merkle_root: Hash256,
@@ -412,7 +265,7 @@ pub struct RPCFreeSectorsResponse {
 /// revision of a file contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCLatestRevisionRequest {
+struct RPCLatestRevisionRequest {
     pub contract_id: FileContractID,
 }
 
@@ -423,56 +276,13 @@ pub struct RPCLatestRevisionRequest {
 /// further revisions or renewals of the contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCLatestRevisionResponse {
+struct RPCLatestRevisionResponse {
     pub contract: FileContract,
     pub revisable: bool,
     pub renewed: bool,
 }
 
-/// RPCReadSectorRequest is the request type for reading a sector from the
-/// host.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCReadSectorRequest {
-    pub prices: HostPrices,
-    pub token: AccountToken,
-    pub root: Hash256,
-    pub offset: u64,
-    pub length: u64,
-}
-
-/// RPCReadSectorResponse contains the proof and data for a sector read request.
-/// The renter must validate the proof against the root hash.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCReadSectorResponse {
-    pub proof: Vec<Hash256>,
-    pub data: Vec<u8>,
-}
-
-/// RPCWriteSectorRequest is the request type for writing a sector to the host's
-/// temporary storage.
-///
-/// The host will store the sector for 432 blocks. If the sector is not
-/// appended to a contract within that time, it will be deleted.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCWriteSectorRequest {
-    pub prices: HostPrices,
-    pub token: AccountToken,
-    pub data: Vec<u8>,
-}
-
-/// RPCWriteSectorResponse contains the root hash of the written sector.
-///
-/// The renter must verify the root hash against the data written.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-pub struct RPCWriteSectorResponse {
-    pub root: Hash256,
-}
-
-pub struct RPCAppendSectorsRequestParams {
+struct RPCAppendSectorsRequestParams {
     pub prices: HostPrices,
     pub sectors: Vec<Hash256>,
     pub contract_id: FileContractID,
@@ -481,7 +291,7 @@ pub struct RPCAppendSectorsRequestParams {
 /// RPCAppendSectorsRequest is the request type for appending sectors to a contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCAppendSectorsRequest {
+struct RPCAppendSectorsRequest {
     pub prices: HostPrices,
     pub sectors: Vec<Hash256>,
     pub contract_id: FileContractID,
@@ -515,7 +325,7 @@ impl RPCAppendSectorsRequest {
 /// against the accepted roots.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCAppendSectorsResponse {
+struct RPCAppendSectorsResponse {
     pub accepted: Vec<bool>,
     pub subtree_roots: Vec<Hash256>,
     pub new_merkle_root: Hash256,
@@ -525,7 +335,7 @@ pub struct RPCAppendSectorsResponse {
 /// for a contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCSectorRootsRequest {
+struct RPCSectorRootsRequest {
     pub prices: HostPrices,
     pub contract_id: FileContractID,
     pub renter_signature: Signature,
@@ -537,7 +347,7 @@ pub struct RPCSectorRootsRequest {
 /// The renter must validate the proof against the roots.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCSectorRootsResponse {
+struct RPCSectorRootsResponse {
     pub proof: Vec<Hash256>,
     pub roots: Vec<Hash256>,
     pub host_signature: Signature,
@@ -547,18 +357,18 @@ pub struct RPCSectorRootsResponse {
 /// an account.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCAccountBalanceRequest {
+struct RPCAccountBalanceRequest {
     pub account: PublicKey,
 }
 
 /// RPCAccountBalanceResponse contains the balance of an account.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCAccountBalanceResponse {
+struct RPCAccountBalanceResponse {
     pub balance: Currency,
 }
 
-pub struct RPCReplenishAccountsParams {
+struct RPCReplenishAccountsParams {
     pub accounts: Vec<PublicKey>,
     pub target: Currency,
     pub contract_id: FileContractID,
@@ -571,7 +381,7 @@ pub struct RPCReplenishAccountsParams {
 /// a revision to the renter for verification.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCReplenishAccountsRequest {
+struct RPCReplenishAccountsRequest {
     pub accounts: Vec<PublicKey>,
     pub target: Currency,
     pub contract_id: FileContractID,
@@ -608,7 +418,7 @@ impl RPCReplenishAccountsRequest {
 /// transferring the funds.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCReplenishAccountsResponse {
+struct RPCReplenishAccountsResponse {
     pub deposits: Vec<AccountDeposit>,
 }
 
@@ -616,7 +426,7 @@ pub struct RPCReplenishAccountsResponse {
 /// is storing a sector.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCVerifySectorRequest {
+struct RPCVerifySectorRequest {
     pub prices: HostPrices,
     pub token: AccountToken,
     pub root: Hash256,
@@ -627,7 +437,7 @@ pub struct RPCVerifySectorRequest {
 /// sector.
 #[derive(Debug, PartialEq, SiaEncode, SiaDecode, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCVerifySectorResponse {
+struct RPCVerifySectorResponse {
     pub proof: Vec<Hash256>,
     pub leaf: Leaf,
 }
@@ -638,7 +448,7 @@ pub struct RPCVerifySectorResponse {
 /// RPCReplenishAccounts should be preferred
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCFundAccountsRequest {
+struct RPCFundAccountsRequest {
     pub contract_id: FileContractID,
     pub deposits: Vec<AccountDeposit>,
     pub renter_signature: Signature,
@@ -648,7 +458,7 @@ pub struct RPCFundAccountsRequest {
 /// balance after funding the accounts.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-pub struct RPCFundAccountsResponse {
+struct RPCFundAccountsResponse {
     pub balances: Vec<Currency>,
     pub host_signature: Signature,
 }
@@ -668,3 +478,405 @@ impl Display for RPCError {
 }
 
 impl Error for RPCError {}
+
+/// A TransportStream is a trait for sending and receiving RPC requests and responses.
+/// It abstracts the underlying transport mechanism, allowing for different implementations
+/// (e.g., TCP, QUIC, WebTransport) to be used without changing the RPC logic.
+pub trait TransportStream {
+    fn write_request<T: SiaEncodable>(&self, id: Specifier, request: &T) -> Result<(), RPCError>;
+    fn write_response<T: SiaEncodable>(&self, response: &T) -> Result<(), RPCError>;
+    fn read_response<T: SiaDecodable>(&self, max_len: usize) -> Result<T, RPCError>;
+}
+
+/// RPCWriteSectorRequest is the request type for writing a sector to the host's
+/// temporary storage.
+///
+/// The host will store the sector for 432 blocks. If the sector is not
+/// appended to a contract within that time, it will be deleted.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+struct RPCWriteSectorRequest {
+    pub prices: HostPrices,
+    pub token: AccountToken,
+    pub data: Vec<u8>,
+}
+
+/// RPCWriteSectorResponse contains the root hash of the written sector.
+///
+/// The renter must verify the root hash against the data written.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+struct RPCWriteSectorResponse {
+    pub root: Hash256,
+}
+
+/// RPCWriteSectorResult contains the result of a write sector operation,
+pub struct RPCWriteSectorResult {
+    pub root: Hash256,
+}
+
+/// RPCWriteSector writes a sector to the host's temporary storage.
+/// The host will store the sector for 432 blocks.
+/// If the sector is not appended to a contract within that time, it will be deleted.
+pub struct RPCWriteSector<T: TransportStream, State> {
+    transport: T,
+    state: PhantomData<State>,
+}
+
+impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorRequest> {
+    pub fn send_request(
+        transport: T,
+        prices: HostPrices,
+        token: AccountToken,
+        data: Vec<u8>,
+    ) -> Result<RPCWriteSector<T, RPCWriteSectorResponse>, RPCError> {
+        let request = RPCWriteSectorRequest {
+            prices,
+            token,
+            data,
+        };
+        transport.write_request(specifier!("RPCWriteSector"), &request)?;
+
+        Ok(RPCWriteSector {
+            transport,
+            state: PhantomData,
+        })
+    }
+}
+
+impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorResponse> {
+    pub fn complete(self) -> Result<RPCWriteSectorResult, RPCError> {
+        let response: RPCWriteSectorResponse = self.transport.read_response(32)?;
+        Ok(RPCWriteSectorResult {
+            root: response.root,
+        })
+    }
+}
+
+/// RPCReadSectorRequest is the request type for reading a sector from the
+/// host.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+struct RPCReadSectorRequest {
+    pub prices: HostPrices,
+    pub token: AccountToken,
+    pub root: Hash256,
+    pub offset: u64,
+    pub length: u64,
+}
+
+/// RPCReadSectorResponse contains the proof and data for a sector read request.
+/// The renter must validate the proof against the root hash.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+struct RPCReadSectorResponse {
+    pub proof: Vec<Hash256>,
+    pub data: Vec<u8>,
+}
+
+pub struct RPCReadSectorResult {
+    pub data: Vec<u8>,
+}
+
+/// RPCReadSector reads a sector from the host.
+/// The proof must be validated against the expected
+/// root hash.
+pub struct RPCReadSector<T: TransportStream, State> {
+    transport: T,
+    state: PhantomData<State>,
+}
+
+impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
+    pub fn send_request(
+        transport: T,
+        prices: HostPrices,
+        token: AccountToken,
+        root: Hash256,
+        length: usize,
+        offset: usize,
+    ) -> Result<RPCReadSector<T, RPCReadSectorResponse>, RPCError> {
+        let request = RPCReadSectorRequest {
+            prices,
+            token,
+            root,
+            length: length as u64,
+            offset: offset as u64,
+        };
+        transport.write_request(specifier!("RPCReadSector"), &request)?;
+
+        Ok(RPCReadSector {
+            transport,
+            state: PhantomData,
+        })
+    }
+}
+
+impl<T: TransportStream> RPCReadSector<T, RPCReadSectorResponse> {
+    pub fn complete(self) -> Result<RPCReadSectorResult, RPCError> {
+        let response: RPCReadSectorResponse =
+            self.transport.read_response(1024 + 8 + SECTOR_SIZE)?;
+        Ok(RPCReadSectorResult {
+            data: response.data,
+        })
+    }
+}
+
+/// FormContractParams contains the parameters for forming a new contract.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+struct FormContractParams {
+    pub renter_public_key: PublicKey,
+    pub renter_address: Address,
+    pub allowance: Currency,
+    pub collateral: Currency,
+    pub proof_height: u64,
+}
+
+/// RPCFormContractRequest is the request type for RPCFormContract.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+struct RPCFormContractRequest {
+    pub prices: HostPrices,
+    pub contract: FormContractParams,
+    pub miner_fee: Currency,
+    pub basis: ChainIndex,
+    pub renter_inputs: Vec<SiacoinElement>,
+    pub renter_parents: Vec<Transaction>,
+}
+
+/// RenterFormContractSignaturesResponse contains the renter's contract signature and
+/// Siacoin input signatures for the contract formation transaction.
+///
+/// At this point, the host has enough information to broadcast the formation.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+struct RenterFormContractSignaturesResponse {
+    pub renter_contract_signature: Signature,
+    pub renter_satisfied_policies: Vec<SatisfiedPolicy>,
+}
+
+pub struct RPCFormContractParams {
+    state: ChainState,
+    prices: HostPrices,
+    contract: FormContractParams,
+    host_public_key: PublicKey,
+    host_address: Address,
+}
+
+pub struct RPCFormContract<T, S, B, State>
+where
+    T: TransportStream,
+    S: RenterContractSigner,
+    B: TransactionBuilder,
+{
+    transport: T,
+    contract_signer: S,
+    transaction_builder: B,
+    state: PhantomData<State>,
+
+    chain_state: ChainState,
+    contract: FileContract,
+    formation_transaction: Transaction,
+    renter_inputs_len: usize,
+}
+
+pub struct RPCFormContractResult {
+    pub basis: ChainIndex,
+    pub transaction_set: Vec<Transaction>,
+    pub contract: FileContract,
+}
+
+impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
+    RPCFormContract<T, S, B, RPCFormContractRequest>
+{
+    pub fn send_request(
+        transport: T,
+        contract_signer: S,
+        transaction_builder: B,
+        params: RPCFormContractParams,
+    ) -> Result<RPCFormContract<T, S, B, HostInputsResponse>, RPCError> {
+        let mut contract = FileContract {
+            revision_number: 0,
+            capacity: 0,
+            filesize: 0,
+            file_merkle_root: Hash256::default(),
+            proof_height: params.contract.proof_height,
+            expiration_height: params.contract.proof_height + 144,
+            renter_output: SiacoinOutput {
+                address: params.contract.renter_address.clone(),
+                value: params.contract.allowance,
+            },
+            host_output: SiacoinOutput {
+                address: params.host_address,
+                value: params.contract.collateral + params.prices.contract_price,
+            },
+            missed_host_value: params.contract.collateral,
+            total_collateral: params.contract.collateral,
+            host_public_key: params.host_public_key,
+            renter_public_key: params.contract.renter_public_key,
+
+            host_signature: Signature::default(),
+            renter_signature: Signature::default(),
+        };
+        contract.renter_signature = contract_signer.sign(contract.sig_hash(&params.state));
+
+        let miner_fee = transaction_builder.miner_fee() * Currency::new(1000);
+        let mut formation_txn = Transaction {
+            miner_fee,
+            ..Default::default()
+        };
+
+        let renter_fund_amount = params.contract.allowance
+            + params.prices.contract_price
+            + miner_fee
+            + contract.tax(&params.state);
+        let renter_basis =
+            transaction_builder.fund_transaction(&mut formation_txn, renter_fund_amount)?;
+
+        let request = RPCFormContractRequest {
+            prices: params.prices,
+            miner_fee,
+            contract: params.contract,
+            basis: renter_basis,
+            renter_inputs: formation_txn
+                .siacoin_inputs
+                .iter()
+                .map(|si| si.parent.clone())
+                .collect(),
+            renter_parents: Vec::new(),
+        };
+        transport.write_request(specifier!("RPCFormContract"), &request)?;
+
+        Ok(RPCFormContract {
+            transport,
+            contract_signer,
+            transaction_builder,
+            state: PhantomData,
+            chain_state: params.state,
+            contract,
+            renter_inputs_len: formation_txn.siacoin_inputs.len(),
+            formation_transaction: formation_txn,
+        })
+    }
+}
+
+impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
+    RPCFormContract<T, S, B, HostInputsResponse>
+{
+    pub fn receive_host_inputs(
+        self,
+    ) -> Result<RPCFormContract<T, S, B, RenterFormContractSignaturesResponse>, RPCError> {
+        let host_inputs_response: HostInputsResponse = self.transport.read_response(10240)?;
+        let mut formation_txn = self.formation_transaction;
+
+        let host_funding = self.contract.total_collateral;
+        let host_sum: Currency = host_inputs_response
+            .host_inputs
+            .iter()
+            .map(|si| si.parent.siacoin_output.value)
+            .sum();
+        if host_sum < host_funding {
+            // TODO: define errors correctly
+            return Err(RPCError {
+                code: 2,
+                description: String::from("not enough host funds"),
+            });
+        } else if host_sum > host_funding {
+            formation_txn.siacoin_outputs.push(SiacoinOutput {
+                address: self.contract.host_output.address.clone(),
+                value: host_sum - host_funding,
+            });
+        }
+        formation_txn.siacoin_inputs = host_inputs_response.host_inputs;
+
+        Ok(RPCFormContract {
+            transport: self.transport,
+            contract_signer: self.contract_signer,
+            transaction_builder: self.transaction_builder,
+            state: PhantomData,
+            chain_state: self.chain_state,
+            contract: self.contract,
+            renter_inputs_len: self.renter_inputs_len,
+            formation_transaction: formation_txn,
+        })
+    }
+}
+
+impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
+    RPCFormContract<T, S, B, RenterFormContractSignaturesResponse>
+{
+    pub fn send_renter_signatures(
+        self,
+    ) -> Result<RPCFormContract<T, S, B, TransactionSetResponse>, RPCError> {
+        let mut formation_txn = self.formation_transaction;
+        let mut contract = self.contract;
+
+        self.contract_signer
+            .sign_revision(&self.chain_state, &mut contract);
+        self.transaction_builder
+            .sign_transaction(&mut formation_txn)?;
+
+        let renter_sigs_response = RenterFormContractSignaturesResponse {
+            renter_contract_signature: contract.renter_signature.clone(),
+            renter_satisfied_policies: formation_txn.siacoin_inputs[..self.renter_inputs_len]
+                .iter()
+                .map(|si| si.satisfied_policy.clone())
+                .collect(),
+        };
+        self.transport.write_response(&renter_sigs_response)?;
+
+        Ok(RPCFormContract {
+            transport: self.transport,
+            contract_signer: self.contract_signer,
+            transaction_builder: self.transaction_builder,
+            state: PhantomData,
+            chain_state: self.chain_state,
+            renter_inputs_len: self.renter_inputs_len,
+            contract,
+            formation_transaction: formation_txn,
+        })
+    }
+}
+
+impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
+    RPCFormContract<T, S, B, TransactionSetResponse>
+{
+    pub fn complete(self) -> Result<RPCFormContractResult, RPCError> {
+        let resp: TransactionSetResponse = self.transport.read_response(STANDARD_TXNSET_SIZE)?;
+        let formation_txn = resp.transaction_set.last().ok_or(RPCError {
+            code: 0,
+            description: String::from("expected file contract in response"),
+        })?;
+        let contract = formation_txn
+            .file_contracts
+            .first()
+            .ok_or(RPCError {
+                code: 0,
+                description: String::from("expected file contract in response"),
+            })?
+            .clone();
+
+        Ok(RPCFormContractResult {
+            basis: resp.basis,
+            transaction_set: resp.transaction_set,
+            contract,
+        })
+    }
+}
+
+pub fn rpc_form_contract<T, S, B>(
+    transport: T,
+    contract_signer: S,
+    transaction_builder: B,
+    params: RPCFormContractParams,
+) -> Result<RPCFormContractResult, RPCError>
+where
+    T: TransportStream,
+    S: RenterContractSigner,
+    B: TransactionBuilder,
+{
+    RPCFormContract::send_request(transport, contract_signer, transaction_builder, params)?
+        .receive_host_inputs()?
+        .send_renter_signatures()?
+        .complete()
+}

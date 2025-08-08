@@ -57,7 +57,7 @@ impl Attestation {
 /// consists of a bidirectional payment channel that resolves as either "valid"
 /// or "missed" depending on whether a valid StorageProof is submitted for the
 /// contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FileContract {
     pub capacity: u64,
