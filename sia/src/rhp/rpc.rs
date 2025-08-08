@@ -1072,4 +1072,78 @@ mod test {
         buf.flush().unwrap();
         assert_eq!(buf.into_inner(), hex::decode(EXPECTED_HEX).unwrap());
     }
+
+    #[test]
+    fn test_read_response() {
+        const HEX_BYTES: &str = "00030000000000000001000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000000003000000000000000400000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000";
+
+        let mut buf = Cursor::new(hex::decode(HEX_BYTES).unwrap());
+        let resp: RPCFreeSectorsResponse = buf.read_response(1024).unwrap();
+
+        let expected = RPCFreeSectorsResponse {
+            old_subtree_hashes: vec![
+                Hash256::new({
+                    let mut bytes = [0u8; 32];
+                    bytes[0] = 1;
+                    bytes
+                }),
+                Hash256::new({
+                    let mut bytes = [0u8; 32];
+                    bytes[0] = 2;
+                    bytes
+                }),
+                Hash256::new({
+                    let mut bytes = [0u8; 32];
+                    bytes[0] = 3;
+                    bytes
+                }),
+            ],
+            old_leaf_hashes: vec![
+                Hash256::new({
+                    let mut bytes = [0u8; 32];
+                    bytes[0] = 4;
+                    bytes
+                }),
+                Hash256::new({
+                    let mut bytes = [0u8; 32];
+                    bytes[0] = 5;
+                    bytes
+                }),
+                Hash256::new({
+                    let mut bytes = [0u8; 32];
+                    bytes[0] = 6;
+                    bytes
+                }),
+            ],
+            new_merkle_root: Hash256::new({
+                let mut bytes = [0u8; 32];
+                bytes[0] = 7;
+                bytes
+            }),
+        };
+
+        assert_eq!(resp, expected);
+    }
+
+    #[test]
+    fn test_response_error() {
+        const HEX_BYTES: &str = "01010b00000000000000666f6f206261722062617a";
+
+        let mut buf = Cursor::new(hex::decode(HEX_BYTES).unwrap());
+        let err = buf
+            .read_response::<RPCReadSectorResponse>(1024)
+            .unwrap_err();
+
+        let expected_err = RPCError {
+            code: 1,
+            description: "foo bar baz".to_string(),
+        };
+
+        match err {
+            Error::RPC(rpc_err) => {
+                assert_eq!(rpc_err, expected_err);
+            }
+            _ => panic!("Expected RPCError, got {err:?}"),
+        }
+    }
 }
