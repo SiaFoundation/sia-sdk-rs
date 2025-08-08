@@ -501,19 +501,19 @@ pub enum Error {
     ExpectedTransactionSet,
 }
 
+pub trait RPCRequest: SiaEncodable + SiaDecodable {
+    const RPC_ID: Specifier;
+}
+
 /// A TransportStream is a trait for sending and receiving RPC requests and responses.
 /// It abstracts the underlying transport mechanism, allowing for different implementations
 /// (e.g., TCP, QUIC, WebTransport) to be used without changing the RPC logic.
 pub trait TransportStream: Read + Write {
-    fn write_request<R: SiaEncodable>(
-        &mut self,
-        specifier: Specifier,
-        request: &R,
-    ) -> Result<(), Error>
+    fn write_request<R: RPCRequest>(&mut self, request: &R) -> Result<(), Error>
     where
         Self: Sized,
     {
-        self.write_all(specifier.as_ref())?;
+        self.write_all(R::RPC_ID.as_ref())?;
         request.encode(self)?;
         Ok(())
     }
@@ -546,10 +546,16 @@ pub trait TransportStream: Read + Write {
     }
 }
 
+impl<T: Read + Write> TransportStream for T {}
+
 /// RPCSettingsRequest is the request type getting the host's current settings.
 /// It is encoded as 0 bytes.
 #[derive(Debug, PartialEq, SiaEncode, SiaDecode)]
 struct RPCSettingsRequest {}
+
+impl RPCRequest for RPCSettingsRequest {
+    const RPC_ID: Specifier = specifier!("Settings");
+}
 
 pub struct RPCSettingsResult {
     pub settings: HostSettings,
@@ -562,10 +568,8 @@ pub struct RPCSettings<TransportStream, State> {
 }
 
 impl<T: TransportStream> RPCSettings<T, RPCSettingsRequest> {
-    const RPC_ID: Specifier = specifier!("RPCSettings");
-
     pub fn send_request(mut transport: T) -> Result<RPCSettings<T, RPCSettingsResponse>, Error> {
-        transport.write_request(Self::RPC_ID, &RPCSettingsRequest {})?;
+        transport.write_request(&RPCSettingsRequest {})?;
 
         Ok(RPCSettings {
             transport,
@@ -600,6 +604,10 @@ struct RPCWriteSectorRequest {
     pub data_length: usize,
 }
 
+impl RPCRequest for RPCWriteSectorRequest {
+    const RPC_ID: Specifier = specifier!("WriteSector");
+}
+
 /// RPCWriteSectorResponse contains the root hash of the written sector.
 ///
 /// The renter must verify the root hash against the data written.
@@ -623,8 +631,6 @@ pub struct RPCWriteSector<TransportStream, State> {
 }
 
 impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorRequest> {
-    const RPC_ID: Specifier = specifier!("RPCWriteSector");
-
     pub fn send_request<D: AsRef<[u8]>>(
         mut transport: T,
         prices: HostPrices,
@@ -637,7 +643,7 @@ impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorRequest> {
             token,
             data_length: data.len(),
         };
-        transport.write_request(Self::RPC_ID, &request)?;
+        transport.write_request(&request)?;
         transport.write_all(data)?;
 
         Ok(RPCWriteSector {
@@ -668,6 +674,10 @@ struct RPCReadSectorRequest {
     pub length: u64,
 }
 
+impl RPCRequest for RPCReadSectorRequest {
+    const RPC_ID: Specifier = specifier!("ReadSector");
+}
+
 /// RPCReadSectorResponse contains the proof and data for a sector read request.
 /// The renter must validate the proof against the root hash.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
@@ -690,7 +700,6 @@ pub struct RPCReadSector<T: TransportStream, State> {
 }
 
 impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
-    const RPC_ID: Specifier = specifier!("RPCReadSector");
     pub fn send_request(
         mut transport: T,
         prices: HostPrices,
@@ -706,7 +715,7 @@ impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
             length: length as u64,
             offset: offset as u64,
         };
-        transport.write_request(Self::RPC_ID, &request)?;
+        transport.write_request(&request)?;
 
         Ok(RPCReadSector {
             transport,
@@ -746,6 +755,10 @@ struct RPCFormContractRequest {
     pub basis: ChainIndex,
     pub renter_inputs: Vec<SiacoinElement>,
     pub renter_parents: Vec<Transaction>,
+}
+
+impl RPCRequest for RPCFormContractRequest {
+    const RPC_ID: Specifier = specifier!("FormContract");
 }
 
 /// RenterFormContractSignaturesResponse contains the renter's contract signature and
@@ -809,8 +822,6 @@ pub struct RPCFormContractResult {
 impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, RPCFormContractRequest>
 {
-    const RPC_ID: Specifier = specifier!("RPCFormContract");
-
     pub fn send_request(
         mut transport: T,
         contract_signer: S,
@@ -867,7 +878,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
                 .collect(),
             renter_parents: Vec::new(),
         };
-        transport.write_request(Self::RPC_ID, &request)?;
+        transport.write_request(&request)?;
 
         Ok(RPCFormContract {
             transport,
@@ -999,4 +1010,66 @@ where
         .receive_host_inputs()?
         .send_renter_signatures()?
         .complete()
+}
+
+#[cfg(test)]
+mod test {
+    use std::io::Cursor;
+    use time::OffsetDateTime;
+
+    use super::*;
+
+    #[test]
+    fn test_write_request() {
+        const EXPECTED_HEX: &str = "52656164536563746f72000000000000000000a1edccce1bc2d300000000000000000042db999d3784a7010000000000000000e3c8666c53467b02000000000000000084b6333b6f084f03000000000000000025a4000a8bca22040000000000000000c691cdd8a68cf604000000000007000000000000000800000000000000090000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000b000000000000000000000000000000000000000000000000000000000000000c000000000000000d0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000f000000000000001000000000000000";
+
+        let mut buf = Cursor::new(Vec::<u8>::new());
+        let mut sig_buf = [0u8; 64];
+        sig_buf[0] = 9;
+        let req = RPCReadSectorRequest {
+            prices: HostPrices {
+                contract_price: Currency::siacoins(1),
+                collateral: Currency::siacoins(2),
+                storage_price: Currency::siacoins(3),
+                ingress_price: Currency::siacoins(4),
+                egress_price: Currency::siacoins(5),
+                free_sector_price: Currency::siacoins(6),
+                tip_height: 7,
+                valid_until: OffsetDateTime::from_unix_timestamp(8).unwrap(),
+                signature: Signature::from({
+                    let mut bytes = [0u8; 64];
+                    bytes[0] = 9;
+                    bytes
+                }),
+            },
+            token: AccountToken {
+                host_key: PublicKey::new({
+                    let mut bytes = [0u8; 32];
+                    bytes[0] = 10;
+                    bytes
+                }),
+                account: PublicKey::new({
+                    let mut bytes = [0u8; 32];
+                    bytes[0] = 11;
+                    bytes
+                }),
+                valid_until: OffsetDateTime::from_unix_timestamp(12).unwrap(),
+                signature: Signature::from({
+                    let mut bytes = [0u8; 64];
+                    bytes[0] = 13;
+                    bytes
+                }),
+            },
+            root: Hash256::new({
+                let mut bytes = [0u8; 32];
+                bytes[0] = 14;
+                bytes
+            }),
+            offset: 15,
+            length: 16,
+        };
+        buf.write_request(&req).unwrap();
+        buf.flush().unwrap();
+        assert_eq!(buf.into_inner(), hex::decode(EXPECTED_HEX).unwrap());
+    }
 }
