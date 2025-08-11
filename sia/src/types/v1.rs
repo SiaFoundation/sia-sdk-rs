@@ -463,7 +463,7 @@ impl Transaction {
 
     fn derive_child_id<T: From<blake2b_simd::Hash>>(&self, prefix: &Specifier, i: usize) -> T {
         let mut state = Params::new().hash_length(32).to_state();
-        state.update(prefix.as_bytes());
+        state.update(prefix.as_ref());
         self.encode_no_sigs(&mut state).unwrap();
         state.update(&(i as u64).to_le_bytes());
         state.finalize().into()

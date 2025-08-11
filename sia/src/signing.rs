@@ -1,6 +1,6 @@
 use core::fmt;
 
-use crate::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
+use crate::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use crate::types::{Hash256, HexParseError};
 use ed25519_dalek::{Signature as ED25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::de::Error;
@@ -47,13 +47,20 @@ impl PublicKey {
         PublicKey(buf)
     }
 
-    pub fn verify(&self, sig_hash: &Hash256, signature: &Signature) -> bool {
+    /// verifies a message against the signature using this public key
+    pub fn verify<T: AsRef<[u8]>>(&self, msg: T, signature: &Signature) -> bool {
         let pk = VerifyingKey::from_bytes(&self.0).unwrap();
         pk.verify(
-            sig_hash.as_ref(),
+            msg.as_ref(),
             &ED25519Signature::from_bytes(signature.as_ref()),
         )
         .is_ok()
+    }
+}
+
+impl From<PublicKey> for [u8; 32] {
+    fn from(val: PublicKey) -> Self {
+        val.0
     }
 }
 
@@ -79,7 +86,7 @@ impl PrivateKey {
         PublicKey::new(buf)
     }
 
-    pub fn sign_hash(&self, h: &Hash256) -> Signature {
+    pub fn sign<T: AsRef<[u8]>>(&self, h: T) -> Signature {
         let sk = SigningKey::from_bytes(&self.0[..32].try_into().unwrap());
         Signature::new(sk.sign(h.as_ref()).to_bytes())
     }
@@ -169,6 +176,21 @@ impl AsRef<[u8; 64]> for Signature {
 impl From<[u8; 64]> for Signature {
     fn from(buf: [u8; 64]) -> Self {
         Signature(buf)
+    }
+}
+
+/// Converts a slice of bytes into a Signature.
+/// # Errors
+/// Returns an error if the slice is not exactly 64 bytes long.
+impl TryFrom<&[u8]> for Signature {
+    type Error = encoding::Error;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != 64 {
+            return Err(encoding::Error::InvalidLength);
+        }
+        let mut sig = [0u8; 64];
+        sig.copy_from_slice(value);
+        Ok(Signature(sig))
     }
 }
 

@@ -57,7 +57,7 @@ impl Attestation {
 /// consists of a bidirectional payment channel that resolves as either "valid"
 /// or "missed" depending on whether a valid StorageProof is submitted for the
 /// contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FileContract {
     pub capacity: u64,
@@ -111,7 +111,7 @@ impl FileContract {
 }
 
 /// A SiacoinElement is a record of a Siacoin UTXO within the state accumulator.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SiacoinElement {
     pub state_element: StateElement,
@@ -523,6 +523,24 @@ impl Transaction {
         state.update(cs.replay_prefix());
         self.encode_semantics(&mut state).unwrap();
         state.finalize().into()
+    }
+}
+
+impl Default for Transaction {
+    fn default() -> Self {
+        Transaction {
+            siacoin_inputs: Vec::new(),
+            siacoin_outputs: Vec::new(),
+            siafund_inputs: Vec::new(),
+            siafund_outputs: Vec::new(),
+            file_contracts: Vec::new(),
+            file_contract_revisions: Vec::new(),
+            file_contract_resolutions: Vec::new(),
+            attestations: Vec::new(),
+            arbitrary_data: Vec::new(),
+            new_foundation_address: None,
+            miner_fee: Currency::zero(),
+        }
     }
 }
 

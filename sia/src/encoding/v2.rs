@@ -1,22 +1,6 @@
-use std::io::{self, Read, Write};
-use thiserror::Error;
+use super::{Error, Result};
+use std::io::{Read, Write};
 use time::{Duration, OffsetDateTime};
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("IO error: {0}")]
-    Io(#[from] io::Error),
-    #[error("Invalid timestamp")]
-    InvalidTimestamp,
-    #[error("Invalid length")]
-    InvalidLength,
-    #[error("Invalid value")]
-    InvalidValue,
-    #[error("Custom error: {0}")]
-    Custom(String),
-}
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 pub trait SiaEncodable {
     fn encode<W: Write>(&self, w: &mut W) -> Result<()>;

@@ -1,5 +1,6 @@
 use core::num::ParseIntError;
 use core::ops::{Add, Deref, DerefMut, Div, Mul, Rem, Sub};
+use std::fmt::Display;
 use std::io::Write;
 use std::iter::Sum;
 
@@ -143,6 +144,12 @@ where
 {
     fn as_ref(&self) -> &T {
         self.deref().as_ref()
+    }
+}
+
+impl Display for Currency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
