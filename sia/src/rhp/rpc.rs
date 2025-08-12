@@ -520,7 +520,7 @@ impl Usage {
     pub fn write_sector(prices: &HostPrices, data_length: usize) -> Self {
         const TEMP_SECTOR_DURATION: u64 = 144 * 3;
         let data_length = Currency::from(Self::round_4kib(data_length as u64));
-        Usage{
+        Usage {
             storage: prices.storage_price * data_length * Currency::from(TEMP_SECTOR_DURATION),
             ingress: prices.ingress_price * data_length,
             ..Default::default()
@@ -541,7 +541,7 @@ impl Usage {
         }
     }
 
-    pub fn verify_sector(prices: &HostPrices)  -> Self {
+    pub fn verify_sector(prices: &HostPrices) -> Self {
         Usage {
             egress: prices.egress_price * Currency::from(SECTOR_SIZE),
             ..Default::default()
@@ -558,8 +558,18 @@ impl Usage {
     pub fn append_sectors(prices: &HostPrices, num_sectors: usize, duration: u64) -> Self {
         Usage {
             storage: prices.storage_price * Currency::from(num_sectors) * Currency::from(duration),
-            ingress: prices.ingress_price * Currency::from(Self::round_4kib(32 * num_sectors as u64)),
-            risked_collateral: prices.collateral * Currency::from(num_sectors) * Currency::from(duration),
+            ingress: prices.ingress_price
+                * Currency::from(Self::round_4kib(32 * num_sectors as u64)),
+            risked_collateral: prices.collateral
+                * Currency::from(num_sectors)
+                * Currency::from(duration),
+            ..Default::default()
+        }
+    }
+
+    pub fn form_contract(prices: &HostPrices) -> Self {
+        Usage {
+            rpc: prices.contract_price,
             ..Default::default()
         }
     }
@@ -769,6 +779,7 @@ struct RPCReadSectorResponse {
 
 pub struct RPCReadSectorResult {
     pub data: Vec<u8>,
+    pub usage: Usage,
 }
 
 /// RPCReadSector reads a sector from the host.
@@ -776,6 +787,7 @@ pub struct RPCReadSectorResult {
 /// root hash.
 pub struct RPCReadSector<T: TransportStream, State> {
     transport: T,
+    usage: Usage,
     state: PhantomData<State>,
 }
 
@@ -788,6 +800,7 @@ impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
         length: usize,
         offset: usize,
     ) -> Result<RPCReadSector<T, RPCReadSectorResponse>, Error> {
+        let usage = Usage::read_sector(&prices, length);
         let request = RPCReadSectorRequest {
             prices,
             token,
@@ -799,6 +812,7 @@ impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
 
         Ok(RPCReadSector {
             transport,
+            usage,
             state: PhantomData,
         })
     }
@@ -809,6 +823,7 @@ impl<T: TransportStream> RPCReadSector<T, RPCReadSectorResponse> {
         let response: RPCReadSectorResponse =
             self.transport.read_response(1024 + 8 + SECTOR_SIZE)?;
         Ok(RPCReadSectorResult {
+            usage: self.usage,
             data: response.data,
         })
     }
@@ -871,6 +886,7 @@ where
     transaction_builder: B,
     state: PhantomData<State>,
 
+    usage: Usage,
     chain_state: ChainState,
     contract: FileContract,
     formation_transaction: Transaction,
@@ -897,6 +913,7 @@ pub struct RPCFormContractResult {
     pub basis: ChainIndex,
     pub transaction_set: Vec<Transaction>,
     pub contract: FileContract,
+    pub usage: Usage,
 }
 
 impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
@@ -908,6 +925,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
         transaction_builder: B,
         params: RPCFormContractParams,
     ) -> Result<RPCFormContract<T, S, B, HostInputsResponse>, Error> {
+        let usage = Usage::form_contract(&params.prices);
         let mut contract = FileContract {
             revision_number: 0,
             capacity: 0,
@@ -965,6 +983,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
             contract_signer,
             transaction_builder,
             state: PhantomData,
+            usage,
             chain_state: params.state,
             contract,
             renter_inputs_len: formation_txn.siacoin_inputs.len(),
@@ -1003,6 +1022,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
             contract_signer: self.contract_signer,
             transaction_builder: self.transaction_builder,
             state: PhantomData,
+            usage: self.usage,
             chain_state: self.chain_state,
             contract: self.contract,
             renter_inputs_len: self.renter_inputs_len,
@@ -1043,6 +1063,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
             contract_signer: self.contract_signer,
             transaction_builder: self.transaction_builder,
             state: PhantomData,
+            usage: self.usage,
             chain_state: self.chain_state,
             renter_inputs_len: self.renter_inputs_len,
             contract,
@@ -1071,6 +1092,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
             basis: resp.basis,
             transaction_set: resp.transaction_set,
             contract,
+            usage: self.usage,
         })
     }
 }
