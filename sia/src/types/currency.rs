@@ -4,6 +4,7 @@ use std::fmt::Display;
 use std::io::Write;
 use std::iter::Sum;
 
+use num_traits::AsPrimitive;
 use serde::{Deserialize, Serialize};
 
 use crate::encoding::{self, SiaDecodable, SiaEncodable, V1SiaDecodable, V1SiaEncodable};
@@ -133,6 +134,15 @@ impl TryInto<u64> for Currency {
     type Error = core::num::TryFromIntError;
     fn try_into(self) -> Result<u64, Self::Error> {
         self.0.try_into()
+    }
+}
+
+impl<T> From<T> for Currency
+where
+    T: AsPrimitive<u128> + Copy + 'static,
+{
+    fn from(value: T) -> Self {
+        Currency::new(value.as_())
     }
 }
 
