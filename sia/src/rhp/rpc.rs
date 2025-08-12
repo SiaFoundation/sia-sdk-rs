@@ -96,23 +96,16 @@ struct RenterResolutionSignaturesResponse {
     pub renter_satisfied_policies: Vec<SatisfiedPolicy>,
 }
 
-/// RPCSettingsResponse is the response type for the RPC settings endpoint.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
-struct RPCSettingsResponse {
-    pub settings: HostSettings,
-}
-
 /// RPCRefreshContractParams contains the parameters for refreshing a contract.
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-struct RefreshContractParams {
+pub struct RefreshContractParams {
     pub contract_id: FileContractID,
     pub allowance: Currency,
     pub collateral: Currency,
 }
 
-struct RPCRefreshContractRequestParams {
+pub struct RPCRefreshContractRequestParams {
     pub prices: HostPrices,
     pub refresh: RefreshContractParams,
     pub miner_fee: Currency,
@@ -214,7 +207,7 @@ impl RPCRenewContractRequest {
     }
 }
 
-struct RPCFreeSectorsRequestParams {
+pub struct RPCFreeSectorsRequestParams {
     pub contract_id: FileContractID,
     pub prices: HostPrices,
     pub indices: Vec<u64>,
@@ -501,6 +494,77 @@ pub enum Error {
     ExpectedTransactionSet,
 }
 
+#[derive(Debug, Default, PartialEq, Clone, Copy)]
+pub struct Usage {
+    pub rpc: Currency,
+    pub storage: Currency,
+    pub egress: Currency,
+    pub ingress: Currency,
+    pub account_funding: Currency,
+    pub risked_collateral: Currency,
+}
+
+impl Usage {
+    const fn round_4kib(size: u64) -> u64 {
+        (size + 4095) & !4095
+    }
+
+    pub fn renter_cost(&self) -> Currency {
+        self.rpc + self.storage + self.egress + self.ingress + self.account_funding
+    }
+
+    pub fn host_collateral(&self) -> Currency {
+        self.risked_collateral
+    }
+
+    pub fn write_sector(prices: &HostPrices, data_length: usize) -> Self {
+        const TEMP_SECTOR_DURATION: u64 = 144 * 3;
+        let data_length = Currency::from(Self::round_4kib(data_length as u64));
+        Usage{
+            storage: prices.storage_price * data_length * Currency::from(TEMP_SECTOR_DURATION),
+            ingress: prices.ingress_price * data_length,
+            ..Default::default()
+        }
+    }
+
+    pub fn read_sector(prices: &HostPrices, data_length: usize) -> Self {
+        Usage {
+            egress: prices.egress_price * Currency::from(Self::round_4kib(data_length as u64)),
+            ..Default::default()
+        }
+    }
+
+    pub fn sector_roots(prices: &HostPrices, num_roots: usize) -> Self {
+        Usage {
+            egress: prices.egress_price * Currency::from(Self::round_4kib(32 * (num_roots as u64))),
+            ..Default::default()
+        }
+    }
+
+    pub fn verify_sector(prices: &HostPrices)  -> Self {
+        Usage {
+            egress: prices.egress_price * Currency::from(SECTOR_SIZE),
+            ..Default::default()
+        }
+    }
+
+    pub fn free_sectors(prices: &HostPrices, num_sectors: usize) -> Self {
+        Usage {
+            rpc: prices.free_sector_price * Currency::from(num_sectors),
+            ..Default::default()
+        }
+    }
+
+    pub fn append_sectors(prices: &HostPrices, num_sectors: usize, duration: u64) -> Self {
+        Usage {
+            storage: prices.storage_price * Currency::from(num_sectors) * Currency::from(duration),
+            ingress: prices.ingress_price * Currency::from(Self::round_4kib(32 * num_sectors as u64)),
+            risked_collateral: prices.collateral * Currency::from(num_sectors) * Currency::from(duration),
+            ..Default::default()
+        }
+    }
+}
+
 pub trait RPCRequest: SiaEncodable + SiaDecodable {
     const RPC_ID: Specifier;
 }
@@ -557,14 +621,28 @@ impl RPCRequest for RPCSettingsRequest {
     const RPC_ID: Specifier = specifier!("Settings");
 }
 
+/// RPCSettingsResponse is the response type for the RPC settings endpoint.
+#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[serde(rename_all = "camelCase")]
+struct RPCSettingsResponse {
+    pub settings: HostSettings,
+}
+
 pub struct RPCSettingsResult {
     pub settings: HostSettings,
+    pub usage: Usage,
 }
 
 /// RPCSettings returns the host's current settings.
 pub struct RPCSettings<TransportStream, State> {
     transport: TransportStream,
     state: PhantomData<State>,
+}
+
+impl<T: TransportStream, State> RPCSettings<T, State> {
+    pub fn usage() -> Usage {
+        Usage::default()
+    }
 }
 
 impl<T: TransportStream> RPCSettings<T, RPCSettingsRequest> {
@@ -583,12 +661,9 @@ impl<T: TransportStream> RPCSettings<T, RPCSettingsResponse> {
         let response: RPCSettingsResponse = self.transport.read_response(STANDARD_OBJECT_SIZE)?;
         Ok(RPCSettingsResult {
             settings: response.settings,
+            usage: Self::usage(),
         })
     }
-}
-
-pub fn rpc_settings<T: TransportStream>(transport: T) -> Result<RPCSettingsResult, Error> {
-    RPCSettings::send_request(transport)?.complete()
 }
 
 /// RPCWriteSectorRequest is the request type for writing a sector to the host's
@@ -620,6 +695,7 @@ struct RPCWriteSectorResponse {
 /// RPCWriteSectorResult contains the result of a write sector operation,
 pub struct RPCWriteSectorResult {
     pub root: Hash256,
+    pub usage: Usage,
 }
 
 /// RPCWriteSector writes a sector to the host's temporary storage.
@@ -627,6 +703,7 @@ pub struct RPCWriteSectorResult {
 /// If the sector is not appended to a contract within that time, it will be deleted.
 pub struct RPCWriteSector<TransportStream, State> {
     transport: TransportStream,
+    usage: Usage,
     state: PhantomData<State>,
 }
 
@@ -638,6 +715,7 @@ impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorRequest> {
         data: D,
     ) -> Result<RPCWriteSector<T, RPCWriteSectorResponse>, Error> {
         let data = data.as_ref();
+        let usage = Usage::write_sector(&prices, data.len());
         let request = RPCWriteSectorRequest {
             prices,
             token,
@@ -648,6 +726,7 @@ impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorRequest> {
 
         Ok(RPCWriteSector {
             transport,
+            usage,
             state: PhantomData,
         })
     }
@@ -658,6 +737,7 @@ impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorResponse> {
         let response: RPCWriteSectorResponse = self.transport.read_response(32)?;
         Ok(RPCWriteSectorResult {
             root: response.root,
+            usage: self.usage,
         })
     }
 }
