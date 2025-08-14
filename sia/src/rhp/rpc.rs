@@ -649,12 +649,6 @@ pub struct RPCSettings<TransportStream, State> {
     state: PhantomData<State>,
 }
 
-impl<T: TransportStream, State> RPCSettings<T, State> {
-    pub fn usage() -> Usage {
-        Usage::default()
-    }
-}
-
 impl<T: TransportStream> RPCSettings<T, RPCSettingsRequest> {
     pub fn send_request(mut transport: T) -> Result<RPCSettings<T, RPCSettingsResponse>, Error> {
         transport.write_request(&RPCSettingsRequest {})?;
@@ -671,7 +665,7 @@ impl<T: TransportStream> RPCSettings<T, RPCSettingsResponse> {
         let response: RPCSettingsResponse = self.transport.read_response(STANDARD_OBJECT_SIZE)?;
         Ok(RPCSettingsResult {
             settings: response.settings,
-            usage: Self::usage(),
+            usage: Usage::default(),
         })
     }
 }
