@@ -38,17 +38,22 @@ impl WebtransportStream {
 
 impl AsyncRead for WebtransportStream {
     async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // TODO: no unwrap
-        let read_bytes = self.receiver.read(buf.len()).await.unwrap().unwrap();
-        buf[..read_bytes.len()].copy_from_slice(&read_bytes);
-        Ok(read_bytes.len())
+        match self.receiver.read(buf.len()).await {
+            Ok(Some(bytes)) => {
+                buf[..bytes.len()].copy_from_slice(&bytes);
+                Ok(bytes.len())
+            }
+            Ok(None) => Ok(0),
+            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+        }
     }
 }
 
 impl AsyncWrite for WebtransportStream {
     async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // TODO: no unwrap
-        self.sender.write(buf).await.unwrap();
-        Ok(buf.len())
+        match self.sender.write(buf).await {
+            Ok(()) => Ok(buf.len()),
+            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+        }
     }
 }
