@@ -254,7 +254,7 @@ impl RPCFreeSectorsRequest {
 /// The renter must validate the response
 #[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
-struct RPCFreeSectorsResponse {
+pub struct RPCFreeSectorsResponse {
     pub old_subtree_hashes: Vec<Hash256>,
     pub old_leaf_hashes: Vec<Hash256>,
     pub new_merkle_root: Hash256,
