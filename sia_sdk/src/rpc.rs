@@ -4,7 +4,7 @@ use sia::rhp::*;
 use sia::signing::Signature;
 use sia::types::v2::*;
 use sia::types::*;
-use std::io::{self, Read};
+use std::io::{self};
 use std::marker::PhantomData;
 
 trait AsyncRead: Sized {
@@ -28,7 +28,7 @@ trait AsyncRead: Sized {
         }
     }
 
-    fn take(self, limit: u64) -> TakeAsyncRead<Self> {
+    fn take(&mut self, limit: u64) -> TakeAsyncRead<Self> {
         TakeAsyncRead::new(self, limit as usize)
     }
 }
@@ -53,18 +53,33 @@ trait AsyncWrite {
     }
 }
 
-struct TakeAsyncRead<T: AsyncRead> {
-    inner: T,
+struct TakeAsyncRead<'a, T: AsyncRead> {
+    inner: &'a mut T,
     limit: usize,
 }
 
-impl<T: AsyncRead> TakeAsyncRead<T> {
-    fn new(inner: T, limit: usize) -> Self {
+impl<'a, T: AsyncRead> TakeAsyncRead<'a, T> {
+    fn new(inner: &'a mut T, limit: usize) -> Self {
         TakeAsyncRead { inner, limit }
+    }
+
+    async fn read_all(&mut self) -> io::Result<Vec<u8>> {
+        let mut out = Vec::with_capacity(self.limit);
+        let mut buf = [0u8; 1024];
+        while self.limit > 0 {
+            let remaining = self.limit.min(buf.len());
+            let n = self.inner.read(&mut buf[..remaining]).await?;
+            if n == 0 {
+                break; // EOF
+            }
+            out.extend_from_slice(&buf[..n]);
+            self.limit -= n;
+        }
+        Ok(out)
     }
 }
 
-impl<T: AsyncRead> AsyncRead for TakeAsyncRead<T> {
+impl<'a, T: AsyncRead> AsyncRead for TakeAsyncRead<'a, T> {
     async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.limit == 0 {
             return Ok(0);
@@ -108,12 +123,14 @@ pub trait TransportStream: AsyncRead + AsyncWrite {
         match error_byte[0] {
             0 => {
                 let mut r = self.take(max_size as u64);
-                let resp = R::decode(&mut r)?;
+                let buf = r.read_all().await?;
+                let resp = R::decode(&mut buf.as_slice())?;
                 Ok(resp)
             }
             1 => {
                 let mut r = self.take(1024);
-                let error = RPCError::decode(&mut r).map(Error::RPC)?;
+                let buf = r.read_all().await?;
+                let error = RPCError::decode(&mut buf.as_slice()).map(Error::RPC)?;
                 Err(error)
             }
             _ => Err(Error::Encoding(encoding::Error::InvalidValue)),
