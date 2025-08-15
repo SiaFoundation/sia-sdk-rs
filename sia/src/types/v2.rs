@@ -349,7 +349,7 @@ impl SiaDecodable for FileContractResolution {
             _ => {
                 return Err(encoding::Error::Custom(
                     "invalid contract resolution type".to_string(),
-                ))
+                ));
             }
         };
         Ok(FileContractResolution { parent, resolution })
@@ -565,7 +565,7 @@ impl SiaEncodable for Transaction {
         ]
         .iter()
         .enumerate()
-        .filter(|(_, &condition)| condition)
+        .filter(|&(_, condition)| *condition)
         .map(|(i, _)| 1 << i)
         .sum::<u64>();
         fields.encode(w)?;
@@ -678,8 +678,8 @@ mod tests {
     use crate::types::Work;
     use crate::{address, hash_256, public_key, siacoin_id};
     use core::fmt::Debug;
-    use serde::de::DeserializeOwned;
     use serde::Serialize;
+    use serde::de::DeserializeOwned;
     use time::{Duration, OffsetDateTime};
 
     /// test_serialize_json is a helper to test serialization and deserialization of a struct to and from JSON.
@@ -1415,7 +1415,13 @@ mod tests {
             arbitrary_data: vec![],
             miner_fee: Currency::new(123581),
         };
-        test_serialize(&txn, "02030400000000000001000000000000005ddfbb00000000000100000000000000aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422640000000000000000000000000000008fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c00000000000000000103aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f14220100000000000000aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f142200000000000000000100000000000000640000000000000000000000000000008fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8cbde20100000000000000000000000000");
-        test_serialize_json(&txn, "{\"siacoinInputs\":[{\"parent\":{\"stateElement\":{\"leafIndex\":12312413,\"merkleProof\":[\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"]},\"id\":\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\",\"siacoinOutput\":{\"value\":\"100\",\"address\":\"8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8cdf32abee86f0\"},\"maturityHeight\":0},\"satisfiedPolicy\":{\"policy\":{\"type\":\"pk\",\"policy\":\"ed25519:aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"},\"signatures\":[\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"]}}],\"siacoinOutputs\":[{\"value\":\"100\",\"address\":\"8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8cdf32abee86f0\"}],\"minerFee\":\"123581\"}");
+        test_serialize(
+            &txn,
+            "02030400000000000001000000000000005ddfbb00000000000100000000000000aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422640000000000000000000000000000008fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c00000000000000000103aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f14220100000000000000aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f142200000000000000000100000000000000640000000000000000000000000000008fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8cbde20100000000000000000000000000",
+        );
+        test_serialize_json(
+            &txn,
+            "{\"siacoinInputs\":[{\"parent\":{\"stateElement\":{\"leafIndex\":12312413,\"merkleProof\":[\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"]},\"id\":\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\",\"siacoinOutput\":{\"value\":\"100\",\"address\":\"8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8cdf32abee86f0\"},\"maturityHeight\":0},\"satisfiedPolicy\":{\"policy\":{\"type\":\"pk\",\"policy\":\"ed25519:aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"},\"signatures\":[\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"]}}],\"siacoinOutputs\":[{\"value\":\"100\",\"address\":\"8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8cdf32abee86f0\"}],\"minerFee\":\"123581\"}",
+        );
     }
 }
