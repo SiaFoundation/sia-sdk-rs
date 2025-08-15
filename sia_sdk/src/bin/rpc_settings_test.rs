@@ -1,8 +1,4 @@
-use std::pin::Pin;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    runtime::Runtime,
-};
+use sia_sdk::rpc::{self, WebtransportStream};
 use web_transport;
 
 #[tokio::main]
@@ -22,7 +18,8 @@ async fn main() {
 
     let (sender, receiver) = connection.open_bi().await.unwrap();
 
-    //    let res = sia::rhp::rpc_settings(stream).unwrap();
+    let stream = WebtransportStream::new(sender, receiver);
 
-    // println!("result {:?}", res.settings)
+    let res = rpc::rpc_settings(stream).await.unwrap();
+    println!("result {:?}", res.settings)
 }

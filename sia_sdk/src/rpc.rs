@@ -91,6 +91,34 @@ impl<'a, T: AsyncRead> AsyncRead for TakeAsyncRead<'a, T> {
     }
 }
 
+pub struct WebtransportStream {
+    receiver: web_transport::RecvStream,
+    sender: web_transport::SendStream,
+}
+
+impl WebtransportStream {
+    pub fn new(sender: web_transport::SendStream, receiver: web_transport::RecvStream) -> Self {
+        WebtransportStream { receiver, sender }
+    }
+}
+
+impl AsyncRead for WebtransportStream {
+    async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // TODO: no unwrap
+        let read_bytes = self.receiver.read(buf.len()).await.unwrap().unwrap();
+        buf[..read_bytes.len()].copy_from_slice(&read_bytes);
+        Ok(read_bytes.len())
+    }
+}
+
+impl AsyncWrite for WebtransportStream {
+    async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // TODO: no unwrap
+        self.sender.write(buf).await.unwrap();
+        Ok(buf.len())
+    }
+}
+
 /// A TransportStream is a trait for sending and receiving RPC requests and responses.
 /// It abstracts the underlying transport mechanism, allowing for different implementations
 /// (e.g., TCP, QUIC, WebTransport) to be used without changing the RPC logic.
