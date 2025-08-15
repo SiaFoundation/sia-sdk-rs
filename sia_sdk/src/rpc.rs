@@ -7,7 +7,7 @@ use sia::types::*;
 use std::io::{self};
 use std::marker::PhantomData;
 
-trait AsyncRead: Sized {
+pub trait AsyncRead: Sized {
     async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
 
     async fn read_exact(&mut self, mut buf: &mut [u8]) -> io::Result<()> {
@@ -33,7 +33,7 @@ trait AsyncRead: Sized {
     }
 }
 
-trait AsyncWrite {
+pub trait AsyncWrite {
     async fn write(&mut self, buf: &[u8]) -> io::Result<usize>;
 
     async fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
@@ -88,34 +88,6 @@ impl<'a, T: AsyncRead> AsyncRead for TakeAsyncRead<'a, T> {
         let n = self.inner.read(&mut buf[..remaining]).await?;
         self.limit -= n;
         Ok(n)
-    }
-}
-
-pub struct WebtransportStream {
-    receiver: web_transport::RecvStream,
-    sender: web_transport::SendStream,
-}
-
-impl WebtransportStream {
-    pub fn new(sender: web_transport::SendStream, receiver: web_transport::RecvStream) -> Self {
-        WebtransportStream { receiver, sender }
-    }
-}
-
-impl AsyncRead for WebtransportStream {
-    async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // TODO: no unwrap
-        let read_bytes = self.receiver.read(buf.len()).await.unwrap().unwrap();
-        buf[..read_bytes.len()].copy_from_slice(&read_bytes);
-        Ok(read_bytes.len())
-    }
-}
-
-impl AsyncWrite for WebtransportStream {
-    async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // TODO: no unwrap
-        self.sender.write(buf).await.unwrap();
-        Ok(buf.len())
     }
 }
 
