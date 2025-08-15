@@ -7,25 +7,8 @@ use sia::types::*;
 use std::io::{self, Read};
 use std::marker::PhantomData;
 
-trait AsyncReadWriter {
-    async fn write(&mut self, buf: &[u8]) -> io::Result<usize>;
+trait AsyncRead: Sized {
     async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
-
-    async fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
-        while !buf.is_empty() {
-            match self.write(buf).await {
-                Ok(0) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "failed to write all data to writer",
-                    ));
-                }
-                Ok(n) => buf = &buf[n..],
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(())
-    }
 
     async fn read_exact(&mut self, mut buf: &mut [u8]) -> io::Result<()> {
         while !buf.is_empty() {
@@ -44,12 +27,59 @@ trait AsyncReadWriter {
             Ok(())
         }
     }
+
+    fn take(self, limit: u64) -> TakeAsyncRead<Self> {
+        TakeAsyncRead::new(self, limit as usize)
+    }
+}
+
+trait AsyncWrite {
+    async fn write(&mut self, buf: &[u8]) -> io::Result<usize>;
+
+    async fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
+        while !buf.is_empty() {
+            match self.write(buf).await {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write all data to writer",
+                    ));
+                }
+                Ok(n) => buf = &buf[n..],
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+}
+
+struct TakeAsyncRead<T: AsyncRead> {
+    inner: T,
+    limit: usize,
+}
+
+impl<T: AsyncRead> TakeAsyncRead<T> {
+    fn new(inner: T, limit: usize) -> Self {
+        TakeAsyncRead { inner, limit }
+    }
+}
+
+impl<T: AsyncRead> AsyncRead for TakeAsyncRead<T> {
+    async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.limit == 0 {
+            return Ok(0);
+        }
+        let remaining = self.limit.min(buf.len());
+        let n = self.inner.read(&mut buf[..remaining]).await?;
+        self.limit -= n;
+        Ok(n)
+    }
 }
 
 /// A TransportStream is a trait for sending and receiving RPC requests and responses.
 /// It abstracts the underlying transport mechanism, allowing for different implementations
 /// (e.g., TCP, QUIC, WebTransport) to be used without changing the RPC logic.
-pub trait TransportStream: AsyncReadWriter {
+pub trait TransportStream: AsyncRead + AsyncWrite {
     async fn write_request<R: RPCRequest>(&mut self, request: &R) -> Result<(), Error>
     where
         Self: Sized,
@@ -91,7 +121,7 @@ pub trait TransportStream: AsyncReadWriter {
     }
 }
 
-impl<T: AsyncReadWriter> TransportStream for T {}
+impl<T: AsyncRead + AsyncWrite> TransportStream for T {}
 
 /// RPCSettings returns the host's current settings.
 pub struct RPCSettings<TransportStream, State> {
@@ -471,17 +501,19 @@ mod test {
         }
     }
 
-    impl AsyncReadWriter for AsyncBuffer {
-        async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.inner.extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
+    impl AsyncRead for AsyncBuffer {
         async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             let len = buf.len().min(self.inner.len());
             buf[..len].copy_from_slice(&self.inner[..len]);
             self.inner.drain(..len);
             Ok(len)
+        }
+    }
+
+    impl AsyncWrite for AsyncBuffer {
+        async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.inner.extend_from_slice(buf);
+            Ok(buf.len())
         }
     }
 
