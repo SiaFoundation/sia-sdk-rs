@@ -1,0 +1,16 @@
+{
+  "name": "indexd_sdk",
+  "version": "0.0.1",
+  "description": "",
+  "license": "MIT",
+  "author": "",
+  "type": "module",
+  "main": "indexd_sdk.js",
+  "types": "./indexd_sdk.d.ts",
+  "files": [
+    "indexd_sdk_bg.wasm",
+    "indexd_sdk.js",
+    "indexd_sdk_bg.js",
+    "indexd_sdk.d.ts"
+  ]
+}

@@ -1,0 +1,38 @@
+[package]
+name = "indexd_sdk"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+bytes = "1.10.1"
+serde-wasm-bindgen = "0.6.5"
+serde_json = "1.0.142"
+sia_sdk = { version = "0.0.2", path = "../sia" }
+tokio = "1.47.1"
+url = "2.5.4"
+wasm-bindgen = "0.2.100"
+wasm-bindgen-futures = "0.4.50"
+web-transport = "0.9.4"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3.50"
+
+[dependencies.web-sys]
+version = "0.3.77"
+features = [
+  "ReadableStream",
+  "ReadableStreamDefaultReader",
+  "TextDecoder",
+  "TextEncoder",
+  "WebTransport",
+  "WebTransportBidirectionalStream",
+  "WebTransportDatagramDuplexStream",
+  "WebTransportReceiveStream",
+  "WebTransportSendStream",
+  "WritableStream",
+  "WritableStreamDefaultWriter",
+  "console",
+]
