@@ -1,7 +1,7 @@
 /// helper module for base64 serialization
 pub(crate) mod base64 {
-    use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
@@ -79,8 +79,8 @@ pub(crate) mod timestamp_array {
 
 /// helper module for Vec<Vec<u8>> base64 serialization
 pub(crate) mod vec_base64 {
-    use base64::engine::general_purpose::STANDARD;
     use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S>(v: &[Vec<u8>], serializer: S) -> Result<S::Ok, S::Error>

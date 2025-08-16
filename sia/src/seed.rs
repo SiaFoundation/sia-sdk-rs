@@ -78,31 +78,151 @@ mod tests {
     #[test]
     fn test_seed_from_entropy() {
         let test_cases = vec![
-			([23,154,249,239,129,81,216,147,144,163,207,136,238,88,11,253],"bleak style know actor budget endorse dream ketchup material index actual wide"),
-			([125,190,141,81,70,235,204,217,162,19,65,96,237,125,157,255],"laundry virtual february miss rubber holiday marriage habit genius hip guess yard"),
-			([56,47,30,87,122,143,19,221,189,249,105,45,161,38,172,91],"deal jump noise vital van uphold wave coffee color ankle prison repeat"),
-			([68,205,7,92,32,16,228,222,144,102,94,12,179,15,67,251],"dynamic habit strike dizzy atom hungry dose slim arrow observe special wash"),
-			([113,45,77,233,42,222,26,5,158,171,102,114,10,7,178,19],"illness heavy kid fiber ticket actress kingdom holiday improve expand uncle chest"),
-			([189,194,141,142,240,157,147,143,61,104,167,223,33,191,95,226],"saddle behave glove thrive summer shy volcano belt tennis assume subject series"),
-			([156,21,48,230,15,181,230,46,105,106,91,163,205,77,45,150],"orchard praise define buyer fury blame pizza enter phrase heavy enter collect"),
-			([14,38,59,189,192,248,53,60,139,36,93,58,42,156,174,238],"athlete crack urge limit local oxygen clutch merry demand female close talent"),
-			([141,252,20,155,232,12,56,225,252,11,92,219,9,189,23,179],"mistake thing cheap source seminar ill usual high swallow evil echo grid"),
-			([25,192,89,200,149,97,136,115,38,103,19,229,88,165,62,169],"border actress impulse client blush define office tiny torch share exile famous"),
-			([255,43,106,70,38,84,73,72,184,0,154,228,158,156,171,32],"you forget muscle erosion duty picture theme battle tonight visual client double"),
-			([222,237,244,22,242,80,27,122,27,91,110,101,44,200,107,151],"ten hurry aisle tool accuse rug hope horse gown green brain comfort"),
-			([96,74,173,157,208,13,130,1,168,248,254,178,92,220,59,233],"gate fever guess parade subway absorb physical cabin rather tragic auction spread"),
-			([176,115,232,168,178,206,187,177,117,105,82,1,211,62,184,132],"race palm clay grain two suffer stick clean achieve okay purchase anger"),
-			([162,226,161,55,247,115,251,40,6,205,151,77,203,35,63,198],"pepper bench evil upon distance neglect brass real evidence flip soup mind"),
-			([199,68,177,121,94,197,135,255,140,56,181,119,99,179,124,65],"shrug cereal furnace rural flash zone couch birth jazz budget tenant lock"),
-			([149,139,33,29,170,228,57,90,209,219,67,202,162,198,242,138],"night flip electric fiction drum pulp electric half skirt bike royal benefit"),
-			([32,138,79,90,166,241,239,197,108,63,107,211,140,3,80,129],"calm fame stove evil bus tired rail uniform squeeze gas stage acoustic"),
-			([231,198,66,33,240,199,105,69,236,87,87,250,128,220,227,145],"treat craft mask thunder isolate pepper rally turtle whisper alone decline card"),
-			([130,4,98,53,124,85,66,215,112,229,188,157,95,195,49,201],"link cart minute weather feature hill seminar resource outer wrap small narrow"),
-			([228,84,238,177,92,231,129,253,139,4,83,68,252,160,139,22],"tone polar proof right job yard clown media eager topic carpet cluster"),
-			([227,39,94,239,75,67,63,122,188,27,58,162,126,135,55,250],"tobacco depend rookie notable crop run vacant guard pen vintage social visual"),
-			([228,96,128,106,248,223,176,232,179,247,6,219,81,173,27,141],"tongue advice boy vast wild inmate sound this swap miracle eight bottom"),
-			([204,38,228,251,95,106,131,62,103,254,162,86,97,48,254,222],"slow damp disagree salute popular palace paper stairs filter another distance sadness"),
-		];
+            (
+                [
+                    23, 154, 249, 239, 129, 81, 216, 147, 144, 163, 207, 136, 238, 88, 11, 253,
+                ],
+                "bleak style know actor budget endorse dream ketchup material index actual wide",
+            ),
+            (
+                [
+                    125, 190, 141, 81, 70, 235, 204, 217, 162, 19, 65, 96, 237, 125, 157, 255,
+                ],
+                "laundry virtual february miss rubber holiday marriage habit genius hip guess yard",
+            ),
+            (
+                [
+                    56, 47, 30, 87, 122, 143, 19, 221, 189, 249, 105, 45, 161, 38, 172, 91,
+                ],
+                "deal jump noise vital van uphold wave coffee color ankle prison repeat",
+            ),
+            (
+                [
+                    68, 205, 7, 92, 32, 16, 228, 222, 144, 102, 94, 12, 179, 15, 67, 251,
+                ],
+                "dynamic habit strike dizzy atom hungry dose slim arrow observe special wash",
+            ),
+            (
+                [
+                    113, 45, 77, 233, 42, 222, 26, 5, 158, 171, 102, 114, 10, 7, 178, 19,
+                ],
+                "illness heavy kid fiber ticket actress kingdom holiday improve expand uncle chest",
+            ),
+            (
+                [
+                    189, 194, 141, 142, 240, 157, 147, 143, 61, 104, 167, 223, 33, 191, 95, 226,
+                ],
+                "saddle behave glove thrive summer shy volcano belt tennis assume subject series",
+            ),
+            (
+                [
+                    156, 21, 48, 230, 15, 181, 230, 46, 105, 106, 91, 163, 205, 77, 45, 150,
+                ],
+                "orchard praise define buyer fury blame pizza enter phrase heavy enter collect",
+            ),
+            (
+                [
+                    14, 38, 59, 189, 192, 248, 53, 60, 139, 36, 93, 58, 42, 156, 174, 238,
+                ],
+                "athlete crack urge limit local oxygen clutch merry demand female close talent",
+            ),
+            (
+                [
+                    141, 252, 20, 155, 232, 12, 56, 225, 252, 11, 92, 219, 9, 189, 23, 179,
+                ],
+                "mistake thing cheap source seminar ill usual high swallow evil echo grid",
+            ),
+            (
+                [
+                    25, 192, 89, 200, 149, 97, 136, 115, 38, 103, 19, 229, 88, 165, 62, 169,
+                ],
+                "border actress impulse client blush define office tiny torch share exile famous",
+            ),
+            (
+                [
+                    255, 43, 106, 70, 38, 84, 73, 72, 184, 0, 154, 228, 158, 156, 171, 32,
+                ],
+                "you forget muscle erosion duty picture theme battle tonight visual client double",
+            ),
+            (
+                [
+                    222, 237, 244, 22, 242, 80, 27, 122, 27, 91, 110, 101, 44, 200, 107, 151,
+                ],
+                "ten hurry aisle tool accuse rug hope horse gown green brain comfort",
+            ),
+            (
+                [
+                    96, 74, 173, 157, 208, 13, 130, 1, 168, 248, 254, 178, 92, 220, 59, 233,
+                ],
+                "gate fever guess parade subway absorb physical cabin rather tragic auction spread",
+            ),
+            (
+                [
+                    176, 115, 232, 168, 178, 206, 187, 177, 117, 105, 82, 1, 211, 62, 184, 132,
+                ],
+                "race palm clay grain two suffer stick clean achieve okay purchase anger",
+            ),
+            (
+                [
+                    162, 226, 161, 55, 247, 115, 251, 40, 6, 205, 151, 77, 203, 35, 63, 198,
+                ],
+                "pepper bench evil upon distance neglect brass real evidence flip soup mind",
+            ),
+            (
+                [
+                    199, 68, 177, 121, 94, 197, 135, 255, 140, 56, 181, 119, 99, 179, 124, 65,
+                ],
+                "shrug cereal furnace rural flash zone couch birth jazz budget tenant lock",
+            ),
+            (
+                [
+                    149, 139, 33, 29, 170, 228, 57, 90, 209, 219, 67, 202, 162, 198, 242, 138,
+                ],
+                "night flip electric fiction drum pulp electric half skirt bike royal benefit",
+            ),
+            (
+                [
+                    32, 138, 79, 90, 166, 241, 239, 197, 108, 63, 107, 211, 140, 3, 80, 129,
+                ],
+                "calm fame stove evil bus tired rail uniform squeeze gas stage acoustic",
+            ),
+            (
+                [
+                    231, 198, 66, 33, 240, 199, 105, 69, 236, 87, 87, 250, 128, 220, 227, 145,
+                ],
+                "treat craft mask thunder isolate pepper rally turtle whisper alone decline card",
+            ),
+            (
+                [
+                    130, 4, 98, 53, 124, 85, 66, 215, 112, 229, 188, 157, 95, 195, 49, 201,
+                ],
+                "link cart minute weather feature hill seminar resource outer wrap small narrow",
+            ),
+            (
+                [
+                    228, 84, 238, 177, 92, 231, 129, 253, 139, 4, 83, 68, 252, 160, 139, 22,
+                ],
+                "tone polar proof right job yard clown media eager topic carpet cluster",
+            ),
+            (
+                [
+                    227, 39, 94, 239, 75, 67, 63, 122, 188, 27, 58, 162, 126, 135, 55, 250,
+                ],
+                "tobacco depend rookie notable crop run vacant guard pen vintage social visual",
+            ),
+            (
+                [
+                    228, 96, 128, 106, 248, 223, 176, 232, 179, 247, 6, 219, 81, 173, 27, 141,
+                ],
+                "tongue advice boy vast wild inmate sound this swap miracle eight bottom",
+            ),
+            (
+                [
+                    204, 38, 228, 251, 95, 106, 131, 62, 103, 254, 162, 86, 97, 48, 254, 222,
+                ],
+                "slow damp disagree salute popular palace paper stairs filter another distance sadness",
+            ),
+        ];
 
         for (entropy, expected) in test_cases {
             let seed = Seed::new(entropy);
