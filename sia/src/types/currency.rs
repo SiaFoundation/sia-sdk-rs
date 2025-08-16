@@ -8,6 +8,9 @@ use num_traits::AsPrimitive;
 use serde::{Deserialize, Serialize};
 
 use crate::encoding::{self, SiaDecodable, SiaEncodable, V1SiaDecodable, V1SiaEncodable};
+use crate::encoding_async::{
+    self, AsyncEncoder, AsyncSiaDecodable, AsyncSiaEncodable, Result as AsyncResult,
+};
 
 // I miss untyped constants
 const SIACOIN_PRECISION_I32: i32 = 24;
@@ -111,6 +114,21 @@ impl SiaDecodable for Currency {
     fn decode<R: std::io::Read>(r: &mut R) -> encoding::Result<Self> {
         let mut buf = [0u8; 16];
         r.read_exact(&mut buf)?;
+        Ok(Currency(u128::from_le_bytes(buf)))
+    }
+}
+
+impl AsyncSiaEncodable for Currency {
+    async fn encode_async<E: AsyncEncoder>(&self, e: &mut E) -> AsyncResult<()> {
+        e.write_all(&self.0.to_le_bytes()).await?;
+        Ok(())
+    }
+}
+
+impl AsyncSiaDecodable for Currency {
+    async fn decode_async<D: encoding_async::AsyncDecoder>(d: &mut D) -> AsyncResult<Self> {
+        let mut buf = [0u8; 16];
+        d.read_exact(&mut buf).await?;
         Ok(Currency(u128::from_le_bytes(buf)))
     }
 }
