@@ -164,9 +164,10 @@ where
     T: AsyncSiaDecodable,
 {
     async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
-        let len = usize::decode_async(r).await?;
-        let mut vec = Vec::with_capacity(len);
-        for _ in 0..len {
+        let mut vec = Vec::new();
+        // note: the vec is not pre-allocated
+        // to prevent abuse by sending a large len
+        for _ in 0..usize::decode_async(r).await? {
             vec.push(T::decode_async(r).await?);
         }
         Ok(vec)

@@ -55,36 +55,33 @@ pub fn derive_sia_decode(input: TokenStream) -> TokenStream {
     let name = &input.ident;
 
     let decode_impl = match &input.data {
-        Data::Struct(data) => {
-            
-            match &data.fields {
-                Fields::Named(fields) => {
-                    let decodes = fields.named.iter().filter_map(|f| match f.vis {
-                        syn::Visibility::Public(_) => {
-                            let name = &f.ident;
-                            let ty = &f.ty;
-                            Some(quote! { #name: <#ty>::decode(r)?, })
-                        }
-                        _ => None,
-                    });
-                    quote! {
-                        Ok(Self {
-                            #(#decodes)*
-                        })
-                    }
-                }
-                Fields::Unnamed(fields) => {
-                    let decodes = fields.unnamed.iter().map(|f| {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => {
+                let decodes = fields.named.iter().filter_map(|f| match f.vis {
+                    syn::Visibility::Public(_) => {
+                        let name = &f.ident;
                         let ty = &f.ty;
-                        quote! { <#ty>::decode(r)?, }
-                    });
-                    quote! {
-                        Ok(Self(#(#decodes)*))
+                        Some(quote! { #name: <#ty>::decode(r)?, })
                     }
+                    _ => None,
+                });
+                quote! {
+                    Ok(Self {
+                        #(#decodes)*
+                    })
                 }
-                Fields::Unit => quote! { Ok(Self) },
             }
-        }
+            Fields::Unnamed(fields) => {
+                let decodes = fields.unnamed.iter().map(|f| {
+                    let ty = &f.ty;
+                    quote! { <#ty>::decode(r)?, }
+                });
+                quote! {
+                    Ok(Self(#(#decodes)*))
+                }
+            }
+            Fields::Unit => quote! { Ok(Self) },
+        },
         Data::Enum(_) => panic!("enums not supported"),
         Data::Union(_) => panic!("unions not supported"),
     };
@@ -148,33 +145,30 @@ pub fn derive_v1_sia_decode(input: TokenStream) -> TokenStream {
     let name = &input.ident;
 
     let decode_impl = match &input.data {
-        Data::Struct(data) => {
-            
-            match &data.fields {
-                Fields::Named(fields) => {
-                    let decodes = fields.named.iter().map(|f| {
-                        let name = &f.ident;
-                        let ty = &f.ty;
-                        quote! { #name: <#ty>::decode_v1(r)?, }
-                    });
-                    quote! {
-                        Ok(Self {
-                            #(#decodes)*
-                        })
-                    }
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => {
+                let decodes = fields.named.iter().map(|f| {
+                    let name = &f.ident;
+                    let ty = &f.ty;
+                    quote! { #name: <#ty>::decode_v1(r)?, }
+                });
+                quote! {
+                    Ok(Self {
+                        #(#decodes)*
+                    })
                 }
-                Fields::Unnamed(fields) => {
-                    let decodes = fields.unnamed.iter().map(|f| {
-                        let ty = &f.ty;
-                        quote! { <#ty>::decode_v1(r)?, }
-                    });
-                    quote! {
-                        Ok(Self(#(#decodes)*))
-                    }
-                }
-                Fields::Unit => quote! { Ok(Self) },
             }
-        }
+            Fields::Unnamed(fields) => {
+                let decodes = fields.unnamed.iter().map(|f| {
+                    let ty = &f.ty;
+                    quote! { <#ty>::decode_v1(r)?, }
+                });
+                quote! {
+                    Ok(Self(#(#decodes)*))
+                }
+            }
+            Fields::Unit => quote! { Ok(Self) },
+        },
         Data::Enum(_) => panic!("enums not supported"),
         Data::Union(_) => panic!("unions not supported"),
     };
@@ -242,36 +236,33 @@ pub fn derive_async_sia_decode(input: TokenStream) -> TokenStream {
     let name = &input.ident;
 
     let decode_impl = match &input.data {
-        Data::Struct(data) => {
-            
-            match &data.fields {
-                Fields::Named(fields) => {
-                    let decodes = fields.named.iter().filter_map(|f| match f.vis {
-                        syn::Visibility::Public(_) => {
-                            let name = &f.ident;
-                            let ty = &f.ty;
-                            Some(quote! { #name: <#ty>::decode_async(d).await?, })
-                        }
-                        _ => None,
-                    });
-                    quote! {
-                        Ok(Self {
-                            #(#decodes)*
-                        })
-                    }
-                }
-                Fields::Unnamed(fields) => {
-                    let decodes = fields.unnamed.iter().map(|f| {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => {
+                let decodes = fields.named.iter().filter_map(|f| match f.vis {
+                    syn::Visibility::Public(_) => {
+                        let name = &f.ident;
                         let ty = &f.ty;
-                        quote! { <#ty>::decode_async(d).await?, }
-                    });
-                    quote! {
-                        Ok(Self(#(#decodes)*))
+                        Some(quote! { #name: <#ty>::decode_async(d).await?, })
                     }
+                    _ => None,
+                });
+                quote! {
+                    Ok(Self {
+                        #(#decodes)*
+                    })
                 }
-                Fields::Unit => quote! { Ok(Self) },
             }
-        }
+            Fields::Unnamed(fields) => {
+                let decodes = fields.unnamed.iter().map(|f| {
+                    let ty = &f.ty;
+                    quote! { <#ty>::decode_async(d).await?, }
+                });
+                quote! {
+                    Ok(Self(#(#decodes)*))
+                }
+            }
+            Fields::Unit => quote! { Ok(Self) },
+        },
         Data::Enum(_) => panic!("enums not supported"),
         Data::Union(_) => panic!("unions not supported"),
     };
