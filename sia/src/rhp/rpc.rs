@@ -331,19 +331,6 @@ struct RPCSectorRootsResponse {
     pub host_signature: Signature,
 }
 
-/// RPCAccountBalanceRequest is the request type for getting the balance of
-/// an account.
-#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
-struct RPCAccountBalanceRequest {
-    pub account: PublicKey,
-}
-
-/// RPCAccountBalanceResponse contains the balance of an account.
-#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
-struct RPCAccountBalanceResponse {
-    pub balance: Currency,
-}
-
 struct RPCReplenishAccountsParams {
     pub accounts: Vec<PublicKey>,
     pub target: Currency,
@@ -598,6 +585,21 @@ impl<T: TransportStream> Transport<T> {
     }
 }
 
+/// Marker type for the initial stage of the RPC process.
+pub struct RPCInit;
+
+/// Marker type for the waiting stage for host inputs.
+pub struct RPCAwaitingHostInputs;
+
+/// Marker type for the waiting stage for host signatures.
+pub struct RPCAwaitingHostSignatures;
+
+/// Marker type for the waiting stage for renter signatures.
+pub struct RPCAwaitingRenterSignatures;
+
+/// Marker type for the completion stage of the RPC process.
+pub struct RPCComplete;
+
 /// RPCSettingsRequest is the request type getting the host's current settings.
 /// It is encoded as 0 bytes.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
@@ -626,8 +628,8 @@ pub struct RPCSettings<T: TransportStream, State> {
     state: PhantomData<State>,
 }
 
-impl<T: TransportStream> RPCSettings<T, RPCSettingsRequest> {
-    pub async fn send_request(stream: T) -> Result<RPCSettings<T, RPCSettingsResponse>, Error> {
+impl<T: TransportStream> RPCSettings<T, RPCInit> {
+    pub async fn send_request(stream: T) -> Result<RPCSettings<T, RPCComplete>, Error> {
         let mut transport = Transport { stream };
         transport.write_request(&RPCSettingsRequest {}).await?;
 
@@ -638,7 +640,7 @@ impl<T: TransportStream> RPCSettings<T, RPCSettingsRequest> {
     }
 }
 
-impl<T: TransportStream> RPCSettings<T, RPCSettingsResponse> {
+impl<T: TransportStream> RPCSettings<T, RPCComplete> {
     pub async fn complete(mut self) -> Result<RPCSettingsResult, Error> {
         let response: RPCSettingsResponse = self.transport.read_response().await?;
         Ok(RPCSettingsResult {
@@ -687,13 +689,13 @@ pub struct RPCWriteSector<T: TransportStream, State> {
     state: PhantomData<State>,
 }
 
-impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorRequest> {
+impl<T: TransportStream> RPCWriteSector<T, RPCInit> {
     pub async fn send_request(
         stream: T,
         prices: HostPrices,
         token: AccountToken,
         data: Vec<u8>,
-    ) -> Result<RPCWriteSector<T, RPCWriteSectorResponse>, Error> {
+    ) -> Result<RPCWriteSector<T, RPCComplete>, Error> {
         let mut transport = Transport { stream };
         let usage = Usage::write_sector(&prices, data.len());
         let request = RPCWriteSectorRequest {
@@ -711,7 +713,7 @@ impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorRequest> {
     }
 }
 
-impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorResponse> {
+impl<T: TransportStream> RPCWriteSector<T, RPCComplete> {
     pub async fn complete(mut self) -> Result<RPCWriteSectorResult, Error> {
         let response: RPCWriteSectorResponse = self.transport.read_response().await?;
         Ok(RPCWriteSectorResult {
@@ -758,7 +760,7 @@ pub struct RPCReadSector<T: TransportStream, State> {
     state: PhantomData<State>,
 }
 
-impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
+impl<T: TransportStream> RPCReadSector<T, RPCInit> {
     pub async fn send_request(
         stream: T,
         prices: HostPrices,
@@ -766,7 +768,7 @@ impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
         root: Hash256,
         length: usize,
         offset: usize,
-    ) -> Result<RPCReadSector<T, RPCReadSectorResponse>, Error> {
+    ) -> Result<RPCReadSector<T, RPCComplete>, Error> {
         let mut transport = Transport { stream };
         let usage = Usage::read_sector(&prices, length);
         let request = RPCReadSectorRequest {
@@ -786,12 +788,67 @@ impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
     }
 }
 
-impl<T: TransportStream> RPCReadSector<T, RPCReadSectorResponse> {
+impl<T: TransportStream> RPCReadSector<T, RPCComplete> {
     pub async fn complete(mut self) -> Result<RPCReadSectorResult, Error> {
         let response: RPCReadSectorResponse = self.transport.read_response().await?;
         Ok(RPCReadSectorResult {
             usage: self.usage,
             data: response.data,
+        })
+    }
+}
+
+/// RPCAccountBalanceRequest is the request type for getting the balance of
+/// an account.
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+struct RPCAccountBalanceRequest {
+    pub account: PublicKey,
+}
+
+impl RPCRequest for RPCAccountBalanceRequest {
+    const RPC_ID: Specifier = specifier!("AccountBalance");
+}
+
+/// RPCAccountBalanceResponse contains the balance of an account.
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+struct RPCAccountBalanceResponse {
+    pub balance: Currency,
+}
+
+/// RPCAccountBalanceResult contains the result of an account balance RPC.
+pub struct RPCAccountBalanceResult {
+    pub balance: Currency,
+    pub usage: Usage,
+}
+
+/// Requests the current balance of an account.
+pub struct RPCAccountBalance<T: TransportStream, State> {
+    transport: Transport<T>,
+    state: PhantomData<State>,
+}
+
+impl<T: TransportStream> RPCAccountBalance<T, RPCInit> {
+    pub async fn send_request(
+        stream: T,
+        account: PublicKey,
+    ) -> Result<RPCAccountBalance<T, RPCComplete>, Error> {
+        let mut transport = Transport { stream };
+        let request = RPCAccountBalanceRequest { account };
+        transport.write_request(&request).await?;
+
+        Ok(RPCAccountBalance {
+            transport,
+            state: PhantomData,
+        })
+    }
+}
+
+impl<T: TransportStream> RPCAccountBalance<T, RPCComplete> {
+    pub async fn complete(mut self) -> Result<RPCAccountBalanceResult, Error> {
+        let response: RPCAccountBalanceResponse = self.transport.read_response().await?;
+        Ok(RPCAccountBalanceResult {
+            balance: response.balance,
+            usage: Usage::default(),
         })
     }
 }
@@ -881,14 +938,14 @@ pub struct RPCFormContractResult {
 }
 
 impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
-    RPCFormContract<T, S, B, RPCFormContractRequest>
+    RPCFormContract<T, S, B, RPCInit>
 {
     pub async fn send_request(
         stream: T,
         contract_signer: S,
         transaction_builder: B,
         params: RPCFormContractParams,
-    ) -> Result<RPCFormContract<T, S, B, HostInputsResponse>, Error> {
+    ) -> Result<RPCFormContract<T, S, B, RPCAwaitingHostInputs>, Error> {
         let mut transport = Transport { stream };
         let usage = Usage::form_contract(&params.prices);
         let mut contract = FileContract {
@@ -958,11 +1015,11 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
 }
 
 impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
-    RPCFormContract<T, S, B, HostInputsResponse>
+    RPCFormContract<T, S, B, RPCAwaitingHostInputs>
 {
     pub async fn receive_host_inputs(
         mut self,
-    ) -> Result<RPCFormContract<T, S, B, RenterFormContractSignaturesResponse>, Error> {
+    ) -> Result<RPCFormContract<T, S, B, RPCAwaitingRenterSignatures>, Error> {
         let host_inputs_response: HostInputsResponse = self.transport.read_response().await?;
         let mut formation_txn = self.formation_transaction;
 
@@ -997,7 +1054,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
 }
 
 impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
-    RPCFormContract<T, S, B, RenterFormContractSignaturesResponse>
+    RPCFormContract<T, S, B, RPCAwaitingRenterSignatures>
 {
     pub fn host_inputs(&self) -> &[SiacoinInput] {
         &self.formation_transaction.siacoin_inputs[self.renter_inputs_len..]
@@ -1005,7 +1062,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
 
     pub async fn send_renter_signatures(
         mut self,
-    ) -> Result<RPCFormContract<T, S, B, TransactionSetResponse>, Error> {
+    ) -> Result<RPCFormContract<T, S, B, RPCComplete>, Error> {
         let mut formation_txn = self.formation_transaction;
         let mut contract = self.contract;
 
@@ -1038,7 +1095,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
 }
 
 impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
-    RPCFormContract<T, S, B, TransactionSetResponse>
+    RPCFormContract<T, S, B, RPCComplete>
 {
     pub async fn complete(mut self) -> Result<RPCFormContractResult, Error> {
         let resp: TransactionSetResponse = self.transport.read_response().await?;
