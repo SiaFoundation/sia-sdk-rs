@@ -1,7 +1,7 @@
 pub use sia_derive::{AsyncSiaDecode, AsyncSiaEncode};
-use std::io::{Read, Write};
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Debug, Error)]
 pub enum EncodingError {
@@ -37,17 +37,20 @@ pub trait AsyncSiaDecodable: Sized {
     fn decode_async<D: AsyncDecoder>(r: &mut D) -> impl Future<Output = Result<Self>>;
 }
 
-impl<W: Write> AsyncEncoder for W {
+impl<T: AsyncWriteExt + Unpin> AsyncEncoder for T {
     async fn write_all(&mut self, buf: &[u8]) -> Result<()> {
         self.write_all(buf)
+            .await
             .map_err(|e| EncodingError::IOError(e.to_string()))
     }
 }
 
-impl<R: Read> AsyncDecoder for R {
+impl<T: AsyncReadExt + Unpin> AsyncDecoder for T {
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
         self.read_exact(buf)
-            .map_err(|e| EncodingError::IOError(e.to_string()))
+            .await
+            .map_err(|e| EncodingError::IOError(e.to_string()))?;
+        Ok(())
     }
 }
 
