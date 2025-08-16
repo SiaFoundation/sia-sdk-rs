@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
@@ -5,16 +6,18 @@ use thiserror::Error;
 
 use super::types::*;
 use crate::consensus::ChainState;
-use crate::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
+use crate::encoding::SiaEncodable;
+use crate::encoding_async::{
+    AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable, AsyncSiaEncode, EncodingError,
+};
 use crate::rhp::SECTOR_SIZE;
 use blake2b_simd::Params;
-use serde::{Deserialize, Serialize};
 
 use crate::signing::{PrivateKey, PublicKey, Signature};
 use crate::types::v2::{FileContract, SatisfiedPolicy, SiacoinElement, SiacoinInput, Transaction};
 use crate::types::{
-    specifier, Address, ChainIndex, Currency, FileContractID, Hash256, Leaf, SiacoinOutput,
-    Specifier,
+    Address, ChainIndex, Currency, FileContractID, Hash256, Leaf, SiacoinOutput, Specifier,
+    specifier,
 };
 
 const STANDARD_OBJECT_SIZE: usize = 1024; // 1 KiB
@@ -53,16 +56,14 @@ pub trait TransactionBuilder {
 
 /// HostInputsResponse contains the host's Siacoin inputs for funding a
 /// formation or resolution transaction.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct HostInputsResponse {
     pub host_inputs: Vec<SiacoinInput>,
 }
 
 /// RPCFormContractThirdResponse contains the finalized formation
 /// transaction set.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct TransactionSetResponse {
     pub basis: ChainIndex,
     pub transaction_set: Vec<Transaction>,
@@ -70,16 +71,14 @@ struct TransactionSetResponse {
 
 /// HostSignatureResponse contains the host's signature for a
 /// contract revision.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct HostSignatureResponse {
     pub host_signature: Signature,
 }
 
 /// RenterSignatureResponse contains the renter's signature for a
 /// contract revision.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RenterSignatureResponse {
     pub renter_signature: Signature,
 }
@@ -88,8 +87,7 @@ struct RenterSignatureResponse {
 /// contract resolution transaction.
 ///
 /// At this point, the host has enough information to broadcast the refresh.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RenterResolutionSignaturesResponse {
     pub renter_renewal_signature: Signature,
     pub renter_contract_signature: Signature,
@@ -97,8 +95,7 @@ struct RenterResolutionSignaturesResponse {
 }
 
 /// RPCRefreshContractParams contains the parameters for refreshing a contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 pub struct RefreshContractParams {
     pub contract_id: FileContractID,
     pub allowance: Currency,
@@ -115,8 +112,7 @@ pub struct RPCRefreshContractRequestParams {
 }
 
 /// RPCRefreshContractRequest is the request type for RPCRefreshContract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCRefreshContractRequest {
     pub prices: HostPrices,
     pub refresh: RefreshContractParams,
@@ -152,8 +148,7 @@ impl RPCRefreshContractRequest {
 }
 
 /// RPCRenewContractParams contains the parameters for renewing a contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RenewContractParams {
     pub contract_id: FileContractID,
     pub allowance: Currency,
@@ -171,8 +166,7 @@ struct RPCRenewContractRequestParams {
 }
 
 /// RPCRenewContractRequest is the request type for RPCRenewContract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCRenewContractRequest {
     pub prices: HostPrices,
     pub renewal: RenewContractParams,
@@ -214,8 +208,7 @@ pub struct RPCFreeSectorsRequestParams {
 }
 
 /// RPCFreeSectorsRequest is the request type for removing sectors from a contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCFreeSectorsRequest {
     pub contract_id: FileContractID,
     pub prices: HostPrices,
@@ -248,8 +241,7 @@ impl RPCFreeSectorsRequest {
 /// and the new merkle root after freeing sectors.
 ///
 /// The renter must validate the response
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCFreeSectorsResponse {
     pub old_subtree_hashes: Vec<Hash256>,
     pub old_leaf_hashes: Vec<Hash256>,
@@ -258,8 +250,7 @@ struct RPCFreeSectorsResponse {
 
 /// RPCLatestRevisionRequest is the request type for getting the latest
 /// revision of a file contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCLatestRevisionRequest {
     pub contract_id: FileContractID,
 }
@@ -269,8 +260,7 @@ struct RPCLatestRevisionRequest {
 ///
 /// If either `revisable` or `renewed` is false, the host will not accept
 /// further revisions or renewals of the contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCLatestRevisionResponse {
     pub contract: FileContract,
     pub revisable: bool,
@@ -284,8 +274,7 @@ struct RPCAppendSectorsRequestParams {
 }
 
 /// RPCAppendSectorsRequest is the request type for appending sectors to a contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCAppendSectorsRequest {
     pub prices: HostPrices,
     pub sectors: Vec<Hash256>,
@@ -318,8 +307,7 @@ impl RPCAppendSectorsRequest {
 /// It includes the sectors that were accepted, the subtree roots, and the new
 /// merkle root after the append operation. The renter must validate the proof
 /// against the accepted roots.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCAppendSectorsResponse {
     pub accepted: Vec<bool>,
     pub subtree_roots: Vec<Hash256>,
@@ -328,8 +316,7 @@ struct RPCAppendSectorsResponse {
 
 /// RPCSectorRootsRequest is the request type for getting the sector roots
 /// for a contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCSectorRootsRequest {
     pub prices: HostPrices,
     pub contract_id: FileContractID,
@@ -340,8 +327,7 @@ struct RPCSectorRootsRequest {
 
 /// RPCSectorRootsResponse contains the sector roots and a proof for a contract.
 /// The renter must validate the proof against the roots.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCSectorRootsResponse {
     pub proof: Vec<Hash256>,
     pub roots: Vec<Hash256>,
@@ -350,15 +336,13 @@ struct RPCSectorRootsResponse {
 
 /// RPCAccountBalanceRequest is the request type for getting the balance of
 /// an account.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCAccountBalanceRequest {
     pub account: PublicKey,
 }
 
 /// RPCAccountBalanceResponse contains the balance of an account.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCAccountBalanceResponse {
     pub balance: Currency,
 }
@@ -374,8 +358,7 @@ struct RPCReplenishAccountsParams {
 ///
 /// The host will fund the account to the target amount and send
 /// a revision to the renter for verification.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCReplenishAccountsRequest {
     pub accounts: Vec<PublicKey>,
     pub target: Currency,
@@ -411,16 +394,14 @@ impl RPCReplenishAccountsRequest {
 ///
 /// The renter should verify the deposits and construct a revision
 /// transferring the funds.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCReplenishAccountsResponse {
     pub deposits: Vec<AccountDeposit>,
 }
 
 /// RPCVerifySectorRequest is the request type for verifying the host
 /// is storing a sector.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCVerifySectorRequest {
     pub prices: HostPrices,
     pub token: AccountToken,
@@ -430,8 +411,7 @@ struct RPCVerifySectorRequest {
 
 /// RPCVerifySectorResponse contains a proof that the host is storing a
 /// sector.
-#[derive(Debug, PartialEq, SiaEncode, SiaDecode, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCVerifySectorResponse {
     pub proof: Vec<Hash256>,
     pub leaf: Leaf,
@@ -441,8 +421,7 @@ struct RPCVerifySectorResponse {
 /// with Siacoin deposits.
 ///
 /// RPCReplenishAccounts should be preferred
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCFundAccountsRequest {
     pub contract_id: FileContractID,
     pub deposits: Vec<AccountDeposit>,
@@ -451,16 +430,15 @@ struct RPCFundAccountsRequest {
 
 /// RPCFundAccountsResponse contains the host's signature and new
 /// balance after funding the accounts.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+
 struct RPCFundAccountsResponse {
     pub balances: Vec<Currency>,
     pub host_signature: Signature,
 }
 
 /// RPCError is the error type returned by the RPC server.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaDecode, AsyncSiaEncode)]
 pub struct RPCError {
     pub code: u8,
     pub description: String,
@@ -476,10 +454,12 @@ impl std::error::Error for RPCError {}
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("transport error: {0}")]
+    Transport(String),
     #[error("IO error: {0}")]
     IO(#[from] io::Error),
     #[error("Encoding error: {0}")]
-    Encoding(#[from] encoding::Error),
+    Encoding(#[from] EncodingError),
 
     #[error("RPC error: {0}")]
     RPC(#[from] RPCError),
@@ -494,7 +474,8 @@ pub enum Error {
     ExpectedTransactionSet,
 }
 
-#[derive(Debug, Default, PartialEq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Usage {
     pub rpc: Currency,
     pub storage: Currency,
@@ -575,56 +556,72 @@ impl Usage {
     }
 }
 
-pub trait RPCRequest: SiaEncodable + SiaDecodable {
+pub trait RPCRequest: AsyncSiaEncodable + AsyncSiaDecodable {
     const RPC_ID: Specifier;
 }
 
 /// A TransportStream is a trait for sending and receiving RPC requests and responses.
 /// It abstracts the underlying transport mechanism, allowing for different implementations
 /// (e.g., TCP, QUIC, WebTransport) to be used without changing the RPC logic.
-pub trait TransportStream: Read + Write {
-    fn write_request<R: RPCRequest>(&mut self, request: &R) -> Result<(), Error>
-    where
-        Self: Sized,
-    {
+pub trait TransportStream {
+    fn write_request<R: RPCRequest>(
+        &mut self,
+        request: &R,
+    ) -> impl Future<Output = Result<(), Error>>;
+    fn write_response<R: AsyncSiaEncodable>(
+        &mut self,
+        response: &R,
+    ) -> impl Future<Output = Result<(), Error>>;
+    fn write_response_error(&mut self, error: &RPCError)
+    -> impl Future<Output = Result<(), Error>>;
+    fn read_response<R: AsyncSiaDecodable>(
+        &mut self,
+        max_size: usize,
+    ) -> impl Future<Output = Result<R, Error>>;
+}
+
+impl<T: Read + Write + Sized> TransportStream for T {
+    async fn write_request<R: RPCRequest>(&mut self, request: &R) -> Result<(), Error> {
         self.write_all(R::RPC_ID.as_ref())?;
-        request.encode(self)?;
+        request.encode_async(self).await?;
+        self.flush()?;
         Ok(())
     }
 
-    fn write_response<R: SiaEncodable>(&mut self, response: &R) -> Result<(), Error>
-    where
-        Self: Sized,
-    {
+    async fn write_response<R: AsyncSiaEncodable>(&mut self, response: &R) -> Result<(), Error> {
         self.write_all(&[0])?; // nil error
-        response.encode(self)?;
+        response.encode_async(self).await?;
+        self.flush()?;
         Ok(())
     }
 
-    fn read_response<R: SiaDecodable>(&mut self, max_size: usize) -> Result<R, Error> {
-        let mut error_byte = [0u8; 1];
-        self.read_exact(&mut error_byte)?;
-        match error_byte[0] {
-            0 => {
+    async fn write_response_error(&mut self, error: &RPCError) -> Result<(), Error> {
+        self.write_all(&[1])?; // non-nil error
+        error.encode_async(self).await?;
+        self.flush()?;
+        Ok(())
+    }
+
+    async fn read_response<R: AsyncSiaDecodable>(&mut self, max_size: usize) -> Result<R, Error> {
+        let has_error = bool::decode_async(self).await?;
+        match has_error {
+            false => {
                 let mut r = self.take(max_size as u64);
-                let resp = R::decode(&mut r)?;
+                let resp = R::decode_async(&mut r).await?;
                 Ok(resp)
             }
-            1 => {
+            true => {
                 let mut r = self.take(1024);
-                let error = RPCError::decode(&mut r).map(Error::RPC)?;
+                let error = RPCError::decode_async(&mut r).await.map(Error::RPC)?;
                 Err(error)
             }
-            _ => Err(Error::Encoding(encoding::Error::InvalidValue)),
         }
     }
 }
 
-impl<T: Read + Write> TransportStream for T {}
-
 /// RPCSettingsRequest is the request type getting the host's current settings.
 /// It is encoded as 0 bytes.
-#[derive(Debug, PartialEq, SiaEncode, SiaDecode)]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCSettingsRequest {}
 
 impl RPCRequest for RPCSettingsRequest {
@@ -632,12 +629,13 @@ impl RPCRequest for RPCSettingsRequest {
 }
 
 /// RPCSettingsResponse is the response type for the RPC settings endpoint.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaDecode, AsyncSiaEncode)]
 struct RPCSettingsResponse {
     pub settings: HostSettings,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RPCSettingsResult {
     pub settings: HostSettings,
     pub usage: Usage,
@@ -650,8 +648,10 @@ pub struct RPCSettings<TransportStream, State> {
 }
 
 impl<T: TransportStream> RPCSettings<T, RPCSettingsRequest> {
-    pub fn send_request(mut transport: T) -> Result<RPCSettings<T, RPCSettingsResponse>, Error> {
-        transport.write_request(&RPCSettingsRequest {})?;
+    pub async fn send_request(
+        mut transport: T,
+    ) -> Result<RPCSettings<T, RPCSettingsResponse>, Error> {
+        transport.write_request(&RPCSettingsRequest {}).await?;
 
         Ok(RPCSettings {
             transport,
@@ -661,8 +661,9 @@ impl<T: TransportStream> RPCSettings<T, RPCSettingsRequest> {
 }
 
 impl<T: TransportStream> RPCSettings<T, RPCSettingsResponse> {
-    pub fn complete(mut self) -> Result<RPCSettingsResult, Error> {
-        let response: RPCSettingsResponse = self.transport.read_response(STANDARD_OBJECT_SIZE)?;
+    pub async fn complete(mut self) -> Result<RPCSettingsResult, Error> {
+        let response: RPCSettingsResponse =
+            self.transport.read_response(STANDARD_OBJECT_SIZE).await?;
         Ok(RPCSettingsResult {
             settings: response.settings,
             usage: Usage::default(),
@@ -675,12 +676,11 @@ impl<T: TransportStream> RPCSettings<T, RPCSettingsResponse> {
 ///
 /// The host will store the sector for 432 blocks. If the sector is not
 /// appended to a contract within that time, it will be deleted.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCWriteSectorRequest {
     pub prices: HostPrices,
     pub token: AccountToken,
-    pub data_length: usize,
+    pub data: Vec<u8>,
 }
 
 impl RPCRequest for RPCWriteSectorRequest {
@@ -690,8 +690,7 @@ impl RPCRequest for RPCWriteSectorRequest {
 /// RPCWriteSectorResponse contains the root hash of the written sector.
 ///
 /// The renter must verify the root hash against the data written.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCWriteSectorResponse {
     pub root: Hash256,
 }
@@ -712,21 +711,19 @@ pub struct RPCWriteSector<TransportStream, State> {
 }
 
 impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorRequest> {
-    pub fn send_request<D: AsRef<[u8]>>(
+    pub async fn send_request(
         mut transport: T,
         prices: HostPrices,
         token: AccountToken,
-        data: D,
+        data: Vec<u8>,
     ) -> Result<RPCWriteSector<T, RPCWriteSectorResponse>, Error> {
-        let data = data.as_ref();
         let usage = Usage::write_sector(&prices, data.len());
         let request = RPCWriteSectorRequest {
             prices,
             token,
-            data_length: data.len(),
+            data,
         };
-        transport.write_request(&request)?;
-        transport.write_all(data)?;
+        transport.write_request(&request).await?;
 
         Ok(RPCWriteSector {
             transport,
@@ -737,8 +734,8 @@ impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorRequest> {
 }
 
 impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorResponse> {
-    pub fn complete(mut self) -> Result<RPCWriteSectorResult, Error> {
-        let response: RPCWriteSectorResponse = self.transport.read_response(32)?;
+    pub async fn complete(mut self) -> Result<RPCWriteSectorResult, Error> {
+        let response: RPCWriteSectorResponse = self.transport.read_response(32).await?;
         Ok(RPCWriteSectorResult {
             root: response.root,
             usage: self.usage,
@@ -748,8 +745,7 @@ impl<T: TransportStream> RPCWriteSector<T, RPCWriteSectorResponse> {
 
 /// RPCReadSectorRequest is the request type for reading a sector from the
 /// host.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCReadSectorRequest {
     pub prices: HostPrices,
     pub token: AccountToken,
@@ -764,8 +760,7 @@ impl RPCRequest for RPCReadSectorRequest {
 
 /// RPCReadSectorResponse contains the proof and data for a sector read request.
 /// The renter must validate the proof against the root hash.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCReadSectorResponse {
     pub proof: Vec<Hash256>,
     pub data: Vec<u8>,
@@ -786,7 +781,7 @@ pub struct RPCReadSector<T: TransportStream, State> {
 }
 
 impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
-    pub fn send_request(
+    pub async fn send_request(
         mut transport: T,
         prices: HostPrices,
         token: AccountToken,
@@ -802,7 +797,7 @@ impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
             length: length as u64,
             offset: offset as u64,
         };
-        transport.write_request(&request)?;
+        transport.write_request(&request).await?;
 
         Ok(RPCReadSector {
             transport,
@@ -813,9 +808,9 @@ impl<T: TransportStream> RPCReadSector<T, RPCReadSectorRequest> {
 }
 
 impl<T: TransportStream> RPCReadSector<T, RPCReadSectorResponse> {
-    pub fn complete(mut self) -> Result<RPCReadSectorResult, Error> {
+    pub async fn complete(mut self) -> Result<RPCReadSectorResult, Error> {
         let response: RPCReadSectorResponse =
-            self.transport.read_response(1024 + 8 + SECTOR_SIZE)?;
+            self.transport.read_response(1024 + 8 + SECTOR_SIZE).await?;
         Ok(RPCReadSectorResult {
             usage: self.usage,
             data: response.data,
@@ -824,8 +819,7 @@ impl<T: TransportStream> RPCReadSector<T, RPCReadSectorResponse> {
 }
 
 /// FormContractParams contains the parameters for forming a new contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct FormContractParams {
     pub renter_public_key: PublicKey,
     pub renter_address: Address,
@@ -835,8 +829,7 @@ struct FormContractParams {
 }
 
 /// RPCFormContractRequest is the request type for RPCFormContract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCFormContractRequest {
     pub prices: HostPrices,
     pub contract: FormContractParams,
@@ -854,8 +847,7 @@ impl RPCRequest for RPCFormContractRequest {
 /// Siacoin input signatures for the contract formation transaction.
 ///
 /// At this point, the host has enough information to broadcast the formation.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RenterFormContractSignaturesResponse {
     pub renter_contract_signature: Signature,
     pub renter_satisfied_policies: Vec<SatisfiedPolicy>,
@@ -913,7 +905,7 @@ pub struct RPCFormContractResult {
 impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, RPCFormContractRequest>
 {
-    pub fn send_request(
+    pub async fn send_request(
         mut transport: T,
         contract_signer: S,
         transaction_builder: B,
@@ -970,7 +962,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
                 .collect(),
             renter_parents: Vec::new(),
         };
-        transport.write_request(&request)?;
+        transport.write_request(&request).await?;
 
         Ok(RPCFormContract {
             transport,
@@ -989,10 +981,10 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
 impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, HostInputsResponse>
 {
-    pub fn receive_host_inputs(
+    pub async fn receive_host_inputs(
         mut self,
     ) -> Result<RPCFormContract<T, S, B, RenterFormContractSignaturesResponse>, Error> {
-        let host_inputs_response: HostInputsResponse = self.transport.read_response(10240)?;
+        let host_inputs_response: HostInputsResponse = self.transport.read_response(10240).await?;
         let mut formation_txn = self.formation_transaction;
 
         let host_funding = self.contract.total_collateral;
@@ -1032,7 +1024,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
         &self.formation_transaction.siacoin_inputs[self.renter_inputs_len..]
     }
 
-    pub fn send_renter_signatures(
+    pub async fn send_renter_signatures(
         mut self,
     ) -> Result<RPCFormContract<T, S, B, TransactionSetResponse>, Error> {
         let mut formation_txn = self.formation_transaction;
@@ -1050,7 +1042,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
                 .map(|si| si.satisfied_policy.clone())
                 .collect(),
         };
-        self.transport.write_response(&renter_sigs_response)?;
+        self.transport.write_response(&renter_sigs_response).await?;
 
         Ok(RPCFormContract {
             transport: self.transport,
@@ -1069,8 +1061,9 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
 impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, TransactionSetResponse>
 {
-    pub fn complete(mut self) -> Result<RPCFormContractResult, Error> {
-        let resp: TransactionSetResponse = self.transport.read_response(STANDARD_TXNSET_SIZE)?;
+    pub async fn complete(mut self) -> Result<RPCFormContractResult, Error> {
+        let resp: TransactionSetResponse =
+            self.transport.read_response(STANDARD_TXNSET_SIZE).await?;
         let formation_txn = resp
             .transaction_set
             .last()
@@ -1091,23 +1084,6 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     }
 }
 
-pub fn rpc_form_contract<T, S, B>(
-    transport: T,
-    contract_signer: S,
-    transaction_builder: B,
-    params: RPCFormContractParams,
-) -> Result<RPCFormContractResult, Error>
-where
-    T: TransportStream,
-    S: RenterContractSigner,
-    B: TransactionBuilder,
-{
-    RPCFormContract::send_request(transport, contract_signer, transaction_builder, params)?
-        .receive_host_inputs()?
-        .send_renter_signatures()?
-        .complete()
-}
-
 #[cfg(test)]
 mod test {
     use std::io::Cursor;
@@ -1115,8 +1091,8 @@ mod test {
 
     use super::*;
 
-    #[test]
-    fn test_write_request() {
+    #[tokio::test]
+    async fn test_write_request() {
         const EXPECTED_HEX: &str = "52656164536563746f72000000000000000000a1edccce1bc2d300000000000000000042db999d3784a7010000000000000000e3c8666c53467b02000000000000000084b6333b6f084f03000000000000000025a4000a8bca22040000000000000000c691cdd8a68cf604000000000007000000000000000800000000000000090000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000b000000000000000000000000000000000000000000000000000000000000000c000000000000000d0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000f000000000000001000000000000000";
 
         let mut buf = Cursor::new(Vec::<u8>::new());
@@ -1164,17 +1140,17 @@ mod test {
             offset: 15,
             length: 16,
         };
-        buf.write_request(&req).unwrap();
+        buf.write_request(&req).await.unwrap();
         buf.flush().unwrap();
         assert_eq!(buf.into_inner(), hex::decode(EXPECTED_HEX).unwrap());
     }
 
-    #[test]
-    fn test_read_response() {
+    #[tokio::test]
+    async fn test_read_response() {
         const HEX_BYTES: &str = "00030000000000000001000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000000003000000000000000400000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000";
 
         let mut buf = Cursor::new(hex::decode(HEX_BYTES).unwrap());
-        let resp: RPCFreeSectorsResponse = buf.read_response(1024).unwrap();
+        let resp: RPCFreeSectorsResponse = buf.read_response(1024).await.unwrap();
 
         let expected = RPCFreeSectorsResponse {
             old_subtree_hashes: vec![
@@ -1221,13 +1197,14 @@ mod test {
         assert_eq!(resp, expected);
     }
 
-    #[test]
-    fn test_response_error() {
+    #[tokio::test]
+    async fn test_response_error() {
         const HEX_BYTES: &str = "01010b00000000000000666f6f206261722062617a";
 
         let mut buf = Cursor::new(hex::decode(HEX_BYTES).unwrap());
         let err = buf
             .read_response::<RPCReadSectorResponse>(1024)
+            .await
             .unwrap_err();
 
         let expected_err = RPCError {

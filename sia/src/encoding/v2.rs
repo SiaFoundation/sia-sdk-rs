@@ -95,11 +95,9 @@ impl<T: SiaEncodable> SiaEncodable for Option<T> {
 
 impl<T: SiaDecodable> SiaDecodable for Option<T> {
     fn decode<R: Read>(r: &mut R) -> Result<Self> {
-        let has_value = bool::decode(r)?;
-        if has_value {
-            Ok(Some(T::decode(r)?))
-        } else {
-            Ok(None)
+        match bool::decode(r)? {
+            true => Ok(Some(T::decode(r)?)),
+            false => Ok(None),
         }
     }
 }
