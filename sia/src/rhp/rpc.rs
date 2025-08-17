@@ -69,6 +69,7 @@ struct TransactionSetResponse {
 /// HostSignatureResponse contains the host's signature for a
 /// contract revision.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+#[allow(dead_code)] // TODO: use RPC
 struct HostSignatureResponse {
     pub host_signature: Signature,
 }
@@ -76,6 +77,7 @@ struct HostSignatureResponse {
 /// RenterSignatureResponse contains the renter's signature for a
 /// contract revision.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+#[allow(dead_code)] // TODO: use RPC
 struct RenterSignatureResponse {
     pub renter_signature: Signature,
 }
@@ -85,6 +87,7 @@ struct RenterSignatureResponse {
 ///
 /// At this point, the host has enough information to broadcast the refresh.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+#[allow(dead_code)] // TODO: use RPC
 struct RenterResolutionSignaturesResponse {
     pub renter_renewal_signature: Signature,
     pub renter_contract_signature: Signature,
@@ -239,6 +242,7 @@ impl RPCFreeSectorsRequest {
 ///
 /// The renter must validate the response
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+#[allow(dead_code)] // TODO: use RPC
 struct RPCFreeSectorsResponse {
     pub old_subtree_hashes: Vec<Hash256>,
     pub old_leaf_hashes: Vec<Hash256>,
@@ -248,6 +252,7 @@ struct RPCFreeSectorsResponse {
 /// RPCLatestRevisionRequest is the request type for getting the latest
 /// revision of a file contract.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+#[allow(dead_code)] // TODO: use RPC
 struct RPCLatestRevisionRequest {
     pub contract_id: FileContractID,
 }
@@ -258,6 +263,7 @@ struct RPCLatestRevisionRequest {
 /// If either `revisable` or `renewed` is false, the host will not accept
 /// further revisions or renewals of the contract.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+#[allow(dead_code)] // TODO: use RPC
 struct RPCLatestRevisionResponse {
     pub contract: FileContract,
     pub revisable: bool,
@@ -305,6 +311,7 @@ impl RPCAppendSectorsRequest {
 /// merkle root after the append operation. The renter must validate the proof
 /// against the accepted roots.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+#[allow(dead_code)] // TODO: use RPC
 struct RPCAppendSectorsResponse {
     pub accepted: Vec<bool>,
     pub subtree_roots: Vec<Hash256>,
@@ -314,6 +321,7 @@ struct RPCAppendSectorsResponse {
 /// RPCSectorRootsRequest is the request type for getting the sector roots
 /// for a contract.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+#[allow(dead_code)] // TODO: use RPC
 struct RPCSectorRootsRequest {
     pub prices: HostPrices,
     pub contract_id: FileContractID,
@@ -325,6 +333,7 @@ struct RPCSectorRootsRequest {
 /// RPCSectorRootsResponse contains the sector roots and a proof for a contract.
 /// The renter must validate the proof against the roots.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+#[allow(dead_code)] // TODO: use RPC
 struct RPCSectorRootsResponse {
     pub proof: Vec<Hash256>,
     pub roots: Vec<Hash256>,
@@ -379,6 +388,7 @@ impl RPCReplenishAccountsRequest {
 /// The renter should verify the deposits and construct a revision
 /// transferring the funds.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+#[allow(dead_code)] // TODO: use RPC
 struct RPCReplenishAccountsResponse {
     pub deposits: Vec<AccountDeposit>,
 }
@@ -386,6 +396,7 @@ struct RPCReplenishAccountsResponse {
 /// RPCVerifySectorRequest is the request type for verifying the host
 /// is storing a sector.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+#[allow(dead_code)] // TODO: use RPC
 struct RPCVerifySectorRequest {
     pub prices: HostPrices,
     pub token: AccountToken,
@@ -396,6 +407,7 @@ struct RPCVerifySectorRequest {
 /// RPCVerifySectorResponse contains a proof that the host is storing a
 /// sector.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+#[allow(dead_code)] // TODO: use RPC
 struct RPCVerifySectorResponse {
     pub proof: Vec<Hash256>,
     pub leaf: Leaf,
@@ -406,6 +418,7 @@ struct RPCVerifySectorResponse {
 ///
 /// RPCReplenishAccounts should be preferred
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
+#[allow(dead_code)] // TODO: use RPC
 struct RPCFundAccountsRequest {
     pub contract_id: FileContractID,
     pub deposits: Vec<AccountDeposit>,
@@ -415,7 +428,7 @@ struct RPCFundAccountsRequest {
 /// RPCFundAccountsResponse contains the host's signature and new
 /// balance after funding the accounts.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
-
+#[allow(dead_code)] // TODO: use RPC
 struct RPCFundAccountsResponse {
     pub balances: Vec<Currency>,
     pub host_signature: Signature,
