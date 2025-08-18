@@ -98,8 +98,10 @@ mod tests {
 
         encoder.encode_shards(&mut shards).unwrap();
 
-        for (i, shard) in shards.iter().enumerate() {
-            println!("{i}: {:?}", &shard[..20]);
-        }
+        assert_eq!(shards[0], vec![1u8; SECTOR_SIZE]);
+        assert_eq!(shards[1], vec![2u8; SECTOR_SIZE]);
+        assert_eq!(shards[2], vec![7u8; SECTOR_SIZE]);
+        assert_eq!(shards[3], vec![4u8; SECTOR_SIZE]);
+        assert_eq!(shards[4], vec![13u8; SECTOR_SIZE]);
     }
 }
