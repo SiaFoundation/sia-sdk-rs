@@ -1,25 +1,6 @@
-pub use sia_derive::{AsyncSiaDecode, AsyncSiaEncode};
-use thiserror::Error;
+use super::{Error, Result};
 use time::{Duration, OffsetDateTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-#[derive(Debug, Error)]
-pub enum EncodingError {
-    #[error("I/O error: {0}")]
-    IOError(String),
-    #[error("Invalid data: {0}")]
-    InvalidData(String),
-    #[error("Invalid timestamp")]
-    InvalidTimestamp,
-    #[error("Invalid length")]
-    InvalidLength,
-    #[error("Invalid value")]
-    InvalidValue,
-    #[error("Custom error: {0}")]
-    Custom(String),
-}
-
-pub type Result<T> = std::result::Result<T, EncodingError>;
 
 pub trait AsyncEncoder {
     fn write_all(&mut self, buf: &[u8]) -> impl Future<Output = Result<()>>;
@@ -41,7 +22,7 @@ impl<T: AsyncWriteExt + Unpin> AsyncEncoder for T {
     async fn write_all(&mut self, buf: &[u8]) -> Result<()> {
         self.write_all(buf)
             .await
-            .map_err(|e| EncodingError::IOError(e.to_string()))
+            .map_err(|e| Error::IOError(e.to_string()))
     }
 }
 
@@ -49,7 +30,7 @@ impl<T: AsyncReadExt + Unpin> AsyncDecoder for T {
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
         self.read_exact(buf)
             .await
-            .map_err(|e| EncodingError::IOError(e.to_string()))?;
+            .map_err(|e| Error::IOError(e.to_string()))?;
         Ok(())
     }
 }
@@ -80,7 +61,7 @@ impl AsyncSiaDecodable for bool {
         match v {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(EncodingError::InvalidValue),
+            _ => Err(Error::InvalidValue),
         }
     }
 }
@@ -94,7 +75,7 @@ impl AsyncSiaEncodable for OffsetDateTime {
 impl AsyncSiaDecodable for OffsetDateTime {
     async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
         let timestamp = i64::decode_async(r).await?;
-        OffsetDateTime::from_unix_timestamp(timestamp).map_err(|_| EncodingError::InvalidTimestamp)
+        OffsetDateTime::from_unix_timestamp(timestamp).map_err(|_| Error::InvalidTimestamp)
     }
 }
 
@@ -108,7 +89,7 @@ impl AsyncSiaDecodable for Duration {
     async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
         let ns = u64::decode_async(r).await?;
         if ns > i64::MAX as u64 {
-            return Err(EncodingError::InvalidValue);
+            return Err(Error::InvalidValue);
         }
         Ok(Duration::nanoseconds(ns as i64))
     }
@@ -185,8 +166,7 @@ impl AsyncSiaEncodable for String {
 impl AsyncSiaDecodable for String {
     async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
         let bytes = Vec::<u8>::decode_async(r).await?;
-        String::from_utf8(bytes)
-            .map_err(|_| EncodingError::InvalidData("Invalid UTF-8 string".to_string()))
+        String::from_utf8(bytes).map_err(|_| Error::InvalidData("Invalid UTF-8 string".to_string()))
     }
 }
 

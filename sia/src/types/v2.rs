@@ -4,7 +4,7 @@ use crate::consensus::ChainState;
 use crate::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use crate::encoding_async::{
     AsyncDecoder, AsyncEncoder, AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable,
-    AsyncSiaEncode, EncodingError, Result as AsyncResult,
+    AsyncSiaEncode, Error as AsyncError, Result as AsyncResult,
 };
 use blake2b_simd::Params;
 use serde::de::{Error, MapAccess, Visitor};
@@ -422,7 +422,7 @@ impl AsyncSiaDecodable for FileContractResolution {
             0 => ContractResolution::Renewal(FileContractRenewal::decode_async(d).await?),
             1 => ContractResolution::StorageProof(StorageProof::decode_async(d).await?),
             2 => ContractResolution::Expiration(),
-            _ => return Err(EncodingError::InvalidValue),
+            _ => return Err(AsyncError::InvalidValue),
         };
         Ok(FileContractResolution { parent, resolution })
     }
@@ -805,7 +805,7 @@ impl AsyncSiaDecodable for Transaction {
     async fn decode_async<D: AsyncDecoder>(d: &mut D) -> AsyncResult<Self> {
         let version = u8::decode_async(d).await?;
         if version != TXN_VERSION {
-            return Err(EncodingError::InvalidValue);
+            return Err(AsyncError::InvalidValue);
         }
 
         let fields = u64::decode_async(d).await?;
