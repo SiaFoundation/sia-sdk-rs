@@ -1,7 +1,7 @@
 use crate::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use crate::encoding_async::{
     AsyncDecoder, AsyncEncoder, AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable,
-    AsyncSiaEncode, EncodingError, Result as AsyncResult,
+    AsyncSiaEncode, Error as AsyncError, Result as AsyncResult,
 };
 use crate::signing::{PublicKey, Signature};
 #[allow(deprecated)]
@@ -450,12 +450,12 @@ impl AsyncSiaDecodable for SpendPolicy {
                 POLICY_UNLOCK_CONDITIONS_PREFIX => Ok(SpendPolicy::UnlockConditions(
                     UnlockConditions::decode_async(d).await?,
                 )),
-                _ => Err(EncodingError::InvalidValue),
+                _ => Err(AsyncError::InvalidValue),
             }
         }
         let policy_version = u8::decode_async(d).await?;
         if policy_version != 1 {
-            return Err(EncodingError::InvalidValue);
+            return Err(AsyncError::InvalidValue);
         }
         decode_policy(d).await
     }
