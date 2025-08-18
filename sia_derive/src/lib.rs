@@ -221,7 +221,7 @@ pub fn derive_async_sia_encode(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl AsyncSiaEncodable for #name {
-            async fn encode_async<E: crate::encoding_async::AsyncEncoder>(&self, e: &mut E) -> Result<(), crate::encoding_async::EncodingError> {
+            async fn encode_async<E: crate::encoding_async::AsyncEncoder>(&self, e: &mut E) -> crate::encoding_async::Result<()> {
                 #encode_impl
             }
         }
@@ -269,7 +269,7 @@ pub fn derive_async_sia_decode(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl AsyncSiaDecodable for #name {
-            async fn decode_async<D: crate::encoding_async::AsyncDecoder>(d: &mut D) -> Result<Self, crate::encoding_async::EncodingError> {
+            async fn decode_async<D: crate::encoding_async::AsyncDecoder>(d: &mut D) -> crate::encoding_async::Result<Self> {
                 #decode_impl
             }
         }

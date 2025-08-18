@@ -8,7 +8,7 @@ use crate::consensus::ChainState;
 use crate::encoding::SiaEncodable;
 use crate::encoding_async::{
     AsyncDecoder, AsyncEncoder, AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable,
-    AsyncSiaEncode, EncodingError,
+    AsyncSiaEncode, Error as AsyncError,
 };
 use crate::rhp::SECTOR_SIZE;
 use blake2b_simd::Params;
@@ -456,7 +456,7 @@ pub enum Error {
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
     #[error("Encoding error: {0}")]
-    Encoding(#[from] EncodingError),
+    Encoding(#[from] AsyncError),
 
     #[error("RPC error: {0}")]
     RPC(#[from] RPCError),
