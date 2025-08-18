@@ -1,5 +1,6 @@
 use crate::rhp::{SECTOR_SIZE, SEGMENT_SIZE};
 use core::convert::AsRef;
+use reed_solomon_erasure::galois_8::ReedSolomon;
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use std::{
     io::{self, BufRead, BufReader, Read},
@@ -10,7 +11,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("ReedSolomon error: {0}")]
-    ReedSolomon(#[from] reed_solomon_simd::Error),
+    ReedSolomon(#[from] reed_solomon_erasure::Error),
 
     #[error("Invalid number of shards: expected {expected}, got {actual}")]
     InvalidNumberOfShards { expected: usize, actual: usize },
@@ -25,7 +26,7 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct Encoder {
-    encoder: ReedSolomonEncoder,
+    encoder: ReedSolomon,
     data_shards: usize,
     parity_shards: usize,
     sector_size: usize,
@@ -42,7 +43,7 @@ impl Encoder {
         sector_size: usize,
     ) -> Result<Self> {
         Ok(Encoder {
-            encoder: ReedSolomonEncoder::new(data_shards, parity_shards, sector_size)?,
+            encoder: ReedSolomon::new(data_shards, parity_shards).unwrap(),
             data_shards,
             parity_shards,
             sector_size,
@@ -87,14 +88,7 @@ impl Encoder {
     /// encode_shards encodes the shards using reed solomon erasure coding,
     /// computing the parity shards and overwriting their values.
     pub fn encode_shards(&mut self, shards: &mut [Vec<u8>]) -> Result<()> {
-        for shard in shards[..self.data_shards].iter() {
-            self.encoder.add_original_shard(shard)?;
-        }
-
-        let result = self.encoder.encode()?;
-        for i in 0..self.parity_shards {
-            shards[i + self.data_shards].copy_from_slice(result.recovery(i).unwrap());
-        }
+        self.encoder.encode(shards)?;
         Ok(())
     }
 }
