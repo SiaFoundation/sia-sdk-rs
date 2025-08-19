@@ -12,7 +12,7 @@ use crate::signing::PublicKey;
 use crate::types::Hash256;
 
 pub trait SectorUploader {
-    fn write_sector(&self, sector: Vec<u8>) -> impl Future<Output = Result<Sector, RHPError>>;
+    fn write_sector(&self, sector: impl AsRef<[u8]>) -> impl Future<Output = Result<Sector, RHPError>>;
 }
 
 pub trait SectorDownloader {
@@ -52,7 +52,8 @@ pub struct Slab {
 }
 
 impl Slab {
-    // digest creates a unique identifier for the resulting slab to be referenced by.
+    /// creates a unique identifier for the resulting slab to be referenced by hashing
+    /// its contents, excluding the host key.
     pub fn digest(&self) -> Hash256 {
         let mut state = blake2b_simd::Params::new().hash_length(32).to_state();
 
@@ -64,7 +65,7 @@ impl Slab {
         state.finalize().into()
     }
 
-    /// upload_slab reads a single slab from the provided reader, erasure codes it, then uploads the resulting sectors.
+    /// Reads a single slab from the provided reader, erasure codes it, then uploads the resulting sectors.
     pub async fn upload_slab<R: AsyncReadExt + Unpin, S: SectorUploader>(
         r: &mut R,
         uploader: S,
@@ -89,6 +90,8 @@ impl Slab {
         })
     }
 
+    /// Downloads a slab from the provided hosts. If enough shards are recovered,
+    /// the reconstructed data will be written to the provided writer.
     pub async fn download_slab<W: AsyncWriteExt + Unpin, S: SectorDownloader>(
         &self,
         writer: &mut W,
