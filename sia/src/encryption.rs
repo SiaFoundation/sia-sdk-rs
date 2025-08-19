@@ -3,7 +3,7 @@ use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 
 /// encrypts the provided shards using XChaCha20. To decrypt the shards, call
 /// this function again with the same key.
-/// NOTE: don't reuse the same key for the same set of shads as it will
+/// NOTE: don't reuse the same key for the same set of shards as it will
 /// compromise the security of the encryption. Always use a freshly generated
 /// key.
 pub(crate) fn encrypt_shards<A: AsMut<[u8]>>(key: &[u8; 32], shards: &mut [A], offset: usize) {
@@ -19,7 +19,7 @@ pub(crate) fn encrypt_shards<A: AsMut<[u8]>>(key: &[u8; 32], shards: &mut [A], o
 
 /// encrypts the provided shard using XChaCha20. To decrypt the shard, call
 /// this function again with the same key.
-/// NOTE: don't reuse the same key for the same set of shads as it will
+/// NOTE: don't reuse the same key for the same set of shards as it will
 /// compromise the security of the encryption. Always use a freshly generated
 /// key.
 pub(crate) fn encrypt_shard<A: AsMut<[u8]>>(
