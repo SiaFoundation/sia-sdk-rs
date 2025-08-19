@@ -22,7 +22,12 @@ pub(crate) fn encrypt_shards<A: AsMut<[u8]>>(key: &[u8; 32], shards: &mut [A], o
 /// NOTE: don't reuse the same key for the same set of shads as it will
 /// compromise the security of the encryption. Always use a freshly generated
 /// key.
-pub(crate) fn encrypt_shard<A: AsMut<[u8]>>(key: &[u8; 32], shard: &mut A, index: u8, offset: usize) {
+pub(crate) fn encrypt_shard<A: AsMut<[u8]>>(
+    key: &[u8; 32],
+    shard: &mut A,
+    index: u8,
+    offset: usize,
+) {
     let mut nonce = [0u8; 24]; // XChaCha20 nonce size
     nonce[0] = index;
     let mut cipher = XChaCha20::new(key.into(), &nonce.into());
