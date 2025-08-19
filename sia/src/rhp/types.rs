@@ -54,7 +54,7 @@ impl HostPrices {
     pub fn is_valid(&self, host_key: &PublicKey, timestamp: OffsetDateTime) -> bool {
         self.valid_until > timestamp
             && self.tip_height > 0
-            && host_key.verify(self.sig_hash(), &self.signature)
+            && host_key.verify(&self.sig_hash(), &self.signature)
     }
 }
 
@@ -117,7 +117,7 @@ impl AccountToken {
             account: account_key.public_key(),
             valid_until: expiration_time,
 
-            signature: account_key.sign(sig_hash),
+            signature: account_key.sign(&sig_hash),
         }
     }
 }
