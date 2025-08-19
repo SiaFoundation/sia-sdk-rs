@@ -12,7 +12,10 @@ use crate::signing::PublicKey;
 use crate::types::Hash256;
 
 pub trait SectorUploader {
-    fn write_sector(&self, sector: impl AsRef<[u8]>) -> impl Future<Output = Result<Sector, RHPError>>;
+    fn write_sector(
+        &self,
+        sector: impl AsRef<[u8]>,
+    ) -> impl Future<Output = Result<Sector, RHPError>>;
 }
 
 pub trait SectorDownloader {
