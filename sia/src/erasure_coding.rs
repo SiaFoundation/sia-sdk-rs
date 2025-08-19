@@ -100,8 +100,8 @@ impl ErasureCoder {
             }
 
             for shard in &shards[..self.data_shards] {
-                let shard = match shard {
-                    Some(s) => s,
+                let mut segment = match shard {
+                    Some(s) => &s[off..off + SEGMENT_SIZE],
                     None => {
                         return Err(Error::ReedSolomon(
                             reed_solomon_erasure::Error::TooFewDataShards,
@@ -109,19 +109,18 @@ impl ErasureCoder {
                     }
                 };
 
-                let mut shard = &shard[off..off + SEGMENT_SIZE];
-                if skip > shard.len() {
-                    skip -= shard.len();
+                if skip > segment.len() {
+                    skip -= segment.len();
                     continue;
                 } else if skip > 0 {
-                    shard = &shard[skip..];
+                    segment = &segment[skip..];
                     skip = 0;
                 }
-                if n < shard.len() {
-                    shard = &shard[..n];
+                if n < segment.len() {
+                    segment = &segment[..n];
                 }
-                w.write_all(shard)?;
-                n -= shard.len();
+                w.write_all(segment)?;
+                n -= segment.len();
             }
         }
         Ok(())
