@@ -7,6 +7,8 @@ macro_rules! impl_hash_id {
             Clone,
             Copy,
             PartialEq,
+            $crate::encoding_async::AsyncSiaEncode,
+            $crate::encoding_async::AsyncSiaDecode,
             $crate::encoding::SiaEncode,
             $crate::encoding::SiaDecode,
             $crate::encoding::V1SiaEncode,
@@ -132,7 +134,7 @@ pub const fn decode_hex_256(input: &[u8]) -> [u8; 32] {
     while i < 64 {
         match decode_hex_pair(input[i], input[i + 1]) {
             Some(byte) => result[i / 2] = byte,
-            None => panic!("invalid hex char"),
+            _ => panic!("invalid hex char"),
         }
         i += 2;
     }

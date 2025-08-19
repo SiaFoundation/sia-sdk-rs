@@ -13,9 +13,10 @@ use crate::encoding::{
     self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode, V1SiaDecodable, V1SiaDecode,
     V1SiaEncodable, V1SiaEncode,
 };
+use crate::encoding_async::{AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable, AsyncSiaEncode};
 use crate::merkle::{Accumulator, LEAF_HASH_PREFIX};
 use crate::signing::PublicKey;
-use crate::types::{specifier, Specifier};
+use crate::types::{Specifier, specifier};
 
 use super::currency::Currency;
 use super::{
@@ -29,7 +30,17 @@ pub const ALGORITHM_ED25519: Specifier = specifier!["ed25519"];
 ///  contract
 ///
 /// Currently only supports ed25519 keys
-#[derive(Debug, PartialEq, Clone, SiaEncode, V1SiaEncode, SiaDecode, V1SiaDecode)]
+#[derive(
+    Debug,
+    PartialEq,
+    Clone,
+    AsyncSiaDecode,
+    AsyncSiaEncode,
+    SiaEncode,
+    V1SiaEncode,
+    SiaDecode,
+    V1SiaDecode,
+)]
 pub struct UnlockKey {
     pub algorithm: Specifier,
     pub key: Vec<u8>,
@@ -92,7 +103,17 @@ pub struct FileContractElement {
 
 // specifies the conditions for spending an output or revising a file contract.
 #[derive(
-    Debug, PartialEq, Clone, Serialize, Deserialize, SiaEncode, SiaDecode, V1SiaEncode, V1SiaDecode,
+    Debug,
+    PartialEq,
+    Clone,
+    Serialize,
+    Deserialize,
+    AsyncSiaDecode,
+    AsyncSiaEncode,
+    SiaEncode,
+    SiaDecode,
+    V1SiaEncode,
+    V1SiaDecode,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct UnlockConditions {
@@ -569,12 +590,14 @@ mod tests {
     fn test_serialize_unlock_conditions() {
         let unlock_conditions = UnlockConditions::new(
             123,
-            vec![PublicKey::new([
-                0x9a, 0xac, 0x1f, 0xfb, 0x1c, 0xfd, 0x10, 0x79, 0xa8, 0xc6, 0xc8, 0x7b, 0x47, 0xda,
-                0x1d, 0x56, 0x7e, 0x35, 0xb9, 0x72, 0x34, 0x99, 0x3c, 0x28, 0x8c, 0x1a, 0xd0, 0xdb,
-                0x1d, 0x1c, 0xe1, 0xb6,
-            ])
-            .into()],
+            vec![
+                PublicKey::new([
+                    0x9a, 0xac, 0x1f, 0xfb, 0x1c, 0xfd, 0x10, 0x79, 0xa8, 0xc6, 0xc8, 0x7b, 0x47,
+                    0xda, 0x1d, 0x56, 0x7e, 0x35, 0xb9, 0x72, 0x34, 0x99, 0x3c, 0x28, 0x8c, 0x1a,
+                    0xd0, 0xdb, 0x1d, 0x1c, 0xe1, 0xb6,
+                ])
+                .into(),
+            ],
             1,
         );
 
@@ -599,7 +622,10 @@ mod tests {
         let unlock_conditions_serialized = serde_json::to_string(&unlock_conditions).unwrap();
         let unlock_conditions_deserialized: UnlockConditions =
             serde_json::from_str(&unlock_conditions_serialized).unwrap();
-        assert_eq!(unlock_conditions_serialized, "{\"timelock\":123,\"publicKeys\":[\"ed25519:9aac1ffb1cfd1079a8c6c87b47da1d567e35b97234993c288c1ad0db1d1ce1b6\"],\"signaturesRequired\":1}");
+        assert_eq!(
+            unlock_conditions_serialized,
+            "{\"timelock\":123,\"publicKeys\":[\"ed25519:9aac1ffb1cfd1079a8c6c87b47da1d567e35b97234993c288c1ad0db1d1ce1b6\"],\"signaturesRequired\":1}"
+        );
         assert_eq!(unlock_conditions_deserialized, unlock_conditions);
     }
 
@@ -626,12 +652,14 @@ mod tests {
             ),
             unlock_conditions: UnlockConditions::new(
                 123,
-                vec![PublicKey::new([
-                    0x9a, 0xac, 0x1f, 0xfb, 0x1c, 0xfd, 0x10, 0x79, 0xa8, 0xc6, 0xc8, 0x7b, 0x47,
-                    0xda, 0x1d, 0x56, 0x7e, 0x35, 0xb9, 0x72, 0x34, 0x99, 0x3c, 0x28, 0x8c, 0x1a,
-                    0xd0, 0xdb, 0x1d, 0x1c, 0xe1, 0xb6,
-                ])
-                .into()],
+                vec![
+                    PublicKey::new([
+                        0x9a, 0xac, 0x1f, 0xfb, 0x1c, 0xfd, 0x10, 0x79, 0xa8, 0xc6, 0xc8, 0x7b,
+                        0x47, 0xda, 0x1d, 0x56, 0x7e, 0x35, 0xb9, 0x72, 0x34, 0x99, 0x3c, 0x28,
+                        0x8c, 0x1a, 0xd0, 0xdb, 0x1d, 0x1c, 0xe1, 0xb6,
+                    ])
+                    .into(),
+                ],
                 1,
             ),
         };
@@ -658,12 +686,14 @@ mod tests {
             ),
             unlock_conditions: UnlockConditions::new(
                 123,
-                vec![PublicKey::new([
-                    0x9a, 0xac, 0x1f, 0xfb, 0x1c, 0xfd, 0x10, 0x79, 0xa8, 0xc6, 0xc8, 0x7b, 0x47,
-                    0xda, 0x1d, 0x56, 0x7e, 0x35, 0xb9, 0x72, 0x34, 0x99, 0x3c, 0x28, 0x8c, 0x1a,
-                    0xd0, 0xdb, 0x1d, 0x1c, 0xe1, 0xb6,
-                ])
-                .into()],
+                vec![
+                    PublicKey::new([
+                        0x9a, 0xac, 0x1f, 0xfb, 0x1c, 0xfd, 0x10, 0x79, 0xa8, 0xc6, 0xc8, 0x7b,
+                        0x47, 0xda, 0x1d, 0x56, 0x7e, 0x35, 0xb9, 0x72, 0x34, 0x99, 0x3c, 0x28,
+                        0x8c, 0x1a, 0xd0, 0xdb, 0x1d, 0x1c, 0xe1, 0xb6,
+                    ])
+                    .into(),
+                ],
                 1,
             ),
             claim_address: Address::new(
@@ -799,12 +829,14 @@ mod tests {
             }],
             unlock_conditions: UnlockConditions::new(
                 123,
-                vec![PublicKey::new([
-                    0x9a, 0xac, 0x1f, 0xfb, 0x1c, 0xfd, 0x10, 0x79, 0xa8, 0xc6, 0xc8, 0x7b, 0x47,
-                    0xda, 0x1d, 0x56, 0x7e, 0x35, 0xb9, 0x72, 0x34, 0x99, 0x3c, 0x28, 0x8c, 0x1a,
-                    0xd0, 0xdb, 0x1d, 0x1c, 0xe1, 0xb6,
-                ])
-                .into()],
+                vec![
+                    PublicKey::new([
+                        0x9a, 0xac, 0x1f, 0xfb, 0x1c, 0xfd, 0x10, 0x79, 0xa8, 0xc6, 0xc8, 0x7b,
+                        0x47, 0xda, 0x1d, 0x56, 0x7e, 0x35, 0xb9, 0x72, 0x34, 0x99, 0x3c, 0x28,
+                        0x8c, 0x1a, 0xd0, 0xdb, 0x1d, 0x1c, 0xe1, 0xb6,
+                    ])
+                    .into(),
+                ],
                 1,
             ),
             unlock_hash: Address::from([

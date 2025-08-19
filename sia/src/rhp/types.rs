@@ -1,4 +1,5 @@
-use crate::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
+use crate::encoding::SiaEncodable;
+use crate::encoding_async::{AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable, AsyncSiaEncode};
 use blake2b_simd::Params;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -10,7 +11,7 @@ pub const SEGMENT_SIZE: usize = 64;
 pub const SECTOR_SIZE: usize = 1 << 22;
 
 /// Contains the prices and parameters of a host.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, AsyncSiaEncode, AsyncSiaDecode)]
 #[serde(rename_all = "camelCase")]
 pub struct HostPrices {
     /// The price of forming a new contract with the host.
@@ -58,7 +59,7 @@ impl HostPrices {
 }
 
 /// Contains the settings of a host, including its prices and other parameters.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, AsyncSiaEncode, AsyncSiaDecode)]
 #[serde(rename_all = "camelCase")]
 pub struct HostSettings {
     /// The version of the protocol the host is using.
@@ -84,7 +85,7 @@ pub struct HostSettings {
 
 /// An account token is used to pay for RPC calls that do not
 /// require a contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, AsyncSiaEncode, AsyncSiaDecode)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountToken {
     pub host_key: PublicKey,
@@ -122,7 +123,7 @@ impl AccountToken {
 }
 
 /// An AccountDeposit is an amount of Siacoin to be deposited into an account.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, AsyncSiaEncode, AsyncSiaDecode)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountDeposit {
     pub account: PublicKey,

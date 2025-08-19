@@ -1,4 +1,8 @@
 use crate::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
+use crate::encoding_async::{
+    AsyncDecoder, AsyncEncoder, AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable,
+    AsyncSiaEncode, Error as AsyncError, Result as AsyncResult,
+};
 use crate::signing::{PublicKey, Signature};
 #[allow(deprecated)]
 use crate::types::v1::UnlockConditions;
@@ -387,7 +391,87 @@ impl SiaDecodable for SpendPolicy {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, Clone)]
+impl AsyncSiaEncodable for SpendPolicy {
+    async fn encode_async<E: AsyncEncoder>(&self, e: &mut E) -> AsyncResult<()> {
+        // helper to recursively encode policies
+        async fn encode_policy<E: AsyncEncoder>(
+            policy: &SpendPolicy,
+            e: &mut E,
+        ) -> AsyncResult<()> {
+            e.write_all(&[policy.type_prefix()]).await?;
+            match policy {
+                SpendPolicy::Above(height) => height.encode_async(e).await,
+                SpendPolicy::After(time) => (time.unix_timestamp() as u64).encode_async(e).await,
+                SpendPolicy::PublicKey(pk) => pk.encode_async(e).await,
+                SpendPolicy::Hash(hash) => hash.encode_async(e).await,
+                SpendPolicy::Threshold(of, policies) => {
+                    of.encode_async(e).await?;
+                    (policies.len() as u8).encode_async(e).await?;
+                    for policy in policies {
+                        encode_policy(policy, e).await?;
+                    }
+                    Ok(())
+                }
+                SpendPolicy::Opaque(addr) => addr.encode_async(e).await,
+                #[allow(deprecated)]
+                SpendPolicy::UnlockConditions(uc) => uc.encode_async(e).await,
+            }
+        }
+        1u8.encode_async(e).await?;
+        encode_policy(self, e).await
+    }
+}
+
+impl AsyncSiaDecodable for SpendPolicy {
+    async fn decode_async<D: AsyncDecoder>(d: &mut D) -> AsyncResult<Self> {
+        // helper to recursively decode policies
+        async fn decode_policy<D: AsyncDecoder>(d: &mut D) -> AsyncResult<SpendPolicy> {
+            let policy_type = u8::decode_async(d).await?;
+            match policy_type {
+                POLICY_ABOVE_PREFIX => Ok(SpendPolicy::Above(u64::decode_async(d).await?)),
+                POLICY_AFTER_PREFIX => {
+                    Ok(SpendPolicy::After(OffsetDateTime::decode_async(d).await?))
+                }
+                POLICY_PUBLIC_KEY_PREFIX => {
+                    Ok(SpendPolicy::PublicKey(PublicKey::decode_async(d).await?))
+                }
+                POLICY_HASH_PREFIX => Ok(SpendPolicy::Hash(Hash256::decode_async(d).await?)),
+                POLICY_THRESHOLD_PREFIX => {
+                    let of: u8 = u8::decode_async(d).await?;
+                    let n = u8::decode_async(d).await?;
+                    let mut policies = Vec::with_capacity(n as usize);
+                    while policies.len() < n as usize {
+                        policies.push(decode_policy(d).await?);
+                    }
+                    Ok(SpendPolicy::Threshold(of, policies))
+                }
+                POLICY_OPAQUE_PREFIX => Ok(SpendPolicy::Opaque(Address::decode_async(d).await?)),
+                #[allow(deprecated)]
+                POLICY_UNLOCK_CONDITIONS_PREFIX => Ok(SpendPolicy::UnlockConditions(
+                    UnlockConditions::decode_async(d).await?,
+                )),
+                _ => Err(AsyncError::InvalidValue),
+            }
+        }
+        let policy_version = u8::decode_async(d).await?;
+        if policy_version != 1 {
+            return Err(AsyncError::InvalidValue);
+        }
+        decode_policy(d).await
+    }
+}
+
+#[derive(
+    Debug,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    SiaEncode,
+    SiaDecode,
+    AsyncSiaEncode,
+    AsyncSiaDecode,
+    Clone,
+)]
 /// A policy that has been satisfied by a set of preimages and signatures.
 pub struct SatisfiedPolicy {
     pub policy: SpendPolicy,
@@ -528,7 +612,7 @@ mod tests {
             (
                 SpendPolicy::after(OffsetDateTime::from_unix_timestamp(100).unwrap()),
                 "{\"type\":\"after\",\"policy\":100}",
-                "01026400000000000000"
+                "01026400000000000000",
             ),
             (
                 SpendPolicy::public_key(PublicKey::new([1; 32])),
@@ -561,7 +645,9 @@ mod tests {
                             2,
                             vec![
                                 SpendPolicy::public_key(PublicKey::new([0; 32])),
-                                SpendPolicy::after(OffsetDateTime::from_unix_timestamp(100).unwrap()),
+                                SpendPolicy::after(
+                                    OffsetDateTime::from_unix_timestamp(100).unwrap(),
+                                ),
                             ],
                         ),
                         SpendPolicy::PublicKey(PublicKey::new([0; 32])),
@@ -582,7 +668,7 @@ mod tests {
                 }),
                 "{\"type\":\"uc\",\"policy\":{\"timelock\":100,\"publicKeys\":[\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"ed25519:0101010101010101010101010101010101010101010101010101010101010101\"],\"signaturesRequired\":2}}",
                 "010764000000000000000200000000000000656432353531390000000000000000002000000000000000000000000000000000000000000000000000000000000000000000000000000065643235353139000000000000000000200000000000000001010101010101010101010101010101010101010101010101010101010101010200000000000000",
-            )
+            ),
         ];
 
         for (i, (policy, json, binary)) in test_cases.iter().enumerate() {

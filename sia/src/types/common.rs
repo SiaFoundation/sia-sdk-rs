@@ -1,5 +1,6 @@
 use core::fmt;
 
+use crate::encoding_async::{AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable, AsyncSiaEncode};
 use blake2b_simd::Params;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -12,7 +13,7 @@ use crate::macros::impl_hash_id;
 use crate::types::currency::Currency;
 use crate::types::v1;
 
-use super::{specifier, Specifier};
+use super::{Specifier, specifier};
 
 impl_hash_id!(Hash256);
 impl_hash_id!(SiacoinOutputID);
@@ -146,7 +147,9 @@ impl FileContractID {
     }
 }
 
-#[derive(Debug, PartialEq, SiaEncode, SiaDecode, Serialize, Deserialize)]
+#[derive(
+    Debug, PartialEq, SiaEncode, SiaDecode, AsyncSiaDecode, AsyncSiaEncode, Serialize, Deserialize,
+)]
 pub struct ChainIndex {
     pub height: u64,
     pub id: BlockID,
@@ -211,7 +214,18 @@ pub enum HexParseError {
 }
 
 /// An address that can be used to receive UTXOs
-#[derive(Default, Debug, PartialEq, Clone, SiaEncode, V1SiaEncode, SiaDecode, V1SiaDecode)]
+#[derive(
+    Default,
+    Debug,
+    PartialEq,
+    Clone,
+    SiaEncode,
+    V1SiaEncode,
+    SiaDecode,
+    V1SiaDecode,
+    AsyncSiaEncode,
+    AsyncSiaDecode,
+)]
 pub struct Address([u8; 32]);
 
 impl<'de> Deserialize<'de> for Address {
@@ -300,7 +314,17 @@ impl fmt::Display for Address {
 /// A SiacoinOutput is a Siacoin UTXO that can be spent using the unlock conditions
 /// for Address
 #[derive(
-    Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, V1SiaEncode, V1SiaDecode, Clone,
+    Debug,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    AsyncSiaEncode,
+    AsyncSiaDecode,
+    SiaEncode,
+    SiaDecode,
+    V1SiaEncode,
+    V1SiaDecode,
+    Clone,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct SiacoinOutput {
@@ -310,7 +334,9 @@ pub struct SiacoinOutput {
 
 /// A SiafundOutput is a Siafund UTXO that can be spent using the unlock conditions
 /// for Address
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(
+    Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, AsyncSiaEncode, AsyncSiaDecode,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct SiafundOutput {
     pub value: u64,
@@ -339,7 +365,17 @@ impl V1SiaDecodable for SiafundOutput {
 }
 
 /// A Leaf is a 64-byte piece of data that is stored in a Merkle tree.
-#[derive(Debug, PartialEq, Clone, SiaEncode, V1SiaEncode, SiaDecode, V1SiaDecode)]
+#[derive(
+    Debug,
+    PartialEq,
+    Clone,
+    SiaEncode,
+    V1SiaEncode,
+    SiaDecode,
+    V1SiaDecode,
+    AsyncSiaEncode,
+    AsyncSiaDecode,
+)]
 pub struct Leaf([u8; 64]);
 
 impl Leaf {
@@ -387,7 +423,17 @@ impl<'de> Deserialize<'de> for Leaf {
 }
 
 /// A StateElement is a generic element within the state accumulator.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, Clone)]
+#[derive(
+    Debug,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    SiaEncode,
+    SiaDecode,
+    AsyncSiaDecode,
+    AsyncSiaEncode,
+    Clone,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct StateElement {
     pub leaf_index: u64,
@@ -445,40 +491,44 @@ mod tests {
 
     #[test]
     fn test_serialize_block() {
-        let b = Block{
-            parent_id: block_id!("8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c"),
+        let b = Block {
+            parent_id: block_id!(
+                "8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c"
+            ),
             nonce: 1236112,
             timestamp: OffsetDateTime::UNIX_EPOCH,
-            miner_payouts: vec![
-                SiacoinOutput{
-                    value: Currency::new(57234234623612361),
-                    address: address!("000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69"),
-                }
-            ],
-            transactions: vec![
-                v1::Transaction {
-                    siacoin_inputs: vec![
-                        v1::SiacoinInput{
-                            parent_id: siacoin_id!("8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c"),
-                            unlock_conditions: v1::UnlockConditions::standard_unlock_conditions(public_key!("ed25519:8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c")),
-                        }
-                    ],
-                    siacoin_outputs: vec![
-                        SiacoinOutput{
-                            value: Currency::new(67856467336433871),
-                            address: address!("000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69"),
-                        }
-                    ],
-                    file_contracts: Vec::new(),
-                    file_contract_revisions: Vec::new(),
-                    storage_proofs: Vec::new(),
-                    siafund_inputs: Vec::new(),
-                    siafund_outputs: Vec::new(),
-                    miner_fees: Vec::new(),
-                    arbitrary_data: Vec::new(),
-                    signatures: Vec::new(),
-                },
-            ],
+            miner_payouts: vec![SiacoinOutput {
+                value: Currency::new(57234234623612361),
+                address: address!(
+                    "000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69"
+                ),
+            }],
+            transactions: vec![v1::Transaction {
+                siacoin_inputs: vec![v1::SiacoinInput {
+                    parent_id: siacoin_id!(
+                        "8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c"
+                    ),
+                    unlock_conditions: v1::UnlockConditions::standard_unlock_conditions(
+                        public_key!(
+                            "ed25519:8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c"
+                        ),
+                    ),
+                }],
+                siacoin_outputs: vec![SiacoinOutput {
+                    value: Currency::new(67856467336433871),
+                    address: address!(
+                        "000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69"
+                    ),
+                }],
+                file_contracts: Vec::new(),
+                file_contract_revisions: Vec::new(),
+                storage_proofs: Vec::new(),
+                siafund_inputs: Vec::new(),
+                siafund_outputs: Vec::new(),
+                miner_fees: Vec::new(),
+                arbitrary_data: Vec::new(),
+                signatures: Vec::new(),
+            }],
         };
 
         const BINARY_STR: &str = "8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c90dc120000000000000000000000000001000000000000000700000000000000cb563bafbb55c90000000000000000000000000000000000000000000000000000000000000000010000000000000001000000000000008fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c000000000000000001000000000000006564323535313900000000000000000020000000000000008fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c010000000000000001000000000000000700000000000000f11318f74d10cf000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
