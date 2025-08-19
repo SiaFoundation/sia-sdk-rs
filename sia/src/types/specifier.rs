@@ -2,6 +2,7 @@ use crate::encoding::{
     SiaDecodable, SiaDecode, SiaEncodable, SiaEncode, V1SiaDecodable, V1SiaDecode, V1SiaEncodable,
     V1SiaEncode,
 };
+use crate::encoding_async::{AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable, AsyncSiaEncode};
 use core::{fmt, str};
 use serde::{Deserialize, Serialize};
 
@@ -14,10 +15,12 @@ pub const SPECIFIER_SIZE: usize = 16;
     PartialEq,
     Serialize,
     Deserialize,
+    AsyncSiaDecode,
+    AsyncSiaEncode,
     SiaEncode,
+    SiaDecode,
     V1SiaEncode,
     V1SiaDecode,
-    SiaDecode,
 )]
 pub struct Specifier([u8; SPECIFIER_SIZE]);
 

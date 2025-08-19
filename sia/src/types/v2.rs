@@ -2,6 +2,10 @@ use std::io;
 
 use crate::consensus::ChainState;
 use crate::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
+use crate::encoding_async::{
+    AsyncDecoder, AsyncEncoder, AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable,
+    AsyncSiaEncode, Error as AsyncError, Result as AsyncResult,
+};
 use blake2b_simd::Params;
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeStruct;
@@ -25,7 +29,9 @@ pub use super::spendpolicy::*;
 /// Generally, an attestation for a particular key is considered to overwrite any
 /// previous attestations with the same key. (This allows hosts to announce a new
 /// network address, for example.)
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(
+    Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, AsyncSiaEncode, AsyncSiaDecode,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct Attestation {
     pub public_key: PublicKey,
@@ -57,7 +63,17 @@ impl Attestation {
 /// consists of a bidirectional payment channel that resolves as either "valid"
 /// or "missed" depending on whether a valid StorageProof is submitted for the
 /// contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, Clone)]
+#[derive(
+    Debug,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    SiaEncode,
+    SiaDecode,
+    AsyncSiaEncode,
+    AsyncSiaDecode,
+    Clone,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct FileContract {
     pub capacity: u64,
@@ -111,7 +127,17 @@ impl FileContract {
 }
 
 /// A SiacoinElement is a record of a Siacoin UTXO within the state accumulator.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, Clone)]
+#[derive(
+    Debug,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    SiaEncode,
+    SiaDecode,
+    AsyncSiaDecode,
+    AsyncSiaEncode,
+    Clone,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct SiacoinElement {
     pub state_element: StateElement,
@@ -121,7 +147,9 @@ pub struct SiacoinElement {
 }
 
 /// A SiafundElement is a record of a Siafund UTXO within the state accumulator.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(
+    Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, AsyncSiaDecode, AsyncSiaEncode,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct SiafundElement {
     pub state_element: StateElement,
@@ -132,7 +160,9 @@ pub struct SiafundElement {
 
 /// A V2FileContractElement is a record of a FileContract within the state
 /// accumulator.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(
+    Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, AsyncSiaDecode, AsyncSiaEncode,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct FileContractElement {
     pub state_element: StateElement,
@@ -141,7 +171,9 @@ pub struct FileContractElement {
 }
 
 /// A ChainIndexElement is a record of a ChainIndex within the state accumulator.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(
+    Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, AsyncSiaDecode, AsyncSiaEncode,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ChainIndexElement {
     pub state_element: StateElement,
@@ -169,7 +201,9 @@ pub struct AttestationElement {
 
 /// A V2SiacoinInput represents a Siacoin UTXO that is being spent in a v2
 /// transaction.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(
+    Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, AsyncSiaEncode, AsyncSiaDecode,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct SiacoinInput {
     pub parent: SiacoinElement,
@@ -178,7 +212,9 @@ pub struct SiacoinInput {
 
 /// A V2SiafundInput represents a Siafund UTXO that is being spent in a v2
 /// transaction.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(
+    Debug, PartialEq, Serialize, Deserialize, AsyncSiaDecode, AsyncSiaEncode, SiaEncode, SiaDecode,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct SiafundInput {
     pub parent: SiafundElement,
@@ -187,7 +223,9 @@ pub struct SiafundInput {
 }
 
 /// A FileContractRevision updates the state of an existing file contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(
+    Debug, PartialEq, Serialize, Deserialize, AsyncSiaDecode, AsyncSiaEncode, SiaEncode, SiaDecode,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct FileContractRevision {
     pub parent: FileContractElement,
@@ -204,7 +242,9 @@ impl FileContractRevision {
 
 /// A FileContractRenewal renews a file contract with optional rollover
 /// of any unspent funds.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(
+    Debug, PartialEq, Serialize, Deserialize, AsyncSiaDecode, AsyncSiaEncode, SiaEncode, SiaDecode,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct FileContractRenewal {
     pub final_revision: FileContract,
@@ -239,7 +279,9 @@ impl FileContractRenewal {
 
 /// A StorageProof asserts the presence of a randomly-selected leaf within the
 /// Merkle tree of a V2FileContract's data.
-#[derive(Debug, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode)]
+#[derive(
+    Debug, PartialEq, Serialize, Deserialize, AsyncSiaDecode, AsyncSiaEncode, SiaEncode, SiaDecode,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageProof {
     // Selecting the leaf requires a source of unpredictable entropy; we use the
@@ -349,8 +391,38 @@ impl SiaDecodable for FileContractResolution {
             _ => {
                 return Err(encoding::Error::Custom(
                     "invalid contract resolution type".to_string(),
-                ))
+                ));
             }
+        };
+        Ok(FileContractResolution { parent, resolution })
+    }
+}
+
+impl AsyncSiaEncodable for FileContractResolution {
+    async fn encode_async<E: AsyncEncoder>(&self, e: &mut E) -> AsyncResult<()> {
+        self.parent.encode_async(e).await?;
+        match &self.resolution {
+            ContractResolution::Renewal(renewal) => {
+                0u8.encode_async(e).await?;
+                renewal.encode_async(e).await
+            }
+            ContractResolution::StorageProof(proof) => {
+                1u8.encode_async(e).await?;
+                proof.encode_async(e).await
+            }
+            ContractResolution::Expiration() => 2u8.encode_async(e).await,
+        }
+    }
+}
+
+impl AsyncSiaDecodable for FileContractResolution {
+    async fn decode_async<D: AsyncDecoder>(d: &mut D) -> AsyncResult<Self> {
+        let parent = FileContractElement::decode_async(d).await?;
+        let resolution = match u8::decode_async(d).await? {
+            0 => ContractResolution::Renewal(FileContractRenewal::decode_async(d).await?),
+            1 => ContractResolution::StorageProof(StorageProof::decode_async(d).await?),
+            2 => ContractResolution::Expiration(),
+            _ => return Err(AsyncError::InvalidValue),
         };
         Ok(FileContractResolution { parent, resolution })
     }
@@ -565,7 +637,7 @@ impl SiaEncodable for Transaction {
         ]
         .iter()
         .enumerate()
-        .filter(|(_, &condition)| condition)
+        .filter(|&(_, condition)| *condition)
         .map(|(i, _)| 1 << i)
         .sum::<u64>();
         fields.encode(w)?;
@@ -668,6 +740,126 @@ impl SiaDecodable for Transaction {
     }
 }
 
+impl AsyncSiaEncodable for Transaction {
+    async fn encode_async<E: AsyncEncoder>(&self, e: &mut E) -> AsyncResult<()> {
+        TXN_VERSION.encode_async(e).await?;
+
+        let fields = [
+            !self.siacoin_inputs.is_empty(),
+            !self.siacoin_outputs.is_empty(),
+            !self.siafund_inputs.is_empty(),
+            !self.siafund_outputs.is_empty(),
+            !self.file_contracts.is_empty(),
+            !self.file_contract_revisions.is_empty(),
+            !self.file_contract_resolutions.is_empty(),
+            !self.attestations.is_empty(),
+            !self.arbitrary_data.is_empty(),
+            self.new_foundation_address.is_some(),
+            self.miner_fee != Currency::zero(),
+        ]
+        .iter()
+        .enumerate()
+        .filter(|&(_, condition)| *condition)
+        .map(|(i, _)| 1 << i)
+        .sum::<u64>();
+        fields.encode_async(e).await?;
+
+        if !self.siacoin_inputs.is_empty() {
+            self.siacoin_inputs.encode_async(e).await?;
+        }
+        if !self.siacoin_outputs.is_empty() {
+            self.siacoin_outputs.encode_async(e).await?;
+        }
+        if !self.siafund_inputs.is_empty() {
+            self.siafund_inputs.encode_async(e).await?;
+        }
+        if !self.siafund_outputs.is_empty() {
+            self.siafund_outputs.encode_async(e).await?;
+        }
+        if !self.file_contracts.is_empty() {
+            self.file_contracts.encode_async(e).await?;
+        }
+        if !self.file_contract_revisions.is_empty() {
+            self.file_contract_revisions.encode_async(e).await?;
+        }
+        if !self.file_contract_resolutions.is_empty() {
+            self.file_contract_resolutions.encode_async(e).await?;
+        }
+        if !self.attestations.is_empty() {
+            self.attestations.encode_async(e).await?;
+        }
+        if !self.arbitrary_data.is_empty() {
+            self.arbitrary_data.encode_async(e).await?;
+        }
+        if let Some(addr) = &self.new_foundation_address {
+            addr.encode_async(e).await?;
+        }
+        if self.miner_fee != Currency::zero() {
+            self.miner_fee.encode_async(e).await?;
+        }
+        Ok(())
+    }
+}
+
+impl AsyncSiaDecodable for Transaction {
+    async fn decode_async<D: AsyncDecoder>(d: &mut D) -> AsyncResult<Self> {
+        let version = u8::decode_async(d).await?;
+        if version != TXN_VERSION {
+            return Err(AsyncError::InvalidValue);
+        }
+
+        let fields = u64::decode_async(d).await?;
+        let mut txn = Transaction {
+            siacoin_inputs: Vec::new(),
+            siacoin_outputs: Vec::new(),
+            siafund_inputs: Vec::new(),
+            siafund_outputs: Vec::new(),
+            file_contracts: Vec::new(),
+            file_contract_revisions: Vec::new(),
+            file_contract_resolutions: Vec::new(),
+            attestations: Vec::new(),
+            arbitrary_data: Vec::new(),
+            new_foundation_address: None,
+            miner_fee: Currency::zero(),
+        };
+        if fields & 1 != 0 {
+            txn.siacoin_inputs = Vec::decode_async(d).await?;
+        }
+        if fields & 2 != 0 {
+            txn.siacoin_outputs = Vec::decode_async(d).await?;
+        }
+        if fields & 4 != 0 {
+            txn.siafund_inputs = Vec::decode_async(d).await?;
+        }
+        if fields & 8 != 0 {
+            txn.siafund_outputs = Vec::decode_async(d).await?;
+        }
+        if fields & 16 != 0 {
+            txn.file_contracts = Vec::decode_async(d).await?;
+        }
+        if fields & 32 != 0 {
+            txn.file_contract_revisions = Vec::decode_async(d).await?;
+        }
+        if fields & 64 != 0 {
+            txn.file_contract_resolutions = Vec::decode_async(d).await?;
+        }
+        if fields & 128 != 0 {
+            txn.attestations = Vec::decode_async(d).await?;
+        }
+        if fields & 256 != 0 {
+            txn.arbitrary_data = Vec::decode_async(d).await?;
+        }
+        if fields & 512 != 0 {
+            txn.new_foundation_address = Some(Address::decode_async(d).await?);
+        }
+        if fields & 1024 != 0 {
+            txn.miner_fee = Currency::decode_async(d).await?;
+        }
+
+        Ok(txn)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,8 +870,8 @@ mod tests {
     use crate::types::Work;
     use crate::{address, hash_256, public_key, siacoin_id};
     use core::fmt::Debug;
-    use serde::de::DeserializeOwned;
     use serde::Serialize;
+    use serde::de::DeserializeOwned;
     use time::{Duration, OffsetDateTime};
 
     /// test_serialize_json is a helper to test serialization and deserialization of a struct to and from JSON.
@@ -1415,7 +1607,13 @@ mod tests {
             arbitrary_data: vec![],
             miner_fee: Currency::new(123581),
         };
-        test_serialize(&txn, "02030400000000000001000000000000005ddfbb00000000000100000000000000aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422640000000000000000000000000000008fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c00000000000000000103aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f14220100000000000000aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f142200000000000000000100000000000000640000000000000000000000000000008fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8cbde20100000000000000000000000000");
-        test_serialize_json(&txn, "{\"siacoinInputs\":[{\"parent\":{\"stateElement\":{\"leafIndex\":12312413,\"merkleProof\":[\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"]},\"id\":\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\",\"siacoinOutput\":{\"value\":\"100\",\"address\":\"8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8cdf32abee86f0\"},\"maturityHeight\":0},\"satisfiedPolicy\":{\"policy\":{\"type\":\"pk\",\"policy\":\"ed25519:aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"},\"signatures\":[\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"]}}],\"siacoinOutputs\":[{\"value\":\"100\",\"address\":\"8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8cdf32abee86f0\"}],\"minerFee\":\"123581\"}");
+        test_serialize(
+            &txn,
+            "02030400000000000001000000000000005ddfbb00000000000100000000000000aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422640000000000000000000000000000008fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c00000000000000000103aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f14220100000000000000aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f142200000000000000000100000000000000640000000000000000000000000000008fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8cbde20100000000000000000000000000",
+        );
+        test_serialize_json(
+            &txn,
+            "{\"siacoinInputs\":[{\"parent\":{\"stateElement\":{\"leafIndex\":12312413,\"merkleProof\":[\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"]},\"id\":\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\",\"siacoinOutput\":{\"value\":\"100\",\"address\":\"8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8cdf32abee86f0\"},\"maturityHeight\":0},\"satisfiedPolicy\":{\"policy\":{\"type\":\"pk\",\"policy\":\"ed25519:aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"},\"signatures\":[\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"]}}],\"siacoinOutputs\":[{\"value\":\"100\",\"address\":\"8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8cdf32abee86f0\"}],\"minerFee\":\"123581\"}",
+        );
     }
 }

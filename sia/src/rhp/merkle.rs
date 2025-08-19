@@ -1,8 +1,8 @@
-use crate::merkle::{sum_node, LEAF_HASH_PREFIX, NODE_HASH_PREFIX};
+use crate::merkle::{LEAF_HASH_PREFIX, NODE_HASH_PREFIX, sum_node};
 use crate::rhp::{SECTOR_SIZE, SEGMENT_SIZE};
 use crate::types::Hash256;
-use blake2b_simd::many::{hash_many, HashManyJob};
 use blake2b_simd::Params;
+use blake2b_simd::many::{HashManyJob, hash_many};
 use rayon::prelude::*;
 
 /// Calculates the Merkle root of a sector

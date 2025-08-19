@@ -1,13 +1,14 @@
 use core::fmt;
 
 use crate::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
+use crate::encoding_async::{AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable, AsyncSiaEncode};
 use crate::types::{Hash256, HexParseError};
 use ed25519_dalek::{Signature as ED25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::de::Error;
 use serde::{Deserialize, Serialize};
 
 /// An ed25519 public key that can be used to verify a signature
-#[derive(Debug, PartialEq, Clone, Copy, SiaEncode, SiaDecode)]
+#[derive(Debug, PartialEq, Clone, Copy, SiaEncode, SiaDecode, AsyncSiaDecode, AsyncSiaEncode)]
 pub struct PublicKey([u8; 32]);
 
 impl PublicKey {
@@ -117,7 +118,7 @@ impl Drop for PrivateKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SiaEncode, SiaDecode)]
+#[derive(Debug, Clone, PartialEq, Eq, SiaEncode, SiaDecode, AsyncSiaEncode, AsyncSiaDecode)]
 pub struct Signature([u8; 64]);
 
 impl Serialize for Signature {
