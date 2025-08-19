@@ -46,7 +46,7 @@ impl ErasureCoder {
         // limit total read size to the size of the slab
         let mut r = r.take((self.data_shards + self.parity_shards) as u64 * SECTOR_SIZE as u64);
 
-        let mut buf = Vec::with_capacity(SEGMENT_SIZE);
+        let mut buf = [0u8; SEGMENT_SIZE];
         for off in (0..).map(|n| n * SEGMENT_SIZE) {
             for shard in shards.iter_mut() {
                 match r.read_exact(&mut buf) {
@@ -63,7 +63,7 @@ impl ErasureCoder {
                     }
                 };
                 shard[off..off + SEGMENT_SIZE].copy_from_slice(&buf);
-                buf.clear(); // clear buffer for next read
+                buf.fill(0); // clear buffer
             }
         }
         Ok(shards)
@@ -91,7 +91,7 @@ mod tests {
     fn test_encode_shards() {
         let data_shards = 2;
         let parity_shards = 3;
-        let mut encoder = ErasureCoder::new(data_shards, parity_shards).unwrap();
+        let mut coder = ErasureCoder::new(data_shards, parity_shards).unwrap();
 
         let mut shards: Vec<Vec<u8>> = [
             vec![1u8; SECTOR_SIZE],
@@ -102,7 +102,7 @@ mod tests {
         ]
         .into();
 
-        encoder.encode_shards(&mut shards).unwrap();
+        coder.encode_shards(&mut shards).unwrap();
 
         let expected_shards: Vec<Vec<u8>> = vec![
             vec![1u8; SECTOR_SIZE],
@@ -117,9 +117,52 @@ mod tests {
         for i in 0..shards.len() {
             let mut shards: Vec<Option<Vec<u8>>> = shards.iter().cloned().map(Some).collect();
             shards[i] = None;
-            encoder.reconstruct(&mut shards).unwrap();
+            coder.reconstruct(&mut shards).unwrap();
             let shards: Vec<Vec<u8>> = shards.into_iter().map(|s| s.unwrap()).collect();
             assert_eq!(shards, expected_shards);
+        }
+    }
+
+    #[test]
+    fn test_striped_read() {
+        let coder = ErasureCoder::new(3, 1).unwrap();
+
+        let mut data = vec![0u8; SECTOR_SIZE * 7 / 2]; // 3.5 shards of data
+        data[..SECTOR_SIZE].fill(1);
+        data[SECTOR_SIZE..2 * SECTOR_SIZE].fill(2);
+        data[2 * SECTOR_SIZE..3 * SECTOR_SIZE].fill(3);
+        data[3 * SECTOR_SIZE..].fill(4);
+
+        let shards = coder.striped_read(&mut data.as_slice()).unwrap();
+        assert_eq!(shards.len(), 4);
+
+        for shard in shards {
+            // every shard should be of SECTOR_SIZE
+            assert_eq!(shard.len(), SECTOR_SIZE);
+
+            // first quarter of every shard is 1s
+            assert_eq!(shard[0..SECTOR_SIZE / 4], [1u8; SECTOR_SIZE / 4]);
+
+            // second quarter is 2s
+            assert_eq!(
+                shard[SECTOR_SIZE / 4..SECTOR_SIZE / 2],
+                [2u8; SECTOR_SIZE / 4]
+            );
+
+            // third quarter is 3s
+            assert_eq!(
+                shard[SECTOR_SIZE / 2..SECTOR_SIZE / 4 * 3],
+                [3u8; SECTOR_SIZE / 4]
+            );
+
+            // half of the fourth quarter is 4s
+            assert_eq!(
+                shard[SECTOR_SIZE / 4 * 3..SECTOR_SIZE / 8 * 7],
+                [4u8; SECTOR_SIZE / 8]
+            );
+
+            // remainder is padded with 0s
+            assert_eq!(shard[SECTOR_SIZE / 8 * 7..], [0u8; SECTOR_SIZE / 8]);
         }
     }
 }
