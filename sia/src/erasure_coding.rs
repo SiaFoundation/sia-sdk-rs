@@ -24,7 +24,7 @@ impl ErasureCoder {
     #[allow(dead_code)]
     pub fn new(data_shards: usize, parity_shards: usize) -> Result<Self> {
         Ok(ErasureCoder {
-            encoder: ReedSolomon::new(data_shards, parity_shards).unwrap(),
+            encoder: ReedSolomon::new(data_shards, parity_shards)?,
             data_shards,
             parity_shards,
         })
