@@ -1,5 +1,6 @@
 pub mod consensus;
 pub mod encoding;
+pub mod encryption;
 pub mod rhp;
 pub mod seed;
 pub mod signing;
@@ -8,4 +9,4 @@ pub mod types;
 pub mod macros;
 pub(crate) mod merkle;
 
-mod erasure_coding;
+pub mod erasure_coding;
