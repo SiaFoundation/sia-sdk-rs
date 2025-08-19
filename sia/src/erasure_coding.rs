@@ -20,15 +20,15 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub struct Encoder {
+pub struct ErasureCoder {
     encoder: ReedSolomon,
     data_shards: usize,
     parity_shards: usize,
 }
 
-impl Encoder {
+impl ErasureCoder {
     pub fn new(data_shards: usize, parity_shards: usize) -> Result<Self> {
-        Ok(Encoder {
+        Ok(ErasureCoder {
             encoder: ReedSolomon::new(data_shards, parity_shards).unwrap(),
             data_shards,
             parity_shards,
@@ -75,6 +75,12 @@ impl Encoder {
         self.encoder.encode(shards)?;
         Ok(())
     }
+
+    /// reconstruct reconstructs the missing shards from the available ones.
+    pub fn reconstruct(&mut self, shards: &mut [Option<Vec<u8>>]) -> Result<()> {
+        self.encoder.reconstruct(shards)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -85,7 +91,7 @@ mod tests {
     fn test_encode_shards() {
         let data_shards = 2;
         let parity_shards = 3;
-        let mut encoder = Encoder::new(data_shards, parity_shards).unwrap();
+        let mut encoder = ErasureCoder::new(data_shards, parity_shards).unwrap();
 
         let mut shards: Vec<Vec<u8>> = [
             vec![1u8; SECTOR_SIZE],
@@ -98,10 +104,22 @@ mod tests {
 
         encoder.encode_shards(&mut shards).unwrap();
 
-        assert_eq!(shards[0], vec![1u8; SECTOR_SIZE]);
-        assert_eq!(shards[1], vec![2u8; SECTOR_SIZE]);
-        assert_eq!(shards[2], vec![7u8; SECTOR_SIZE]);
-        assert_eq!(shards[3], vec![4u8; SECTOR_SIZE]);
-        assert_eq!(shards[4], vec![13u8; SECTOR_SIZE]);
+        let expected_shards: Vec<Vec<u8>> = vec![
+            vec![1u8; SECTOR_SIZE],
+            vec![2u8; SECTOR_SIZE],
+            vec![7u8; SECTOR_SIZE],  // parity shard 1
+            vec![4u8; SECTOR_SIZE],  // parity shard 2
+            vec![13u8; SECTOR_SIZE], // parity shard 3
+        ];
+        assert_eq!(shards, expected_shards);
+
+        // reconstruct every shard
+        for i in 0..shards.len() {
+            let mut shards: Vec<Option<Vec<u8>>> = shards.iter().cloned().map(Some).collect();
+            shards[i] = None;
+            encoder.reconstruct(&mut shards).unwrap();
+            let shards: Vec<Vec<u8>> = shards.into_iter().map(|s| s.unwrap()).collect();
+            assert_eq!(shards, expected_shards);
+        }
     }
 }
