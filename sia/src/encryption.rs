@@ -1,5 +1,3 @@
-use std::u8;
-
 use chacha20::XChaCha20;
 use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 
