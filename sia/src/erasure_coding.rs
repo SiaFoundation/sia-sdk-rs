@@ -57,7 +57,7 @@ impl ErasureCoder {
 
         // use a buffered writer since striped_write will write 64 bytes at a time
         let mut w = BufWriter::new(w);
-        self.striped_write(&mut w, &shards, skip, n)?;
+        self.striped_write(&mut w, shards, skip, n)?;
         w.flush()?;
         Ok(())
     }
