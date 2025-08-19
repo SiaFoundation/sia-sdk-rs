@@ -23,8 +23,8 @@ pub trait SectorDownloader {
         &self,
         host: &PublicKey,
         root: &Hash256,
-        limit: usize,
         offset: usize,
+        limit: usize,
     ) -> impl Future<Output = Result<Vec<u8>, RHPError>>;
 }
 
@@ -71,7 +71,7 @@ impl Slab {
     /// Reads a single slab from the provided reader, erasure codes it, then uploads the resulting sectors.
     pub async fn upload_slab<R: AsyncReadExt + Unpin, S: SectorUploader>(
         r: &mut R,
-        uploader: S,
+        uploader: &S,
         encryption_key: [u8; 32],
         data_shards: u8,
         parity_shards: u8,
@@ -106,7 +106,7 @@ impl Slab {
         for (i, sector) in self.sectors.iter().enumerate() {
             sector_futures.push(async move {
                 downloader
-                    .read_sector(&sector.host_key, &sector.root, SECTOR_SIZE, 0)
+                    .read_sector(&sector.host_key, &sector.root, 0, SECTOR_SIZE)
                     .await
                     .map(|data| (i, data))
             });
@@ -143,5 +143,69 @@ impl Slab {
         rs.write_reconstructed_shards(writer, &mut successful_shards, offset, length)
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::rhp::sector_root;
+    use std::collections::HashMap;
+    use tokio::sync::Mutex;
+
+    struct MockUploadDownloader {
+        sectors: Mutex<HashMap<String, Vec<u8>>>,
+    }
+
+    impl SectorDownloader for MockUploadDownloader {
+        async fn read_sector(
+            &self,
+            _: &PublicKey,
+            root: &Hash256,
+            offset: usize,
+            limit: usize,
+        ) -> Result<Vec<u8>, RHPError> {
+            let sectors = self.sectors.lock().await;
+            match sectors.get(&root.to_string()) {
+                Some(data) => Ok(data[offset..offset + limit].to_vec()),
+                None => Err(RHPError::Transport("sector not found".into())),
+            }
+        }
+    }
+
+    impl SectorUploader for MockUploadDownloader {
+        async fn write_sector(&self, sector: impl AsRef<[u8]>) -> Result<Sector, RHPError> {
+            let root = sector_root(&sector);
+            let sector_data = sector.as_ref().to_vec();
+            let mut sectors = self.sectors.lock().await;
+            sectors.insert(root.to_string(), sector_data);
+
+            Ok(Sector {
+                root,
+                host_key: PublicKey::new(rand::random()),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_slab_roundtrip() {
+        let mock = MockUploadDownloader {
+            sectors: Mutex::new(HashMap::new()),
+        };
+
+        let data = vec![0u8; 1024];
+        let key: [u8; 32] = rand::random();
+        let slab: Slab = Slab::upload_slab(&mut data.as_ref(), &mock, key, 3, 2)
+            .await
+            .unwrap();
+        assert_eq!(slab.min_shards, 3);
+        assert_eq!(slab.sectors.len(), 5);
+
+        let mut writer: Vec<u8> = Vec::new();
+        slab.download_slab(&mut writer, &mock, 0, 1024)
+            .await
+            .unwrap();
+
+        assert_eq!(writer, data);
     }
 }

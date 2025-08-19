@@ -7,6 +7,7 @@ macro_rules! impl_hash_id {
             Clone,
             Copy,
             PartialEq,
+            Eq,
             $crate::encoding_async::AsyncSiaEncode,
             $crate::encoding_async::AsyncSiaDecode,
             $crate::encoding::SiaEncode,
