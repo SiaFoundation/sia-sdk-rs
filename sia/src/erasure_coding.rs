@@ -47,17 +47,17 @@ impl ErasureCoder {
     /// striped_read reads data from the given reader into a vector of shards.
     pub fn striped_read<R: io::Read>(&self, r: &mut R) -> Result<Vec<Vec<u8>>> {
         // allocate memory for shards
-        let mut shards: Vec<Vec<u8>> = Vec::with_capacity(self.data_shards + self.parity_shards);
+        let mut shards: Vec<Vec<u8>> = Vec::with_capacity(self.data_shards);
         for _ in 0..self.data_shards + self.parity_shards {
             shards.push(vec![0u8; SECTOR_SIZE]);
         }
 
-        // limit total read size to the size of the slab
-        let mut r = r.take((self.data_shards + self.parity_shards) as u64 * SECTOR_SIZE as u64);
+        // limit total read size to the size of the slab's data shards
+        let mut r = r.take(self.data_shards as u64 * SECTOR_SIZE as u64);
 
         let mut buf = [0u8; SEGMENT_SIZE];
         for off in (0..).map(|n| n * SEGMENT_SIZE) {
-            for shard in shards.iter_mut() {
+            for shard in shards[..self.data_shards].iter_mut() {
                 match r.read_exact(&mut buf) {
                     Ok(_) => {}
                     Err(err) => {
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_striped_read() {
-        let coder = ErasureCoder::new(3, 1).unwrap();
+        let mut coder = ErasureCoder::new(4, 1).unwrap();
 
         let mut data = vec![0u8; SECTOR_SIZE * 7 / 2]; // 3.5 shards of data
         data[..SECTOR_SIZE].fill(1);
@@ -142,10 +142,13 @@ mod tests {
         data[2 * SECTOR_SIZE..3 * SECTOR_SIZE].fill(3);
         data[3 * SECTOR_SIZE..].fill(4);
 
-        let shards = coder.striped_read(&mut data.as_slice()).unwrap();
-        assert_eq!(shards.len(), 4);
+        let mut shards = coder.striped_read(&mut data.as_slice()).unwrap();
 
-        for shard in shards {
+        // we expect 5 shards and the last one is an empty parity shard
+        assert_eq!(shards.len(), 5);
+        assert_eq!(shards[4], [0u8; SECTOR_SIZE]);
+
+        for shard in &shards[..4] {
             // every shard should be of SECTOR_SIZE
             assert_eq!(shard.len(), SECTOR_SIZE);
 
@@ -173,5 +176,10 @@ mod tests {
             // remainder is padded with 0s
             assert_eq!(shard[SECTOR_SIZE / 8 * 7..], [0u8; SECTOR_SIZE / 8]);
         }
+
+        // encoding the read shards should succeed without errors and cause the
+        // parity shard to be filled
+        coder.encode_shards(&mut shards).unwrap();
+        assert_ne!(shards[4], [0u8; SECTOR_SIZE]);
     }
 }
