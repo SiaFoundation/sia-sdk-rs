@@ -1,6 +1,6 @@
 use crate::rhp::{SECTOR_SIZE, SEGMENT_SIZE};
 use reed_solomon_erasure::galois_8::ReedSolomon;
-use std::io::{self, Read};
+use std::io::{self, BufReader, Read};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -33,6 +33,15 @@ impl ErasureCoder {
             data_shards,
             parity_shards,
         })
+    }
+
+    /// read_encoded_shards is a convenience method that reads data from the
+    /// given reader and returns erasure coded shards in a single call.
+    pub fn read_encoded_shards<R: io::Read>(&mut self, r: &mut R) -> Result<Vec<Vec<u8>>> {
+        // use a buffered reader since striped_read will read 64 bytes at a time
+        let mut shards = self.striped_read(&mut BufReader::new(r))?;
+        self.encode_shards(&mut shards)?;
+        Ok(shards)
     }
 
     /// striped_read reads data from the given reader into a vector of shards.
