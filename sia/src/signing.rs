@@ -49,7 +49,7 @@ impl PublicKey {
     }
 
     /// verifies a message against the signature using this public key
-    pub fn verify<T: AsRef<[u8]>>(&self, msg: T, signature: &Signature) -> bool {
+    pub fn verify<T: AsRef<[u8]>>(&self, msg: &T, signature: &Signature) -> bool {
         let pk = VerifyingKey::from_bytes(&self.0).unwrap();
         pk.verify(
             msg.as_ref(),
@@ -87,7 +87,7 @@ impl PrivateKey {
         PublicKey::new(buf)
     }
 
-    pub fn sign<T: AsRef<[u8]>>(&self, h: T) -> Signature {
+    pub fn sign<T: AsRef<[u8]>>(&self, h: &T) -> Signature {
         let sk = SigningKey::from_bytes(&self.0[..32].try_into().unwrap());
         Signature::new(sk.sign(h.as_ref()).to_bytes())
     }

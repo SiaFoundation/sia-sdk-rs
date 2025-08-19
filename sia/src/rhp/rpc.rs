@@ -22,7 +22,7 @@ use crate::types::{
 
 pub trait RenterContractSigner {
     fn public_key(&self) -> PublicKey;
-    fn sign<T: AsRef<[u8]>>(&self, msg: T) -> Signature;
+    fn sign<T: AsRef<[u8]>>(&self, msg: &T) -> Signature;
     fn sign_revision(&self, state: &ChainState, contract: &mut FileContract);
 }
 
@@ -31,13 +31,13 @@ impl RenterContractSigner for PrivateKey {
         self.public_key()
     }
 
-    fn sign<T: AsRef<[u8]>>(&self, msg: T) -> Signature {
-        self.sign(msg.as_ref())
+    fn sign<T: AsRef<[u8]>>(&self, msg: &T) -> Signature {
+        self.sign(msg)
     }
 
     fn sign_revision(&self, state: &ChainState, contract: &mut FileContract) {
         let sig_hash = contract.sig_hash(state);
-        contract.renter_signature = self.sign(sig_hash);
+        contract.renter_signature = self.sign(&sig_hash);
     }
 }
 
@@ -142,7 +142,7 @@ impl RPCRefreshContractRequest {
             basis: params.basis,
             renter_inputs: params.renter_inputs,
             renter_parents: params.renter_parents,
-            challenge_signature: signer.sign(state.finalize().as_bytes()),
+            challenge_signature: signer.sign(&state.finalize()),
         }
     }
 }
@@ -196,7 +196,7 @@ impl RPCRenewContractRequest {
             basis: params.basis,
             renter_inputs: params.renter_inputs,
             renter_parents: params.renter_parents,
-            challenge_signature: signer.sign(state.finalize().as_bytes()),
+            challenge_signature: signer.sign(&state.finalize()),
         }
     }
 }
@@ -232,7 +232,7 @@ impl RPCFreeSectorsRequest {
             contract_id: params.contract_id,
             prices: params.prices,
             indices: params.indices,
-            challenge_signature: signer.sign(state.finalize().as_bytes()),
+            challenge_signature: signer.sign(&state.finalize()),
         }
     }
 }
@@ -300,7 +300,7 @@ impl RPCAppendSectorsRequest {
             prices: params.prices,
             sectors: params.sectors,
             contract_id: params.contract_id,
-            challenge_signature: signer.sign(state.finalize().as_bytes()),
+            challenge_signature: signer.sign(&state.finalize()),
         }
     }
 }
@@ -377,7 +377,7 @@ impl RPCReplenishAccountsRequest {
             accounts: params.accounts,
             target: params.target,
             contract_id: params.contract_id,
-            challenge_signature: signer.sign(state.finalize().as_bytes()),
+            challenge_signature: signer.sign(&state.finalize()),
         }
     }
 }
@@ -984,7 +984,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
             host_signature: Signature::default(),
             renter_signature: Signature::default(),
         };
-        contract.renter_signature = contract_signer.sign(contract.sig_hash(&params.state));
+        contract.renter_signature = contract_signer.sign(&contract.sig_hash(&params.state));
 
         let miner_fee = transaction_builder.miner_fee() * Currency::new(1000);
         let mut formation_txn = Transaction {
