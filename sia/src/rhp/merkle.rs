@@ -6,8 +6,7 @@ use blake2b_simd::many::{HashManyJob, hash_many};
 use rayon::prelude::*;
 
 /// Calculates the Merkle root of a sector
-pub fn sector_root(sector: &impl AsRef<[u8]>) -> Hash256 {
-    let sector = sector.as_ref();
+pub fn sector_root(sector: &[u8]) -> Hash256 {
     assert_eq!(sector.len(), SECTOR_SIZE);
     let mut params = Params::new();
     params.hash_length(32);
