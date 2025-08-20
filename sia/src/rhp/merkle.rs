@@ -86,32 +86,24 @@ pub enum ProofValidationError {
 
 pub type Result<T> = std::result::Result<T, ProofValidationError>;
 
-struct RangeProofVerifier {
-    start: usize,
-    end: usize,
-    roots: Vec<Hash256>,
-}
+pub struct RangeProof;
 
-impl RangeProofVerifier {
+impl RangeProof {
     #[allow(dead_code)]
-    pub async fn from_reader<R: AsyncRead + Unpin>(
-        r: R,
-        start: usize,
-        end: usize,
-    ) -> Result<(usize, Self)> {
-        let (total, roots) = Self::read_data(&mut io::BufReader::new(r), start, end).await?;
-        Ok((total, Self { start, end, roots }))
+    pub async fn verify<R: AsyncRead + Unpin>(r: R, start: usize, end: usize) -> Result<()> {
+        let roots = Self::read_data(&mut io::BufReader::new(r), start, end).await?;
+
+        unimplemented!("implement verification");
     }
 
     async fn read_data<R: AsyncRead + Unpin>(
         r: &mut R,
         start: usize,
         end: usize,
-    ) -> Result<(usize, Vec<Hash256>)> {
+    ) -> Result<Vec<Hash256>> {
         assert!(start < end);
         let mut i = start;
         let j = end;
-        let mut total = 0;
         let mut roots = Vec::new();
 
         while i < j {
@@ -119,11 +111,10 @@ impl RangeProofVerifier {
             let n = subtree_size * SEGMENT_SIZE;
             let mut r = r.take(n as u64);
             let root = sector_root_from_reader(&mut r).await?;
-            total += n;
             roots.push(root);
             i += subtree_size;
         }
-        Ok((total, roots))
+        Ok(roots)
     }
 }
 

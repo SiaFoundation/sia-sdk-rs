@@ -11,6 +11,7 @@ use crate::encoding_async::{
     AsyncSiaEncode, Error as AsyncError,
 };
 use crate::rhp::SECTOR_SIZE;
+use crate::rhp::merkle::{ProofValidationError, RangeProof};
 use blake2b_simd::Params;
 
 use crate::signing::{PrivateKey, PublicKey, Signature};
@@ -469,6 +470,9 @@ pub enum Error {
 
     #[error("expected transaction set in response")]
     ExpectedTransactionSet,
+
+    #[error("proof validation failed")]
+    ProofValidation(#[from] ProofValidationError),
 }
 
 #[derive(Debug, Default, PartialEq, Clone, Copy, Serialize, Deserialize)]
@@ -771,6 +775,8 @@ pub struct RPCReadSector<T: TransportStream, State> {
     transport: Transport<T>,
     usage: Usage,
     state: PhantomData<State>,
+    offset: usize,
+    length: usize,
 }
 
 impl<T: TransportStream> RPCReadSector<T, RPCInit> {
@@ -797,6 +803,8 @@ impl<T: TransportStream> RPCReadSector<T, RPCInit> {
             transport,
             usage,
             state: PhantomData,
+            offset,
+            length,
         })
     }
 }
@@ -804,6 +812,12 @@ impl<T: TransportStream> RPCReadSector<T, RPCInit> {
 impl<T: TransportStream> RPCReadSector<T, RPCComplete> {
     pub async fn complete(mut self) -> Result<RPCReadSectorResult, Error> {
         let response: RPCReadSectorResponse = self.transport.read_response().await?;
+
+        // verify proof
+        let start = self.offset / SEGMENT_SIZE;
+        let end = (self.offset + self.length + SEGMENT_SIZE - 1) / SEGMENT_SIZE;
+        RangeProof::verify(&mut &response.data[..], start, end).await?;
+
         Ok(RPCReadSectorResult {
             usage: self.usage,
             data: response.data,
