@@ -240,8 +240,7 @@ mod tests {
             assert_eq!(
                 shards.len(),
                 DATA_SHARDS + PARITY_SHARDS,
-                "data size {} shard count mismatch",
-                data_size
+                "data size {data_size} shard count mismatch"
             );
 
             for (i, data) in data[..size].chunks(64).enumerate() {
@@ -253,10 +252,7 @@ mod tests {
                 assert_eq!(
                     &shards[index][offset..offset + 64],
                     chunk,
-                    "data size {} shard {} mismatch at offset {}",
-                    data_size,
-                    index,
-                    offset
+                    "data size {data_size} shard {index} mismatch at offset {offset}"
                 );
             }
         }

@@ -151,6 +151,7 @@ impl Slab {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::hash_256;
     use crate::rhp::sector_root;
     use rand::RngCore;
     use std::collections::HashMap;
@@ -178,7 +179,7 @@ mod test {
 
     impl SectorUploader for MockUploadDownloader {
         async fn write_sector(&self, sector: impl AsRef<[u8]>) -> Result<Sector, RHPError> {
-            let root = sector_root(&sector);
+            let root = sector_root(sector.as_ref());
             let sector_data = sector.as_ref().to_vec();
             let mut sectors = self.sectors.lock().await;
             sectors.insert(root.to_string(), sector_data);
@@ -232,5 +233,45 @@ mod test {
         slab.download(&mut writer, &mock).await.unwrap();
 
         assert_eq!(writer, data);
+    }
+
+    /// tests Slab.digest against a reference digest
+    #[test]
+    fn test_slab_digest() {
+        let s = Slab {
+            min_shards: 1,
+            encryption_key: [
+                152, 138, 169, 77, 22, 195, 154, 192, 91, 139, 241, 61, 75, 225, 38, 124, 225, 31,
+                187, 165, 80, 215, 75, 121, 115, 204, 235, 9, 90, 248, 68, 92,
+            ],
+            sectors: vec![
+                Sector {
+                    root: hash_256!(
+                        "fb0a42cce246d6bb9716eb0e97579a1d0d5c2bb34d7234e9ae271d4fd8201b24"
+                    ),
+                    host_key: PublicKey::new(rand::random()), // host key is not included in the digest
+                },
+                Sector {
+                    root: hash_256!(
+                        "8125994daee38e1fbaf7a26c7935420ce055202f7175eae98d291ebe80f2b00e"
+                    ),
+                    host_key: PublicKey::new(rand::random()), // host key is not included in the digest
+                },
+                Sector {
+                    root: hash_256!(
+                        "54ee41b57b9439868b119b8fe1c6c602bd6b35e27d31400c5bb85912b60c9f0a"
+                    ),
+                    host_key: PublicKey::new(rand::random()), // host key is not included in the digest
+                },
+            ],
+            // length and offset are not included in the digest
+            length: 100,
+            offset: 100,
+        };
+
+        assert_eq!(
+            s.digest().to_string(),
+            "d1aea84f8682d7ae17b6c1f14dc344eb70b9328ee913a76fc241559657b06284"
+        )
     }
 }
