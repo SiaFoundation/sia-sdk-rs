@@ -218,10 +218,14 @@ mod tests {
 
         let mut data = vec![0u8; SECTOR_SIZE * DATA_SHARDS];
         rand::rng().fill_bytes(&mut data);
-        let coder = ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).expect("Failed to create ErasureCoder");
-        let (shards, slab_size) = coder.striped_read(&mut data.as_slice()).await.expect("Failed to read shards");
+        let coder =
+            ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).expect("Failed to create ErasureCoder");
+        let (shards, slab_size) = coder
+            .striped_read(&mut data.as_slice())
+            .await
+            .expect("Failed to read shards");
         assert_eq!(slab_size, SECTOR_SIZE * DATA_SHARDS);
-        assert_eq!(shards.len(), DATA_SHARDS+PARITY_SHARDS);
+        assert_eq!(shards.len(), DATA_SHARDS + PARITY_SHARDS);
 
         for (i, chunk) in data.chunks(64).enumerate() {
             let index = i % DATA_SHARDS;

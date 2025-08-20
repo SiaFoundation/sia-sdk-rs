@@ -152,8 +152,8 @@ impl Slab {
 mod test {
     use super::*;
     use crate::rhp::sector_root;
+    use rand::RngCore;
     use std::collections::HashMap;
-    use rand::{RngCore};
     use tokio::sync::Mutex;
 
     struct MockUploadDownloader {
@@ -207,9 +207,7 @@ mod test {
         assert_eq!(slab.sectors.len(), 5);
 
         let mut writer: Vec<u8> = Vec::new();
-        slab.download(&mut writer, &mock)
-            .await
-            .unwrap();
+        slab.download(&mut writer, &mock).await.unwrap();
 
         assert_eq!(writer, data);
     }
@@ -231,9 +229,7 @@ mod test {
         assert_eq!(slab.sectors.len(), 5);
 
         let mut writer: Vec<u8> = Vec::new();
-        slab.download(&mut writer, &mock)
-            .await
-            .unwrap();
+        slab.download(&mut writer, &mock).await.unwrap();
 
         assert_eq!(writer, data);
     }
