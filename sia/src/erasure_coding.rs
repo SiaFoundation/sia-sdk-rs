@@ -216,22 +216,32 @@ mod tests {
         const DATA_SHARDS: usize = 3;
         const PARITY_SHARDS: usize = 2;
 
-        let mut data = vec![0u8; SECTOR_SIZE * DATA_SHARDS];
-        rand::rng().fill_bytes(&mut data);
-        let coder =
-            ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).expect("Failed to create ErasureCoder");
-        let (shards, slab_size) = coder
-            .striped_read(&mut data.as_slice())
-            .await
-            .expect("Failed to read shards");
-        assert_eq!(slab_size, SECTOR_SIZE * DATA_SHARDS);
-        assert_eq!(shards.len(), DATA_SHARDS + PARITY_SHARDS);
+        let test_cases = vec![
+            // (data size, expected size)
+            (100, 100), // under
+            (SECTOR_SIZE * DATA_SHARDS, SECTOR_SIZE * DATA_SHARDS), // exact
+            (2 * SECTOR_SIZE * DATA_SHARDS, SECTOR_SIZE * DATA_SHARDS), // over
+        ];
 
-        for (i, chunk) in data.chunks(64).enumerate() {
-            let index = i % DATA_SHARDS;
-            let offset = (i / DATA_SHARDS) * SEGMENT_SIZE;
+        let coder = ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).unwrap();
 
-            assert_eq!(&shards[index][offset..offset + 64], chunk);
+        for (data_size, expected_size) in test_cases {
+            let mut data = vec![0u8; data_size];
+            rand::rng().fill_bytes(&mut data);
+
+            let (shards, size) = coder.striped_read(&mut &data[..]).await.unwrap();
+
+            assert_eq!(size, expected_size, "data size {} mismatch", data_size);
+            assert_eq!(shards.len(), DATA_SHARDS + PARITY_SHARDS, "data size {} shard count mismatch", data_size);
+
+            for (i, data) in data[..size].chunks(64).enumerate() {
+                let mut chunk = [0u8; SEGMENT_SIZE];
+                chunk[..data.len()].copy_from_slice(data); // pad it out with zeros
+                let index = i % DATA_SHARDS;
+                let offset = (i / DATA_SHARDS) * SEGMENT_SIZE;
+
+                assert_eq!(&shards[index][offset..offset + 64], chunk, "data size {} shard {} mismatch at offset {}", data_size, index, offset);
+            }
         }
     }
 
