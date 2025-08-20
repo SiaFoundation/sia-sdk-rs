@@ -147,6 +147,11 @@ impl ErasureCoder {
                 let segment = &mut shard[start..end];
                 let mut bytes_read = 0;
                 while bytes_read < SEGMENT_SIZE {
+                    // note: read_exact + UnexpectedEoF is not used due to the documentation
+                    // saying "the contents of buf are unspecified." when UnexpectedEoF is
+                    // returned. It's *most likely* fine to rely on the contents being
+                    // a partial read, but better to not make the assumption for every
+                    // possible implementation of the Read trait.
                     let n = r.read(&mut segment[bytes_read..]).await?;
                     if n == 0 {
                         return Ok((shards, data_size));
@@ -218,8 +223,8 @@ mod tests {
 
         let test_cases = vec![
             // (data size, expected size)
-            (100, 100), // under
-            (SECTOR_SIZE * DATA_SHARDS, SECTOR_SIZE * DATA_SHARDS), // exact
+            (100, 100),                                                 // under
+            (SECTOR_SIZE * DATA_SHARDS, SECTOR_SIZE * DATA_SHARDS),     // exact
             (2 * SECTOR_SIZE * DATA_SHARDS, SECTOR_SIZE * DATA_SHARDS), // over
         ];
 
@@ -232,7 +237,12 @@ mod tests {
             let (shards, size) = coder.striped_read(&mut &data[..]).await.unwrap();
 
             assert_eq!(size, expected_size, "data size {} mismatch", data_size);
-            assert_eq!(shards.len(), DATA_SHARDS + PARITY_SHARDS, "data size {} shard count mismatch", data_size);
+            assert_eq!(
+                shards.len(),
+                DATA_SHARDS + PARITY_SHARDS,
+                "data size {} shard count mismatch",
+                data_size
+            );
 
             for (i, data) in data[..size].chunks(64).enumerate() {
                 let mut chunk = [0u8; SEGMENT_SIZE];
@@ -240,7 +250,14 @@ mod tests {
                 let index = i % DATA_SHARDS;
                 let offset = (i / DATA_SHARDS) * SEGMENT_SIZE;
 
-                assert_eq!(&shards[index][offset..offset + 64], chunk, "data size {} shard {} mismatch at offset {}", data_size, index, offset);
+                assert_eq!(
+                    &shards[index][offset..offset + 64],
+                    chunk,
+                    "data size {} shard {} mismatch at offset {}",
+                    data_size,
+                    index,
+                    offset
+                );
             }
         }
     }
