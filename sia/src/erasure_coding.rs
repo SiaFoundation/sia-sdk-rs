@@ -36,11 +36,11 @@ impl ErasureCoder {
     pub async fn read_encoded_shards<R: AsyncRead + Unpin>(
         &mut self,
         r: &mut R,
-    ) -> Result<Vec<Vec<u8>>> {
+    ) -> Result<(Vec<Vec<u8>>, usize)> {
         // use a buffered reader since striped_read will read 64 bytes at a time
-        let mut shards = self.striped_read(&mut BufReader::new(r)).await?;
+        let (mut shards, size) = self.striped_read(&mut BufReader::new(r)).await?;
         self.encode_shards(&mut shards)?;
-        Ok(shards)
+        Ok((shards, size))
     }
 
     /// write_reconstructed_shards is a convenience method that attempts to
@@ -130,7 +130,7 @@ impl ErasureCoder {
     }
 
     /// striped_read reads data from the given reader into a vector of shards.
-    async fn striped_read<R: AsyncRead + Unpin>(&self, r: &mut R) -> Result<Vec<Vec<u8>>> {
+    async fn striped_read<R: AsyncRead + Unpin>(&self, r: &mut R) -> Result<(Vec<Vec<u8>>, usize)> {
         // allocate memory for shards
         let mut shards: Vec<Vec<u8>> = Vec::with_capacity(self.data_shards);
         for _ in 0..self.data_shards + self.parity_shards {
@@ -139,33 +139,31 @@ impl ErasureCoder {
 
         // limit total read size to the size of the slab's data shards
         let mut r = r.take(self.data_shards as u64 * SECTOR_SIZE as u64);
-
-        let mut buf = [0u8; SEGMENT_SIZE];
-        for off in (0..).map(|n| n * SEGMENT_SIZE) {
-            for shard in shards[..self.data_shards].iter_mut() {
-                match r.read_exact(&mut buf).await {
-                    Ok(_) => {}
-                    Err(err) => {
-                        if err.kind() == io::ErrorKind::UnexpectedEof {
-                            // EOF reached, the remaining bytes are zeros
-                            shard[off..off + SEGMENT_SIZE].copy_from_slice(&buf);
-                            return Ok(shards);
-                        } else {
-                            // Some other IO error
-                            return Err(Error::Io(err));
-                        }
+        let mut data_size = 0;
+        for off in (0..SECTOR_SIZE).step_by(SEGMENT_SIZE) {
+            let start = off;
+            let end = off + SEGMENT_SIZE;
+            for shard in &mut shards[..self.data_shards].iter_mut() {
+                let segment = &mut shard[start..end];
+                let mut bytes_read = 0;
+                while bytes_read < SEGMENT_SIZE {
+                    let n = r.read(&mut segment[bytes_read..]).await?;
+                    if n == 0 {
+                        return Ok((shards, data_size));
                     }
-                };
-                shard[off..off + SEGMENT_SIZE].copy_from_slice(&buf);
-                buf.fill(0); // clear buffer
+                    bytes_read += n;
+                    data_size += n;
+                }
             }
         }
-        Ok(shards)
+        Ok((shards, data_size))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use rand::RngCore;
+
     use super::*;
 
     #[tokio::test]
@@ -214,6 +212,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_striped_read() {
+        const DATA_SHARDS: usize = 3;
+        const PARITY_SHARDS: usize = 2;
+
+        let mut data = vec![0u8; SECTOR_SIZE * DATA_SHARDS];
+        rand::rng().fill_bytes(&mut data);
+        let coder = ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).expect("Failed to create ErasureCoder");
+        let (shards, slab_size) = coder.striped_read(&mut data.as_slice()).await.expect("Failed to read shards");
+        assert_eq!(slab_size, SECTOR_SIZE * DATA_SHARDS);
+        assert_eq!(shards.len(), DATA_SHARDS+PARITY_SHARDS);
+
+        for (i, chunk) in data.chunks(64).enumerate() {
+            let index = i % DATA_SHARDS;
+            let offset = (i / DATA_SHARDS) * SEGMENT_SIZE;
+
+            assert_eq!(&shards[index][offset..offset + 64], chunk);
+        }
+    }
+
+    #[tokio::test]
     async fn test_striped_read_write() {
         let mut coder = ErasureCoder::new(4, 1).unwrap();
 
@@ -223,10 +241,11 @@ mod tests {
         data[2 * SECTOR_SIZE..3 * SECTOR_SIZE].fill(3);
         data[3 * SECTOR_SIZE..].fill(4);
 
-        let mut shards = coder.striped_read(&mut data.as_slice()).await.unwrap();
+        let (mut shards, size) = coder.striped_read(&mut data.as_slice()).await.unwrap();
 
         // we expect 5 shards and the last one is an empty parity shard
         assert_eq!(shards.len(), 5);
+        assert_eq!(size, SECTOR_SIZE * 7 / 2);
         assert_eq!(shards[4], [0u8; SECTOR_SIZE]);
 
         for shard in &shards[..4] {
@@ -299,7 +318,7 @@ mod tests {
         data[3 * SECTOR_SIZE..].fill(4);
 
         // encode the data
-        let encoded_shards = coder.read_encoded_shards(&mut &data[..]).await.unwrap();
+        let (encoded_shards, _) = coder.read_encoded_shards(&mut &data[..]).await.unwrap();
 
         // drop a shard
         let mut encoded_shards = encoded_shards.into_iter().map(Some).collect::<Vec<_>>();

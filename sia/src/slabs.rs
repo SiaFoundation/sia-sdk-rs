@@ -52,11 +52,13 @@ pub struct Slab {
     pub encryption_key: [u8; 32],
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
+    pub offset: usize,
+    pub length: usize,
 }
 
 impl Slab {
     /// creates a unique identifier for the resulting slab to be referenced by hashing
-    /// its contents, excluding the host key.
+    /// its contents, excluding the host key, length, and offset.
     pub fn digest(&self) -> Hash256 {
         let mut state = blake2b_simd::Params::new().hash_length(32).to_state();
 
@@ -69,7 +71,7 @@ impl Slab {
     }
 
     /// Reads a single slab from the provided reader, erasure codes it, then uploads the resulting sectors.
-    pub async fn upload_slab<R: AsyncReadExt + Unpin, S: SectorUploader>(
+    pub async fn upload<R: AsyncReadExt + Unpin, S: SectorUploader>(
         r: &mut R,
         uploader: &S,
         encryption_key: [u8; 32],
@@ -77,7 +79,7 @@ impl Slab {
         parity_shards: u8,
     ) -> Result<Self, Error> {
         let mut rs = ErasureCoder::new(data_shards as usize, parity_shards as usize)?;
-        let mut shards = rs.read_encoded_shards(r).await?;
+        let (mut shards, length) = rs.read_encoded_shards(r).await?;
         encrypt_shards(&encryption_key, &mut shards, 0);
 
         let mut futures = Vec::new();
@@ -90,17 +92,17 @@ impl Slab {
             encryption_key,
             min_shards: data_shards,
             sectors: results,
+            offset: 0,
+            length,
         })
     }
 
     /// Downloads a slab from the provided hosts. If enough shards are recovered,
     /// the reconstructed data will be written to the provided writer.
-    pub async fn download_slab<W: AsyncWriteExt + Unpin, S: SectorDownloader>(
+    pub async fn download<W: AsyncWriteExt + Unpin, S: SectorDownloader>(
         &self,
         writer: &mut W,
         downloader: &S,
-        offset: usize,
-        length: usize,
     ) -> Result<(), Error> {
         let mut sector_futures = FuturesUnordered::new();
         for (i, sector) in self.sectors.iter().enumerate() {
@@ -140,7 +142,7 @@ impl Slab {
             return Err(Error::NotEnoughShards(successful, self.min_shards));
         }
 
-        rs.write_reconstructed_shards(writer, &mut successful_shards, offset, length)
+        rs.write_reconstructed_shards(writer, &mut successful_shards, self.offset, self.length)
             .await?;
         Ok(())
     }
@@ -151,6 +153,7 @@ mod test {
     use super::*;
     use crate::rhp::sector_root;
     use std::collections::HashMap;
+    use rand::{RngCore};
     use tokio::sync::Mutex;
 
     struct MockUploadDownloader {
@@ -193,16 +196,42 @@ mod test {
             sectors: Mutex::new(HashMap::new()),
         };
 
-        let data = vec![0u8; 1024];
+        let mut data = vec![0u8; 3 * SECTOR_SIZE];
+        rand::rng().fill_bytes(&mut data);
+
         let key: [u8; 32] = rand::random();
-        let slab: Slab = Slab::upload_slab(&mut data.as_ref(), &mock, key, 3, 2)
+        let slab: Slab = Slab::upload(&mut data.as_ref(), &mock, key, 3, 2)
             .await
             .unwrap();
         assert_eq!(slab.min_shards, 3);
         assert_eq!(slab.sectors.len(), 5);
 
         let mut writer: Vec<u8> = Vec::new();
-        slab.download_slab(&mut writer, &mock, 0, 1024)
+        slab.download(&mut writer, &mock)
+            .await
+            .unwrap();
+
+        assert_eq!(writer, data);
+    }
+
+    #[tokio::test]
+    async fn test_partial_slab_roundtrip() {
+        let mock = MockUploadDownloader {
+            sectors: Mutex::new(HashMap::new()),
+        };
+
+        let mut data = vec![0u8; 1024];
+        rand::rng().fill_bytes(&mut data);
+
+        let key: [u8; 32] = rand::random();
+        let slab: Slab = Slab::upload(&mut data.as_ref(), &mock, key, 3, 2)
+            .await
+            .unwrap();
+        assert_eq!(slab.min_shards, 3);
+        assert_eq!(slab.sectors.len(), 5);
+
+        let mut writer: Vec<u8> = Vec::new();
+        slab.download(&mut writer, &mock)
             .await
             .unwrap();
 
