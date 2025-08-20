@@ -1,9 +1,11 @@
-use crate::merkle::{LEAF_HASH_PREFIX, NODE_HASH_PREFIX, sum_node};
+use crate::merkle::{self, LEAF_HASH_PREFIX, NODE_HASH_PREFIX, sum_leaf, sum_node};
 use crate::rhp::{SECTOR_SIZE, SEGMENT_SIZE};
 use crate::types::Hash256;
 use blake2b_simd::Params;
 use blake2b_simd::many::{HashManyJob, hash_many};
 use rayon::prelude::*;
+use thiserror::Error;
+use tokio::io::{self, AsyncRead, AsyncReadExt};
 
 /// Calculates the Merkle root of a sector
 pub fn sector_root(sector: &[u8]) -> Hash256 {
@@ -71,6 +73,101 @@ pub fn sector_root(sector: &[u8]) -> Hash256 {
         &tree_hashes[0],
         &tree_hashes[tree_hashes.len() / 2],
     )
+}
+
+#[derive(Debug, Error)]
+pub enum ProofValidationError {
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+
+    #[error("The proof data is not segment aligned")]
+    NotSegmentAligned,
+}
+
+pub type Result<T> = std::result::Result<T, ProofValidationError>;
+
+struct RangeProofVerifier {
+    start: usize,
+    end: usize,
+    roots: Vec<Hash256>,
+}
+
+impl RangeProofVerifier {
+    #[allow(dead_code)]
+    pub async fn from_reader<R: AsyncRead + Unpin>(
+        r: R,
+        start: usize,
+        end: usize,
+    ) -> Result<(usize, Self)> {
+        let (total, roots) = Self::read_data(&mut io::BufReader::new(r), start, end).await?;
+        Ok((total, Self { start, end, roots }))
+    }
+
+    async fn read_data<R: AsyncRead + Unpin>(
+        r: &mut R,
+        start: usize,
+        end: usize,
+    ) -> Result<(usize, Vec<Hash256>)> {
+        assert!(start < end);
+        let mut i = start;
+        let j = end;
+        let mut total = 0;
+        let mut roots = Vec::new();
+
+        while i < j {
+            let subtree_size = next_subtree_size(i, j);
+            let n = subtree_size * SEGMENT_SIZE;
+            let mut r = r.take(n as u64);
+            let root = sector_root_from_reader(&mut r).await?;
+            total += n;
+            roots.push(root);
+            i += subtree_size;
+        }
+        Ok((total, roots))
+    }
+}
+
+fn next_subtree_size(start: usize, end: usize) -> usize {
+    assert!(start < end);
+    let ideal = start.trailing_zeros();
+    let max_size = (end - start)
+        .checked_ilog2()
+        .expect("should not be None since start < end");
+    if ideal > max_size {
+        return 1 << max_size;
+    }
+    1 << ideal
+}
+
+async fn sector_root_from_reader<R: AsyncRead + Unpin>(r: &mut R) -> Result<Hash256> {
+    let mut acc = merkle::Accumulator::new();
+    let mut r = io::BufReader::new(r);
+
+    let mut leaf = [0u8; SEGMENT_SIZE];
+    loop {
+        // read a leaf
+        let mut bytes_read = 0;
+        while bytes_read < leaf.len() {
+            let n = r.read(&mut leaf[..bytes_read]).await?;
+            if n == 0 {
+                break;
+            }
+            bytes_read += n;
+        }
+        // if no bytes were read, we are done
+        // if a full segment was read, we add the leaf
+        // otherwise, we got a partial segment, which results in an error
+        match bytes_read {
+            0 => return Ok(acc.root()),
+            SEGMENT_SIZE => {
+                let h = sum_leaf(Params::new().hash_length(32), &leaf);
+                acc.add_leaf(&h);
+            }
+            _ => {
+                return Err(ProofValidationError::NotSegmentAligned);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
