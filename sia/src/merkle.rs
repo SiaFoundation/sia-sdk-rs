@@ -86,3 +86,25 @@ pub fn sum_node(params: &Params, left: &Hash256, right: &Hash256) -> Hash256 {
 
     h.into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rhp::{SECTOR_SIZE, SEGMENT_SIZE};
+
+    #[test]
+    fn test_sector_root_from_leaves() {
+        let data = vec![0u8; SECTOR_SIZE];
+
+        let mut acc = Accumulator::new();
+        for chunk in data.chunks(SEGMENT_SIZE) {
+            let leaf_hash = sum_leaf(&acc.params, chunk);
+            acc.add_leaf(&leaf_hash);
+        }
+
+        let expected_root = "50ed59cecd5ed3ca9e65cec0797202091dbba45272dafa3faa4e27064eedd52c"
+            .parse()
+            .unwrap();
+        assert_eq!(acc.root(), expected_root);
+    }
+}
