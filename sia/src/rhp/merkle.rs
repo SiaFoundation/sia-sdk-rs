@@ -1,5 +1,5 @@
-use crate::merkle::{self, LEAF_HASH_PREFIX, NODE_HASH_PREFIX, sum_leaf, sum_node};
-use crate::rhp::{SECTOR_SIZE, SEGMENT_SIZE};
+use crate::merkle::{self, Accumulator, LEAF_HASH_PREFIX, NODE_HASH_PREFIX, sum_leaf, sum_node};
+use crate::rhp::{LEAVES_PER_SECTOR, SECTOR_SIZE, SEGMENT_SIZE};
 use crate::types::Hash256;
 use blake2b_simd::Params;
 use blake2b_simd::many::{HashManyJob, hash_many};
@@ -13,7 +13,7 @@ pub fn sector_root(sector: &[u8]) -> Hash256 {
     let mut params = Params::new();
     params.hash_length(32);
 
-    let mut tree_hashes = vec![Hash256::default(); SECTOR_SIZE / SEGMENT_SIZE];
+    let mut tree_hashes = vec![Hash256::default(); LEAVES_PER_SECTOR];
     tree_hashes
         .par_chunks_exact_mut(4)
         .enumerate()
@@ -77,6 +77,12 @@ pub fn sector_root(sector: &[u8]) -> Hash256 {
 
 #[derive(Debug, Error)]
 pub enum ProofValidationError {
+    #[error("Invalid proof length: expected {expected}, got {actual}")]
+    InvalidProofLength { expected: usize, actual: usize },
+
+    #[error("Invalid proof root: expected {expected}, got {actual}")]
+    InvalidProofRoot { expected: Hash256, actual: Hash256 },
+
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
 
@@ -90,10 +96,46 @@ pub struct RangeProof;
 
 impl RangeProof {
     #[allow(dead_code)]
-    pub async fn verify<R: AsyncRead + Unpin>(r: R, start: usize, end: usize) -> Result<()> {
+    pub async fn verify<R: AsyncRead + Unpin>(
+        r: R,
+        root: &Hash256,
+        proof: &[Hash256],
+        start: usize,
+        end: usize,
+    ) -> Result<()> {
         let roots = Self::read_data(&mut io::BufReader::new(r), start, end).await?;
 
-        unimplemented!("implement verification");
+        if proof.len() != range_proof_size(LEAVES_PER_SECTOR, start, end) {
+            return Err(ProofValidationError::InvalidProofLength {
+                expected: range_proof_size(LEAVES_PER_SECTOR, start, end),
+                actual: proof.len(),
+            });
+        }
+
+        let consume = |acc: &mut Accumulator, roots: &[Hash256], i: usize, j: usize| {
+            let mut roots = roots;
+            let mut i = i;
+            while i < j && !roots.is_empty() {
+                let subtree_size = next_subtree_size(i, j);
+                let height = subtree_size.checked_ilog2().expect("should not be None");
+                acc.insert_node(&roots[0], height as usize);
+                roots = &roots[1..];
+                i += subtree_size;
+            }
+        };
+
+        let mut acc = merkle::Accumulator::new();
+        consume(&mut acc, proof, 0, start);
+        consume(&mut acc, &roots, start, end);
+        consume(&mut acc, proof, end, LEAVES_PER_SECTOR);
+
+        if acc.root() != *root {
+            return Err(ProofValidationError::InvalidProofRoot {
+                expected: *root,
+                actual: acc.root(),
+            });
+        }
+        Ok(())
     }
 
     async fn read_data<R: AsyncRead + Unpin>(
@@ -128,6 +170,16 @@ fn next_subtree_size(start: usize, end: usize) -> usize {
         return 1 << max_size;
     }
     1 << ideal
+}
+
+fn range_proof_size(leaves_per_sector: usize, start: usize, end: usize) -> usize {
+    let left_hashes = start.count_ones() as usize;
+    let path_mask = 1usize
+        << ((end - 1) ^ (leaves_per_sector - 1))
+            .checked_ilog2()
+            .expect("should not be None ");
+    let right_hashes = (!(end - 1) & path_mask).count_ones() as usize;
+    left_hashes + right_hashes
 }
 
 async fn sector_root_from_reader<R: AsyncRead + Unpin>(r: &mut R) -> Result<Hash256> {

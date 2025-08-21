@@ -777,6 +777,7 @@ pub struct RPCReadSector<T: TransportStream, State> {
     state: PhantomData<State>,
     offset: usize,
     length: usize,
+    root: Hash256,
 }
 
 impl<T: TransportStream> RPCReadSector<T, RPCInit> {
@@ -805,6 +806,7 @@ impl<T: TransportStream> RPCReadSector<T, RPCInit> {
             state: PhantomData,
             offset,
             length,
+            root,
         })
     }
 }
@@ -816,7 +818,14 @@ impl<T: TransportStream> RPCReadSector<T, RPCComplete> {
         // verify proof
         let start = self.offset / SEGMENT_SIZE;
         let end = (self.offset + self.length + SEGMENT_SIZE - 1) / SEGMENT_SIZE;
-        RangeProof::verify(&mut &response.data[..], start, end).await?;
+        RangeProof::verify(
+            &mut &response.data[..],
+            &self.root,
+            &response.proof,
+            start,
+            end,
+        )
+        .await?;
 
         Ok(RPCReadSectorResult {
             usage: self.usage,

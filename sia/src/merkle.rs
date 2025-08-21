@@ -37,6 +37,17 @@ impl Accumulator {
         self.num_leaves += 1;
     }
 
+    pub fn insert_node(&mut self, h: &Hash256, height: usize) {
+        let mut h = *h;
+        let mut i = height;
+        while self.has_tree_at_height(i) {
+            h = sum_node(&self.params, &self.trees[i], &h);
+            i += 1;
+        }
+        self.trees[height] = h;
+        self.num_leaves += 1 << height;
+    }
+
     pub fn root(&self) -> Hash256 {
         let mut i = self.num_leaves.trailing_zeros() as usize;
         if i == 64 {
