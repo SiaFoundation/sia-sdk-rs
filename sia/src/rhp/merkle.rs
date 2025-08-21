@@ -174,10 +174,12 @@ fn next_subtree_size(start: usize, end: usize) -> usize {
 
 fn range_proof_size(leaves_per_sector: usize, start: usize, end: usize) -> usize {
     let left_hashes = start.count_ones() as usize;
-    let path_mask = 1usize
+    let path_mask = (1usize
         << ((end - 1) ^ (leaves_per_sector - 1))
             .checked_ilog2()
-            .expect("should not be None ");
+            .map(|n| n + 1)
+            .unwrap_or(0))
+        - 1;
     let right_hashes = (!(end - 1) & path_mask).count_ones() as usize;
     left_hashes + right_hashes
 }
@@ -250,6 +252,30 @@ mod tests {
         assert_eq!(
             root,
             hash_256!("84d0672b204f38469dbb818bcb3caa7391f7781cbf84bce0482b2fd2c2d50938")
+        );
+    }
+
+    #[test]
+    fn test_range_proof_size() {
+        assert_eq!(range_proof_size(LEAVES_PER_SECTOR, 0, LEAVES_PER_SECTOR), 0);
+        assert_eq!(range_proof_size(LEAVES_PER_SECTOR, 1, LEAVES_PER_SECTOR), 1);
+        assert_eq!(
+            range_proof_size(LEAVES_PER_SECTOR, 0, LEAVES_PER_SECTOR / 2),
+            1
+        );
+        assert_eq!(
+            range_proof_size(
+                LEAVES_PER_SECTOR,
+                LEAVES_PER_SECTOR / 2,
+                LEAVES_PER_SECTOR / 2
+            ),
+            2
+        );
+        assert_eq!(range_proof_size(LEAVES_PER_SECTOR, 0, 42), 13);
+        assert_eq!(range_proof_size(LEAVES_PER_SECTOR, 24, 42), 15);
+        assert_eq!(
+            range_proof_size(LEAVES_PER_SECTOR, 24, LEAVES_PER_SECTOR),
+            2
         );
     }
 }
