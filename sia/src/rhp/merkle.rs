@@ -210,7 +210,6 @@ async fn sector_root_from_reader<R: AsyncRead + Unpin>(r: &mut R) -> Result<Hash
             SEGMENT_SIZE => {
                 let h = sum_leaf(Params::new().hash_length(32), &leaf);
                 acc.add_leaf(&h);
-                return Ok(acc.root());
             }
             _ => {
                 return Err(ProofValidationError::NotSegmentAligned);
