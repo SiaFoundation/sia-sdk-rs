@@ -236,7 +236,7 @@ mod tests {
 
             let (shards, size) = coder.striped_read(&mut &data[..]).await.unwrap();
 
-            assert_eq!(size, expected_size, "data size {} mismatch", data_size);
+            assert_eq!(size, expected_size, "data size {data_size} mismatch");
             assert_eq!(
                 shards.len(),
                 DATA_SHARDS + PARITY_SHARDS,

@@ -817,7 +817,7 @@ impl<T: TransportStream> RPCReadSector<T, RPCComplete> {
 
         // verify proof
         let start = self.offset / SEGMENT_SIZE;
-        let end = (self.offset + self.length + SEGMENT_SIZE - 1) / SEGMENT_SIZE;
+        let end = (self.offset + self.length).div_ceil(SEGMENT_SIZE);
         RangeProof::verify(
             &mut &response.data[..],
             &self.root,
