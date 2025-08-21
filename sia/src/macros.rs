@@ -86,6 +86,14 @@ macro_rules! impl_hash_id {
             }
         }
 
+        impl std::str::FromStr for $name {
+            type Err = $crate::types::HexParseError;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Self::parse_string(s)
+            }
+        }
+
         impl AsRef<[u8; 32]> for $name {
             fn as_ref(&self) -> &[u8; 32] {
                 &self.0

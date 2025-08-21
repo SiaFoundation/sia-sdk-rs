@@ -188,6 +188,7 @@ fn range_proof_size(leaves_per_sector: usize, start: usize, end: usize) -> usize
 
 async fn sector_root_from_reader<R: AsyncRead + Unpin>(r: &mut R) -> Result<Hash256> {
     let mut acc = merkle::Accumulator::new();
+    let r = r.take(SECTOR_SIZE as u64); // cap at a sector
     let mut r = io::BufReader::new(r);
 
     let mut leaf = [0u8; SEGMENT_SIZE];
@@ -195,7 +196,7 @@ async fn sector_root_from_reader<R: AsyncRead + Unpin>(r: &mut R) -> Result<Hash
         // read a leaf
         let mut bytes_read = 0;
         while bytes_read < leaf.len() {
-            let n = r.read(&mut leaf[..bytes_read]).await?;
+            let n = r.read(&mut leaf[bytes_read..]).await?;
             if n == 0 {
                 break;
             }
@@ -209,6 +210,7 @@ async fn sector_root_from_reader<R: AsyncRead + Unpin>(r: &mut R) -> Result<Hash
             SEGMENT_SIZE => {
                 let h = sum_leaf(Params::new().hash_length(32), &leaf);
                 acc.add_leaf(&h);
+                return Ok(acc.root());
             }
             _ => {
                 return Err(ProofValidationError::NotSegmentAligned);
@@ -295,5 +297,77 @@ mod tests {
             32768
         );
         assert_eq!(next_subtree_size(24, 42), 8);
+    }
+
+    #[tokio::test]
+    async fn test_sector_root_from_reader() {
+        // prepare slightly more than a sector worth of data to make sure we
+        // only compute the hash over the first SECTOR_SIZE bytes
+        let data = vec![0u8; SECTOR_SIZE + 64];
+        let root = sector_root_from_reader(&mut &data[..]).await.unwrap();
+
+        let expected_root = "50ed59cecd5ed3ca9e65cec0797202091dbba45272dafa3faa4e27064eedd52c"
+            .parse()
+            .unwrap();
+        assert_eq!(root, expected_root);
+    }
+
+    #[tokio::test]
+    async fn test_verify_range_proof() {
+        let sector = vec![0u8; SECTOR_SIZE];
+        let sector_root = sector_root(&sector);
+        let proof: [Hash256; 15] = [
+            "f0022a573326ecc0e4c18cf56b9a31d94dc792f8ec20ecbbc57d33c75db24c54"
+                .parse()
+                .unwrap(),
+            "d66f6fce29310f5d2db0d2398e6d93b23c9fa1982b7249b07664590b7aebc49a"
+                .parse()
+                .unwrap(),
+            "5b3bc22a619574a668c4e2a22fa72210611813c6ed44cf445789ee316102bfe1"
+                .parse()
+                .unwrap(),
+            "3d8e644caa3e7ac720b1f7ce42d829ecf2c0ad7ef656258f4c1c90422074ba23"
+                .parse()
+                .unwrap(),
+            "f0022a573326ecc0e4c18cf56b9a31d94dc792f8ec20ecbbc57d33c75db24c54"
+                .parse()
+                .unwrap(),
+            "9213804e199cab3449185a5517f54e49c1d6b0892b8269ed4baab62dbf3e8ebb"
+                .parse()
+                .unwrap(),
+            "f052bf6db4444532ed0d8fdfc67c0ce9688fb4042d461a5bb367506de5e712a8"
+                .parse()
+                .unwrap(),
+            "61b3d824e7b4662df867477f09335dfecfc990c9f0b3731fbec981428b38190d"
+                .parse()
+                .unwrap(),
+            "272b122c6943a7dd6b5e2797a727de61f53c274f29d7d3e4e30d40620f83dc2b"
+                .parse()
+                .unwrap(),
+            "5ce18ab62a07bb4d4def2509f8bfa982d5cfd07deb533248abfd7b305652470c"
+                .parse()
+                .unwrap(),
+            "39cb8aa6feace01924b732664b81a8f41d688cbd7817154c663c1686a4cf6a0e"
+                .parse()
+                .unwrap(),
+            "95ab608799eb9c485712a4c995d4e22ea7b20024fe81730f5b4deb4982e97b78"
+                .parse()
+                .unwrap(),
+            "6530f5433504ba845332dd51742b57f0666456c99b78f67c72fac381980527b1"
+                .parse()
+                .unwrap(),
+            "53ae21d13da92c6741cf44e9b08e0c0616485402c343e4f6c92e5c8516187bcf"
+                .parse()
+                .unwrap(),
+            "f2c4d3e9ce380389b1088d44ddb30276fbff5f75803c2bd13678b690f4187d7e"
+                .parse()
+                .unwrap(),
+        ];
+
+        assert!(
+            RangeProof::verify(&sector[..], &sector_root, &proof[..], 24, 42)
+                .await
+                .is_ok()
+        );
     }
 }
