@@ -117,7 +117,9 @@ impl RangeProof {
             let mut i = i;
             while i < j && !roots.is_empty() {
                 let subtree_size = next_subtree_size(i, j);
-                let height = subtree_size.checked_ilog2().expect("should not be None");
+                let height = subtree_size
+                    .checked_ilog2()
+                    .expect("should not be None since subtree_size > 0");
                 acc.insert_node(&roots[0], height as usize);
                 roots = &roots[1..];
                 i += subtree_size;
@@ -277,5 +279,21 @@ mod tests {
             range_proof_size(LEAVES_PER_SECTOR, 24, LEAVES_PER_SECTOR),
             2
         );
+    }
+
+    #[test]
+    fn test_next_subtree_size() {
+        assert_eq!(next_subtree_size(0, 1), 1);
+        assert_eq!(
+            next_subtree_size(LEAVES_PER_SECTOR, LEAVES_PER_SECTOR + 1),
+            1
+        );
+        assert_eq!(next_subtree_size(0, LEAVES_PER_SECTOR), 65536);
+        assert_eq!(next_subtree_size(0, LEAVES_PER_SECTOR / 2), 32768);
+        assert_eq!(
+            next_subtree_size(LEAVES_PER_SECTOR / 2, LEAVES_PER_SECTOR),
+            32768
+        );
+        assert_eq!(next_subtree_size(24, 42), 8);
     }
 }
