@@ -30,7 +30,7 @@ impl Accumulator {
         let mut i = 0;
         let mut node = *h;
         while self.has_tree_at_height(i) {
-            node = sum_node(&self.params, &self.trees[i], h);
+            node = sum_node(&self.params, &self.trees[i], &node);
             i += 1;
         }
         self.trees[i] = node;
