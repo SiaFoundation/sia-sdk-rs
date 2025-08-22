@@ -573,28 +573,42 @@ pub trait RPCRequest: AsyncSiaEncodable + AsyncSiaDecodable {
 /// It abstracts the underlying transport mechanism, allowing for different implementations
 /// (e.g., TCP, QUIC, WebTransport) to be used without changing the RPC logic.
 pub trait TransportStream: AsyncEncoder + AsyncDecoder + Unpin + Sized {
-    async fn write_request<R: RPCRequest>(&mut self, request: &R) -> Result<(), Error> {
-        self.write_all(R::RPC_ID.as_ref()).await?;
-        request.encode_async(self).await?;
-        Ok(())
+    fn write_request<R: RPCRequest>(
+        &mut self,
+        request: &R,
+    ) -> impl std::future::Future<Output = Result<(), Error>> {
+        async {
+            self.write_all(R::RPC_ID.as_ref()).await?;
+            request.encode_async(self).await?;
+            Ok(())
+        }
     }
 
-    async fn write_response<R: AsyncSiaEncodable>(&mut self, response: &R) -> Result<(), Error> {
-        self.write_all(&[0]).await?; // nil error
-        response.encode_async(self).await?;
-        Ok(())
+    fn write_response<R: AsyncSiaEncodable>(
+        &mut self,
+        response: &R,
+    ) -> impl std::future::Future<Output = Result<(), Error>> {
+        async {
+            self.write_all(&[0]).await?; // nil error
+            response.encode_async(self).await?;
+            Ok(())
+        }
     }
 
-    async fn read_response<R: AsyncSiaDecodable>(&mut self) -> Result<R, Error> {
-        let has_error = bool::decode_async(self).await?;
-        match has_error {
-            false => {
-                let resp = R::decode_async(self).await?;
-                Ok(resp)
-            }
-            true => {
-                let error = RPCError::decode_async(self).await.map(Error::RPC)?;
-                Err(error)
+    fn read_response<R: AsyncSiaDecodable>(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<R, Error>> {
+        async {
+            let has_error = bool::decode_async(self).await?;
+            match has_error {
+                false => {
+                    let resp = R::decode_async(self).await?;
+                    Ok(resp)
+                }
+                true => {
+                    let error = RPCError::decode_async(self).await.map(Error::RPC)?;
+                    Err(error)
+                }
             }
         }
     }
