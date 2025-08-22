@@ -645,7 +645,7 @@ pub struct RPCSettings<T: TransportStream, State> {
     state: PhantomData<State>,
 }
 
-impl<'t, T: TransportStream> RPCSettings<T, RPCInit> {
+impl<T: TransportStream> RPCSettings<T, RPCInit> {
     pub async fn send_request(mut transport: T) -> Result<RPCSettings<T, RPCComplete>, Error> {
         transport.write_request(&RPCSettingsRequest {}).await?;
 
