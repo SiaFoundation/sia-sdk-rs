@@ -124,9 +124,7 @@ impl RangeProof {
                 && let Some(root) = roots.pop_front()
             {
                 let subtree_size = next_subtree_size(i, j);
-                let height = subtree_size
-                    .checked_ilog2()
-                    .expect("should not be None since subtree_size > 0");
+                let height = subtree_size.trailing_zeros(); // log2
                 acc.insert_node(root, height as usize);
                 i += subtree_size;
             }
