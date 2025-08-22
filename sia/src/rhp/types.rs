@@ -9,6 +9,7 @@ use crate::types::{Address, Currency, Hash256};
 
 pub const SEGMENT_SIZE: usize = 64;
 pub const SECTOR_SIZE: usize = 1 << 22;
+pub const LEAVES_PER_SECTOR: usize = SECTOR_SIZE / SEGMENT_SIZE;
 
 /// Contains the prices and parameters of a host.
 #[derive(Debug, PartialEq, Serialize, Deserialize, AsyncSiaEncode, AsyncSiaDecode)]

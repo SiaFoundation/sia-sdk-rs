@@ -1,3 +1,4 @@
+use crate::rhp::merkle;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::marker::PhantomData;
@@ -11,6 +12,7 @@ use crate::encoding_async::{
     AsyncSiaEncode, Error as AsyncError,
 };
 use crate::rhp::SECTOR_SIZE;
+use crate::rhp::merkle::ProofValidationError;
 use blake2b_simd::Params;
 
 use crate::signing::{PrivateKey, PublicKey, Signature};
@@ -469,6 +471,9 @@ pub enum Error {
 
     #[error("expected transaction set in response")]
     ExpectedTransactionSet,
+
+    #[error("proof validation failed")]
+    ProofValidation(#[from] ProofValidationError),
 }
 
 #[derive(Debug, Default, PartialEq, Clone, Copy, Serialize, Deserialize)]
@@ -755,8 +760,7 @@ impl RPCRequest for RPCReadSectorRequest {
 /// The renter must validate the proof against the root hash.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCReadSectorResponse {
-    pub proof: Vec<Hash256>,
-    pub data: Vec<u8>,
+    pub data: merkle::RangeProof,
 }
 
 pub struct RPCReadSectorResult {
@@ -771,6 +775,9 @@ pub struct RPCReadSector<T: TransportStream, State> {
     transport: Transport<T>,
     usage: Usage,
     state: PhantomData<State>,
+    offset: usize,
+    length: usize,
+    root: Hash256,
 }
 
 impl<T: TransportStream> RPCReadSector<T, RPCInit> {
@@ -797,6 +804,9 @@ impl<T: TransportStream> RPCReadSector<T, RPCInit> {
             transport,
             usage,
             state: PhantomData,
+            offset,
+            length,
+            root,
         })
     }
 }
@@ -804,9 +814,15 @@ impl<T: TransportStream> RPCReadSector<T, RPCInit> {
 impl<T: TransportStream> RPCReadSector<T, RPCComplete> {
     pub async fn complete(mut self) -> Result<RPCReadSectorResult, Error> {
         let response: RPCReadSectorResponse = self.transport.read_response().await?;
+
+        // verify proof
+        let start = self.offset / SEGMENT_SIZE;
+        let end = (self.offset + self.length).div_ceil(SEGMENT_SIZE);
+        let data = response.data.verify(&self.root, start, end).await?;
+
         Ok(RPCReadSectorResult {
             usage: self.usage,
-            data: response.data,
+            data,
         })
     }
 }
