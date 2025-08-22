@@ -1,3 +1,20 @@
+## 0.1.0 (2025-08-22)
+
+### Breaking Changes
+
+- Change signing code to borrow.
+
+### Features
+
+- Add JSON serialization to ChainState
+- Add generic support for reading and writing erasure-coded slabs.
+- Add support for encrypting and decrypting shards.
+- Add support for ReedSolomon erasure coding.
+- Added AsyncSiaEncodable and AsyncSiaDecodable traits.
+- Added RHP4 request and response types.
+- Added RHP4 RPC usage and helpers.
+- Verify proofs in RPCWriteSector and RPCReadSector.
+
 ## 0.0.2 (2025-07-21)
 
 ### Features
