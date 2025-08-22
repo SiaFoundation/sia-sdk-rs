@@ -100,7 +100,6 @@ pub type Result<T> = std::result::Result<T, ProofValidationError>;
 pub struct RangeProof(Vec<Hash256>);
 
 impl RangeProof {
-    #[allow(dead_code)]
     pub async fn verify<R: AsyncRead + Unpin>(
         self,
         r: R,

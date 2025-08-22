@@ -21,7 +21,6 @@ pub struct ErasureCoder {
 }
 
 impl ErasureCoder {
-    #[allow(dead_code)]
     pub fn new(data_shards: usize, parity_shards: usize) -> Result<Self> {
         Ok(ErasureCoder {
             encoder: ReedSolomon::new(data_shards, parity_shards)?,
@@ -32,7 +31,6 @@ impl ErasureCoder {
 
     /// read_encoded_shards is a convenience method that reads data from the
     /// given reader and returns erasure coded shards in a single call.
-    #[allow(dead_code)]
     pub async fn read_encoded_shards<R: AsyncRead + Unpin>(
         &mut self,
         r: &mut R,
@@ -47,7 +45,6 @@ impl ErasureCoder {
     /// recover the data shards of the provided shards, join them and write the
     /// result to the provided writer. It skips the first `skip` bytes and
     /// writes 'n' bytes in total.
-    #[allow(dead_code)]
     pub async fn write_reconstructed_shards<W: AsyncWrite + Unpin>(
         &mut self,
         w: &mut W,

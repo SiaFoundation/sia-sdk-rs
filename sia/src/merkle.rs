@@ -65,7 +65,6 @@ impl Accumulator {
     }
 }
 
-#[allow(dead_code)]
 pub fn sum_leaf(params: &Params, leaf: &[u8]) -> Hash256 {
     let h = params
         .to_state()
