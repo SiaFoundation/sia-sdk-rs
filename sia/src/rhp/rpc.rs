@@ -572,43 +572,35 @@ pub trait RPCRequest: AsyncSiaEncodable + AsyncSiaDecodable {
 /// A TransportStream is a trait for sending and receiving RPC requests and responses.
 /// It abstracts the underlying transport mechanism, allowing for different implementations
 /// (e.g., TCP, QUIC, WebTransport) to be used without changing the RPC logic.
-pub trait TransportStream: AsyncEncoder + AsyncDecoder + Unpin + Sized {}
-
-impl<T: AsyncEncoder + AsyncDecoder + Unpin> TransportStream for T {}
-
-struct Transport<T: TransportStream> {
-    stream: T,
-}
-
-impl<T: TransportStream> Transport<T> {
+pub trait TransportStream: AsyncEncoder + AsyncDecoder + Unpin + Sized {
     async fn write_request<R: RPCRequest>(&mut self, request: &R) -> Result<(), Error> {
-        self.stream.write_all(R::RPC_ID.as_ref()).await?;
-        request.encode_async(&mut self.stream).await?;
+        self.write_all(R::RPC_ID.as_ref()).await?;
+        request.encode_async(self).await?;
         Ok(())
     }
 
     async fn write_response<R: AsyncSiaEncodable>(&mut self, response: &R) -> Result<(), Error> {
-        self.stream.write_all(&[0]).await?; // nil error
-        response.encode_async(&mut self.stream).await?;
+        self.write_all(&[0]).await?; // nil error
+        response.encode_async(self).await?;
         Ok(())
     }
 
     async fn read_response<R: AsyncSiaDecodable>(&mut self) -> Result<R, Error> {
-        let has_error = bool::decode_async(&mut self.stream).await?;
+        let has_error = bool::decode_async(self).await?;
         match has_error {
             false => {
-                let resp = R::decode_async(&mut self.stream).await?;
+                let resp = R::decode_async(self).await?;
                 Ok(resp)
             }
             true => {
-                let error = RPCError::decode_async(&mut self.stream)
-                    .await
-                    .map(Error::RPC)?;
+                let error = RPCError::decode_async(self).await.map(Error::RPC)?;
                 Err(error)
             }
         }
     }
 }
+
+impl<T: AsyncEncoder + AsyncDecoder + Unpin> TransportStream for T {}
 
 /// Marker type for the initial stage of the RPC process.
 pub struct RPCInit;
@@ -649,13 +641,12 @@ pub struct RPCSettingsResult {
 
 /// RPCSettings returns the host's current settings.
 pub struct RPCSettings<T: TransportStream, State> {
-    transport: Transport<T>,
+    transport: T,
     state: PhantomData<State>,
 }
 
-impl<T: TransportStream> RPCSettings<T, RPCInit> {
-    pub async fn send_request(stream: T) -> Result<RPCSettings<T, RPCComplete>, Error> {
-        let mut transport = Transport { stream };
+impl<'t, T: TransportStream> RPCSettings<T, RPCInit> {
+    pub async fn send_request(mut transport: T) -> Result<RPCSettings<T, RPCComplete>, Error> {
         transport.write_request(&RPCSettingsRequest {}).await?;
 
         Ok(RPCSettings {
@@ -710,19 +701,18 @@ pub struct RPCWriteSectorResult {
 /// If the sector is not appended to a contract within that time, it will be deleted.
 pub struct RPCWriteSector<T: TransportStream, State> {
     root: Hash256,
-    transport: Transport<T>,
+    transport: T,
     usage: Usage,
     state: PhantomData<State>,
 }
 
 impl<T: TransportStream> RPCWriteSector<T, RPCInit> {
     pub async fn send_request(
-        stream: T,
+        mut transport: T,
         prices: HostPrices,
         token: AccountToken,
         data: Vec<u8>,
     ) -> Result<RPCWriteSector<T, RPCComplete>, Error> {
-        let mut transport = Transport { stream };
         let usage = Usage::write_sector(&prices, data.len());
         let request = RPCWriteSectorRequest {
             prices,
@@ -793,7 +783,7 @@ pub struct RPCReadSectorResult {
 /// The proof must be validated against the expected
 /// root hash.
 pub struct RPCReadSector<T: TransportStream, State> {
-    transport: Transport<T>,
+    transport: T,
     usage: Usage,
     state: PhantomData<State>,
     offset: usize,
@@ -803,14 +793,13 @@ pub struct RPCReadSector<T: TransportStream, State> {
 
 impl<T: TransportStream> RPCReadSector<T, RPCInit> {
     pub async fn send_request(
-        stream: T,
+        mut transport: T,
         prices: HostPrices,
         token: AccountToken,
         root: Hash256,
         length: usize,
         offset: usize,
     ) -> Result<RPCReadSector<T, RPCComplete>, Error> {
-        let mut transport = Transport { stream };
         let usage = Usage::read_sector(&prices, length);
         let request = RPCReadSectorRequest {
             prices,
@@ -873,16 +862,15 @@ pub struct RPCAccountBalanceResult {
 
 /// Requests the current balance of an account.
 pub struct RPCAccountBalance<T: TransportStream, State> {
-    transport: Transport<T>,
+    transport: T,
     state: PhantomData<State>,
 }
 
 impl<T: TransportStream> RPCAccountBalance<T, RPCInit> {
     pub async fn send_request(
-        stream: T,
+        mut transport: T,
         account: PublicKey,
     ) -> Result<RPCAccountBalance<T, RPCComplete>, Error> {
-        let mut transport = Transport { stream };
         let request = RPCAccountBalanceRequest { account };
         transport.write_request(&request).await?;
 
@@ -952,7 +940,7 @@ where
     S: RenterContractSigner,
     B: TransactionBuilder,
 {
-    transport: Transport<T>,
+    transport: T,
     contract_signer: S,
     transaction_builder: B,
     state: PhantomData<State>,
@@ -991,12 +979,11 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, RPCInit>
 {
     pub async fn send_request(
-        stream: T,
+        mut transport: T,
         contract_signer: S,
         transaction_builder: B,
         params: RPCFormContractParams,
     ) -> Result<RPCFormContract<T, S, B, RPCAwaitingHostInputs>, Error> {
-        let mut transport = Transport { stream };
         let usage = Usage::form_contract(&params.prices);
         let mut contract = FileContract {
             revision_number: 0,
@@ -1242,19 +1229,17 @@ mod test {
             length: 16,
         };
 
-        let mut buf = Cursor::new(Vec::<u8>::new());
-        let mut transport = Transport { stream: &mut buf };
+        let mut transport = Cursor::new(Vec::<u8>::new());
         transport.write_request(&req).await.unwrap();
-        buf.flush().await.unwrap();
-        assert_eq!(buf.into_inner(), hex::decode(EXPECTED_HEX).unwrap());
+        transport.flush().await.unwrap();
+        assert_eq!(transport.into_inner(), hex::decode(EXPECTED_HEX).unwrap());
     }
 
     #[tokio::test]
     async fn test_read_response() {
         const HEX_BYTES: &str = "00030000000000000001000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000000003000000000000000400000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000";
 
-        let mut buf = Cursor::new(hex::decode(HEX_BYTES).unwrap());
-        let mut transport = Transport { stream: &mut buf };
+        let mut transport = Cursor::new(hex::decode(HEX_BYTES).unwrap());
         let resp: RPCFreeSectorsResponse = transport.read_response().await.unwrap();
 
         let expected = RPCFreeSectorsResponse {
@@ -1306,8 +1291,7 @@ mod test {
     async fn test_response_error() {
         const HEX_BYTES: &str = "01010b00000000000000666f6f206261722062617a";
 
-        let mut buf = Cursor::new(hex::decode(HEX_BYTES).unwrap());
-        let mut transport = Transport { stream: &mut buf };
+        let mut transport = Cursor::new(hex::decode(HEX_BYTES).unwrap());
         let err = transport
             .read_response::<RPCReadSectorResponse>()
             .await
@@ -1346,13 +1330,11 @@ mod test {
 
         // helper to prepare the transport and fill it with the expected host
         // response
-        let transport = async || -> Transport<_> {
-            let mut transport = Transport {
-                stream: Cursor::new(Vec::<u8>::new()),
-            };
+        let transport = async || -> _ {
+            let mut transport = Cursor::new(Vec::<u8>::new());
             let response = RPCWriteSectorResponse { root };
             transport.write_response(&response).await.unwrap();
-            transport.stream.set_position(0);
+            transport.set_position(0);
             transport
         };
 
