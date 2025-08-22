@@ -1,3 +1,4 @@
+use crate::rhp::merkle;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::marker::PhantomData;
@@ -11,7 +12,7 @@ use crate::encoding_async::{
     AsyncSiaEncode, Error as AsyncError,
 };
 use crate::rhp::SECTOR_SIZE;
-use crate::rhp::merkle::{ProofValidationError, RangeProof};
+use crate::rhp::merkle::ProofValidationError;
 use blake2b_simd::Params;
 
 use crate::signing::{PrivateKey, PublicKey, Signature};
@@ -759,7 +760,7 @@ impl RPCRequest for RPCReadSectorRequest {
 /// The renter must validate the proof against the root hash.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCReadSectorResponse {
-    pub proof: Vec<Hash256>,
+    pub proof: merkle::RangeProof,
     pub data: Vec<u8>,
 }
 
@@ -818,14 +819,10 @@ impl<T: TransportStream> RPCReadSector<T, RPCComplete> {
         // verify proof
         let start = self.offset / SEGMENT_SIZE;
         let end = (self.offset + self.length).div_ceil(SEGMENT_SIZE);
-        RangeProof::verify(
-            &mut &response.data[..],
-            &self.root,
-            &response.proof,
-            start,
-            end,
-        )
-        .await?;
+        response
+            .proof
+            .verify(&mut &response.data[..], &self.root, start, end)
+            .await?;
 
         Ok(RPCReadSectorResult {
             usage: self.usage,

@@ -1,9 +1,13 @@
+use std::collections::VecDeque;
+
+use crate::encoding_async::{AsyncSiaDecodable, AsyncSiaEncodable};
 use crate::merkle::{self, Accumulator, LEAF_HASH_PREFIX, NODE_HASH_PREFIX, sum_leaf, sum_node};
 use crate::rhp::{LEAVES_PER_SECTOR, SECTOR_SIZE, SEGMENT_SIZE};
 use crate::types::Hash256;
 use blake2b_simd::Params;
 use blake2b_simd::many::{HashManyJob, hash_many};
 use rayon::prelude::*;
+use sia_derive::{AsyncSiaDecode, AsyncSiaEncode};
 use thiserror::Error;
 use tokio::io::{self, AsyncRead, AsyncReadExt};
 
@@ -92,18 +96,21 @@ pub enum ProofValidationError {
 
 pub type Result<T> = std::result::Result<T, ProofValidationError>;
 
-pub struct RangeProof;
+#[derive(Debug, AsyncSiaEncode, AsyncSiaDecode, PartialEq)]
+pub struct RangeProof(Vec<Hash256>);
 
 impl RangeProof {
     #[allow(dead_code)]
     pub async fn verify<R: AsyncRead + Unpin>(
+        self,
         r: R,
         root: &Hash256,
-        proof: &[Hash256],
         start: usize,
         end: usize,
     ) -> Result<()> {
-        let roots = Self::read_data(&mut io::BufReader::new(r), start, end).await?;
+        let mut proof: VecDeque<Hash256> = self.0.into();
+        let mut roots: VecDeque<Hash256> =
+            Self::read_data(&mut io::BufReader::new(r), start, end).await?;
 
         if proof.len() != range_proof_size(LEAVES_PER_SECTOR, start, end) {
             return Err(ProofValidationError::InvalidProofLength {
@@ -112,24 +119,24 @@ impl RangeProof {
             });
         }
 
-        let consume = |acc: &mut Accumulator, roots: &[Hash256], i: usize, j: usize| {
-            let mut roots = roots;
+        let consume = |acc: &mut Accumulator, roots: &mut VecDeque<Hash256>, i: usize, j: usize| {
             let mut i = i;
-            while i < j && !roots.is_empty() {
+            while i < j
+                && let Some(root) = roots.pop_front()
+            {
                 let subtree_size = next_subtree_size(i, j);
                 let height = subtree_size
                     .checked_ilog2()
                     .expect("should not be None since subtree_size > 0");
-                acc.insert_node(&roots[0], height as usize);
-                roots = &roots[1..];
+                acc.insert_node(root, height as usize);
                 i += subtree_size;
             }
         };
 
         let mut acc = merkle::Accumulator::new();
-        consume(&mut acc, proof, 0, start);
-        consume(&mut acc, &roots, start, end);
-        consume(&mut acc, proof, end, LEAVES_PER_SECTOR);
+        consume(&mut acc, &mut proof, 0, start);
+        consume(&mut acc, &mut roots, start, end);
+        consume(&mut acc, &mut proof, end, LEAVES_PER_SECTOR);
 
         if acc.root() != *root {
             return Err(ProofValidationError::InvalidProofRoot {
@@ -144,18 +151,18 @@ impl RangeProof {
         r: &mut R,
         start: usize,
         end: usize,
-    ) -> Result<Vec<Hash256>> {
+    ) -> Result<VecDeque<Hash256>> {
         assert!(start < end);
         let mut i = start;
         let j = end;
-        let mut roots = Vec::new();
+        let mut roots = VecDeque::new();
 
         while i < j {
             let subtree_size = next_subtree_size(i, j);
             let n = subtree_size * SEGMENT_SIZE;
             let mut r = r.take(n as u64);
             let root = sector_root_from_reader(&mut r).await?;
-            roots.push(root);
+            roots.push_back(root);
             i += subtree_size;
         }
         Ok(roots)
@@ -209,7 +216,7 @@ async fn sector_root_from_reader<R: AsyncRead + Unpin>(r: &mut R) -> Result<Hash
             0 => return Ok(acc.root()),
             SEGMENT_SIZE => {
                 let h = sum_leaf(Params::new().hash_length(32), &leaf);
-                acc.add_leaf(&h);
+                acc.add_leaf(h);
             }
             _ => {
                 return Err(ProofValidationError::NotSegmentAligned);
@@ -305,9 +312,8 @@ mod tests {
         let data = vec![0u8; SECTOR_SIZE + 64];
         let root = sector_root_from_reader(&mut &data[..]).await.unwrap();
 
-        let expected_root = "50ed59cecd5ed3ca9e65cec0797202091dbba45272dafa3faa4e27064eedd52c"
-            .parse()
-            .unwrap();
+        let expected_root =
+            hash_256!("50ed59cecd5ed3ca9e65cec0797202091dbba45272dafa3faa4e27064eedd52c");
         assert_eq!(root, expected_root);
     }
 
@@ -315,58 +321,27 @@ mod tests {
     async fn test_verify_range_proof() {
         let sector = vec![0u8; SECTOR_SIZE];
         let sector_root = sector_root(&sector);
-        let proof: [Hash256; 15] = [
-            "f0022a573326ecc0e4c18cf56b9a31d94dc792f8ec20ecbbc57d33c75db24c54"
-                .parse()
-                .unwrap(),
-            "d66f6fce29310f5d2db0d2398e6d93b23c9fa1982b7249b07664590b7aebc49a"
-                .parse()
-                .unwrap(),
-            "5b3bc22a619574a668c4e2a22fa72210611813c6ed44cf445789ee316102bfe1"
-                .parse()
-                .unwrap(),
-            "3d8e644caa3e7ac720b1f7ce42d829ecf2c0ad7ef656258f4c1c90422074ba23"
-                .parse()
-                .unwrap(),
-            "f0022a573326ecc0e4c18cf56b9a31d94dc792f8ec20ecbbc57d33c75db24c54"
-                .parse()
-                .unwrap(),
-            "9213804e199cab3449185a5517f54e49c1d6b0892b8269ed4baab62dbf3e8ebb"
-                .parse()
-                .unwrap(),
-            "f052bf6db4444532ed0d8fdfc67c0ce9688fb4042d461a5bb367506de5e712a8"
-                .parse()
-                .unwrap(),
-            "61b3d824e7b4662df867477f09335dfecfc990c9f0b3731fbec981428b38190d"
-                .parse()
-                .unwrap(),
-            "272b122c6943a7dd6b5e2797a727de61f53c274f29d7d3e4e30d40620f83dc2b"
-                .parse()
-                .unwrap(),
-            "5ce18ab62a07bb4d4def2509f8bfa982d5cfd07deb533248abfd7b305652470c"
-                .parse()
-                .unwrap(),
-            "39cb8aa6feace01924b732664b81a8f41d688cbd7817154c663c1686a4cf6a0e"
-                .parse()
-                .unwrap(),
-            "95ab608799eb9c485712a4c995d4e22ea7b20024fe81730f5b4deb4982e97b78"
-                .parse()
-                .unwrap(),
-            "6530f5433504ba845332dd51742b57f0666456c99b78f67c72fac381980527b1"
-                .parse()
-                .unwrap(),
-            "53ae21d13da92c6741cf44e9b08e0c0616485402c343e4f6c92e5c8516187bcf"
-                .parse()
-                .unwrap(),
-            "f2c4d3e9ce380389b1088d44ddb30276fbff5f75803c2bd13678b690f4187d7e"
-                .parse()
-                .unwrap(),
+        let proof: Vec<Hash256> = vec![
+            hash_256!("f0022a573326ecc0e4c18cf56b9a31d94dc792f8ec20ecbbc57d33c75db24c54"),
+            hash_256!("d66f6fce29310f5d2db0d2398e6d93b23c9fa1982b7249b07664590b7aebc49a"),
+            hash_256!("5b3bc22a619574a668c4e2a22fa72210611813c6ed44cf445789ee316102bfe1"),
+            hash_256!("3d8e644caa3e7ac720b1f7ce42d829ecf2c0ad7ef656258f4c1c90422074ba23"),
+            hash_256!("f0022a573326ecc0e4c18cf56b9a31d94dc792f8ec20ecbbc57d33c75db24c54"),
+            hash_256!("9213804e199cab3449185a5517f54e49c1d6b0892b8269ed4baab62dbf3e8ebb"),
+            hash_256!("f052bf6db4444532ed0d8fdfc67c0ce9688fb4042d461a5bb367506de5e712a8"),
+            hash_256!("61b3d824e7b4662df867477f09335dfecfc990c9f0b3731fbec981428b38190d"),
+            hash_256!("272b122c6943a7dd6b5e2797a727de61f53c274f29d7d3e4e30d40620f83dc2b"),
+            hash_256!("5ce18ab62a07bb4d4def2509f8bfa982d5cfd07deb533248abfd7b305652470c"),
+            hash_256!("39cb8aa6feace01924b732664b81a8f41d688cbd7817154c663c1686a4cf6a0e"),
+            hash_256!("95ab608799eb9c485712a4c995d4e22ea7b20024fe81730f5b4deb4982e97b78"),
+            hash_256!("6530f5433504ba845332dd51742b57f0666456c99b78f67c72fac381980527b1"),
+            hash_256!("53ae21d13da92c6741cf44e9b08e0c0616485402c343e4f6c92e5c8516187bcf"),
+            hash_256!("f2c4d3e9ce380389b1088d44ddb30276fbff5f75803c2bd13678b690f4187d7e"),
         ];
 
-        assert!(
-            RangeProof::verify(&sector[..], &sector_root, &proof[..], 24, 42)
-                .await
-                .is_ok()
-        );
+        RangeProof(proof)
+            .verify(&sector[..], &sector_root, 24, 42)
+            .await
+            .expect("proof validation failed");
     }
 }

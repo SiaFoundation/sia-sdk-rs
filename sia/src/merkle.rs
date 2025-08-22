@@ -26,9 +26,9 @@ impl Accumulator {
         self.num_leaves & (1 << height) != 0
     }
 
-    pub fn add_leaf(&mut self, h: &Hash256) {
+    pub fn add_leaf(&mut self, h: Hash256) {
         let mut i = 0;
-        let mut node = *h;
+        let mut node = h;
         while self.has_tree_at_height(i) {
             node = sum_node(&self.params, &self.trees[i], &node);
             i += 1;
@@ -37,14 +37,14 @@ impl Accumulator {
         self.num_leaves += 1;
     }
 
-    pub fn insert_node(&mut self, h: &Hash256, height: usize) {
-        let mut h = *h;
+    pub fn insert_node(&mut self, h: Hash256, height: usize) {
+        let mut h = h;
         let mut i = height;
         while self.has_tree_at_height(i) {
             h = sum_node(&self.params, &self.trees[i], &h);
             i += 1;
         }
-        self.trees[height] = h;
+        self.trees[i] = h;
         self.num_leaves += 1 << height;
     }
 
@@ -90,6 +90,7 @@ pub fn sum_node(params: &Params, left: &Hash256, right: &Hash256) -> Hash256 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash_256;
     use crate::rhp::{SECTOR_SIZE, SEGMENT_SIZE};
 
     #[test]
@@ -99,12 +100,11 @@ mod tests {
         let mut acc = Accumulator::new();
         for chunk in data.chunks(SEGMENT_SIZE) {
             let leaf_hash = sum_leaf(&acc.params, chunk);
-            acc.add_leaf(&leaf_hash);
+            acc.add_leaf(leaf_hash);
         }
 
-        let expected_root = "50ed59cecd5ed3ca9e65cec0797202091dbba45272dafa3faa4e27064eedd52c"
-            .parse()
-            .unwrap();
+        let expected_root =
+            hash_256!("50ed59cecd5ed3ca9e65cec0797202091dbba45272dafa3faa4e27064eedd52c");
         assert_eq!(acc.root(), expected_root);
     }
 }
