@@ -1,20 +1,21 @@
 use chacha20::XChaCha20;
 use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
+use rayon::prelude::*;
 
 /// encrypts the provided shards using XChaCha20. To decrypt the shards, call
 /// this function again with the same key.
 /// NOTE: don't reuse the same key for the same set of shards as it will
 /// compromise the security of the encryption. Always use a freshly generated
 /// key.
-pub(crate) fn encrypt_shards<A: AsMut<[u8]>>(key: &[u8; 32], shards: &mut [A], offset: usize) {
+pub(crate) fn encrypt_shards(key: &[u8; 32], shards: &mut Vec<Vec<u8>>, offset: usize) {
     assert!(shards.len() <= u8::MAX as usize);
-    let mut nonce = [0u8; 24]; // XChaCha20 nonce size
-    for (i, shard) in shards.iter_mut().enumerate() {
+    shards.par_iter_mut().enumerate().for_each(|(i, shard)| {
+        let mut nonce = [0u8; 24]; // XChaCha20 nonce size
         nonce[0] = i as u8;
         let mut cipher = XChaCha20::new(key.into(), &nonce.into());
         cipher.seek(offset);
-        cipher.apply_keystream(shard.as_mut());
-    }
+        cipher.apply_keystream(shard);
+    });
 }
 
 /// encrypts the provided shard using XChaCha20. To decrypt the shard, call
