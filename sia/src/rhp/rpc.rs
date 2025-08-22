@@ -760,8 +760,7 @@ impl RPCRequest for RPCReadSectorRequest {
 /// The renter must validate the proof against the root hash.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCReadSectorResponse {
-    pub proof: merkle::RangeProof,
-    pub data: Vec<u8>,
+    pub data: merkle::RangeProof,
 }
 
 pub struct RPCReadSectorResult {
@@ -819,14 +818,11 @@ impl<T: TransportStream> RPCReadSector<T, RPCComplete> {
         // verify proof
         let start = self.offset / SEGMENT_SIZE;
         let end = (self.offset + self.length).div_ceil(SEGMENT_SIZE);
-        response
-            .proof
-            .verify(&mut &response.data[..], &self.root, start, end)
-            .await?;
+        let data = response.data.verify(&self.root, start, end).await?;
 
         Ok(RPCReadSectorResult {
             usage: self.usage,
-            data: response.data,
+            data,
         })
     }
 }

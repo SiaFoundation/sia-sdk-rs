@@ -97,19 +97,13 @@ pub enum ProofValidationError {
 pub type Result<T> = std::result::Result<T, ProofValidationError>;
 
 #[derive(Debug, AsyncSiaEncode, AsyncSiaDecode, PartialEq)]
-pub struct RangeProof(Vec<Hash256>);
+pub struct RangeProof(Vec<Hash256>, Vec<u8>);
 
 impl RangeProof {
-    pub async fn verify<R: AsyncRead + Unpin>(
-        self,
-        r: R,
-        root: &Hash256,
-        start: usize,
-        end: usize,
-    ) -> Result<()> {
+    pub async fn verify(self, root: &Hash256, start: usize, end: usize) -> Result<Vec<u8>> {
         let mut proof: VecDeque<Hash256> = self.0.into();
         let mut roots: VecDeque<Hash256> =
-            Self::read_data(&mut io::BufReader::new(r), start, end).await?;
+            Self::read_data(&mut io::BufReader::new(&self.1[..]), start, end).await?;
 
         if proof.len() != range_proof_size(LEAVES_PER_SECTOR, start, end) {
             return Err(ProofValidationError::InvalidProofLength {
@@ -141,7 +135,7 @@ impl RangeProof {
                 actual: acc.root(),
             });
         }
-        Ok(())
+        Ok(self.1)
     }
 
     async fn read_data<R: AsyncRead + Unpin>(
@@ -316,8 +310,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_range_proof() {
-        let sector = vec![0u8; SECTOR_SIZE];
-        let sector_root = sector_root(&sector);
+        let data = vec![0u8; SECTOR_SIZE];
+        let sector_root = sector_root(&data);
         let proof: Vec<Hash256> = vec![
             hash_256!("f0022a573326ecc0e4c18cf56b9a31d94dc792f8ec20ecbbc57d33c75db24c54"),
             hash_256!("d66f6fce29310f5d2db0d2398e6d93b23c9fa1982b7249b07664590b7aebc49a"),
@@ -336,9 +330,10 @@ mod tests {
             hash_256!("f2c4d3e9ce380389b1088d44ddb30276fbff5f75803c2bd13678b690f4187d7e"),
         ];
 
-        RangeProof(proof)
-            .verify(&sector[..], &sector_root, 24, 42)
+        let verified_data = RangeProof(proof, data.clone()) // clone since RangeProof usually owns the data
+            .verify(&sector_root, 24, 42)
             .await
             .expect("proof validation failed");
+        assert_eq!(&data, &verified_data);
     }
 }
