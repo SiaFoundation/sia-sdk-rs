@@ -26,19 +26,17 @@ impl Accumulator {
         self.num_leaves & (1 << height) != 0
     }
 
-    pub fn add_leaf(&mut self, h: Hash256) {
+    pub fn add_leaf(&mut self, mut h: Hash256) {
         let mut i = 0;
-        let mut node = h;
         while self.has_tree_at_height(i) {
-            node = sum_node(&self.params, &self.trees[i], &node);
+            h = sum_node(&self.params, &self.trees[i], &h);
             i += 1;
         }
-        self.trees[i] = node;
+        self.trees[i] = h;
         self.num_leaves += 1;
     }
 
-    pub fn insert_node(&mut self, h: Hash256, height: usize) {
-        let mut h = h;
+    pub fn insert_node(&mut self, mut h: Hash256, height: usize) {
         let mut i = height;
         while self.has_tree_at_height(i) {
             h = sum_node(&self.params, &self.trees[i], &h);
@@ -46,6 +44,11 @@ impl Accumulator {
         }
         self.trees[i] = h;
         self.num_leaves += 1 << height;
+    }
+
+    pub fn reset(&mut self) {
+        self.trees.fill(Default::default());
+        self.num_leaves = 0;
     }
 
     pub fn root(&self) -> Hash256 {

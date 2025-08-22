@@ -101,9 +101,8 @@ pub struct RangeProof(Vec<Hash256>, Vec<u8>);
 
 impl RangeProof {
     pub async fn verify(self, root: &Hash256, start: usize, end: usize) -> Result<Vec<u8>> {
+        let mut roots: VecDeque<Hash256> = self.roots(start, end)?;
         let mut proof: VecDeque<Hash256> = self.0.into();
-        let mut roots: VecDeque<Hash256> =
-            Self::read_data(&mut io::BufReader::new(&self.1[..]), start, end).await?;
 
         if proof.len() != range_proof_size(LEAVES_PER_SECTOR, start, end) {
             return Err(ProofValidationError::InvalidProofLength {
@@ -138,22 +137,36 @@ impl RangeProof {
         Ok(self.1)
     }
 
-    async fn read_data<R: AsyncRead + Unpin>(
-        r: &mut R,
-        start: usize,
-        end: usize,
-    ) -> Result<VecDeque<Hash256>> {
+    fn roots(&self, start: usize, end: usize) -> Result<VecDeque<Hash256>> {
         assert!(start < end);
         let mut i = start;
         let j = end;
         let mut roots = VecDeque::new();
+        let mut params = Params::new();
+        params.hash_length(32);
 
+        let mut acc = merkle::Accumulator::new();
+        let mut off: usize = 0;
         while i < j {
+            acc.reset();
+
             let subtree_size = next_subtree_size(i, j);
             let n = subtree_size * SEGMENT_SIZE;
-            let mut r = r.take(n as u64);
-            let root = sector_root_from_reader(&mut r).await?;
-            roots.push_back(root);
+
+            let leaf_hashes: Vec<Hash256> = self
+                .1
+                .get(off..off + n)
+                .ok_or(ProofValidationError::NotSegmentAligned)?
+                .par_chunks_exact(64)
+                .map(|segment| sum_leaf(&params, segment))
+                .collect();
+
+            for h in leaf_hashes {
+                acc.add_leaf(h);
+            }
+
+            roots.push_back(acc.root());
+            off += n;
             i += subtree_size;
         }
         Ok(roots)
