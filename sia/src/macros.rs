@@ -33,30 +33,14 @@ macro_rules! impl_hash_id {
                 D: serde::Deserializer<'de>,
             {
                 let s = String::deserialize(deserializer)?;
-                $name::parse_string(&s).map_err(|e| serde::de::Error::custom(format!("{:?}", e)))
+                s.parse()
+                    .map_err(|e| serde::de::Error::custom(format!("{:?}", e)))
             }
         }
 
         impl $name {
             pub const fn new(b: [u8; 32]) -> Self {
                 Self(b)
-            }
-
-            // Example method that might be used in serialization/deserialization
-            pub fn parse_string(s: &str) -> Result<Self, $crate::types::HexParseError> {
-                let s = match s.split_once(':') {
-                    Some((_prefix, suffix)) => suffix,
-                    None => s,
-                };
-
-                if s.len() != 64 {
-                    return Err($crate::types::HexParseError::InvalidLength);
-                }
-
-                let mut data = [0u8; 32];
-                hex::decode_to_slice(s, &mut data)
-                    .map_err($crate::types::HexParseError::HexError)?;
-                Ok($name(data))
             }
         }
 
@@ -90,7 +74,19 @@ macro_rules! impl_hash_id {
             type Err = $crate::types::HexParseError;
 
             fn from_str(s: &str) -> Result<Self, Self::Err> {
-                Self::parse_string(s)
+                let s = match s.split_once(':') {
+                    Some((_prefix, suffix)) => suffix,
+                    None => s,
+                };
+
+                if s.len() != 64 {
+                    return Err($crate::types::HexParseError::InvalidLength);
+                }
+
+                let mut data = [0u8; 32];
+                hex::decode_to_slice(s, &mut data)
+                    .map_err($crate::types::HexParseError::HexError)?;
+                Ok($name(data))
             }
         }
 

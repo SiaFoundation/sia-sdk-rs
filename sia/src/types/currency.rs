@@ -38,7 +38,8 @@ impl<'de> Deserialize<'de> for Currency {
             }
 
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Self::Value, E> {
-                Currency::parse_string(s).map_err(|e| serde::de::Error::custom(format!("{e:?}")))
+                s.parse()
+                    .map_err(|e| serde::de::Error::custom(format!("{e:?}")))
             }
 
             fn visit_i32<E: serde::de::Error>(self, value: i32) -> Result<Self::Value, E> {
@@ -190,7 +191,48 @@ impl Currency {
         Currency(0)
     }
 
-    pub fn parse_string(s: &str) -> Result<Self, CurrencyParseError> {
+    /// Converts a given amount of Siacoins into the `Currency` type.
+    ///
+    /// This function takes the amount of Siacoins as a `u64` and converts it into
+    /// the `Currency` type, which internally represents the value in Hastings where
+    /// 1 SC = 10^24 H.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - The amount of Siacoins to be converted into `Currency`.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Currency` instance representing the specified amount of Siacoins.
+    pub const fn siacoins(n: u64) -> Self {
+        Currency::new((n as u128) * 10u128.pow(SIACOIN_PRECISION_U32))
+    }
+
+    pub fn checked_add(self, other: Currency) -> Option<Self> {
+        let v = self.0.checked_add(other.0)?;
+        Some(Currency(v))
+    }
+
+    pub fn checked_sub(self, other: Currency) -> Option<Self> {
+        let v = self.0.checked_sub(other.0)?;
+        Some(Currency(v))
+    }
+
+    pub fn checked_mul(self, other: Currency) -> Option<Self> {
+        let v = self.0.checked_mul(other.0)?;
+        Some(Currency(v))
+    }
+
+    pub fn checked_div(self, other: Currency) -> Option<Self> {
+        let v = self.0.checked_div(other.0)?;
+        Some(Currency(v))
+    }
+}
+
+impl std::str::FromStr for Currency {
+    type Err = crate::types::CurrencyParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         let i = s
             .find(|c: char| !c.is_ascii_digit() && c != '.')
             .unwrap_or(s.len());
@@ -240,43 +282,6 @@ impl Currency {
             * 10u128.pow((SIACOIN_PRECISION_I32 - frac_digits + scaling_factor) as u32);
 
         Ok(Currency::new(integer + fraction))
-    }
-
-    /// Converts a given amount of Siacoins into the `Currency` type.
-    ///
-    /// This function takes the amount of Siacoins as a `u64` and converts it into
-    /// the `Currency` type, which internally represents the value in Hastings where
-    /// 1 SC = 10^24 H.
-    ///
-    /// # Arguments
-    ///
-    /// * `n` - The amount of Siacoins to be converted into `Currency`.
-    ///
-    /// # Returns
-    ///
-    /// Returns a `Currency` instance representing the specified amount of Siacoins.
-    pub const fn siacoins(n: u64) -> Self {
-        Currency::new((n as u128) * 10u128.pow(SIACOIN_PRECISION_U32))
-    }
-
-    pub fn checked_add(self, other: Currency) -> Option<Self> {
-        let v = self.0.checked_add(other.0)?;
-        Some(Currency(v))
-    }
-
-    pub fn checked_sub(self, other: Currency) -> Option<Self> {
-        let v = self.0.checked_sub(other.0)?;
-        Some(Currency(v))
-    }
-
-    pub fn checked_mul(self, other: Currency) -> Option<Self> {
-        let v = self.0.checked_mul(other.0)?;
-        Some(Currency(v))
-    }
-
-    pub fn checked_div(self, other: Currency) -> Option<Self> {
-        let v = self.0.checked_div(other.0)?;
-        Some(Currency(v))
     }
 }
 
@@ -391,7 +396,7 @@ mod tests {
             ),
         ];
         for (input, expected) in test_cases {
-            assert_eq!(Currency::parse_string(input).unwrap(), expected);
+            assert_eq!(input.parse::<Currency>().unwrap(), expected);
         }
     }
 

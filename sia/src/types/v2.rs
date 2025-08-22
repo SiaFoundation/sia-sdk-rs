@@ -1587,7 +1587,7 @@ mod tests {
                 satisfied_policy: SatisfiedPolicy {
                     policy: SpendPolicy::public_key(public_key!("ed25519:aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422")),
                     signatures: vec![
-                        Signature::parse_string("aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422").unwrap()
+                        "aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422".parse().unwrap()
                     ],
                     preimages: vec![],
                 },

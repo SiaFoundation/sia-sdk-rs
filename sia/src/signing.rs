@@ -146,17 +146,6 @@ impl Signature {
     pub fn data(&self) -> &[u8] {
         &self.0
     }
-
-    pub fn parse_string(s: &str) -> Result<Self, HexParseError> {
-        let data = hex::decode(s).map_err(HexParseError::HexError)?;
-        if data.len() != 64 {
-            return Err(HexParseError::InvalidLength);
-        }
-
-        let mut sig = [0u8; 64];
-        sig.copy_from_slice(&data);
-        Ok(Signature(sig))
-    }
 }
 
 impl Default for Signature {
@@ -174,6 +163,21 @@ impl AsRef<[u8; 64]> for Signature {
 impl From<[u8; 64]> for Signature {
     fn from(buf: [u8; 64]) -> Self {
         Signature(buf)
+    }
+}
+
+impl std::str::FromStr for Signature {
+    type Err = crate::types::HexParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let data = hex::decode(s).map_err(HexParseError::HexError)?;
+        if data.len() != 64 {
+            return Err(HexParseError::InvalidLength);
+        }
+
+        let mut sig = [0u8; 64];
+        sig.copy_from_slice(&data);
+        Ok(Signature(sig))
     }
 }
 
