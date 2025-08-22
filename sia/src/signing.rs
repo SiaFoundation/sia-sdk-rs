@@ -139,7 +139,7 @@ impl<'de> Deserialize<'de> for Signature {
 }
 
 impl Signature {
-    pub fn new(sig: [u8; 64]) -> Self {
+    pub const fn new(sig: [u8; 64]) -> Self {
         Signature(sig)
     }
 

@@ -1177,6 +1177,37 @@ mod test {
 
     use super::*;
 
+    const test_prices: HostPrices = HostPrices {
+        contract_price: Currency::siacoins(1),
+        collateral: Currency::siacoins(2),
+        storage_price: Currency::siacoins(3),
+        ingress_price: Currency::siacoins(4),
+        egress_price: Currency::siacoins(5),
+        free_sector_price: Currency::siacoins(6),
+        tip_height: 7,
+        valid_until: OffsetDateTime::UNIX_EPOCH,
+        signature: Signature::new([0u8; 64]),
+    };
+
+    const test_account_token: AccountToken = AccountToken {
+        host_key: PublicKey::new({
+            let mut bytes = [0u8; 32];
+            bytes[0] = 10;
+            bytes
+        }),
+        account: PublicKey::new({
+            let mut bytes = [0u8; 32];
+            bytes[0] = 11;
+            bytes
+        }),
+        valid_until: OffsetDateTime::UNIX_EPOCH,
+        signature: Signature::new({
+            let mut bytes = [0u8; 64];
+            bytes[0] = 13;
+            bytes
+        }),
+    };
+
     #[tokio::test]
     async fn test_write_request() {
         const EXPECTED_HEX: &str = "52656164536563746f72000000000000000000a1edccce1bc2d300000000000000000042db999d3784a7010000000000000000e3c8666c53467b02000000000000000084b6333b6f084f03000000000000000025a4000a8bca22040000000000000000c691cdd8a68cf604000000000007000000000000000800000000000000090000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000b000000000000000000000000000000000000000000000000000000000000000c000000000000000d0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000f000000000000001000000000000000";
@@ -1184,39 +1215,8 @@ mod test {
         let mut sig_buf = [0u8; 64];
         sig_buf[0] = 9;
         let req = RPCReadSectorRequest {
-            prices: HostPrices {
-                contract_price: Currency::siacoins(1),
-                collateral: Currency::siacoins(2),
-                storage_price: Currency::siacoins(3),
-                ingress_price: Currency::siacoins(4),
-                egress_price: Currency::siacoins(5),
-                free_sector_price: Currency::siacoins(6),
-                tip_height: 7,
-                valid_until: OffsetDateTime::from_unix_timestamp(8).unwrap(),
-                signature: Signature::from({
-                    let mut bytes = [0u8; 64];
-                    bytes[0] = 9;
-                    bytes
-                }),
-            },
-            token: AccountToken {
-                host_key: PublicKey::new({
-                    let mut bytes = [0u8; 32];
-                    bytes[0] = 10;
-                    bytes
-                }),
-                account: PublicKey::new({
-                    let mut bytes = [0u8; 32];
-                    bytes[0] = 11;
-                    bytes
-                }),
-                valid_until: OffsetDateTime::from_unix_timestamp(12).unwrap(),
-                signature: Signature::from({
-                    let mut bytes = [0u8; 64];
-                    bytes[0] = 13;
-                    bytes
-                }),
-            },
+            prices: test_prices,
+            token: test_account_token,
             root: Hash256::new({
                 let mut bytes = [0u8; 32];
                 bytes[0] = 14;
@@ -1307,6 +1307,60 @@ mod test {
                 assert_eq!(rpc_err, expected_err);
             }
             _ => panic!("Expected RPCError, got {err:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rpc_write_sector_send_request() {
+        let mut data: Vec<u8> = vec![0u8; SECTOR_SIZE];
+        rand::fill(&mut data[..]);
+        let root = merkle::sector_root(&data);
+        let stream = Cursor::new(Vec::<u8>::new());
+        let rpc = RPCWriteSector::send_request(stream, test_prices, test_account_token, data)
+            .await
+            .unwrap();
+        assert_eq!(rpc.root, root);
+    }
+
+    #[tokio::test]
+    async fn test_rpc_write_sector_complete() {
+        let mut data: Vec<u8> = vec![0u8; SECTOR_SIZE];
+        rand::fill(&mut data[..]);
+        let root = merkle::sector_root(&data);
+
+        // helper to prepare the transport and fill it with the expected host
+        // response
+        let transport = async || -> Transport<_> {
+            let mut transport = Transport {
+                stream: Cursor::new(Vec::<u8>::new()),
+            };
+            let response = RPCWriteSectorResponse { root };
+            transport.write_response(&response).await.unwrap();
+            transport.stream.set_position(0);
+            transport
+        };
+
+        // perform the RPC with the correct root
+        let rpc = RPCWriteSector::<_, RPCComplete> {
+            root,
+            transport: transport().await,
+            usage: Usage::default(),
+            state: PhantomData,
+        };
+        rpc.complete().await.unwrap();
+
+        // change the root to force a mismatch
+        let rpc = RPCWriteSector::<_, RPCComplete> {
+            root: Hash256::default(),
+            transport: transport().await,
+            usage: Usage::default(),
+            state: PhantomData,
+        };
+        if let Err(Error::SectorRootMismatch { expected, got }) = rpc.complete().await {
+            assert_eq!(expected, Hash256::default());
+            assert_eq!(got, root);
+        } else {
+            panic!("Expected SectorRootMismatch");
         }
     }
 }
