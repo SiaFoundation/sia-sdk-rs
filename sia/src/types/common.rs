@@ -234,7 +234,8 @@ impl<'de> Deserialize<'de> for Address {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Address::parse_string(&s).map_err(|e| serde::de::Error::custom(format!("{e:?}")))
+        s.parse()
+            .map_err(|e| serde::de::Error::custom(format!("{e:?}")))
     }
 }
 
@@ -250,28 +251,6 @@ impl Serialize for Address {
 impl Address {
     pub const fn new(addr: [u8; 32]) -> Address {
         Address(addr)
-    }
-
-    pub fn parse_string(s: &str) -> Result<Self, HexParseError> {
-        if s.len() != 76 {
-            return Err(HexParseError::InvalidLength);
-        }
-
-        let mut data = [0u8; 38];
-        hex::decode_to_slice(s, &mut data).map_err(HexParseError::HexError)?;
-
-        let h = Params::new()
-            .hash_length(32)
-            .to_state()
-            .update(&data[..32])
-            .finalize();
-        let checksum = h.as_bytes();
-
-        if checksum[..6] != data[32..] {
-            return Err(HexParseError::InvalidChecksum);
-        }
-
-        Ok(data[..32].into())
     }
 }
 
@@ -292,6 +271,32 @@ impl From<&[u8]> for Address {
 impl From<[u8; 32]> for Address {
     fn from(val: [u8; 32]) -> Self {
         Address(val)
+    }
+}
+
+impl std::str::FromStr for Address {
+    type Err = crate::types::HexParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() != 76 {
+            return Err(HexParseError::InvalidLength);
+        }
+
+        let mut data = [0u8; 38];
+        hex::decode_to_slice(s, &mut data).map_err(HexParseError::HexError)?;
+
+        let h = Params::new()
+            .hash_length(32)
+            .to_state()
+            .update(&data[..32])
+            .finalize();
+        let checksum = h.as_bytes();
+
+        if checksum[..6] != data[32..] {
+            return Err(HexParseError::InvalidChecksum);
+        }
+
+        Ok(data[..32].into())
     }
 }
 
@@ -378,8 +383,16 @@ impl V1SiaDecodable for SiafundOutput {
 )]
 pub struct Leaf([u8; 64]);
 
-impl Leaf {
-    pub fn parse_string(s: &str) -> Result<Self, HexParseError> {
+impl From<[u8; 64]> for Leaf {
+    fn from(data: [u8; 64]) -> Self {
+        Leaf(data)
+    }
+}
+
+impl std::str::FromStr for Leaf {
+    type Err = crate::types::HexParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.len() != 128 {
             return Err(HexParseError::InvalidLength);
         }
@@ -387,12 +400,6 @@ impl Leaf {
         let mut data = [0u8; 64];
         hex::decode_to_slice(s, &mut data).map_err(HexParseError::HexError)?;
         Ok(Leaf(data))
-    }
-}
-
-impl From<[u8; 64]> for Leaf {
-    fn from(data: [u8; 64]) -> Self {
-        Leaf(data)
     }
 }
 

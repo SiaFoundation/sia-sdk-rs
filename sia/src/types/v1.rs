@@ -59,7 +59,7 @@ impl<'de> Deserialize<'de> for UnlockKey {
     {
         if deserializer.is_human_readable() {
             let s = String::deserialize(deserializer)?;
-            UnlockKey::parse_string(&s).map_err(|e| Error::custom(format!("{e:?}")))
+            s.parse().map_err(|e| Error::custom(format!("{e:?}")))
         } else {
             let (algorithm, key) = <(Specifier, Vec<u8>)>::deserialize(deserializer)?;
             Ok(Self { algorithm, key })
@@ -73,10 +73,10 @@ impl fmt::Display for UnlockKey {
     }
 }
 
-impl UnlockKey {
-    /// Parses an UnlockKey from a string
-    /// The string should be in the format "algorithm:public_key"
-    pub fn parse_string(s: &str) -> Result<Self, HexParseError> {
+impl std::str::FromStr for UnlockKey {
+    type Err = crate::types::HexParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (prefix, key_str) = s.split_once(':').ok_or(HexParseError::MissingPrefix)?;
         Ok(UnlockKey {
             algorithm: Specifier::from(prefix),
@@ -907,10 +907,7 @@ mod tests {
                 ),
                 unlock_conditions: UnlockConditions {
                     timelock: 0,
-                    public_keys: vec![UnlockKey::parse_string(
-                        "ed25519:800ed6c2760e3e4ba1ff00128585c8cf8fed2e3dc1e3da1eb92d49f405bd6360",
-                    )
-                    .unwrap()],
+                    public_keys: vec!["ed25519:800ed6c2760e3e4ba1ff00128585c8cf8fed2e3dc1e3da1eb92d49f405bd6360".parse().unwrap()],
                     signatures_required: 6312611591377486220,
                 },
             }],
@@ -945,7 +942,7 @@ mod tests {
                 FileContractRevision{
                    parent_id: contract_id!(
                         "e4e26d93771d3bbb3d9dd306105d77cfb3a6254d1cc3495903af6e013442c63c"),
-                   unlock_conditions: UnlockConditions { timelock: 0, public_keys: vec![UnlockKey::parse_string("ed25519:e6b9cde4eb058f8ecbb083d99779cb0f6d518d5386f019af6ead09fa52de8567").unwrap()], signatures_required: 206644730660526450 },
+                   unlock_conditions: UnlockConditions { timelock: 0, public_keys: vec!["ed25519:e6b9cde4eb058f8ecbb083d99779cb0f6d518d5386f019af6ead09fa52de8567".parse().unwrap()], signatures_required: 206644730660526450 },
                    revision_number: 10595710523108536025,
                    file_size: 0,
                    file_merkle_root: Hash256::default(),
@@ -970,7 +967,7 @@ mod tests {
                 StorageProof{
                     parent_id: contract_id!(
                         "c0b9e98c9e03a2740c75d673871c1ee91f36d1bb329ff3ddbf1dfa8c6e1a64eb"),
-                    leaf: Leaf::parse_string("b78fa521dc62d9ced82bc3b61e0aa5a5c221d6cca5db63d94c9879543fb98c0a971094a89cd4408487ae32902248d321b545f9a051729aa0bb1725b848e3d453").unwrap(),
+                    leaf: "b78fa521dc62d9ced82bc3b61e0aa5a5c221d6cca5db63d94c9879543fb98c0a971094a89cd4408487ae32902248d321b545f9a051729aa0bb1725b848e3d453".parse().unwrap(),
                     proof: vec![
                         hash_256!("fe08c0a061475e7e5dec19e717cf98792fa7b555d0b5d3540a05db09f59ab8de"),
                     ],
@@ -1414,7 +1411,7 @@ mod tests {
         ];
 
         for (expected_str, public_key) in test_cases {
-            let expected = Address::parse_string(expected_str).unwrap();
+            let expected = expected_str.parse().unwrap();
 
             let public_key = PublicKey::new(public_key.as_slice().try_into().unwrap());
             let addr = UnlockConditions::standard_unlock_conditions(public_key).address();
