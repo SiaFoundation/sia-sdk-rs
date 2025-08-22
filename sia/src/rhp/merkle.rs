@@ -197,8 +197,7 @@ fn range_proof_size(leaves_per_sector: usize, start: usize, end: usize) -> usize
     left_hashes + right_hashes
 }
 
-#[allow(dead_code)]
-async fn sector_root_from_reader<R: AsyncRead + Unpin>(r: &mut R) -> Result<Hash256> {
+pub async fn sector_root_from_reader<R: AsyncRead + Unpin>(r: &mut R) -> Result<Hash256> {
     let mut acc = merkle::Accumulator::new();
     let r = r.take(SECTOR_SIZE as u64); // cap at a sector
     let mut r = io::BufReader::new(r);

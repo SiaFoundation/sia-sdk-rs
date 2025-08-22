@@ -1,8 +1,10 @@
 use crate::rhp::merkle;
+use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::marker::PhantomData;
 use thiserror::Error;
+use tokio::try_join;
 
 use super::types::*;
 use crate::consensus::ChainState;
@@ -474,6 +476,11 @@ pub enum Error {
 
     #[error("proof validation failed")]
     ProofValidation(#[from] ProofValidationError),
+
+    #[error(
+        "root of uploaded data doesn't match root returned by host: expected {expected}, got {got}"
+    )]
+    SectorRootMismatch { expected: Hash256, got: Hash256 },
 }
 
 #[derive(Debug, Default, PartialEq, Clone, Copy, Serialize, Deserialize)]
@@ -702,6 +709,7 @@ pub struct RPCWriteSectorResult {
 /// The host will store the sector for 432 blocks.
 /// If the sector is not appended to a contract within that time, it will be deleted.
 pub struct RPCWriteSector<T: TransportStream, State> {
+    root: Hash256,
     transport: Transport<T>,
     usage: Usage,
     state: PhantomData<State>,
@@ -721,9 +729,15 @@ impl<T: TransportStream> RPCWriteSector<T, RPCInit> {
             token,
             data,
         };
-        transport.write_request(&request).await?;
+
+        let mut data = &request.data[..];
+        let (_, root) = try_join!(
+            transport.write_request(&request),
+            merkle::sector_root_from_reader(&mut data).map_err(Error::ProofValidation),
+        )?;
 
         Ok(RPCWriteSector {
+            root,
             transport,
             usage,
             state: PhantomData,
@@ -734,6 +748,13 @@ impl<T: TransportStream> RPCWriteSector<T, RPCInit> {
 impl<T: TransportStream> RPCWriteSector<T, RPCComplete> {
     pub async fn complete(mut self) -> Result<RPCWriteSectorResult, Error> {
         let response: RPCWriteSectorResponse = self.transport.read_response().await?;
+        if response.root != self.root {
+            return Err(Error::SectorRootMismatch {
+                expected: self.root,
+                got: response.root,
+            });
+        }
+
         Ok(RPCWriteSectorResult {
             root: response.root,
             usage: self.usage,
