@@ -1177,7 +1177,7 @@ mod test {
 
     use super::*;
 
-    const test_prices: HostPrices = HostPrices {
+    const TEST_PRICES: HostPrices = HostPrices {
         contract_price: Currency::siacoins(1),
         collateral: Currency::siacoins(2),
         storage_price: Currency::siacoins(3),
@@ -1189,7 +1189,7 @@ mod test {
         signature: Signature::new([0u8; 64]),
     };
 
-    const test_account_token: AccountToken = AccountToken {
+    const TEST_ACCOUNT_TOKEN: AccountToken = AccountToken {
         host_key: PublicKey::new({
             let mut bytes = [0u8; 32];
             bytes[0] = 10;
@@ -1212,11 +1212,27 @@ mod test {
     async fn test_write_request() {
         const EXPECTED_HEX: &str = "52656164536563746f72000000000000000000a1edccce1bc2d300000000000000000042db999d3784a7010000000000000000e3c8666c53467b02000000000000000084b6333b6f084f03000000000000000025a4000a8bca22040000000000000000c691cdd8a68cf604000000000007000000000000000800000000000000090000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000b000000000000000000000000000000000000000000000000000000000000000c000000000000000d0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000f000000000000001000000000000000";
 
+        let mut prices = TEST_PRICES;
+        prices.valid_until = OffsetDateTime::from_unix_timestamp(8).unwrap();
+        prices.signature = Signature::new({
+            let mut bytes = [0u8; 64];
+            bytes[0] = 9;
+            bytes
+        });
+
+        let mut token = TEST_ACCOUNT_TOKEN;
+        token.valid_until = OffsetDateTime::from_unix_timestamp(12).unwrap();
+        token.signature = Signature::new({
+            let mut bytes = [0u8; 64];
+            bytes[0] = 13;
+            bytes
+        });
+
         let mut sig_buf = [0u8; 64];
         sig_buf[0] = 9;
         let req = RPCReadSectorRequest {
-            prices: test_prices,
-            token: test_account_token,
+            prices: prices,
+            token: token,
             root: Hash256::new({
                 let mut bytes = [0u8; 32];
                 bytes[0] = 14;
@@ -1316,7 +1332,7 @@ mod test {
         rand::fill(&mut data[..]);
         let root = merkle::sector_root(&data);
         let stream = Cursor::new(Vec::<u8>::new());
-        let rpc = RPCWriteSector::send_request(stream, test_prices, test_account_token, data)
+        let rpc = RPCWriteSector::send_request(stream, TEST_PRICES, TEST_ACCOUNT_TOKEN, data)
             .await
             .unwrap();
         assert_eq!(rpc.root, root);
