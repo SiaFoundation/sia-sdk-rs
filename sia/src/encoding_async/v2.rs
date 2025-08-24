@@ -20,17 +20,14 @@ pub trait AsyncSiaDecodable: Sized {
 
 impl<T: AsyncWriteExt + Unpin> AsyncEncoder for T {
     async fn write_all(&mut self, buf: &[u8]) -> Result<()> {
-        self.write_all(buf)
-            .await
-            .map_err(|e| Error::IOError(e.to_string()))
+        self.write_all(buf).await?;
+        Ok(())
     }
 }
 
 impl<T: AsyncReadExt + Unpin> AsyncDecoder for T {
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
-        self.read_exact(buf)
-            .await
-            .map_err(|e| Error::IOError(e.to_string()))?;
+        self.read_exact(buf).await?;
         Ok(())
     }
 }
@@ -61,7 +58,7 @@ impl AsyncSiaDecodable for bool {
         match v {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(Error::InvalidValue),
+            _ => Err(Error::InvalidValue("requires 0 or 1".into())),
         }
     }
 }
@@ -89,7 +86,10 @@ impl AsyncSiaDecodable for Duration {
     async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
         let ns = u64::decode_async(r).await?;
         if ns > i64::MAX as u64 {
-            return Err(Error::InvalidValue);
+            return Err(Error::InvalidValue(format!(
+                "duration {ns} must be less than {}",
+                i64::MAX
+            )));
         }
         Ok(Duration::nanoseconds(ns as i64))
     }
@@ -166,7 +166,7 @@ impl AsyncSiaEncodable for String {
 impl AsyncSiaDecodable for String {
     async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
         let bytes = Vec::<u8>::decode_async(r).await?;
-        String::from_utf8(bytes).map_err(|_| Error::InvalidData("Invalid UTF-8 string".to_string()))
+        String::from_utf8(bytes).map_err(|e| Error::InvalidValue(e.to_string()))
     }
 }
 

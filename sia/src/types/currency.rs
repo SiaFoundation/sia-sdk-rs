@@ -96,7 +96,7 @@ impl V1SiaDecodable for Currency {
     fn decode_v1<R: std::io::Read>(r: &mut R) -> encoding::Result<Self> {
         let len = usize::decode_v1(r)?;
         if len > 16 {
-            return Err(encoding::Error::InvalidLength);
+            return Err(encoding::Error::InvalidLength(len));
         }
         let mut buf = [0u8; 16];
         r.read_exact(&mut buf[16 - len..])?;
