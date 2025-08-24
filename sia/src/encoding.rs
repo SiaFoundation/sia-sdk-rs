@@ -1,4 +1,5 @@
 use std::io;
+
 use thiserror::Error;
 
 mod v1;
@@ -11,9 +12,9 @@ pub enum Error {
     #[error("Invalid timestamp")]
     InvalidTimestamp,
     #[error("Invalid length")]
-    InvalidLength,
-    #[error("Invalid value")]
-    InvalidValue,
+    InvalidLength(usize),
+    #[error("Invalid value: {0}")]
+    InvalidValue(String),
     #[error("Custom error: {0}")]
     Custom(String),
 }
