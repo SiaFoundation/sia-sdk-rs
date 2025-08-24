@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["sia", "sia_derive"]
+members = [ "rhp4_quic","sia", "sia_derive"]

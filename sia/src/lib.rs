@@ -3,7 +3,6 @@ pub mod encoding;
 pub mod encoding_async;
 pub mod encryption;
 pub mod erasure_coding;
-pub mod hosts;
 pub mod rhp;
 pub mod seed;
 pub mod signing;

@@ -468,6 +468,12 @@ pub enum Error {
     #[error("not enough host funds {0} < {1}")]
     NotEnoughHostFunds(Currency, Currency),
 
+    #[error("invalid response: {0}")]
+    InvalidResponse(String),
+
+    #[error("invalid signature")]
+    InvalidSignature,
+
     #[error("expected single file contract in response, found {0}")]
     ExpectedContractTransaction(usize),
 
