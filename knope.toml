@@ -14,6 +14,7 @@ type = "CreateChangeFile"
 
 [[workflows]]
 name = "prepare-release"
+ignore_conventional_commits = true
 
 [[workflows.steps]]
 type = "PrepareRelease"

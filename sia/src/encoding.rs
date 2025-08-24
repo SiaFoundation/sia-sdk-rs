@@ -9,8 +9,6 @@ mod v2;
 pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
-    #[error("Invalid timestamp")]
-    InvalidTimestamp,
     #[error("Invalid length")]
     InvalidLength(usize),
     #[error("Invalid value: {0}")]

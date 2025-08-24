@@ -3,7 +3,7 @@ use crate::encoding::{
 };
 use crate::encoding_async::{
     AsyncDecoder, AsyncEncoder, AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable,
-    AsyncSiaEncode, Result as AsyncResult,
+    AsyncSiaEncode,
 };
 use crate::signing::{PublicKey, Signature};
 #[allow(deprecated)]
@@ -394,13 +394,13 @@ impl SiaDecodable for SpendPolicy {
 }
 
 impl AsyncSiaEncodable for SpendPolicy {
-    async fn encode_async<E: AsyncEncoder>(&self, e: &mut E) -> AsyncResult<()> {
+    async fn encode_async<E: AsyncEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
         // helper to recursively encode policies
         async fn encode_policy<E: AsyncEncoder>(
             policy: &SpendPolicy,
             e: &mut E,
-        ) -> AsyncResult<()> {
-            e.write_all(&[policy.type_prefix()]).await?;
+        ) -> Result<(), E::Error> {
+            e.encode_buf(&[policy.type_prefix()]).await?;
             match policy {
                 SpendPolicy::Above(height) => height.encode_async(e).await,
                 SpendPolicy::After(time) => (time.unix_timestamp() as u64).encode_async(e).await,
@@ -425,9 +425,9 @@ impl AsyncSiaEncodable for SpendPolicy {
 }
 
 impl AsyncSiaDecodable for SpendPolicy {
-    async fn decode_async<D: AsyncDecoder>(d: &mut D) -> AsyncResult<Self> {
+    async fn decode_async<D: AsyncDecoder>(d: &mut D) -> Result<Self, D::Error> {
         // helper to recursively decode policies
-        async fn decode_policy<D: AsyncDecoder>(d: &mut D) -> AsyncResult<SpendPolicy> {
+        async fn decode_policy<D: AsyncDecoder>(d: &mut D) -> Result<SpendPolicy, D::Error> {
             let policy_type = u8::decode_async(d).await?;
             match policy_type {
                 POLICY_ABOVE_PREFIX => Ok(SpendPolicy::Above(u64::decode_async(d).await?)),
@@ -454,14 +454,16 @@ impl AsyncSiaDecodable for SpendPolicy {
                 )),
                 _ => Err(EncodingError::InvalidValue(format!(
                     "invalid policy type: {policy_type}"
-                ))),
+                ))
+                .into()),
             }
         }
         let policy_version = u8::decode_async(d).await?;
         if policy_version != 1 {
             return Err(EncodingError::InvalidValue(format!(
                 "invalid policy version: {policy_version}"
-            )));
+            ))
+            .into());
         }
         decode_policy(d).await
     }

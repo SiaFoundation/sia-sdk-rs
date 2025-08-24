@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rand::RngCore;
 use sia::erasure_coding::ErasureCoder;
-use sia::rhp::SECTOR_SIZE;
+use sia::rhp::{RPCError, SECTOR_SIZE};
 use sia::signing::PublicKey;
 use sia::slabs::{Sector, SectorDownloader, SectorUploader, Slab};
 use sia::types::Hash256;
@@ -10,7 +10,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
 struct MockUploadDownloader {
-    sectors: Mutex<HashMap<String, Vec<u8>>>,
+    sectors: Mutex<HashMap<Hash256, Vec<u8>>>,
 }
 
 impl SectorDownloader for MockUploadDownloader {
@@ -22,9 +22,12 @@ impl SectorDownloader for MockUploadDownloader {
         limit: usize,
     ) -> Result<Vec<u8>, sia::rhp::Error> {
         let sectors = self.sectors.lock().await;
-        match sectors.get(&root.to_string()) {
+        match sectors.get(root) {
             Some(data) => Ok(data[offset..offset + limit].to_vec()),
-            None => Err(sia::rhp::Error::Transport("sector not found".into())),
+            None => Err(sia::rhp::Error::RPC(RPCError {
+                code: 3,
+                description: "sector not found".into(),
+            })),
         }
     }
 }
@@ -34,7 +37,7 @@ impl SectorUploader for MockUploadDownloader {
         let root = Hash256::new(rand::random());
         let sector_data = sector.as_ref().to_vec();
         let mut sectors = self.sectors.lock().await;
-        sectors.insert(root.to_string(), sector_data);
+        sectors.insert(root, sector_data);
 
         Ok(Sector {
             root,
