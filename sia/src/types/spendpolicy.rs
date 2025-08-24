@@ -325,7 +325,8 @@ impl SiaEncodable for SpendPolicy {
             policy: &SpendPolicy,
             w: &mut W,
         ) -> encoding::Result<()> {
-            w.write_all(&[policy.type_prefix()])?;
+            w.write_all(&[policy.type_prefix()])
+                .map_err(|e| encoding::Error::Io(e.to_string()))?;
             match policy {
                 SpendPolicy::Above(height) => height.encode(w),
                 SpendPolicy::After(time) => (time.unix_timestamp() as u64).encode(w),

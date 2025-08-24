@@ -99,14 +99,16 @@ impl V1SiaDecodable for Currency {
             return Err(encoding::Error::InvalidLength(len));
         }
         let mut buf = [0u8; 16];
-        r.read_exact(&mut buf[16 - len..])?;
+        r.read_exact(&mut buf[16 - len..])
+            .map_err(|e| encoding::Error::Io(e.to_string()))?;
         Ok(Currency(u128::from_be_bytes(buf)))
     }
 }
 
 impl SiaEncodable for Currency {
     fn encode<W: Write>(&self, w: &mut W) -> encoding::Result<()> {
-        w.write_all(&self.0.to_le_bytes())?;
+        w.write_all(&self.0.to_le_bytes())
+            .map_err(|e| encoding::Error::Io(e.to_string()))?;
         Ok(())
     }
 }
@@ -114,7 +116,8 @@ impl SiaEncodable for Currency {
 impl SiaDecodable for Currency {
     fn decode<R: std::io::Read>(r: &mut R) -> encoding::Result<Self> {
         let mut buf = [0u8; 16];
-        r.read_exact(&mut buf)?;
+        r.read_exact(&mut buf)
+            .map_err(|e| encoding::Error::Io(e.to_string()))?;
         Ok(Currency(u128::from_le_bytes(buf)))
     }
 }
