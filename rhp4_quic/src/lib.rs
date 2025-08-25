@@ -81,8 +81,8 @@ pub enum Error {
     #[error("invalid signature")]
     InvalidSignature,
 
-    #[error("connection failed")]
-    ConnectionFailed,
+    #[error("connection error: {0}")]
+    Connection(String),
 }
 
 impl Dialer {
@@ -139,7 +139,11 @@ impl Dialer {
         self.cached_prices.lock().unwrap().insert(*host_key, prices);
     }
 
-    async fn dial_host(&mut self, host: PublicKey) -> Result<Stream, Error> {
+    async fn with_host<T, F, C>(&mut self, host: PublicKey, cb: C) -> Result<T, Error>
+    where
+        F: Future<Output = Result<T, Error>>,
+        C: FnOnce(Stream) -> F,
+    {
         let existing_conn = {
             let open_conns = self.open_conns.lock().unwrap();
             open_conns.get(&host).cloned()
@@ -189,7 +193,8 @@ impl Dialer {
                 }
             }
 
-            let conn = new_conn.ok_or(Error::ConnectionFailed)?;
+            let conn =
+                new_conn.ok_or(Error::Connection("failed to establish connection".into()))?;
             let open_conns = &mut self.open_conns.lock().unwrap();
             open_conns.insert(host, conn.clone());
             conn
@@ -198,8 +203,15 @@ impl Dialer {
         let (send, recv) = conn
             .open_bi()
             .await
-            .expect("Failed to open bidirectional stream");
-        Ok(Stream { send, recv })
+            .map_err(|e| Error::Connection(e.to_string()))?;
+
+        match cb(Stream { send, recv }).await {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                self.open_conns.lock().unwrap().remove(&host);
+                Err(e)
+            }
+        }
     }
 
     pub async fn set_hosts(&mut self, hosts: Vec<Host>) {
@@ -218,14 +230,18 @@ impl Dialer {
             return Ok(prices);
         }
 
-        let stream = self.dial_host(host_key).await?;
-        let resp = RPCSettings::send_request(stream).await?.complete().await?;
-        let prices = resp.settings.prices;
-        if prices.valid_until < OffsetDateTime::now_utc() {
-            return Err(Error::InvalidPrices);
-        } else if !host_key.verify(prices.sig_hash().as_ref(), &prices.signature) {
-            return Err(Error::InvalidSignature);
-        }
+        let prices = self
+            .with_host(host_key, |stream| async move {
+                let resp = RPCSettings::send_request(stream).await?.complete().await?;
+                let prices = resp.settings.prices;
+                if prices.valid_until < OffsetDateTime::now_utc() {
+                    return Err(Error::InvalidPrices);
+                } else if !host_key.verify(prices.sig_hash().as_ref(), &prices.signature) {
+                    return Err(Error::InvalidSignature);
+                }
+                Ok(prices)
+            })
+            .await?;
         self.set_cached_prices(&host_key, prices.clone());
         Ok(prices)
     }
@@ -237,15 +253,15 @@ impl Dialer {
         sector: Vec<u8>,
     ) -> Result<Hash256, Error> {
         let prices = self.host_prices(host_key, false).await?;
-        let stream = self.dial_host(host_key).await?;
         let token = AccountToken::new(account_key, host_key);
-
-        let resp = RPCWriteSector::send_request(stream, prices, token, sector)
-            .await?
-            .complete()
-            .await?;
-
-        Ok(resp.root)
+        self.with_host(host_key, |stream| async move {
+            let resp = RPCWriteSector::send_request(stream, prices, token, sector)
+                .await?
+                .complete()
+                .await?;
+            Ok(resp.root)
+        })
+        .await
     }
 
     pub async fn read_sector(
@@ -257,15 +273,15 @@ impl Dialer {
         limit: usize,
     ) -> Result<Vec<u8>, Error> {
         let prices = self.host_prices(host_key, false).await?;
-        let stream = self.dial_host(host_key).await?;
         let token = AccountToken::new(account_key, host_key);
-
-        let resp = RPCReadSector::send_request(stream, prices, token, root, offset, limit)
-            .await?
-            .complete()
-            .await?;
-
-        Ok(resp.data)
+        self.with_host(host_key, |stream| async move {
+            let resp = RPCReadSector::send_request(stream, prices, token, root, offset, limit)
+                .await?
+                .complete()
+                .await?;
+            Ok(resp.data)
+        })
+        .await
     }
 }
 
