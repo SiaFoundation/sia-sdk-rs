@@ -12,8 +12,7 @@ pub trait SiaDecodable: Sized {
 
 impl SiaEncodable for u8 {
     fn encode<W: Write>(&self, w: &mut W) -> Result<()> {
-        w.write_all(&[*self])
-            .map_err(|e| Error::Io(e.to_string()))?;
+        w.write_all(&[*self])?;
         Ok(())
     }
 }
@@ -21,8 +20,7 @@ impl SiaEncodable for u8 {
 impl SiaDecodable for u8 {
     fn decode<R: Read>(r: &mut R) -> Result<Self> {
         let mut buf = [0; 1];
-        r.read_exact(&mut buf)
-            .map_err(|e| Error::Io(e.to_string()))?;
+        r.read_exact(&mut buf)?;
         Ok(buf[0])
     }
 }
@@ -112,7 +110,7 @@ macro_rules! impl_sia_numeric {
         $(
             impl SiaEncodable for $t {
                 fn encode<W: Write>(&self, w: &mut W) -> Result<()> {
-                    w.write_all(&(*self as u64).to_le_bytes()).map_err(|e| Error::Io(e.to_string()))?;
+                    w.write_all(&(*self as u64).to_le_bytes())?;
                     Ok(())
                 }
             }
@@ -120,7 +118,7 @@ macro_rules! impl_sia_numeric {
             impl SiaDecodable for $t {
                 fn decode<R: Read>(r: &mut R) -> Result<Self> {
                     let mut buf = [0u8; 8];
-                    r.read_exact(&mut buf).map_err(|e| Error::Io(e.to_string()))?;
+                    r.read_exact(&mut buf)?;
                     Ok(u64::from_le_bytes(buf) as Self)
                 }
             }
@@ -172,7 +170,7 @@ impl SiaDecodable for String {
 
 impl<const N: usize> SiaEncodable for [u8; N] {
     fn encode<W: Write>(&self, w: &mut W) -> Result<()> {
-        w.write_all(self).map_err(|e| Error::Io(e.to_string()))?;
+        w.write_all(self)?;
         Ok(())
     }
 }
@@ -180,8 +178,7 @@ impl<const N: usize> SiaEncodable for [u8; N] {
 impl<const N: usize> SiaDecodable for [u8; N] {
     fn decode<R: Read>(r: &mut R) -> Result<Self> {
         let mut arr = [0u8; N];
-        r.read_exact(&mut arr)
-            .map_err(|e| Error::Io(e.to_string()))?;
+        r.read_exact(&mut arr)?;
         Ok(arr)
     }
 }

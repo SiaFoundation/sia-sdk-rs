@@ -11,8 +11,7 @@ pub trait V1SiaDecodable: Sized {
 
 impl V1SiaEncodable for u8 {
     fn encode_v1<W: Write>(&self, w: &mut W) -> Result<()> {
-        w.write_all(&[*self])
-            .map_err(|e| Error::Io(e.to_string()))?;
+        w.write_all(&[*self])?;
         Ok(())
     }
 }
@@ -20,8 +19,7 @@ impl V1SiaEncodable for u8 {
 impl V1SiaDecodable for u8 {
     fn decode_v1<R: Read>(r: &mut R) -> Result<Self> {
         let mut buf = [0; 1];
-        r.read_exact(&mut buf)
-            .map_err(|e| Error::Io(e.to_string()))?;
+        r.read_exact(&mut buf)?;
         Ok(buf[0])
     }
 }
@@ -81,7 +79,7 @@ macro_rules! impl_sia_numeric {
         $(
             impl V1SiaEncodable for $t {
                 fn encode_v1<W: Write>(&self, w: &mut W) -> Result<()> {
-                    w.write_all(&(*self as u64).to_le_bytes()).map_err(|e| Error::Io(e.to_string()))?;
+                    w.write_all(&(*self as u64).to_le_bytes())?;
                     Ok(())
                 }
             }
@@ -89,7 +87,7 @@ macro_rules! impl_sia_numeric {
             impl V1SiaDecodable for $t {
                 fn decode_v1<R: Read>(r: &mut R) -> Result<Self> {
                     let mut buf = [0u8; 8];
-                    r.read_exact(&mut buf).map_err(|e| Error::Io(e.to_string()))?;
+                    r.read_exact(&mut buf)?;
                     Ok(u64::from_le_bytes(buf) as Self)
                 }
             }
@@ -141,7 +139,7 @@ impl V1SiaDecodable for String {
 
 impl<const N: usize> V1SiaEncodable for [u8; N] {
     fn encode_v1<W: Write>(&self, w: &mut W) -> Result<()> {
-        w.write_all(self).map_err(|e| Error::Io(e.to_string()))?;
+        w.write_all(self)?;
         Ok(())
     }
 }
@@ -149,8 +147,7 @@ impl<const N: usize> V1SiaEncodable for [u8; N] {
 impl<const N: usize> V1SiaDecodable for [u8; N] {
     fn decode_v1<R: Read>(r: &mut R) -> Result<Self> {
         let mut arr = [0u8; N];
-        r.read_exact(&mut arr)
-            .map_err(|e| Error::Io(e.to_string()))?;
+        r.read_exact(&mut arr)?;
         Ok(arr)
     }
 }

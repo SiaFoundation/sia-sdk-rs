@@ -25,7 +25,7 @@ use super::{
 // expose spend policies
 pub use super::spendpolicy::*;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Protocol {
     SiaMux,
     QUIC,
@@ -100,7 +100,15 @@ impl AsyncSiaDecodable for Protocol {
 }
 
 #[derive(
-    SiaEncode, SiaDecode, AsyncSiaEncode, AsyncSiaDecode, Debug, PartialEq, Serialize, Deserialize,
+    Debug,
+    PartialEq,
+    Clone,
+    SiaEncode,
+    SiaDecode,
+    AsyncSiaEncode,
+    AsyncSiaDecode,
+    Serialize,
+    Deserialize,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct NetAddress {
