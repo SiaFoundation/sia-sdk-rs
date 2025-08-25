@@ -50,7 +50,7 @@ pub struct Dialer {
         non-ideal fallback behavior when dual-stack is not supported. This effectively treats every platform as
         single-stack instead since IPv4 is the preferred fallback.
     */
-    endpoint_v4: Endpoint,
+    endpoint_v4: Option<Endpoint>,
     endpoint_v6: Option<Endpoint>,
 
     hosts: Mutex<HashMap<PublicKey, Vec<NetAddress>>>,
@@ -86,15 +86,19 @@ pub enum Error {
 }
 
 impl Dialer {
-    pub fn new(mut client_config: ClientConfig) -> Self {
+    pub fn new(mut client_config: ClientConfig) -> Result<Self, &'static str> {
         client_config.alpn_protocols = vec![b"sia/rhp4".to_vec()];
 
         let client_config = QuicClientConfig::try_from(client_config).unwrap();
         let client_config = quinn::ClientConfig::new(Arc::new(client_config));
 
-        let mut endpoint_v4 = quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into()).unwrap();
-        endpoint_v4.set_default_client_config(client_config.clone());
-
+        let endpoint_v4 = match quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into()) {
+            Ok(mut endpoint) => {
+                endpoint.set_default_client_config(client_config.clone());
+                Some(endpoint)
+            }
+            Err(_) => None,
+        };
         let endpoint_v6 = match quinn::Endpoint::client((Ipv6Addr::UNSPECIFIED, 0).into()) {
             Ok(mut endpoint) => {
                 endpoint.set_default_client_config(client_config);
@@ -103,13 +107,17 @@ impl Dialer {
             Err(_) => None,
         };
 
-        Self {
+        if endpoint_v4.is_none() && endpoint_v6.is_none() {
+            return Err("unable to create IPv4 and IPv6 endpoint");
+        }
+
+        Ok(Self {
             endpoint_v4,
             endpoint_v6,
             hosts: Mutex::new(HashMap::new()),
             open_conns: Mutex::new(HashMap::new()),
             cached_prices: Mutex::new(HashMap::new()),
-        }
+        })
     }
 
     fn get_cached_prices(&self, host_key: &PublicKey) -> Option<HostPrices> {
@@ -165,8 +173,8 @@ impl Dialer {
                             new_conn = Some(conn);
                             break;
                         }
-                    } else if socket.is_ipv4() {
-                        let conn = self.endpoint_v4.connect(socket, addr).unwrap().await.ok();
+                    } else if socket.is_ipv4() && let Some(endpoint) = &self.endpoint_v4 {
+                        let conn = endpoint.connect(socket, addr).unwrap().await.ok();
                         if let Some(conn) = conn {
                             new_conn = Some(conn);
                             break;
@@ -282,7 +290,7 @@ mod test {
         let client_config =
             rustls::ClientConfig::with_platform_verifier().expect("Failed to create client config");
 
-        let mut dialer = Dialer::new(client_config);
+        let mut dialer = Dialer::new(client_config).expect("Failed to create dialer");
         dialer
             .set_hosts(vec![Host {
                 public_key: host_key,
