@@ -36,7 +36,7 @@ impl V1SiaDecodable for bool {
         match v {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(Error::InvalidValue),
+            _ => Err(Error::InvalidValue("requires 0 or 1".into())),
         }
     }
 }
@@ -133,7 +133,7 @@ impl V1SiaEncodable for String {
 impl V1SiaDecodable for String {
     fn decode_v1<R: Read>(r: &mut R) -> Result<Self> {
         let buf = Vec::<u8>::decode_v1(r)?;
-        String::from_utf8(buf).map_err(|_| Error::InvalidLength)
+        String::from_utf8(buf).map_err(|e| Error::InvalidValue(e.to_string()))
     }
 }
 

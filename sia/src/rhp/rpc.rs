@@ -8,10 +8,10 @@ use tokio::try_join;
 
 use super::types::*;
 use crate::consensus::ChainState;
-use crate::encoding::SiaEncodable;
+use crate::encoding::{Error as EncodingError, SiaEncodable};
 use crate::encoding_async::{
     AsyncDecoder, AsyncEncoder, AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable,
-    AsyncSiaEncode, Error as AsyncError,
+    AsyncSiaEncode,
 };
 use crate::rhp::SECTOR_SIZE;
 use crate::rhp::merkle::ProofValidationError;
@@ -460,7 +460,7 @@ pub enum Error {
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
     #[error("Encoding error: {0}")]
-    Encoding(#[from] AsyncError),
+    Encoding(#[from] EncodingError),
 
     #[error("RPC error: {0}")]
     RPC(#[from] RPCError),

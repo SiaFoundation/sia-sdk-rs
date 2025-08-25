@@ -37,7 +37,7 @@ impl SiaDecodable for bool {
         match v {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(Error::InvalidValue),
+            _ => Err(Error::InvalidValue("requires 0 or 1".into())),
         }
     }
 }
@@ -65,7 +65,10 @@ impl SiaDecodable for Duration {
     fn decode<R: Read>(r: &mut R) -> Result<Self> {
         let ns = u64::decode(r)?;
         if ns > i64::MAX as u64 {
-            return Err(Error::InvalidValue);
+            return Err(Error::InvalidValue(format!(
+                "duration {ns} must be less than {}",
+                i64::MAX
+            )));
         }
         Ok(Duration::nanoseconds(ns as i64))
     }
@@ -161,7 +164,7 @@ impl SiaEncodable for String {
 impl SiaDecodable for String {
     fn decode<R: Read>(r: &mut R) -> Result<Self> {
         let buf = Vec::<u8>::decode(r)?;
-        String::from_utf8(buf).map_err(|_| Error::InvalidLength)
+        String::from_utf8(buf).map_err(|e| Error::InvalidValue(e.to_string()))
     }
 }
 

@@ -188,7 +188,7 @@ impl TryFrom<&[u8]> for Signature {
     type Error = encoding::Error;
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         if value.len() != 64 {
-            return Err(encoding::Error::InvalidLength);
+            return Err(encoding::Error::InvalidLength(value.len()));
         }
         let mut sig = [0u8; 64];
         sig.copy_from_slice(value);
@@ -204,7 +204,6 @@ impl fmt::Display for Signature {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
     #[test]
