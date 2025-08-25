@@ -1,3 +1,4 @@
+pub mod app_client;
 pub mod consensus;
 pub mod encoding;
 pub mod encoding_async;
