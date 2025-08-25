@@ -7,14 +7,14 @@ use std::sync::Arc;
 use thiserror::{self, Error};
 
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
-use sia::encoding::Error as EncodingError;
-use sia::encoding_async::{AsyncDecoder, AsyncEncoder, Result as EncodingResult};
-use sia::rhp::{
+use crate::encoding::Error as EncodingError;
+use crate::encoding_async::{AsyncDecoder, AsyncEncoder, Result as EncodingResult};
+use crate::rhp::{
     AccountToken, Error as RHPError, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector,
 };
-use sia::signing::{PrivateKey, PublicKey};
-use sia::types::Hash256;
-use sia::types::v2::{NetAddress, Protocol};
+use crate::signing::{PrivateKey, PublicKey};
+use crate::types::Hash256;
+use crate::types::v2::{NetAddress, Protocol};
 use std::sync::Mutex;
 use time::OffsetDateTime;
 
