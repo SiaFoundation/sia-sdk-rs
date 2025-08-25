@@ -26,10 +26,7 @@ use crate::types::{
 macro_rules! impl_rpc_request {
     ($name:ident, $text:literal) => {
         impl RPCRequest for $name {
-            async fn encode_request<E: AsyncEncoder>(
-                &self,
-                w: &mut E,
-            ) -> Result<(), Error> {
+            async fn encode_request<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), Error> {
                 specifier!($text).encode_async(w).await?;
                 self.encode_async(w).await?;
                 Ok(())
@@ -42,18 +39,13 @@ macro_rules! impl_rpc_request {
 macro_rules! impl_rpc_response {
     ($name:ident) => {
         impl RPCResponse for $name {
-            async fn encode_response<E: AsyncEncoder>(
-                &self,
-                w: &mut E,
-            ) -> Result<(), Error> {
+            async fn encode_response<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), Error> {
                 false.encode_async(w).await?; // nil error
                 self.encode_async(w).await?;
                 Ok(())
             }
 
-            async fn decode_response<D: AsyncDecoder>(
-                r: &mut D,
-            ) -> Result<Self, Error> {
+            async fn decode_response<D: AsyncDecoder>(r: &mut D) -> Result<Self, Error> {
                 let has_error = bool::decode_async(r).await?;
                 match has_error {
                     false => {
@@ -61,12 +53,10 @@ macro_rules! impl_rpc_response {
                         Ok(resp)
                     }
                     true => {
-                        let error = RPCError::decode_async(r)
-                            .await
-                            .map(Error::RPC)?;
+                        let error = RPCError::decode_async(r).await.map(Error::RPC)?;
                         Err(error)
-            }
-        }
+                    }
+                }
             }
         }
 
@@ -625,16 +615,12 @@ impl Usage {
 }
 
 pub trait RPCRequest: Sized + sealed::Sealed {
-    fn encode_request<E: AsyncEncoder>(
-        &self,
-        w: &mut E,
-    ) -> impl Future<Output = Result<(), Error>>;
+    fn encode_request<E: AsyncEncoder>(&self, w: &mut E)
+    -> impl Future<Output = Result<(), Error>>;
 }
 
 pub trait RPCResponse: Sized + sealed::Sealed {
-    fn decode_response<D: AsyncDecoder>(
-        r: &mut D,
-    ) -> impl Future<Output = Result<Self, Error>>;
+    fn decode_response<D: AsyncDecoder>(r: &mut D) -> impl Future<Output = Result<Self, Error>>;
 
     fn encode_response<E: AsyncEncoder>(
         &self,

@@ -9,7 +9,9 @@ use thiserror::{self, Error};
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use sia::encoding::Error as EncodingError;
 use sia::encoding_async::{AsyncDecoder, AsyncEncoder, Result as EncodingResult};
-use sia::rhp::{AccountToken, Error as RHPError, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector };
+use sia::rhp::{
+    AccountToken, Error as RHPError, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector,
+};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use sia::types::v2::{NetAddress, Protocol};
@@ -23,13 +25,19 @@ struct Stream {
 
 impl AsyncDecoder for Stream {
     async fn read_exact(&mut self, buf: &mut [u8]) -> EncodingResult<()> {
-        self.recv.read_exact(buf).await.map_err(|e| EncodingError::Custom(e.to_string()))
+        self.recv
+            .read_exact(buf)
+            .await
+            .map_err(|e| EncodingError::Custom(e.to_string()))
     }
 }
 
 impl AsyncEncoder for Stream {
     async fn write_all(&mut self, buf: &[u8]) -> EncodingResult<()> {
-        self.send.write_all(buf).await.map_err(|e| EncodingError::Custom(e.to_string()))
+        self.send
+            .write_all(buf)
+            .await
+            .map_err(|e| EncodingError::Custom(e.to_string()))
     }
 }
 
