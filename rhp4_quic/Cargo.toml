@@ -22,4 +22,3 @@ tokio = "1.47.1"
 
 [dev-dependencies]
 rustls-platform-verifier = "0.6.1"
-tokio = "1.47.1"
