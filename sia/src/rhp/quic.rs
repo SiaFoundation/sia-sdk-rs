@@ -6,7 +6,6 @@ use std::num::ParseIntError;
 use std::sync::Arc;
 use thiserror::{self, Error};
 
-use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use crate::encoding::Error as EncodingError;
 use crate::encoding_async::{AsyncDecoder, AsyncEncoder, Result as EncodingResult};
 use crate::rhp::{
@@ -15,6 +14,7 @@ use crate::rhp::{
 use crate::signing::{PrivateKey, PublicKey};
 use crate::types::Hash256;
 use crate::types::v2::{NetAddress, Protocol};
+use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use std::sync::Mutex;
 use time::OffsetDateTime;
 
@@ -290,8 +290,8 @@ mod test {
     use std::time::Duration;
 
     use super::*;
+    use crate::public_key;
     use rustls_platform_verifier::ConfigVerifierExt;
-    use sia::public_key;
     use tokio::time::sleep;
 
     #[tokio::test]
