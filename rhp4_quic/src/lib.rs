@@ -9,14 +9,12 @@ use thiserror::{self, Error};
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use sia::encoding::Error as EncodingError;
 use sia::encoding_async::{AsyncDecoder, AsyncEncoder, Result as EncodingResult};
-use sia::rhp::{
-    AccountToken, Error as RHPError, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector,
-};
+use sia::rhp::{AccountToken, Error as RHPError, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector };
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use sia::types::v2::{NetAddress, Protocol};
+use std::sync::Mutex;
 use time::OffsetDateTime;
-use tokio::sync::Mutex;
 
 struct Stream {
     send: SendStream,
@@ -25,19 +23,13 @@ struct Stream {
 
 impl AsyncDecoder for Stream {
     async fn read_exact(&mut self, buf: &mut [u8]) -> EncodingResult<()> {
-        self.recv
-            .read_exact(buf)
-            .await
-            .map_err(|e| EncodingError::Io(e.to_string()))
+        self.recv.read_exact(buf).await.map_err(|e| EncodingError::Custom(e.to_string()))
     }
 }
 
 impl AsyncEncoder for Stream {
     async fn write_all(&mut self, buf: &[u8]) -> EncodingResult<()> {
-        self.send
-            .write_all(buf)
-            .await
-            .map_err(|e| EncodingError::Io(e.to_string()))
+        self.send.write_all(buf).await.map_err(|e| EncodingError::Custom(e.to_string()))
     }
 }
 
@@ -45,10 +37,11 @@ impl AsyncEncoder for Stream {
 /// Connections will be cached for reuse whenever possible.
 #[derive(Debug)]
 pub struct Dialer {
-    // note: quinn's documentation suggests non-ideal fallback behavior
-    // when dual-stack is not supported. This effectively treats
-    // every platform as single-stack instead since IPv4 is the
-    // preferred fallback.
+    /*
+        note: quinn's documentation (https://docs.rs/quinn/latest/quinn/struct.Endpoint.html#method.client) suggests
+        non-ideal fallback behavior when dual-stack is not supported. This effectively treats every platform as
+        single-stack instead since IPv4 is the preferred fallback.
+    */
     endpoint_v4: Endpoint,
     endpoint_v6: Option<Endpoint>,
 
@@ -111,15 +104,39 @@ impl Dialer {
         }
     }
 
+    fn get_cached_prices(&self, host_key: &PublicKey) -> Option<HostPrices> {
+        let mut cached_prices = self.cached_prices.lock().unwrap();
+        match cached_prices.get(host_key) {
+            Some(prices) => {
+                if prices.valid_until < OffsetDateTime::now_utc() {
+                    cached_prices.remove(host_key);
+                    None
+                } else {
+                    Some(prices.clone())
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn set_cached_prices(&self, host_key: &PublicKey, prices: HostPrices) {
+        self.cached_prices.lock().unwrap().insert(*host_key, prices);
+    }
+
     async fn dial_host(&mut self, host: PublicKey) -> Result<Stream, Error> {
-        let mut open_conns = self.open_conns.lock().await;
-        let conn = if let Some(existing_conn) = open_conns.get(&host)
+        let existing_conn = {
+            let open_conns = self.open_conns.lock().unwrap();
+            open_conns.get(&host).cloned()
+        };
+        let conn = if let Some(existing_conn) = existing_conn
             && existing_conn.close_reason().is_none()
         {
-            existing_conn.clone()
+            existing_conn
         } else {
-            let hosts = self.hosts.lock().await;
-            let addresses = hosts.get(&host).ok_or(Error::UnknownHost(host))?;
+            let addresses = {
+                let hosts = self.hosts.lock().unwrap();
+                hosts.get(&host).cloned().ok_or(Error::UnknownHost(host))?
+            };
             let mut new_conn = None;
             for addr in addresses {
                 if addr.protocol != Protocol::QUIC {
@@ -155,6 +172,7 @@ impl Dialer {
             }
 
             let conn = new_conn.ok_or(Error::ConnectionFailed)?;
+            let open_conns = &mut self.open_conns.lock().unwrap();
             open_conns.insert(host, conn.clone());
             conn
         };
@@ -167,7 +185,7 @@ impl Dialer {
     }
 
     pub async fn set_hosts(&mut self, hosts: Vec<Host>) {
-        let mut host_map = self.hosts.lock().await;
+        let mut host_map = self.hosts.lock().unwrap();
         for host in hosts {
             host_map.insert(host.public_key, host.addresses);
         }
@@ -178,16 +196,8 @@ impl Dialer {
         host_key: PublicKey,
         refresh: bool,
     ) -> Result<HostPrices, Error> {
-        if self.hosts.lock().await.get(&host_key).is_none() {
-            return Err(Error::UnknownHost(host_key));
-        }
-
-        if !refresh && let Some(prices) = self.cached_prices.lock().await.get(&host_key) {
-            if prices.valid_until < OffsetDateTime::now_utc() {
-                self.cached_prices.lock().await.remove(&host_key);
-            } else {
-                return Ok(prices.clone());
-            }
+        if !refresh && let Some(prices) = self.get_cached_prices(&host_key) {
+            return Ok(prices);
         }
 
         let stream = self.dial_host(host_key).await?;
@@ -198,10 +208,7 @@ impl Dialer {
         } else if !host_key.verify(prices.sig_hash().as_ref(), &prices.signature) {
             return Err(Error::InvalidSignature);
         }
-        self.cached_prices
-            .lock()
-            .await
-            .insert(host_key, prices.clone());
+        self.set_cached_prices(&host_key, prices.clone());
         Ok(prices)
     }
 
