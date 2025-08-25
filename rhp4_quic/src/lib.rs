@@ -173,7 +173,9 @@ impl Dialer {
                             new_conn = Some(conn);
                             break;
                         }
-                    } else if socket.is_ipv4() && let Some(endpoint) = &self.endpoint_v4 {
+                    } else if socket.is_ipv4()
+                        && let Some(endpoint) = &self.endpoint_v4
+                    {
                         let conn = endpoint.connect(socket, addr).unwrap().await.ok();
                         if let Some(conn) = conn {
                             new_conn = Some(conn);
