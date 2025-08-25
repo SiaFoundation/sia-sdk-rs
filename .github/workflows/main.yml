@@ -21,10 +21,10 @@ jobs:
         # Check if the library target compiles. This will still allow for using
         # non-wasm functionality in tests and benchmarks but guarantees that
         # consumers of the library can use it to generate wasm bindings.
-        run: cargo check --target wasm32-unknown-unknown --lib
+        run: cargo check --target wasm32-unknown-unknown --lib --package sia_sdk
       - name: Rustfmt
         run: cargo +nightly fmt --all -- --check
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-features -- -D warnings
       - name: Test
-        run: cargo test
+        run: cargo test --all-features

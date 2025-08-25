@@ -1,5 +1,6 @@
 use crate::encoding::SiaEncodable;
 use crate::encoding_async::{AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable, AsyncSiaEncode};
+use crate::types::v2::NetAddress;
 use blake2b_simd::Params;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -11,8 +12,17 @@ pub const SEGMENT_SIZE: usize = 64;
 pub const SECTOR_SIZE: usize = 1 << 22;
 pub const LEAVES_PER_SECTOR: usize = SECTOR_SIZE / SEGMENT_SIZE;
 
+/// Represents a host in the Sia network. The
+/// addresses can be used to connect to the host.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Host {
+    pub public_key: PublicKey,
+    pub addresses: Vec<NetAddress>,
+}
+
 /// Contains the prices and parameters of a host.
-#[derive(Debug, PartialEq, Serialize, Deserialize, AsyncSiaEncode, AsyncSiaDecode)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AsyncSiaEncode, AsyncSiaDecode)]
 #[serde(rename_all = "camelCase")]
 pub struct HostPrices {
     /// The price of forming a new contract with the host.

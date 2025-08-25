@@ -10,7 +10,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
 struct MockUploadDownloader {
-    sectors: Mutex<HashMap<String, Vec<u8>>>,
+    sectors: Mutex<HashMap<Hash256, Vec<u8>>>,
 }
 
 impl SectorDownloader for MockUploadDownloader {
@@ -22,7 +22,7 @@ impl SectorDownloader for MockUploadDownloader {
         limit: usize,
     ) -> Result<Vec<u8>, sia::rhp::Error> {
         let sectors = self.sectors.lock().await;
-        match sectors.get(&root.to_string()) {
+        match sectors.get(root) {
             Some(data) => Ok(data[offset..offset + limit].to_vec()),
             None => Err(sia::rhp::Error::Transport("sector not found".into())),
         }
@@ -34,7 +34,7 @@ impl SectorUploader for MockUploadDownloader {
         let root = Hash256::new(rand::random());
         let sector_data = sector.as_ref().to_vec();
         let mut sectors = self.sectors.lock().await;
-        sectors.insert(root.to_string(), sector_data);
+        sectors.insert(root, sector_data);
 
         Ok(Sector {
             root,
