@@ -1,9 +1,10 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rand::RngCore;
-use sia::erasure_coding::ErasureCoder;
+use sia::objects::erasure_coding::ErasureCoder;
+use sia::objects::slabs::{Sector, Slab};
+use sia::objects::uploader::{self, SectorDownloader, SectorUploader};
 use sia::rhp::SECTOR_SIZE;
 use sia::signing::PublicKey;
-use sia::slabs::{Sector, SectorDownloader, SectorUploader, Slab};
 use sia::types::Hash256;
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
@@ -20,17 +21,17 @@ impl SectorDownloader for MockUploadDownloader {
         root: &Hash256,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<u8>, sia::rhp::Error> {
+    ) -> Result<Vec<u8>, uploader::Error> {
         let sectors = self.sectors.lock().await;
         match sectors.get(root) {
             Some(data) => Ok(data[offset..offset + limit].to_vec()),
-            None => Err(sia::rhp::Error::Transport("sector not found".into())),
+            None => Err(sia::rhp::Error::Transport("sector not found".into()).into()),
         }
     }
 }
 
 impl SectorUploader for MockUploadDownloader {
-    async fn write_sector(&self, sector: impl AsRef<[u8]>) -> Result<Sector, sia::rhp::Error> {
+    async fn write_sector(&self, sector: impl AsRef<[u8]>) -> Result<Sector, uploader::Error> {
         let root = Hash256::new(rand::random());
         let sector_data = sector.as_ref().to_vec();
         let mut sectors = self.sectors.lock().await;

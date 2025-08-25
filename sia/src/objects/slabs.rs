@@ -4,38 +4,23 @@ use futures::stream::FuturesUnordered;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::encryption::{encrypt_shard, encrypt_shards};
+use super::erasure_coding::{self, ErasureCoder};
 use crate::encoding::SiaEncodable;
-use crate::encryption::{encrypt_shard, encrypt_shards};
-use crate::erasure_coding::{self, ErasureCoder};
-use crate::rhp::{Error as RHPError, SECTOR_SIZE};
+use crate::objects::uploader::SectorDownloader;
+use crate::rhp::SECTOR_SIZE;
+use super::uploader::{self, SectorUploader};
 use crate::signing::PublicKey;
 use crate::types::Hash256;
-
-pub trait SectorUploader {
-    fn write_sector(
-        &self,
-        sector: impl AsRef<[u8]>,
-    ) -> impl Future<Output = Result<Sector, RHPError>>;
-}
-
-pub trait SectorDownloader {
-    fn read_sector(
-        &self,
-        host: &PublicKey,
-        root: &Hash256,
-        offset: usize,
-        limit: usize,
-    ) -> impl Future<Output = Result<Vec<u8>, RHPError>>;
-}
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("rhp error: {0}")]
-    RHPError(#[from] RHPError),
+    Upload(#[from] uploader::Error),
     #[error("I/O error: {0}")]
-    IOError(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
     #[error("encoder error: {0}")]
-    EncoderError(#[from] erasure_coding::Error),
+    Encoder(#[from] erasure_coding::Error),
     #[error("not enough shards: {0}/{1}")]
     NotEnoughShards(u8, u8),
 }
@@ -151,7 +136,7 @@ impl Slab {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::hash_256;
+    use crate::{hash_256, rhp};
     use crate::rhp::sector_root;
     use rand::RngCore;
     use std::collections::HashMap;
@@ -168,17 +153,17 @@ mod test {
             root: &Hash256,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<u8>, RHPError> {
+        ) -> Result<Vec<u8>, uploader::Error> {
             let sectors = self.sectors.lock().await;
             match sectors.get(&root.to_string()) {
                 Some(data) => Ok(data[offset..offset + limit].to_vec()),
-                None => Err(RHPError::Transport("sector not found".into())),
+                None => Err(rhp::Error::Transport("sector not found".into()).into()),
             }
         }
     }
 
     impl SectorUploader for MockUploadDownloader {
-        async fn write_sector(&self, sector: impl AsRef<[u8]>) -> Result<Sector, RHPError> {
+        async fn write_sector(&self, sector: impl AsRef<[u8]>) -> Result<Sector, uploader::Error> {
             let root = sector_root(sector.as_ref());
             let sector_data = sector.as_ref().to_vec();
             let mut sectors = self.sectors.lock().await;
