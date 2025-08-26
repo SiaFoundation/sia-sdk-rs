@@ -107,7 +107,7 @@ pub struct Dialer {
     endpoint_v6: Option<Endpoint>,
 
     hosts: Mutex<HashMap<PublicKey, Vec<NetAddress>>>,
-    open_conns: Mutex<HashMap<PublicKey, Connection>>,
+    open_conns: Arc<Mutex<HashMap<PublicKey, Connection>>>,
     cached_prices: Mutex<HashMap<PublicKey, HostPrices>>,
 }
 
@@ -141,7 +141,7 @@ impl Dialer {
             endpoint_v4,
             endpoint_v6,
             hosts: Mutex::new(HashMap::new()),
-            open_conns: Mutex::new(HashMap::new()),
+            open_conns: Arc::new(Mutex::new(HashMap::new())),
             cached_prices: Mutex::new(HashMap::new()),
         })
     }
@@ -165,15 +165,24 @@ impl Dialer {
         self.cached_prices.lock().unwrap().insert(*host_key, prices);
     }
 
-    async fn with_host<T, F, C>(&mut self, host: PublicKey, cb: C) -> Result<T, Error>
-    where
-        F: Future<Output = Result<T, Error>>,
-        C: FnOnce(Stream) -> F,
-    {
-        let existing_conn = {
-            let open_conns = self.open_conns.lock().unwrap();
-            open_conns.get(&host).cloned()
-        };
+    fn track_conn_lifecycle(
+        open_conns: Arc<Mutex<HashMap<PublicKey, Connection>>>,
+        host: PublicKey,
+        conn: Connection,
+    ) {
+        tokio::spawn(async move {
+            conn.closed().await;
+            let mut m = open_conns.lock().unwrap();
+            if let Some(existing_conn) = m.get(&host)
+                && existing_conn.stable_id() == conn.stable_id()
+            {
+                m.remove(&host);
+            }
+        });
+    }
+
+    async fn host_stream(&self, host: PublicKey) -> Result<Stream, Error> {
+        let existing_conn = { self.open_conns.lock().unwrap().get(&host).cloned() };
         let conn = if let Some(existing_conn) = existing_conn
             && existing_conn.close_reason().is_none()
         {
@@ -220,31 +229,19 @@ impl Dialer {
             }
 
             let conn = new_conn.ok_or(Error::FailedToConnect)?;
+            Self::track_conn_lifecycle(Arc::clone(&self.open_conns), host, conn.clone());
+
             let open_conns = &mut self.open_conns.lock().unwrap();
             open_conns.insert(host, conn.clone());
             conn
         };
 
         let (send, recv) = conn.open_bi().await?;
-
-        match cb(Stream { send, recv }).await {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                self.open_conns.lock().unwrap().remove(&host);
-                Err(e)
-            }
-        }
-    }
-
-    pub async fn set_hosts(&mut self, hosts: Vec<Host>) {
-        let mut host_map = self.hosts.lock().unwrap();
-        for host in hosts {
-            host_map.insert(host.public_key, host.addresses);
-        }
+        Ok(Stream { send, recv })
     }
 
     pub async fn host_prices(
-        &mut self,
+        &self,
         host_key: PublicKey,
         refresh: bool,
     ) -> Result<HostPrices, Error> {
@@ -252,42 +249,36 @@ impl Dialer {
             return Ok(prices);
         }
 
-        let prices = self
-            .with_host(host_key, |stream| async move {
-                let resp = RPCSettings::send_request(stream).await?.complete().await?;
-                let prices = resp.settings.prices;
-                if prices.valid_until < OffsetDateTime::now_utc() {
-                    return Err(Error::InvalidPrices);
-                } else if !host_key.verify(prices.sig_hash().as_ref(), &prices.signature) {
-                    return Err(Error::InvalidSignature);
-                }
-                Ok(prices)
-            })
-            .await?;
+        let stream = self.host_stream(host_key).await?;
+        let resp = RPCSettings::send_request(stream).await?.complete().await?;
+        let prices = resp.settings.prices;
+        if prices.valid_until < OffsetDateTime::now_utc() {
+            return Err(Error::InvalidPrices);
+        } else if !host_key.verify(prices.sig_hash().as_ref(), &prices.signature) {
+            return Err(Error::InvalidSignature);
+        }
         self.set_cached_prices(&host_key, prices.clone());
         Ok(prices)
     }
 
     pub async fn write_sector(
-        &mut self,
+        &self,
         host_key: PublicKey,
         account_key: &PrivateKey,
         sector: Vec<u8>,
     ) -> Result<Hash256, Error> {
         let prices = self.host_prices(host_key, false).await?;
         let token = AccountToken::new(account_key, host_key);
-        self.with_host(host_key, |stream| async move {
-            let resp = RPCWriteSector::send_request(stream, prices, token, sector)
-                .await?
-                .complete()
-                .await?;
-            Ok(resp.root)
-        })
-        .await
+        let stream = self.host_stream(host_key).await?;
+        let resp = RPCWriteSector::send_request(stream, prices, token, sector)
+            .await?
+            .complete()
+            .await?;
+        Ok(resp.root)
     }
 
     pub async fn read_sector(
-        &mut self,
+        &self,
         host_key: PublicKey,
         account_key: &PrivateKey,
         root: Hash256,
@@ -296,14 +287,24 @@ impl Dialer {
     ) -> Result<Vec<u8>, Error> {
         let prices = self.host_prices(host_key, false).await?;
         let token = AccountToken::new(account_key, host_key);
-        self.with_host(host_key, |stream| async move {
-            let resp = RPCReadSector::send_request(stream, prices, token, root, offset, limit)
-                .await?
-                .complete()
-                .await?;
-            Ok(resp.data)
-        })
-        .await
+        let stream = self.host_stream(host_key).await?;
+        let resp = RPCReadSector::send_request(stream, prices, token, root, offset, limit)
+            .await?
+            .complete()
+            .await?;
+        Ok(resp.data)
+    }
+
+    pub fn hosts(&self) -> Vec<PublicKey> {
+        self.hosts.lock().unwrap().keys().cloned().collect()
+    }
+
+    pub fn update_hosts(&mut self, hosts: Vec<Host>) {
+        let mut hosts_map = self.hosts.lock().unwrap();
+        hosts_map.clear();
+        for host in hosts {
+            hosts_map.insert(host.public_key, host.addresses);
+        }
     }
 }
 
@@ -331,16 +332,14 @@ mod test {
             rustls::ClientConfig::with_platform_verifier().expect("Failed to create client config");
 
         let mut dialer = Dialer::new(client_config).expect("Failed to create dialer");
-        dialer
-            .set_hosts(vec![Host {
-                public_key: host_key,
-                addresses: vec![NetAddress {
-                    protocol: Protocol::QUIC,
-                    address: "6r4b0vj1ai55fobdvauvpg3to5bpeijl045b2q268fcj7q1vkuog.sia.host:9984"
-                        .into(),
-                }],
-            }])
-            .await;
+        dialer.update_hosts(vec![Host {
+            public_key: host_key,
+            addresses: vec![NetAddress {
+                protocol: Protocol::QUIC,
+                address: "6r4b0vj1ai55fobdvauvpg3to5bpeijl045b2q268fcj7q1vkuog.sia.host:9984"
+                    .into(),
+            }],
+        }]);
 
         let prices = dialer
             .host_prices(host_key, false)
