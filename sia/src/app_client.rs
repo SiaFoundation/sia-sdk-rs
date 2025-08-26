@@ -8,7 +8,7 @@ use crate::signing::PublicKey;
 use crate::types::Hash256;
 
 #[derive(Debug, Error)]
-enum Error {
+pub enum Error {
     #[error("reqwest error: {0}")]
     Reqwest(#[from] reqwest::Error),
 
