@@ -119,6 +119,25 @@ mod tests {
     use httptest::{Expectation, Server};
 
     #[tokio::test]
+    async fn test_basic_auth() {
+        let server = Server::run();
+
+        // expect 1 authenticated get and 1 authenticated post request
+        server.expect(
+            Expectation::matching(request::headers(contains((
+                "authorization",
+                "Basic OnBhc3N3b3Jk",
+            ))))
+            .times(2)
+            .respond_with(Response::builder().status(200).body("{}").unwrap()),
+        );
+
+        let client = Client::new(server.url("/").to_string(), Some("password".to_string()));
+        let _: Result<()> = client.get_json("/").await;
+        let _: Result<()> = client.post_json("/", "{}").await;
+    }
+
+    #[tokio::test]
     async fn test_slab() {
         let slab = Slab {
             id: "43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28"
