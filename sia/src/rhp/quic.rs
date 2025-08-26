@@ -214,11 +214,16 @@ impl Dialer {
         }
     }
 
-    pub async fn set_hosts(&mut self, hosts: Vec<Host>) {
+    pub fn update_hosts(&mut self, hosts: Vec<Host>) {
         let mut host_map = self.hosts.lock().unwrap();
         for host in hosts {
             host_map.insert(host.public_key, host.addresses);
         }
+    }
+
+    pub fn hosts(&self) -> Vec<Host> {
+        let host_map = self.hosts.lock().unwrap();
+        host_map.values().cloned().collect()
     }
 
     pub async fn host_prices(
@@ -245,9 +250,11 @@ impl Dialer {
         self.set_cached_prices(&host_key, prices.clone());
         Ok(prices)
     }
+}
 
-    pub async fn write_sector(
-        &mut self,
+impl HostDialer for Dialer {
+    async fn write_sector(
+        &self,
         host_key: PublicKey,
         account_key: &PrivateKey,
         sector: Vec<u8>,
@@ -264,8 +271,8 @@ impl Dialer {
         .await
     }
 
-    pub async fn read_sector(
-        &mut self,
+    async fn read_sector(
+        &self,
         host_key: PublicKey,
         account_key: &PrivateKey,
         root: Hash256,

@@ -530,6 +530,9 @@ pub enum Error {
         "root of uploaded data doesn't match root returned by host: expected {expected}, got {got}"
     )]
     SectorRootMismatch { expected: Hash256, got: Hash256 },
+
+    #[error("custom error: {0}")]
+    Custom(String),
 }
 
 #[derive(Debug, Default, PartialEq, Clone, Copy, Serialize, Deserialize)]
