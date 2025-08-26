@@ -80,7 +80,7 @@ macro_rules! impl_hash_id {
                 };
 
                 if s.len() != 64 {
-                    return Err($crate::types::HexParseError::InvalidLength);
+                    return Err($crate::types::HexParseError::InvalidLength(s.len()));
                 }
 
                 let mut data = [0u8; 32];
