@@ -8,6 +8,7 @@ use thiserror::{self, Error};
 
 use crate::encoding;
 use crate::encoding_async::{AsyncDecoder, AsyncEncoder};
+use crate::objects::{HostDialer, HostQueue, UploadError};
 use crate::rhp::{
     self, AccountToken, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector, Transport,
 };
@@ -55,6 +56,9 @@ pub enum Error {
     #[error("write error: {0}")]
     Write(#[from] quinn::WriteError),
 
+    #[error("upload error: {0}")]
+    Upload(#[from] UploadError),
+
     #[error("invalid prices")]
     InvalidPrices,
 
@@ -96,58 +100,21 @@ impl Transport for Stream {
 
 /// A Dialer manages QUIC connections to Sia hosts.
 /// Connections will be cached for reuse whenever possible.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Dialer {
-    /*
-        note: quinn's documentation (https://docs.rs/quinn/latest/quinn/struct.Endpoint.html#method.client) suggests
-        non-ideal fallback behavior when dual-stack is not supported. This effectively treats every platform as
-        single-stack instead since IPv4 is the preferred fallback.
-    */
-    endpoint_v4: Option<Endpoint>,
-    endpoint_v6: Option<Endpoint>,
-
-    hosts: Mutex<HashMap<PublicKey, Vec<NetAddress>>>,
-    open_conns: Arc<Mutex<HashMap<PublicKey, Connection>>>,
-    cached_prices: Mutex<HashMap<PublicKey, HostPrices>>,
+    inner: Arc<DialerInner>,
 }
 
 impl Dialer {
-    pub fn new(mut client_config: ClientConfig) -> Result<Self, &'static str> {
-        client_config.alpn_protocols = vec![b"sia/rhp4".to_vec()];
-
-        let client_config = QuicClientConfig::try_from(client_config).unwrap();
-        let client_config = quinn::ClientConfig::new(Arc::new(client_config));
-
-        let endpoint_v4 = match quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into()) {
-            Ok(mut endpoint) => {
-                endpoint.set_default_client_config(client_config.clone());
-                Some(endpoint)
-            }
-            Err(_) => None,
-        };
-        let endpoint_v6 = match quinn::Endpoint::client((Ipv6Addr::UNSPECIFIED, 0).into()) {
-            Ok(mut endpoint) => {
-                endpoint.set_default_client_config(client_config);
-                Some(endpoint)
-            }
-            Err(_) => None,
-        };
-
-        if endpoint_v4.is_none() && endpoint_v6.is_none() {
-            return Err("unable to create IPv4 and IPv6 endpoint");
-        }
-
-        Ok(Self {
-            endpoint_v4,
-            endpoint_v6,
-            hosts: Mutex::new(HashMap::new()),
-            open_conns: Arc::new(Mutex::new(HashMap::new())),
-            cached_prices: Mutex::new(HashMap::new()),
+    pub fn new(client_config: ClientConfig) -> Result<Self, &'static str> {
+        let inner = DialerInner::new(client_config)?;
+        Ok(Dialer {
+            inner: Arc::new(inner),
         })
     }
 
     fn get_cached_prices(&self, host_key: &PublicKey) -> Option<HostPrices> {
-        let mut cached_prices = self.cached_prices.lock().unwrap();
+        let mut cached_prices = self.inner.cached_prices.lock().unwrap();
         match cached_prices.get(host_key) {
             Some(prices) => {
                 if prices.valid_until < OffsetDateTime::now_utc() {
@@ -162,17 +129,18 @@ impl Dialer {
     }
 
     fn set_cached_prices(&self, host_key: &PublicKey, prices: HostPrices) {
-        self.cached_prices.lock().unwrap().insert(*host_key, prices);
+        self.inner
+            .cached_prices
+            .lock()
+            .unwrap()
+            .insert(*host_key, prices);
     }
 
-    fn track_conn_lifecycle(
-        open_conns: Arc<Mutex<HashMap<PublicKey, Connection>>>,
-        host: PublicKey,
-        conn: Connection,
-    ) {
+    fn track_conn_lifecycle(&self, host: PublicKey, conn: Connection) {
+        let inner = self.inner.clone();
         tokio::spawn(async move {
             conn.closed().await;
-            let mut m = open_conns.lock().unwrap();
+            let mut m = inner.open_conns.lock().unwrap();
             if let Some(existing_conn) = m.get(&host)
                 && existing_conn.stable_id() == conn.stable_id()
             {
@@ -182,14 +150,14 @@ impl Dialer {
     }
 
     async fn host_stream(&self, host: PublicKey) -> Result<Stream, Error> {
-        let existing_conn = { self.open_conns.lock().unwrap().get(&host).cloned() };
+        let existing_conn = { self.inner.open_conns.lock().unwrap().get(&host).cloned() };
         let conn = if let Some(existing_conn) = existing_conn
             && existing_conn.close_reason().is_none()
         {
             existing_conn
         } else {
             let addresses = {
-                let hosts = self.hosts.lock().unwrap();
+                let hosts = self.inner.hosts.lock().unwrap();
                 hosts.get(&host).cloned().ok_or(Error::UnknownHost(host))?
             };
             let mut new_conn = None;
@@ -205,7 +173,7 @@ impl Dialer {
                 let resolved_addrs = (addr, port).to_socket_addrs()?;
                 for socket in resolved_addrs {
                     if socket.is_ipv6()
-                        && let Some(endpoint) = &self.endpoint_v6
+                        && let Some(endpoint) = &self.inner.endpoint_v6
                     {
                         let conn = endpoint.connect(socket, addr).unwrap().await.ok();
                         if let Some(conn) = conn {
@@ -213,7 +181,7 @@ impl Dialer {
                             break;
                         }
                     } else if socket.is_ipv4()
-                        && let Some(endpoint) = &self.endpoint_v4
+                        && let Some(endpoint) = &self.inner.endpoint_v4
                     {
                         let conn = endpoint.connect(socket, addr).unwrap().await.ok();
                         if let Some(conn) = conn {
@@ -229,9 +197,9 @@ impl Dialer {
             }
 
             let conn = new_conn.ok_or(Error::FailedToConnect)?;
-            Self::track_conn_lifecycle(Arc::clone(&self.open_conns), host, conn.clone());
+            self.track_conn_lifecycle(host, conn.clone());
 
-            let open_conns = &mut self.open_conns.lock().unwrap();
+            let open_conns = &mut self.inner.open_conns.lock().unwrap();
             open_conns.insert(host, conn.clone());
             conn
         };
@@ -260,13 +228,68 @@ impl Dialer {
         self.set_cached_prices(&host_key, prices.clone());
         Ok(prices)
     }
+}
 
-    pub async fn write_sector(
+#[derive(Debug)]
+struct DialerInner {
+    /*
+        note: quinn's documentation (https://docs.rs/quinn/latest/quinn/struct.Endpoint.html#method.client) suggests
+        non-ideal fallback behavior when dual-stack is not supported. This effectively treats every platform as
+        single-stack instead since IPv4 is the preferred fallback.
+    */
+    endpoint_v4: Option<Endpoint>,
+    endpoint_v6: Option<Endpoint>,
+
+    hosts: Mutex<HashMap<PublicKey, Vec<NetAddress>>>,
+    open_conns: Mutex<HashMap<PublicKey, Connection>>,
+    cached_prices: Mutex<HashMap<PublicKey, HostPrices>>,
+}
+
+impl DialerInner {
+    fn new(mut client_config: ClientConfig) -> Result<Self, &'static str> {
+        client_config.alpn_protocols = vec![b"sia/rhp4".to_vec()];
+
+        let client_config = QuicClientConfig::try_from(client_config).unwrap();
+        let client_config = quinn::ClientConfig::new(Arc::new(client_config));
+
+        let endpoint_v4 = match quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into()) {
+            Ok(mut endpoint) => {
+                endpoint.set_default_client_config(client_config.clone());
+                Some(endpoint)
+            }
+            Err(_) => None,
+        };
+        let endpoint_v6 = match quinn::Endpoint::client((Ipv6Addr::UNSPECIFIED, 0).into()) {
+            Ok(mut endpoint) => {
+                endpoint.set_default_client_config(client_config);
+                Some(endpoint)
+            }
+            Err(_) => None,
+        };
+
+        if endpoint_v4.is_none() && endpoint_v6.is_none() {
+            return Err("unable to create IPv4 and IPv6 endpoint");
+        }
+
+        Ok(Self {
+            endpoint_v4,
+            endpoint_v6,
+            hosts: Mutex::new(HashMap::new()),
+            open_conns: Mutex::new(HashMap::new()),
+            cached_prices: Mutex::new(HashMap::new()),
+        })
+    }
+}
+
+impl HostDialer for Dialer {
+    type Error = Error;
+
+    async fn write_sector(
         &self,
         host_key: PublicKey,
         account_key: &PrivateKey,
         sector: Vec<u8>,
-    ) -> Result<Hash256, Error> {
+    ) -> Result<Hash256, Self::Error> {
         let prices = self.host_prices(host_key, false).await?;
         let token = AccountToken::new(account_key, host_key);
         let stream = self.host_stream(host_key).await?;
@@ -277,14 +300,14 @@ impl Dialer {
         Ok(resp.root)
     }
 
-    pub async fn read_sector(
+    async fn read_sector(
         &self,
         host_key: PublicKey,
         account_key: &PrivateKey,
         root: Hash256,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<Vec<u8>, Self::Error> {
         let prices = self.host_prices(host_key, false).await?;
         let token = AccountToken::new(account_key, host_key);
         let stream = self.host_stream(host_key).await?;
@@ -295,12 +318,13 @@ impl Dialer {
         Ok(resp.data)
     }
 
-    pub fn hosts(&self) -> Vec<PublicKey> {
-        self.hosts.lock().unwrap().keys().cloned().collect()
+    fn hosts(&self) -> HostQueue {
+        let hosts: Vec<PublicKey> = self.inner.hosts.lock().unwrap().keys().cloned().collect();
+        HostQueue::from(hosts)
     }
 
-    pub fn update_hosts(&mut self, hosts: Vec<Host>) {
-        let mut hosts_map = self.hosts.lock().unwrap();
+    fn update_hosts(&mut self, hosts: Vec<Host>) {
+        let mut hosts_map = self.inner.hosts.lock().unwrap();
         hosts_map.clear();
         for host in hosts {
             hosts_map.insert(host.public_key, host.addresses);
