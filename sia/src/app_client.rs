@@ -61,13 +61,13 @@ impl Client {
     }
 
     #[allow(dead_code)]
-    pub async fn slab(&self) -> Result<Slab> {
-        self.get_json("/slab").await
+    pub async fn slab(&self, slab_id: &SlabID) -> Result<Slab> {
+        self.get_json(&format!("/slab/{}", slab_id)).await
     }
 
     #[allow(dead_code)]
-    pub async fn pin_slab<S: Serialize>(&self, body: &S) -> Result<SlabID> {
-        self.post_json("/slabs", serde_json::to_string(&body)?)
+    pub async fn pin_slab(&self, slab: &Slab) -> Result<SlabID> {
+        self.post_json("/slabs", serde_json::to_string(&slab)?)
             .await
     }
 
@@ -157,7 +157,11 @@ mod tests {
         let server = Server::run();
 
         server.expect(
-            Expectation::matching(request::method_path("GET", "/slab")).respond_with(
+            Expectation::matching(request::method_path(
+                "GET",
+                "/slab/43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28",
+            ))
+            .respond_with(
                 Response::builder()
                     .status(200)
                     .body(TEST_SLAB_JSON)
@@ -166,7 +170,7 @@ mod tests {
         );
 
         let client = Client::new(server.url("/").to_string(), Some("password".to_string()));
-        assert_eq!(client.slab().await.unwrap(), slab);
+        assert_eq!(client.slab(&slab.id).await.unwrap(), slab);
     }
 
     #[tokio::test]
