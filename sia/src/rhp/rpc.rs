@@ -1231,8 +1231,8 @@ mod test {
         let mut sig_buf = [0u8; 64];
         sig_buf[0] = 9;
         let req = RPCReadSectorRequest {
-            prices: prices,
-            token: token,
+            prices,
+            token,
             root: Hash256::new({
                 let mut bytes = [0u8; 32];
                 bytes[0] = 14;

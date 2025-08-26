@@ -1,10 +1,9 @@
-use std::fmt;
 use thiserror::Error;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    signing::{PrivateKey, PublicKey},
+    signing::PublicKey,
     types::Hash256,
 };
 
@@ -52,6 +51,7 @@ pub struct SlabPinParams {
 }
 
 impl Client {
+    #[allow(dead_code)]
     fn new(url: String, password: Option<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -60,6 +60,7 @@ impl Client {
         }
     }
 
+    #[allow(dead_code)]
     async fn slab(&self) -> Result<Slab> {
         let slab: Slab = self
             .client
@@ -71,19 +72,6 @@ impl Client {
             .json()
             .await?;
         Ok(slab)
-    }
-
-    async fn pin_slab(&self, params: SlabPinParams) -> Result<Hash256> {
-        let slab_id: Hash256 = self
-            .client
-            .post(format!("{}/slabs", self.url))
-            .basic_auth("", self.password.clone())
-            .json(&params)
-            .send()
-            .await?
-            .json()
-            .await?;
-        Ok(slab_id)
     }
 }
 
@@ -123,7 +111,19 @@ mod tests {
             }],
         };
 
-        const TEST_SLAB_JSON: &str = "\"{\"id\":\"43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28\",\"encryptionKey\":[186,153,179,170,159,95,101,177,15,130,58,19,138,144,9,91,181,119,38,225,209,47,149,22,157,210,16,232,10,151,186,160],\"minShards\":1,\"sectors\":[{\"root\":\"826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6\",\"hostKey\":\"ed25519:470c3cbd5498ba161379823c0c9d24c6e6b325d1a9fe1f215689f3ef297bf530\"},{\"root\":\"623e6c88c40b9d2c7e9654c399161ea072b34db81db7e7e81df0093cbe7edd73\",\"hostKey\":\"ed25519:910b22c360a1c67cb6a9a7371fa600c48e87d626b328669d01f34048ac3132fe\"},{\"root\":\"c92d003c2c3fc38bc6f48e3f50d8dbc5e04ed2da33b22df64b366ff48b1d35b9\",\"hostKey\":\"ed25519:273d9e37288d7a24cc3b5ef167b918a9d3ebf2274f90d26a7c249ab609086e93\"}]}\r\n        slab {\"id\":\"329032cd99e5f22a84b8667d9b846f86b8b0f44dae453a56328fd7485f5b77e1\",\"encryptionKey\":[8,59,228,167,205,24,51,197,204,203,42,51,119,190,199,244,122,116,139,173,248,254,200,80,241,214,24,64,1,35,21,245],\"minShards\":1,\"sectors\":[{\"root\":\"d421bedac94a7ddd9f61c8847dd7be52617d6d023f6d2c07d2665cf0ccc4a851\",\"hostKey\":\"ed25519:470c3cbd5498ba161379823c0c9d24c6e6b325d1a9fe1f215689f3ef297bf530\"},{\"root\":\"d11b3bdc87fb34de413edb9253ad96b141115b7396b74b1b9ef5f6d70a140edb\",\"hostKey\":\"ed25519:910b22c360a1c67cb6a9a7371fa600c48e87d626b328669d01f34048ac3132fe\"},{\"root\":\"a077d0da3ea2fda0b18b28825b8f0e43c74bcec32fe1607940cf24e919c54960\",\"hostKey\":\"ed25519:273d9e37288d7a24cc3b5ef167b918a9d3ebf2274f90d26a7c249ab609086e93\"}]}\'\r\n";
+        const TEST_SLAB_JSON: &str = r#"
+        {
+          "id": "43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28",
+          "encryptionKey": [186,153,179,170,159,95,101,177,15,130,58,19,138,144,9,91,181,119,38,225,209,47,149,22,157,210,16,232,10,151,186,160],
+          "minShards": 1,
+          "sectors": [
+            {
+              "root": "826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6",
+              "hostKey": "ed25519:910b22c360a1c67cb6a9a7371fa600c48e87d626b328669d01f34048ac3132fe"
+            }
+          ]
+        }
+        "#;
 
         let server = Server::run();
 
