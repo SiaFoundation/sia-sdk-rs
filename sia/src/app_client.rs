@@ -3,6 +3,7 @@ use thiserror::Error;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use crate::signing::PublicKey;
 use crate::types::Hash256;
@@ -62,7 +63,7 @@ impl Client {
 
     #[allow(dead_code)]
     pub async fn slab(&self, slab_id: &SlabID) -> Result<Slab> {
-        self.get_json(&format!("/slab/{}", slab_id)).await
+        self.get_json(&format!("/slab/{slab_id}")).await
     }
 
     #[allow(dead_code)]
@@ -106,7 +107,7 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         if let Some(password) = &mut self.password {
-            password.clear();
+            password.zeroize();
         }
     }
 }
