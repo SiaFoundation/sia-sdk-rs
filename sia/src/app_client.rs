@@ -1,8 +1,10 @@
 use thiserror::Error;
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
-use crate::{signing::PublicKey, types::Hash256};
+use crate::signing::PublicKey;
+use crate::types::Hash256;
 
 #[derive(Debug, Error)]
 enum Error {
@@ -88,7 +90,8 @@ impl Drop for Client {
 mod tests {
     use super::*;
     use httptest::http::Response;
-    use httptest::{Expectation, Server, matchers::*};
+    use httptest::matchers::*;
+    use httptest::{Expectation, Server};
 
     #[tokio::test]
     async fn test_slab() {
