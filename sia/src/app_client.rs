@@ -1,11 +1,8 @@
 use thiserror::Error;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::{
-    signing::PublicKey,
-    types::Hash256,
-};
+use crate::{signing::PublicKey, types::Hash256};
 
 #[derive(Debug, Error)]
 enum Error {
@@ -52,7 +49,7 @@ pub struct SlabPinParams {
 
 impl Client {
     #[allow(dead_code)]
-    fn new(url: String, password: Option<String>) -> Self {
+    pub fn new(url: String, password: Option<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
             url: url.trim_end_matches('/').to_string(),
@@ -61,17 +58,21 @@ impl Client {
     }
 
     #[allow(dead_code)]
-    async fn slab(&self) -> Result<Slab> {
-        let slab: Slab = self
+    pub async fn slab(&self) -> Result<Slab> {
+        self.get_json("/slab").await
+    }
+
+    /// Helper to send a GET request with basic auth and parse the JSON
+    /// response.
+    async fn get_json<D: DeserializeOwned>(&self, path: &str) -> Result<D> {
+        Ok(self
             .client
-            .get(format!("{}/slab", self.url))
+            .get(format!("{}{}", self.url, path))
             .basic_auth("", self.password.clone())
             .send()
-            .await
-            .unwrap()
-            .json()
-            .await?;
-        Ok(slab)
+            .await?
+            .json::<D>()
+            .await?)
     }
 }
 
