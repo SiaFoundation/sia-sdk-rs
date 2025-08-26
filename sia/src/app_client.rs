@@ -66,7 +66,7 @@ impl Client {
     }
 
     #[allow(dead_code)]
-    pub async fn pin_slab(&self, slab: &Slab) -> Result<SlabID> {
+    pub async fn pin_slab(&self, slab: &SlabPinParams) -> Result<SlabID> {
         self.post_json("/slabs", serde_json::to_string(&slab)?)
             .await
     }
@@ -194,10 +194,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_pin_slab() {
-        let slab = Slab {
-            id: "43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28"
-                .parse()
-                .unwrap(),
+        let slab_id = "43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28"
+            .parse()
+            .unwrap();
+        let slab = SlabPinParams {
             encryption_key: [
                 186, 153, 179, 170, 159, 95, 101, 177, 15, 130, 58, 19, 138, 144, 9, 91, 181, 119,
                 38, 225, 209, 47, 149, 22, 157, 210, 16, 232, 10, 151, 186, 160,
@@ -229,6 +229,6 @@ mod tests {
         );
 
         let client = Client::new(server.url("/").to_string(), Some("password".to_string()));
-        assert_eq!(client.pin_slab(&slab).await.unwrap(), slab.id);
+        assert_eq!(client.pin_slab(&slab).await.unwrap(), slab_id);
     }
 }
