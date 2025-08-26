@@ -18,7 +18,7 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-struct Client {
+pub struct Client {
     client: reqwest::Client,
     url: String,
     password: Option<String>,
