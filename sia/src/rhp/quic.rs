@@ -8,7 +8,7 @@ use thiserror::{self, Error};
 
 use crate::encoding;
 use crate::encoding_async::{AsyncDecoder, AsyncEncoder};
-use crate::objects::{HostDialer, HostQueue, UploadError};
+use crate::objects::{HostDialer, UploadError};
 use crate::rhp::{
     self, AccountToken, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector, Transport,
 };
@@ -318,9 +318,8 @@ impl HostDialer for Dialer {
         Ok(resp.data)
     }
 
-    fn hosts(&self) -> HostQueue {
-        let hosts: Vec<PublicKey> = self.inner.hosts.lock().unwrap().keys().cloned().collect();
-        HostQueue::from(hosts)
+    fn hosts(&self) -> Vec<PublicKey> {
+        self.inner.hosts.lock().unwrap().keys().cloned().collect()
     }
 
     fn update_hosts(&mut self, hosts: Vec<Host>) {

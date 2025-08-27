@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -36,7 +36,7 @@ pub trait HostDialer: Send + Sync {
         limit: usize,
     ) -> impl Future<Output = Result<Vec<u8>, Self::Error>> + Send;
 
-    fn hosts(&self) -> HostQueue;
+    fn hosts(&self) -> Vec<PublicKey>;
     fn update_hosts(&mut self, hosts: Vec<Host>);
 }
 
@@ -70,17 +70,25 @@ where
     D: HostDialer + 'static,
     D::Error: From<UploadError>,
 {
-    async fn try_upload(&self, host_key: PublicKey, sector: Vec<u8>) -> Result<Sector, D::Error> {
+    async fn try_upload(&self, host_queue: HostQueue, sector: Vec<u8>) -> Result<Sector, D::Error> {
         let permit = self.semaphore.acquire().await;
         if permit.is_err() {
             return Err(UploadError::Closed.into());
         }
 
-        let root = self
+        let host_key = host_queue.pop_front()?;
+
+        match self
             .dialer
             .write_sector(host_key, &self.account_key, sector)
-            .await?;
-        Ok(Sector { root, host_key })
+            .await
+        {
+            Ok(root) => Ok(Sector { root, host_key }),
+            Err(err) => {
+                host_queue.retry(host_key);
+                Err(err)
+            }
+        }
     }
 
     async fn write_sector(
@@ -89,7 +97,7 @@ where
         sector: impl AsRef<[u8]>,
     ) -> Result<Sector, D::Error> {
         let mut tasks = FuturesUnordered::new();
-        tasks.push(self.try_upload(host_queue.pop_front()?, sector.as_ref().to_vec()));
+        tasks.push(self.try_upload(host_queue.clone(), sector.as_ref().to_vec()));
         loop {
             tokio::select! {
                 Some(res) = tasks.next() => {
@@ -100,14 +108,14 @@ where
                         Err(_) => {
                             if tasks.is_empty() {
                                 // try the next host
-                                tasks.push(self.try_upload(host_queue.pop_front()?, sector.as_ref().to_vec()));
+                                tasks.push(self.try_upload(host_queue.clone(), sector.as_ref().to_vec()));
                             }
                         }
                     }
                 },
                 _ = tokio::time::sleep(Duration::from_secs(15)) => {
                     // race another host to prevent slow hosts from stalling uploads
-                    tasks.push(self.try_upload(host_queue.pop_front()?, sector.as_ref().to_vec()));
+                    tasks.push(self.try_upload(host_queue.clone(), sector.as_ref().to_vec()));
                 }
             }
         }
@@ -125,7 +133,7 @@ where
     D::Error: From<UploadError>,
 {
     encrypt_shards(encryption_key, &mut shards, 0);
-    let hosts = uploader.dialer.hosts();
+    let hosts = HostQueue::new(uploader.dialer.hosts(), 2);
     let mut futures = Vec::new();
     for shard in shards {
         futures.push(uploader.write_sector(hosts.clone(), shard));
@@ -223,31 +231,54 @@ where
     }
 }
 
+#[derive(Debug)]
+struct HostQueueInner {
+    queue: VecDeque<PublicKey>,
+    failures: HashMap<PublicKey, usize>,
+    max_attempts: usize,
+}
+
 /// A thread-safe queue of host public keys.
 #[derive(Debug, Clone)]
-pub struct HostQueue(Arc<Mutex<VecDeque<PublicKey>>>);
+pub struct HostQueue {
+    inner: Arc<Mutex<HostQueueInner>>,
+}
 
 impl HostQueue {
+    pub fn new(hosts: Vec<PublicKey>, max_attempts: usize) -> Self {
+        HostQueue {
+            inner: Arc::new(Mutex::new(HostQueueInner {
+                queue: VecDeque::from(hosts),
+                failures: HashMap::new(),
+                max_attempts,
+            })),
+        }
+    }
     pub fn len(&self) -> usize {
-        self.0.lock().unwrap().len()
+        self.inner.lock().unwrap().queue.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.lock().unwrap().is_empty()
+        self.inner.lock().unwrap().queue.is_empty()
     }
 
     pub fn pop_front(&self) -> Result<PublicKey, UploadError> {
-        self.0
+        self.inner
             .lock()
             .unwrap()
+            .queue
             .pop_front()
             .ok_or(UploadError::NoMoreHosts)
     }
-}
 
-impl From<Vec<PublicKey>> for HostQueue {
-    fn from(hosts: Vec<PublicKey>) -> Self {
-        HostQueue(Arc::new(Mutex::new(VecDeque::from(hosts))))
+    pub fn retry(&self, host: PublicKey) {
+        let mut inner = self.inner.lock().unwrap();
+        let max_attempts = inner.max_attempts;
+        let attempts = inner.failures.entry(host).or_insert(0);
+        if *attempts < max_attempts {
+            *attempts += 1;
+            inner.queue.push_back(host);
+        }
     }
 }
 
@@ -322,9 +353,8 @@ mod test {
             }
         }
 
-        fn hosts(&self) -> HostQueue {
-            let hosts: Vec<PublicKey> = self.hosts.lock().unwrap().keys().cloned().collect();
-            HostQueue::from(hosts)
+        fn hosts(&self) -> Vec<PublicKey> {
+            self.hosts.lock().unwrap().keys().cloned().collect()
         }
 
         fn update_hosts(&mut self, hosts: Vec<Host>) {

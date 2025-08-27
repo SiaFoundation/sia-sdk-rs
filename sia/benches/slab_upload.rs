@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rand::RngCore;
-use sia::objects::{HostDialer, HostQueue, UploadError, Uploader};
+use sia::objects::{HostDialer, UploadError, Uploader};
 use sia::rhp::{Host, SECTOR_SIZE, sector_root};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
@@ -74,9 +74,8 @@ impl HostDialer for MockUploader {
         Ok(data)
     }
 
-    fn hosts(&self) -> HostQueue {
-        let hosts: Vec<PublicKey> = self.inner.hosts.lock().unwrap().keys().cloned().collect();
-        HostQueue::from(hosts)
+    fn hosts(&self) -> Vec<PublicKey> {
+        self.inner.hosts.lock().unwrap().keys().cloned().collect()
     }
 
     fn update_hosts(&mut self, hosts: Vec<Host>) {
