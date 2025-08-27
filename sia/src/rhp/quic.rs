@@ -8,7 +8,7 @@ use thiserror::{self, Error};
 
 use crate::encoding;
 use crate::encoding_async::{AsyncDecoder, AsyncEncoder};
-use crate::objects::{HostDialer, UploadError};
+use crate::objects::{Error as UploadError, HostDialer};
 use crate::rhp::{
     self, AccountToken, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector, Transport,
 };
