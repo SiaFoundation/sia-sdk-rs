@@ -152,7 +152,7 @@ impl Slab {
 mod test {
     use super::*;
     use crate::hash_256;
-    use crate::rhp::sector_root;
+    use crate::rhp::{RPCError, sector_root};
     use rand::RngCore;
     use std::collections::HashMap;
     use tokio::sync::Mutex;
@@ -172,7 +172,10 @@ mod test {
             let sectors = self.sectors.lock().await;
             match sectors.get(&root.to_string()) {
                 Some(data) => Ok(data[offset..offset + limit].to_vec()),
-                None => Err(RHPError::Transport("sector not found".into())),
+                None => Err(RHPError::RPC(RPCError {
+                    code: 3,
+                    description: "sector not found".into(),
+                })),
             }
         }
     }

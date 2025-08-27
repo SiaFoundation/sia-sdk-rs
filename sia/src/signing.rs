@@ -8,7 +8,9 @@ use serde::de::Error;
 use serde::{Deserialize, Serialize};
 
 /// An ed25519 public key that can be used to verify a signature
-#[derive(Debug, PartialEq, Clone, Copy, SiaEncode, SiaDecode, AsyncSiaDecode, AsyncSiaEncode)]
+#[derive(
+    Debug, Eq, Hash, PartialEq, Clone, Copy, SiaEncode, SiaDecode, AsyncSiaDecode, AsyncSiaEncode,
+)]
 pub struct PublicKey([u8; 32]);
 
 impl PublicKey {
