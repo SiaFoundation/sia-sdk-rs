@@ -1,6 +1,7 @@
 use futures::StreamExt;
 use futures::future::try_join_all;
 use futures::stream::FuturesUnordered;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -41,6 +42,8 @@ pub enum Error {
 }
 
 /// A Sector is a unit of data stored on the Sia network. It can be referenced by its Merkle root.
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct Sector {
     pub root: Hash256,
     pub host_key: PublicKey,

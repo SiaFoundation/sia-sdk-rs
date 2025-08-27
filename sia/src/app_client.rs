@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-use crate::signing::PublicKey;
+use crate::slabs::Sector;
 use crate::types::Hash256;
 
 #[derive(Debug, Error)]
@@ -25,19 +25,10 @@ pub struct Client {
     password: Option<String>,
 }
 
-type SlabID = Hash256;
-
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Sector {
-    pub root: SlabID,
-    pub host_key: PublicKey,
-}
-
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Slab {
-    pub id: SlabID,
+    pub id: Hash256,
     pub encryption_key: [u8; 32],
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
@@ -62,12 +53,12 @@ impl Client {
     }
 
     #[allow(dead_code)]
-    pub async fn slab(&self, slab_id: &SlabID) -> Result<Slab> {
+    pub async fn slab(&self, slab_id: &Hash256) -> Result<Slab> {
         self.get_json(&format!("/slab/{slab_id}")).await
     }
 
     #[allow(dead_code)]
-    pub async fn pin_slab(&self, slab: &SlabPinParams) -> Result<SlabID> {
+    pub async fn pin_slab(&self, slab: &SlabPinParams) -> Result<Hash256> {
         self.post_json("/slabs", serde_json::to_string(&slab)?)
             .await
     }
@@ -114,6 +105,8 @@ impl Drop for Client {
 
 #[cfg(test)]
 mod tests {
+    use crate::{hash_256, public_key};
+
     use super::*;
     use httptest::http::Response;
     use httptest::matchers::*;
@@ -135,7 +128,7 @@ mod tests {
 
         let client = Client::new(server.url("/").to_string(), Some("password".to_string()));
         let _: Result<()> = client.get_json("/").await;
-        let _: Result<()> = client.post_json("/", "{}").await;
+        let _: Result<()> = client.post_json("/", "").await;
     }
 
     #[tokio::test]
@@ -150,13 +143,10 @@ mod tests {
             ],
             min_shards: 1,
             sectors: vec![Sector {
-                root: "826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6"
-                    .parse()
-                    .unwrap(),
-                host_key:
+                root: hash_256!("826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6"),
+                host_key: public_key!(
                     "ed25519:910b22c360a1c67cb6a9a7371fa600c48e87d626b328669d01f34048ac3132fe"
-                        .parse()
-                        .unwrap(),
+                ),
             }],
         };
 
@@ -195,9 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pin_slab() {
-        let slab_id = "43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28"
-            .parse()
-            .unwrap();
+        let slab_id = hash_256!("43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28");
         let slab = SlabPinParams {
             encryption_key: [
                 186, 153, 179, 170, 159, 95, 101, 177, 15, 130, 58, 19, 138, 144, 9, 91, 181, 119,
@@ -205,13 +193,10 @@ mod tests {
             ],
             min_shards: 1,
             sectors: vec![Sector {
-                root: "826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6"
-                    .parse()
-                    .unwrap(),
-                host_key:
+                root: hash_256!("826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6"),
+                host_key: public_key!(
                     "ed25519:910b22c360a1c67cb6a9a7371fa600c48e87d626b328669d01f34048ac3132fe"
-                        .parse()
-                        .unwrap(),
+                ),
             }],
         };
         let server = Server::run();
