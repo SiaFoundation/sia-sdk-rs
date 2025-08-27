@@ -149,12 +149,20 @@ impl Dialer {
         });
     }
 
+    fn existing_conn(&self, host: PublicKey) -> Option<Connection> {
+        let mut open_conns = self.inner.open_conns.lock().unwrap();
+        if let Some(conn) = open_conns.get(&host).cloned() {
+            if conn.close_reason().is_none() {
+                return Some(conn);
+            }
+            open_conns.remove(&host);
+        }
+        None
+    }
+
     async fn host_stream(&self, host: PublicKey) -> Result<Stream, Error> {
-        let existing_conn = { self.inner.open_conns.lock().unwrap().get(&host).cloned() };
-        let conn = if let Some(existing_conn) = existing_conn
-            && existing_conn.close_reason().is_none()
-        {
-            existing_conn
+        let conn = if let Some(conn) = self.existing_conn(host) {
+            conn
         } else {
             let addresses = {
                 let hosts = self.inner.hosts.lock().unwrap();

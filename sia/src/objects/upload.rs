@@ -69,7 +69,11 @@ impl<D: HostDialer> UploaderInner<D>
 where
     D::Error: From<UploadError>,
 {
-    async fn try_upload(&self, host_queue: HostQueue, sector: Vec<u8>) -> Result<Sector, D::Error> {
+    async fn try_upload_sector(
+        &self,
+        host_queue: HostQueue,
+        sector: Vec<u8>,
+    ) -> Result<Sector, D::Error> {
         let permit = self.semaphore.acquire().await;
         if permit.is_err() {
             return Err(UploadError::Closed.into());
@@ -90,13 +94,13 @@ where
         }
     }
 
-    async fn write_sector(
+    async fn upload_slab_sector(
         &self,
         host_queue: HostQueue,
         sector: impl AsRef<[u8]>,
     ) -> Result<Sector, D::Error> {
         let mut tasks = FuturesUnordered::new();
-        tasks.push(self.try_upload(host_queue.clone(), sector.as_ref().to_vec()));
+        tasks.push(self.try_upload_sector(host_queue.clone(), sector.as_ref().to_vec()));
         loop {
             tokio::select! {
                 Some(res) = tasks.next() => {
@@ -107,14 +111,14 @@ where
                         Err(_) => {
                             if tasks.is_empty() {
                                 // try the next host
-                                tasks.push(self.try_upload(host_queue.clone(), sector.as_ref().to_vec()));
+                                tasks.push(self.try_upload_sector(host_queue.clone(), sector.as_ref().to_vec()));
                             }
                         }
                     }
                 },
                 _ = tokio::time::sleep(Duration::from_secs(15)) => {
                     // race another host to prevent slow hosts from stalling uploads
-                    tasks.push(self.try_upload(host_queue.clone(), sector.as_ref().to_vec()));
+                    tasks.push(self.try_upload_sector(host_queue.clone(), sector.as_ref().to_vec()));
                 }
             }
         }
@@ -153,7 +157,7 @@ where
         let hosts = HostQueue::new(uploader.dialer.hosts(), 2);
         let mut futures = Vec::new();
         for shard in shards {
-            futures.push(uploader.write_sector(hosts.clone(), shard));
+            futures.push(uploader.upload_slab_sector(hosts.clone(), shard));
         }
 
         try_join_all(futures).await
