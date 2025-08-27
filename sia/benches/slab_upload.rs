@@ -44,14 +44,9 @@ impl HostDialer for MockUploader {
         data: Vec<u8>,
     ) -> Result<Hash256, Self::Error> {
         let inner = self.inner.clone();
-        let root = tokio::spawn(async move {
-            let root = sector_root(data.as_ref());
-            sleep(Duration::from_millis(10)).await;
-            inner.sectors.lock().unwrap().insert(root, data);
-            root
-        })
-        .await
-        .unwrap();
+        let root = sector_root(data.as_ref());
+        sleep(Duration::from_millis(10)).await;
+        inner.sectors.lock().unwrap().insert(root, data);
         Ok(root)
     }
 
@@ -64,14 +59,9 @@ impl HostDialer for MockUploader {
         limit: usize,
     ) -> Result<Vec<u8>, Self::Error> {
         let inner = self.inner.clone();
-        let data = tokio::spawn(async move {
-            sleep(Duration::from_millis(10)).await;
-            let sector = inner.sectors.lock().unwrap().get(&root).unwrap().clone();
-            sector[offset..offset + limit].to_vec()
-        })
-        .await
-        .unwrap();
-        Ok(data)
+        sleep(Duration::from_millis(10)).await;
+        let sector = inner.sectors.lock().unwrap().get(&root).unwrap().clone();
+        Ok(sector[offset..offset + limit].to_vec())
     }
 
     fn hosts(&self) -> Vec<PublicKey> {

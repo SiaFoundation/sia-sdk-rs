@@ -18,7 +18,7 @@ use crate::signing::{PrivateKey, PublicKey};
 use crate::types::Hash256;
 
 pub trait HostDialer: Send + Sync {
-    type Error: From<UploadError> + Send + 'static;
+    type Error: From<UploadError> + Send;
 
     fn write_sector(
         &self,
@@ -67,7 +67,6 @@ struct UploaderInner<D: HostDialer> {
 
 impl<D: HostDialer> UploaderInner<D>
 where
-    D: HostDialer + 'static,
     D::Error: From<UploadError>,
 {
     async fn try_upload(&self, host_queue: HostQueue, sector: Vec<u8>) -> Result<Sector, D::Error> {
@@ -122,26 +121,6 @@ where
     }
 }
 
-/// helper to upload shards. A function that does not
-/// take `self` is necessary for tokio::spawn
-async fn upload_shards<D: HostDialer + 'static>(
-    uploader: Arc<UploaderInner<D>>,
-    encryption_key: &[u8; 32],
-    mut shards: Vec<Vec<u8>>,
-) -> Result<Vec<Sector>, D::Error>
-where
-    D::Error: From<UploadError>,
-{
-    encrypt_shards(encryption_key, &mut shards, 0);
-    let hosts = HostQueue::new(uploader.dialer.hosts(), 2);
-    let mut futures = Vec::new();
-    for shard in shards {
-        futures.push(uploader.write_sector(hosts.clone(), shard));
-    }
-
-    try_join_all(futures).await
-}
-
 pub struct Uploader<D: HostDialer> {
     inner: Arc<UploaderInner<D>>,
 }
@@ -162,7 +141,26 @@ where
         }
     }
 
-    /// Encrypts then uploads the erasure coded shards.
+    /// helper to upload shards. A function that does not
+    /// take `self` is necessary for tokio::spawn
+    async fn try_upload_shards(
+        uploader: Arc<UploaderInner<D>>,
+        shards: Vec<Vec<u8>>,
+    ) -> Result<Vec<Sector>, D::Error>
+    where
+        D::Error: From<UploadError>,
+    {
+        let hosts = HostQueue::new(uploader.dialer.hosts(), 2);
+        let mut futures = Vec::new();
+        for shard in shards {
+            futures.push(uploader.write_sector(hosts.clone(), shard));
+        }
+
+        try_join_all(futures).await
+    }
+
+    /// Uploads the erasure coded shards. The shards
+    /// should be encrypted by the caller.
     ///
     /// [upload] should generally be preferred for simplicity.
     /// This is primarily useful for environments that have
@@ -177,7 +175,7 @@ where
         if shards.len() < data_shards as usize {
             return Err(UploadError::NotEnoughShards(shards.len() as u8, data_shards).into());
         }
-        let sectors = upload_shards(self.inner.clone(), &encryption_key, shards).await?;
+        let sectors = Self::try_upload_shards(self.inner.clone(), shards).await?;
         let slab = Slab {
             encryption_key,
             min_shards: data_shards,
@@ -203,14 +201,15 @@ where
         let mut sector_jobs = JoinSet::new();
         let mut slabs = Vec::new();
         loop {
-            let (shards, length) = rs.read_encoded_shards(r).await.map_err(|e| e.into())?;
+            let (mut shards, length) = rs.read_encoded_shards(r).await.map_err(|e| e.into())?;
             if length == 0 {
                 break;
             }
             let inner = self.inner.clone();
             let index = slabs.len();
             sector_jobs.spawn(async move {
-                upload_shards(inner, &encryption_key, shards)
+                encrypt_shards(&encryption_key, &mut shards, 0);
+                Self::try_upload_shards(inner, shards)
                     .await
                     .map(|sectors| (index, sectors))
             });
