@@ -40,12 +40,12 @@ impl HostDialer for MockUploader {
         &self,
         _: PublicKey,
         _: &PrivateKey,
-        data: Vec<u8>,
+        data: &[u8],
     ) -> Result<Hash256, Self::Error> {
         let inner = self.inner.clone();
-        let root = sector_root(data.as_ref());
+        let root = sector_root(data);
         sleep(Duration::from_millis(10)).await;
-        inner.sectors.lock().unwrap().insert(root, data);
+        inner.sectors.lock().unwrap().insert(root, data.to_vec());
         Ok(root)
     }
 

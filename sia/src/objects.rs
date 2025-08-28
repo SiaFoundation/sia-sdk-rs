@@ -32,7 +32,7 @@ pub trait HostDialer: Send + Sync {
         &self,
         host_key: PublicKey,
         account_key: &PrivateKey,
-        sector: Vec<u8>,
+        sector: &[u8],
     ) -> impl Future<Output = Result<Hash256, Self::Error>> + Send;
 
     fn read_sector(
@@ -124,7 +124,7 @@ where
     async fn try_upload_sector(
         &self,
         host_queue: HostQueue,
-        sector: Vec<u8>,
+        sector: &[u8],
     ) -> Result<Sector, D::Error> {
         let _permit = self.semaphore.acquire().await.map_err(|_| Error::Closed)?;
 
@@ -146,10 +146,10 @@ where
     async fn upload_slab_sector(
         &self,
         host_queue: HostQueue,
-        sector: impl AsRef<[u8]>,
+        sector: Vec<u8>,
     ) -> Result<Sector, D::Error> {
         let mut tasks = FuturesUnordered::new();
-        tasks.push(self.try_upload_sector(host_queue.clone(), sector.as_ref().to_vec()));
+        tasks.push(self.try_upload_sector(host_queue.clone(), sector.as_ref()));
         loop {
             tokio::select! {
                 Some(res) = tasks.next() => {
@@ -160,14 +160,14 @@ where
                         Err(_) => {
                             if tasks.is_empty() {
                                 // try the next host
-                                tasks.push(self.try_upload_sector(host_queue.clone(), sector.as_ref().to_vec()));
+                                tasks.push(self.try_upload_sector(host_queue.clone(), sector.as_ref()));
                             }
                         }
                     }
                 },
                 _ = tokio::time::sleep(Duration::from_secs(15)) => {
                     // race another host to prevent slow hosts from stalling uploads
-                    tasks.push(self.try_upload_sector(host_queue.clone(), sector.as_ref().to_vec()));
+                    tasks.push(self.try_upload_sector(host_queue.clone(), sector.as_ref()));
                 }
             }
         }
@@ -464,7 +464,7 @@ mod test {
             &self,
             host_key: PublicKey,
             _: &PrivateKey,
-            data: Vec<u8>,
+            data: &[u8],
         ) -> Result<Hash256, Self::Error> {
             let host_exists = {
                 let hosts = self.inner.hosts.lock().unwrap();
@@ -474,7 +474,7 @@ mod test {
                 return Err(Error::NoMoreHosts);
             }
             let root = sector_root(data.as_ref());
-            self.inner.sectors.lock().unwrap().insert(root, data);
+            self.inner.sectors.lock().unwrap().insert(root, data.to_vec());
             Ok(root)
         }
 

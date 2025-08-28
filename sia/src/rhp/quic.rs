@@ -284,12 +284,12 @@ impl HostDialer for Dialer {
         &self,
         host_key: PublicKey,
         account_key: &PrivateKey,
-        sector: Vec<u8>,
+        sector: &[u8],
     ) -> Result<Hash256, Self::Error> {
         let prices = self.host_prices(host_key, false).await?;
         let token = AccountToken::new(account_key, host_key);
         let stream = self.host_stream(host_key).await?;
-        let resp = RPCWriteSector::send_request(stream, prices, token, sector)
+        let resp = RPCWriteSector::send_request(stream, prices, token, sector.to_vec())
             .await?
             .complete()
             .await?;
