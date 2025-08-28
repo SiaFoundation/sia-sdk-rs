@@ -64,6 +64,9 @@ pub enum Error {
 
     #[error("invalid signature")]
     InvalidSignature,
+
+    #[error("no endpoint")]
+    NoEndpoint,
 }
 
 impl AsyncDecoder for Stream {
@@ -106,7 +109,7 @@ pub struct Dialer {
 }
 
 impl Dialer {
-    pub fn new(client_config: ClientConfig) -> Result<Self, &'static str> {
+    pub fn new(client_config: ClientConfig) -> Result<Self, Error> {
         let inner = DialerInner::new(client_config)?;
         Ok(Dialer {
             inner: Arc::new(inner),
@@ -134,19 +137,6 @@ impl Dialer {
             .lock()
             .unwrap()
             .insert(*host_key, prices);
-    }
-
-    fn track_conn_lifecycle(&self, host: PublicKey, conn: Connection) {
-        let inner = self.inner.clone();
-        tokio::spawn(async move {
-            conn.closed().await;
-            let mut m = inner.open_conns.lock().unwrap();
-            if let Some(existing_conn) = m.get(&host)
-                && existing_conn.stable_id() == conn.stable_id()
-            {
-                m.remove(&host);
-            }
-        });
     }
 
     fn existing_conn(&self, host: PublicKey) -> Option<Connection> {
@@ -205,8 +195,6 @@ impl Dialer {
             }
 
             let conn = new_conn.ok_or(Error::FailedToConnect)?;
-            self.track_conn_lifecycle(host, conn.clone());
-
             let open_conns = &mut self.inner.open_conns.lock().unwrap();
             open_conns.insert(host, conn.clone());
             conn
@@ -254,7 +242,7 @@ struct DialerInner {
 }
 
 impl DialerInner {
-    fn new(mut client_config: ClientConfig) -> Result<Self, &'static str> {
+    fn new(mut client_config: ClientConfig) -> Result<Self, Error> {
         client_config.alpn_protocols = vec![b"sia/rhp4".to_vec()];
 
         let client_config = QuicClientConfig::try_from(client_config).unwrap();
@@ -276,7 +264,7 @@ impl DialerInner {
         };
 
         if endpoint_v4.is_none() && endpoint_v6.is_none() {
-            return Err("unable to create IPv4 and IPv6 endpoint");
+            return Err(Error::NoEndpoint);
         }
 
         Ok(Self {

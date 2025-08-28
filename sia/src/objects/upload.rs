@@ -74,10 +74,11 @@ where
         host_queue: HostQueue,
         sector: Vec<u8>,
     ) -> Result<Sector, D::Error> {
-        let permit = self.semaphore.acquire().await;
-        if permit.is_err() {
-            return Err(UploadError::Closed.into());
-        }
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|_| UploadError::Closed)?;
 
         let host_key = host_queue.pop_front()?;
 
@@ -132,7 +133,7 @@ pub struct Uploader<D: HostDialer> {
 impl<D: HostDialer> Uploader<D>
 where
     D: HostDialer + 'static,
-    D::Error: From<UploadError>,
+    D::Error: From<UploadError> + From<erasure_coding::Error>,  
 {
     pub fn new(dialer: D, account_key: PrivateKey, max_inflight: usize) -> Self {
         let semaphore = Semaphore::new(max_inflight);
@@ -200,12 +201,11 @@ where
         data_shards: u8,
         parity_shards: u8,
     ) -> Result<Vec<Slab>, D::Error> {
-        let mut rs = ErasureCoder::new(data_shards as usize, parity_shards as usize)
-            .map_err(|e| e.into())?;
+        let mut rs = ErasureCoder::new(data_shards as usize, parity_shards as usize)?;
         let mut sector_jobs = JoinSet::new();
         let mut slabs = Vec::new();
         loop {
-            let (mut shards, length) = rs.read_encoded_shards(r).await.map_err(|e| e.into())?;
+            let (mut shards, length) = rs.read_encoded_shards(r).await?;
             if length == 0 {
                 break;
             }
