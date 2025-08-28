@@ -5,8 +5,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-use crate::slabs::Sector;
-use crate::types::Hash256;
+use sia::slabs::Sector;
+use sia::types::Hash256;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -105,7 +105,7 @@ impl Drop for Client {
 
 #[cfg(test)]
 mod tests {
-    use crate::{hash_256, public_key};
+    use sia::{hash_256, public_key};
 
     use super::*;
     use httptest::http::Response;

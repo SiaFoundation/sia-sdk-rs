@@ -1011,6 +1011,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "indexd"
+version = "0.0.1"
+dependencies = [
+ "httptest",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sia",
+ "thiserror",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1793,16 +1807,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
-name = "sia-sdk-derive"
-version = "0.0.2"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "sia_sdk"
+name = "sia"
 version = "0.0.2"
 dependencies = [
  "base64",
@@ -1813,14 +1818,12 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "hex",
- "httptest",
  "num-bigint",
  "num-rational",
  "num-traits",
  "rand",
  "rayon",
  "reed-solomon-erasure",
- "reqwest",
  "serde",
  "serde-big-array",
  "serde_json",
@@ -1830,7 +1833,15 @@ dependencies = [
  "time",
  "tokio",
  "uint",
- "zeroize",
+]
+
+[[package]]
+name = "sia-sdk-derive"
+version = "0.0.2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

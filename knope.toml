@@ -6,6 +6,10 @@ changelog = "sia/CHANGELOG.md"
 versioned_files = ["sia_derive/Cargo.toml"]
 changelog = "sia_derive/CHANGELOG.md"
 
+[packages.indexd]
+versioned_files = ["indexd/Cargo.toml"]
+changelog = "indexd/CHANGELOG.md"
+
 [[workflows]]
 name = "document-change"
 
