@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -6,18 +7,17 @@ use futures::StreamExt;
 use futures::future::try_join_all;
 use futures::stream::FuturesUnordered;
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, BufReader, BufWriter};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::objects::encryption::{encrypt_shard, encrypt_shards};
 use crate::objects::erasure_coding::ErasureCoder;
 use crate::objects::slabs::{Sector, Slab};
-use crate::rhp::{self, Host};
+use crate::rhp::{self, Host, SEGMENT_SIZE};
 use crate::signing::{PrivateKey, PublicKey};
 use crate::types::Hash256;
 
-use crate::rhp::SECTOR_SIZE;
 use tokio::io::AsyncWriteExt;
 use tokio::time::sleep;
 
@@ -249,12 +249,15 @@ where
         data_shards: u8,
         parity_shards: u8,
     ) -> Result<Vec<Slab>, D::Error> {
+        // use a buffered reader since the erasure coder reads 64 bytes at a time.
+        let mut r = BufReader::new(r);
         let mut rs = ErasureCoder::new(data_shards as usize, parity_shards as usize)
             .map_err(|e| e.into())?;
         let mut sector_jobs = JoinSet::new();
         let mut slabs = Vec::new();
         loop {
-            let (mut shards, length) = rs.read_encoded_shards(r).await.map_err(|e| e.into())?;
+            let (mut shards, length) =
+                rs.read_encoded_shards(&mut r).await.map_err(|e| e.into())?;
             if length == 0 {
                 break;
             }
@@ -322,6 +325,12 @@ where
         Ok((index, data))
     }
 
+    /// Downloads the shards of an erasure-coded slab.
+    /// Successful shards will be decrypted using the
+    /// encryption_key.
+    ///
+    /// offset and limit are the byte range to download
+    /// from each sector.
     pub async fn download_slab_shards(
         &self,
         encryption_key: &[u8; 32],
@@ -400,29 +409,90 @@ where
         }
     }
 
-    pub async fn download<W: AsyncWriteExt + Unpin>(
+    /// Returns the offset and length of the sector to download in order
+    /// to recover the raw data.
+    fn sector_region(data_shards: usize, offset: usize, length: usize) -> (usize, usize) {
+        let chunk_size = SEGMENT_SIZE * data_shards;
+        let start = (offset / chunk_size) * SEGMENT_SIZE;
+        let mut end = ((offset + length) / chunk_size) * SEGMENT_SIZE;
+        if (offset + length) % chunk_size != 0 {
+            end += SEGMENT_SIZE;
+        }
+        (start, end - start)
+    }
+
+    pub async fn download_range<W: AsyncWriteExt + Unpin>(
         &self,
         w: &mut W,
         slabs: &[Slab],
+        mut offset: usize,
+        mut length: usize,
     ) -> Result<(), Error> {
-        for slab in slabs {
-            let mut rs = ErasureCoder::new(
-                slab.min_shards as usize,
-                slab.sectors.len() - slab.min_shards as usize,
-            )?;
+        let mut w = BufWriter::new(w);
+        let mut first = true;
+        for (i, slab) in slabs.iter().enumerate() {
+            if length == 0 {
+                break;
+            }
+            let n = slab.length - slab.offset;
+            if i == slabs.len() - 1 && offset + length > n {
+                // if this is the last slab and there's leftover length
+                // return an error
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "not enough data remaining",
+                )
+                .into());
+            } else if offset >= n {
+                offset -= n;
+                continue;
+            }
+
+            let mut slab_offset = slab.offset;
+            if first {
+                // for the first necessary slab, adjust the offset
+                // by the remainder
+                slab_offset += offset;
+                first = false;
+            }
+            let slab_length = (slab.length - slab_offset).min(length);
+            let (shard_offset, shard_length) =
+                Self::sector_region(slab.min_shards as usize, slab_offset, slab_length);
             let mut shards = self
                 .download_slab_shards(
                     &slab.encryption_key,
                     &slab.sectors,
                     slab.min_shards,
-                    0,
-                    SECTOR_SIZE,
+                    shard_offset,
+                    shard_length,
                 )
                 .await?;
-            rs.write_reconstructed_shards(w, &mut shards, slab.offset, slab.length)
-                .await?;
+            let mut rs = ErasureCoder::new(
+                slab.min_shards as usize,
+                slab.sectors.len() - slab.min_shards as usize,
+            )?;
+            rs.write_reconstructed_shards(
+                &mut w,
+                &mut shards,
+                slab_offset % (SEGMENT_SIZE * slab.min_shards as usize),
+                slab_length,
+            )
+            .await?;
+            length -= slab_length;
         }
+        w.flush().await?;
         Ok(())
+    }
+
+    /// downloads data from the provided slabs and writes it
+    /// to the writer.
+    pub async fn download<W: AsyncWriteExt + Unpin>(
+        &self,
+        w: &mut W,
+        slabs: &[Slab],
+    ) -> Result<(), Error> {
+        let total_length = slabs.iter().fold(0, |sum, slab| sum + slab.length);
+        self.download_range(w, slabs, 0, total_length).await
     }
 }
 
@@ -580,6 +650,116 @@ mod test {
             .await
             .expect("failed to download");
 
+        assert_eq!(downloaded_data.len(), data.len());
         assert_eq!(downloaded_data, data);
+    }
+
+    #[tokio::test]
+    async fn test_download_range() {
+        const DATA_SHARDS: usize = 2;
+        const PARITY_SHARDS: usize = 2;
+        const SLAB_SIZE: usize = SECTOR_SIZE * DATA_SHARDS;
+        const DATA_SIZE: usize = 4 * SLAB_SIZE;
+
+        let mut dialer = MockDialer::new();
+        let seed: [u8; 32] = rand::random();
+        let account_key = PrivateKey::from_seed(&seed);
+
+        dialer.update_hosts(vec![
+            Host {
+                public_key: PublicKey::new(rand::random()),
+                addresses: vec![],
+            },
+            Host {
+                public_key: PublicKey::new(rand::random()),
+                addresses: vec![],
+            },
+            Host {
+                public_key: PublicKey::new(rand::random()),
+                addresses: vec![],
+            },
+            Host {
+                public_key: PublicKey::new(rand::random()),
+                addresses: vec![],
+            },
+        ]);
+
+        let slab_uploader = Uploader::new(dialer.clone(), account_key.clone(), 10);
+
+        let mut data = vec![0u8; DATA_SIZE];
+        rand::rng().fill_bytes(&mut data);
+
+        let encryption_key = rand::random();
+        let slabs = slab_uploader
+            .upload(
+                &mut &data[..],
+                encryption_key,
+                DATA_SHARDS as u8,
+                PARITY_SHARDS as u8,
+            )
+            .await
+            .expect("upload failed");
+
+        assert_eq!(slabs[0].encryption_key, encryption_key);
+        assert_eq!(
+            slabs[0].sectors.len(),
+            DATA_SHARDS as usize + PARITY_SHARDS as usize
+        );
+        assert_eq!(slabs.len(), 4);
+
+        let slab_downloader = Downloader::new(dialer.clone(), account_key.clone(), 10);
+        let mut downloaded_data = Vec::with_capacity(data.len());
+
+        slab_downloader
+            .download_range(&mut downloaded_data, &slabs, 0, 100)
+            .await
+            .expect("failed to download");
+        assert_eq!(downloaded_data.len(), 100);
+        assert_eq!(&downloaded_data, &data[..100]);
+        downloaded_data.clear();
+
+        slab_downloader
+            .download_range(&mut downloaded_data, &slabs, 100, 100)
+            .await
+            .expect("failed to download");
+
+        assert_eq!(downloaded_data.len(), 100);
+        assert_eq!(&downloaded_data, &data[100..200]);
+        downloaded_data.clear();
+
+        // across slab boundaries
+        let offset = SLAB_SIZE - 50;
+        slab_downloader
+            .download_range(&mut downloaded_data, &slabs, offset, 100)
+            .await
+            .expect("failed to download");
+
+        assert_eq!(downloaded_data.len(), 100);
+        assert_eq!(&downloaded_data, &data[offset..offset + 100]);
+        downloaded_data.clear();
+
+        // eof
+        let offset = DATA_SIZE - 100;
+        slab_downloader
+            .download_range(&mut downloaded_data, &slabs, offset, 100)
+            .await
+            .expect("failed to download");
+        assert_eq!(downloaded_data.len(), 100);
+        assert_eq!(&downloaded_data, &data[offset..offset + 100]);
+        downloaded_data.clear();
+
+        // length out of range
+        let offset = DATA_SIZE - 100;
+        slab_downloader
+            .download_range(&mut downloaded_data, &slabs, offset, 200)
+            .await
+            .expect_err("download should fail");
+
+        // offset out of range
+        let offset = DATA_SIZE + 100;
+        slab_downloader
+            .download_range(&mut downloaded_data, &slabs, offset, 200)
+            .await
+            .expect_err("download should fail");
     }
 }

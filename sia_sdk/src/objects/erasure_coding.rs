@@ -1,7 +1,7 @@
 use crate::rhp::{SECTOR_SIZE, SEGMENT_SIZE};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use thiserror::Error;
-use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -35,8 +35,7 @@ impl ErasureCoder {
         &mut self,
         r: &mut R,
     ) -> Result<(Vec<Vec<u8>>, usize)> {
-        // use a buffered reader since striped_read will read 64 bytes at a time
-        let (mut shards, size) = self.striped_read(&mut BufReader::new(r)).await?;
+        let (mut shards, size) = self.striped_read(r).await?;
         self.encode_shards(&mut shards)?;
         Ok((shards, size))
     }
@@ -54,10 +53,7 @@ impl ErasureCoder {
     ) -> Result<()> {
         // reconstruct just the data, that's all we need
         self.reconstruct_data(shards)?;
-
-        // use a buffered writer since striped_write will write 64 bytes at a time
-        let mut w = BufWriter::new(w);
-        self.striped_write(&mut w, shards, skip, n).await?;
+        self.striped_write(w, shards, skip, n).await?;
         w.flush().await?;
         Ok(())
     }
@@ -88,12 +84,9 @@ impl ErasureCoder {
         &self,
         w: &mut W,
         shards: &[Option<Vec<u8>>],
-        skip: usize,
-        n: usize,
+        mut skip: usize,
+        mut n: usize,
     ) -> Result<()> {
-        let mut skip = skip;
-        let mut n = n;
-
         for off in (0..).map(|n| n * SEGMENT_SIZE) {
             if n == 0 {
                 return Ok(()); // done
