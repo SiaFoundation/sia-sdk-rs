@@ -100,9 +100,9 @@ impl ErasureCoder {
                     continue;
                 }
 
-                let segment = shard.as_ref().ok_or({
-                    Error::ReedSolomon(reed_solomon_erasure::Error::TooFewDataShards)
-                })?;
+                let segment = shard.as_ref().ok_or(Error::ReedSolomon(
+                    reed_solomon_erasure::Error::TooFewDataShards,
+                ))?;
 
                 let start = offset + skip;
                 let length = n.min(SEGMENT_SIZE - skip);
