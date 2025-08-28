@@ -18,6 +18,21 @@ pub(crate) fn encrypt_shards(key: &[u8; 32], shards: &mut Vec<Vec<u8>>, offset: 
     });
 }
 
+/// Encrypts a single shard using XChaCha20. To decrypt the shard, call this
+/// function again with the same key.
+/// NOTE: don't reuse the same key for the same shard as it will compromise the
+/// security of the encryption. Always use a freshly generated key.
+///
+/// For performance reasons, prefer using `encrypt_shards` when encrypting
+/// multiple shards.
+pub(crate) fn encrypt_shard(key: &[u8; 32], shard: &mut [u8], index: u8, offset: usize) {
+    let mut nonce: [u8; 24] = [0u8; 24]; // XChaCha20 nonce size
+    nonce[0] = index;
+    let mut cipher = XChaCha20::new(key.into(), &nonce.into());
+    cipher.seek(offset);
+    cipher.apply_keystream(shard);
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

@@ -52,5 +52,5 @@ name = "merkle_root"
 harness = false
 
 [[bench]]
-name = "slab_upload"
+name = "slabs"
 harness = false

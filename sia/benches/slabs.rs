@@ -1,11 +1,10 @@
 use std::collections::HashMap;
-use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rand::RngCore;
-use sia::objects::{HostDialer, UploadError, Uploader};
+use sia::objects::{Downloader, Error as UploadError, HostDialer, Uploader};
 use sia::rhp::{Host, SECTOR_SIZE, sector_root};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
@@ -41,12 +40,12 @@ impl HostDialer for MockUploader {
         &self,
         _: PublicKey,
         _: &PrivateKey,
-        data: Vec<u8>,
+        data: &[u8],
     ) -> Result<Hash256, Self::Error> {
         let inner = self.inner.clone();
-        let root = sector_root(data.as_ref());
+        let root = sector_root(data);
         sleep(Duration::from_millis(10)).await;
-        inner.sectors.lock().unwrap().insert(root, data);
+        inner.sectors.lock().unwrap().insert(root, data.to_vec());
         Ok(root)
     }
 
@@ -77,14 +76,15 @@ impl HostDialer for MockUploader {
     }
 }
 
-fn benchmark_upload_slab(c: &mut Criterion) {
+fn benchmark_upload(c: &mut Criterion) {
     const DATA_SHARDS: usize = 10;
     const PARITY_SHARDS: usize = 20;
+    const DATA_SIZE: usize = 4 * SECTOR_SIZE * DATA_SHARDS;
 
-    let mut data = vec![0u8; 4 * SECTOR_SIZE * DATA_SHARDS];
+    let mut data = vec![0u8; DATA_SIZE];
     rand::rng().fill_bytes(&mut data);
 
-    c.bench_with_input(BenchmarkId::new("slab", data.len()), &data, |b, data| {
+    c.bench_with_input(BenchmarkId::new("upload", DATA_SIZE), &data, |b, data| {
         let rt = Runtime::new().expect("Failed to create runtime");
 
         let encryption_key: [u8; 32] = rand::random();
@@ -99,12 +99,11 @@ fn benchmark_upload_slab(c: &mut Criterion) {
                     .collect(),
             );
 
-            let mut r = Cursor::new(data);
             let slab_uploader = Uploader::new(uploader, PrivateKey::from_seed(&[0u8; 32]), 30);
 
             let slabs = slab_uploader
                 .upload(
-                    &mut r,
+                    &mut &data[..],
                     encryption_key,
                     DATA_SHARDS as u8,
                     PARITY_SHARDS as u8,
@@ -117,5 +116,58 @@ fn benchmark_upload_slab(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, benchmark_upload_slab);
+fn benchmark_download(c: &mut Criterion) {
+    const DATA_SHARDS: usize = 10;
+    const PARITY_SHARDS: usize = 20;
+    const DATA_SIZE: usize = 4 * SECTOR_SIZE * DATA_SHARDS;
+
+    let mut data = vec![0u8; DATA_SIZE];
+    rand::rng().fill_bytes(&mut data);
+
+    let rt = Runtime::new().expect("Failed to create runtime");
+    let encryption_key: [u8; 32] = rand::random();
+    let uploader = MockUploader::new();
+
+    let mut inner_upload = uploader.clone();
+    let slabs = rt.block_on(async move {
+        inner_upload.update_hosts(
+            (0..(DATA_SHARDS + PARITY_SHARDS))
+                .map(|_| Host {
+                    public_key: PublicKey::new(rand::random()),
+                    addresses: vec![],
+                })
+                .collect(),
+        );
+
+        let slab_uploader = Uploader::new(inner_upload, PrivateKey::from_seed(&[0u8; 32]), 30);
+
+        slab_uploader
+            .upload(
+                &mut &data[..],
+                encryption_key,
+                DATA_SHARDS as u8,
+                PARITY_SHARDS as u8,
+            )
+            .await
+            .expect("upload failed")
+    });
+    c.bench_with_input(
+        BenchmarkId::new("download", DATA_SIZE),
+        &(uploader, slabs),
+        |b, (uploader, slabs)| {
+            let rt = Runtime::new().expect("Failed to create runtime");
+            b.to_async(rt).iter(|| async move {
+                let slab_downloader =
+                    Downloader::new(uploader.clone(), PrivateKey::from_seed(&[0u8; 32]), 10);
+                let mut downloaded_data = Vec::with_capacity(DATA_SIZE);
+                slab_downloader
+                    .download(&mut downloaded_data, slabs)
+                    .await
+                    .expect("failed to download");
+            })
+        },
+    );
+}
+
+criterion_group!(benches, benchmark_upload, benchmark_download);
 criterion_main!(benches);
