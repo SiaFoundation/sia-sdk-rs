@@ -133,7 +133,7 @@ pub struct Uploader<D: HostDialer> {
 impl<D: HostDialer> Uploader<D>
 where
     D: HostDialer + 'static,
-    D::Error: From<UploadError> + From<erasure_coding::Error>,  
+    D::Error: From<UploadError> + From<erasure_coding::Error>,
 {
     pub fn new(dialer: D, account_key: PrivateKey, max_inflight: usize) -> Self {
         let semaphore = Semaphore::new(max_inflight);
