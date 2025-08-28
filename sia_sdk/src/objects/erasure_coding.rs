@@ -87,34 +87,31 @@ impl ErasureCoder {
         mut skip: usize,
         mut n: usize,
     ) -> Result<()> {
-        for off in (0..).map(|n| n * SEGMENT_SIZE) {
-            if n == 0 {
-                return Ok(()); // done
-            }
-
+        let row_bytes = self.data_shards * SEGMENT_SIZE;
+        let rows = skip / row_bytes;
+        let mut offset = rows * SEGMENT_SIZE;
+        skip %= row_bytes;
+        while n > 0 {
             for shard in &shards[..self.data_shards] {
-                let mut segment = match shard {
-                    Some(s) => &s[off..off + SEGMENT_SIZE],
-                    None => {
-                        return Err(Error::ReedSolomon(
-                            reed_solomon_erasure::Error::TooFewDataShards,
-                        ));
-                    }
-                };
-
-                if skip > segment.len() {
-                    skip -= segment.len();
+                if n == 0 {
+                    return Ok(());
+                } else if skip > SEGMENT_SIZE {
+                    skip -= SEGMENT_SIZE;
                     continue;
-                } else if skip > 0 {
-                    segment = &segment[skip..];
-                    skip = 0;
                 }
-                if n < segment.len() {
-                    segment = &segment[..n];
-                }
-                w.write_all(segment).await?;
-                n -= segment.len();
+
+                let segment = shard.as_ref().ok_or({
+                    Error::ReedSolomon(reed_solomon_erasure::Error::TooFewDataShards)
+                })?;
+
+                let start = offset + skip;
+                let length = n.min(SEGMENT_SIZE - skip);
+
+                w.write_all(&segment[start..start + length]).await?;
+                n -= length;
+                skip = 0;
             }
+            offset += SEGMENT_SIZE;
         }
         Ok(())
     }
