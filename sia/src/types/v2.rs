@@ -1,18 +1,17 @@
 use std::io;
 
 use crate::consensus::ChainState;
-use crate::encoding::{
-    self, Error as EncodingError, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode,
-};
+use crate::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use crate::encoding_async::{
-    self, AsyncDecoder, AsyncEncoder, AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable,
-    AsyncSiaEncode, Result as AsyncResult,
+    AsyncDecoder, AsyncEncoder, AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable,
+    AsyncSiaEncode,
 };
 use blake2b_simd::Params;
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use thiserror::Error;
 
 use crate::signing::{PublicKey, Signature};
 use crate::types::common::BlockID;
@@ -25,10 +24,16 @@ use super::{
 // expose spend policies
 pub use super::spendpolicy::*;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Protocol {
     SiaMux,
     QUIC,
+}
+
+#[derive(Debug, Error)]
+pub enum ProtocolParseError {
+    #[error("invalid protocol {0}")]
+    InvalidProtocol(String),
 }
 
 impl Protocol {
@@ -41,15 +46,13 @@ impl Protocol {
 }
 
 impl TryFrom<String> for Protocol {
-    type Error = EncodingError;
+    type Error = ProtocolParseError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         match value.as_str() {
             "siamux" => Ok(Protocol::SiaMux),
             "quic" => Ok(Protocol::QUIC),
-            _ => Err(EncodingError::InvalidValue(format!(
-                "protocol {value} is not supported"
-            ))),
+            _ => Err(ProtocolParseError::InvalidProtocol(value)),
         }
     }
 }
@@ -82,25 +85,35 @@ impl SiaEncodable for Protocol {
 impl SiaDecodable for Protocol {
     fn decode<R: io::Read>(r: &mut R) -> encoding::Result<Self> {
         let s = String::decode(r)?;
-        Protocol::try_from(s)
+        let v = Protocol::try_from(s).map_err(|e| encoding::Error::InvalidValue(e.to_string()))?;
+        Ok(v)
     }
 }
 
 impl AsyncSiaEncodable for Protocol {
-    async fn encode_async<E: AsyncEncoder>(&self, e: &mut E) -> encoding_async::Result<()> {
+    async fn encode_async<E: AsyncEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
         self.as_str().as_bytes().encode_async(e).await
     }
 }
 
 impl AsyncSiaDecodable for Protocol {
-    async fn decode_async<D: AsyncDecoder>(d: &mut D) -> encoding_async::Result<Self> {
+    async fn decode_async<D: AsyncDecoder>(d: &mut D) -> Result<Self, D::Error> {
         let s = String::decode_async(d).await?;
-        Protocol::try_from(s)
+        let v = Protocol::try_from(s).map_err(|e| encoding::Error::InvalidValue(e.to_string()))?;
+        Ok(v)
     }
 }
 
 #[derive(
-    SiaEncode, SiaDecode, AsyncSiaEncode, AsyncSiaDecode, Debug, PartialEq, Serialize, Deserialize,
+    Debug,
+    PartialEq,
+    Clone,
+    SiaEncode,
+    SiaDecode,
+    AsyncSiaEncode,
+    AsyncSiaDecode,
+    Serialize,
+    Deserialize,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct NetAddress {
@@ -484,7 +497,7 @@ impl SiaDecodable for FileContractResolution {
 }
 
 impl AsyncSiaEncodable for FileContractResolution {
-    async fn encode_async<E: AsyncEncoder>(&self, e: &mut E) -> AsyncResult<()> {
+    async fn encode_async<E: AsyncEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
         self.parent.encode_async(e).await?;
         match &self.resolution {
             ContractResolution::Renewal(renewal) => {
@@ -501,7 +514,7 @@ impl AsyncSiaEncodable for FileContractResolution {
 }
 
 impl AsyncSiaDecodable for FileContractResolution {
-    async fn decode_async<D: AsyncDecoder>(d: &mut D) -> AsyncResult<Self> {
+    async fn decode_async<D: AsyncDecoder>(d: &mut D) -> Result<Self, D::Error> {
         let parent = FileContractElement::decode_async(d).await?;
         let resolution_type = u8::decode_async(d).await?;
         let resolution = match resolution_type {
@@ -509,9 +522,10 @@ impl AsyncSiaDecodable for FileContractResolution {
             1 => ContractResolution::StorageProof(StorageProof::decode_async(d).await?),
             2 => ContractResolution::Expiration(),
             _ => {
-                return Err(EncodingError::InvalidValue(format!(
+                return Err(encoding::Error::InvalidValue(format!(
                     "invalid contract resolution type: {resolution_type}"
-                )));
+                ))
+                .into());
             }
         };
         Ok(FileContractResolution { parent, resolution })
@@ -831,7 +845,7 @@ impl SiaDecodable for Transaction {
 }
 
 impl AsyncSiaEncodable for Transaction {
-    async fn encode_async<E: AsyncEncoder>(&self, e: &mut E) -> AsyncResult<()> {
+    async fn encode_async<E: AsyncEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
         TXN_VERSION.encode_async(e).await?;
 
         let fields = [
@@ -892,12 +906,13 @@ impl AsyncSiaEncodable for Transaction {
 }
 
 impl AsyncSiaDecodable for Transaction {
-    async fn decode_async<D: AsyncDecoder>(d: &mut D) -> AsyncResult<Self> {
+    async fn decode_async<D: AsyncDecoder>(d: &mut D) -> Result<Self, D::Error> {
         let version = u8::decode_async(d).await?;
         if version != TXN_VERSION {
-            return Err(EncodingError::InvalidValue(format!(
+            return Err(encoding::Error::InvalidValue(format!(
                 "invalid transaction version: {version}"
-            )));
+            ))
+            .into());
         }
 
         let fields = u64::decode_async(d).await?;

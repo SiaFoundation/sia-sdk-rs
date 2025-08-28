@@ -94,13 +94,16 @@ pub enum ProofValidationError {
     NotSegmentAligned,
 }
 
-pub type Result<T> = std::result::Result<T, ProofValidationError>;
-
 #[derive(Debug, AsyncSiaEncode, AsyncSiaDecode, PartialEq)]
 pub struct RangeProof(Vec<Hash256>, Vec<u8>);
 
 impl RangeProof {
-    pub async fn verify(self, root: &Hash256, start: usize, end: usize) -> Result<Vec<u8>> {
+    pub async fn verify(
+        self,
+        root: &Hash256,
+        start: usize,
+        end: usize,
+    ) -> Result<Vec<u8>, ProofValidationError> {
         let mut roots: VecDeque<Hash256> = self.roots(start, end)?;
         let mut proof: VecDeque<Hash256> = self.0.into();
 
@@ -137,7 +140,7 @@ impl RangeProof {
         Ok(self.1)
     }
 
-    fn roots(&self, start: usize, end: usize) -> Result<VecDeque<Hash256>> {
+    fn roots(&self, start: usize, end: usize) -> Result<VecDeque<Hash256>, ProofValidationError> {
         assert!(start < end);
         let mut i = start;
         let j = end;
@@ -197,7 +200,9 @@ fn range_proof_size(leaves_per_sector: usize, start: usize, end: usize) -> usize
     left_hashes + right_hashes
 }
 
-pub async fn sector_root_from_reader<R: AsyncRead + Unpin>(r: &mut R) -> Result<Hash256> {
+pub async fn sector_root_from_reader<R: AsyncRead + Unpin>(
+    r: &mut R,
+) -> Result<Hash256, ProofValidationError> {
     let mut acc = merkle::Accumulator::new();
     let r = r.take(SECTOR_SIZE as u64); // cap at a sector
     let mut r = io::BufReader::new(r);

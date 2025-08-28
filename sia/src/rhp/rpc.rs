@@ -1,5 +1,4 @@
 use crate::rhp::merkle;
-use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::marker::PhantomData;
@@ -13,16 +12,59 @@ use crate::encoding_async::{
     AsyncDecoder, AsyncEncoder, AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable,
     AsyncSiaEncode,
 };
-use crate::rhp::SECTOR_SIZE;
 use crate::rhp::merkle::ProofValidationError;
+use crate::rhp::{self, SECTOR_SIZE};
 use blake2b_simd::Params;
 
 use crate::signing::{PrivateKey, PublicKey, Signature};
 use crate::types::v2::{FileContract, SatisfiedPolicy, SiacoinElement, SiacoinInput, Transaction};
 use crate::types::{
-    Address, ChainIndex, Currency, FileContractID, Hash256, Leaf, SiacoinOutput, Specifier,
-    specifier,
+    Address, ChainIndex, Currency, FileContractID, Hash256, Leaf, SiacoinOutput, specifier,
 };
+
+macro_rules! impl_rpc_request {
+    ($name:ident, $text:literal) => {
+        impl RPCRequest for $name {
+            async fn encode_request<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
+                specifier!($text).encode_async(w).await?;
+                self.encode_async(w).await?;
+                Ok(())
+            }
+        }
+        impl sealed::Sealed for $name {}
+    };
+}
+
+macro_rules! impl_rpc_response {
+    ($name:ident) => {
+        impl RPCResponse for $name {
+            async fn encode_response<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
+                false.encode_async(w).await?; // nil error
+                self.encode_async(w).await?;
+                Ok(())
+            }
+
+            async fn decode_response<D: AsyncDecoder>(r: &mut D) -> Result<Self, D::Error>
+            where
+                D::Error: From<rhp::Error>,
+            {
+                let has_error = bool::decode_async(r).await?;
+                match has_error {
+                    false => {
+                        let resp = Self::decode_async(r).await?;
+                        Ok(resp)
+                    }
+                    true => {
+                        let error = RPCError::decode_async(r).await?;
+                        Err(Error::from(error).into())
+                    }
+                }
+            }
+        }
+
+        impl sealed::Sealed for $name {}
+    };
+}
 
 pub trait RenterContractSigner {
     fn public_key(&self) -> PublicKey;
@@ -61,6 +103,7 @@ pub trait TransactionBuilder {
 struct HostInputsResponse {
     pub host_inputs: Vec<SiacoinInput>,
 }
+impl_rpc_response!(HostInputsResponse);
 
 /// RPCFormContractThirdResponse contains the finalized formation
 /// transaction set.
@@ -69,6 +112,7 @@ struct TransactionSetResponse {
     pub basis: ChainIndex,
     pub transaction_set: Vec<Transaction>,
 }
+impl_rpc_response!(TransactionSetResponse);
 
 /// HostSignatureResponse contains the host's signature for a
 /// contract revision.
@@ -252,6 +296,7 @@ struct RPCFreeSectorsResponse {
     pub old_leaf_hashes: Vec<Hash256>,
     pub new_merkle_root: Hash256,
 }
+impl_rpc_response!(RPCFreeSectorsResponse);
 
 /// RPCLatestRevisionRequest is the request type for getting the latest
 /// revision of a file contract.
@@ -455,10 +500,8 @@ impl std::error::Error for RPCError {}
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("transport error: {0}")]
-    Transport(String),
     #[error("IO error: {0}")]
-    IO(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
     #[error("Encoding error: {0}")]
     Encoding(#[from] EncodingError),
 
@@ -467,6 +510,12 @@ pub enum Error {
 
     #[error("not enough host funds {0} < {1}")]
     NotEnoughHostFunds(Currency, Currency),
+
+    #[error("invalid response: {0}")]
+    InvalidResponse(String),
+
+    #[error("invalid signature")]
+    InvalidSignature,
 
     #[error("expected single file contract in response, found {0}")]
     ExpectedContractTransaction(usize),
@@ -565,49 +614,41 @@ impl Usage {
     }
 }
 
-pub trait RPCRequest: AsyncSiaEncodable + AsyncSiaDecodable {
-    const RPC_ID: Specifier;
+pub trait RPCRequest: Sized + sealed::Sealed {
+    fn encode_request<E: AsyncEncoder>(
+        &self,
+        w: &mut E,
+    ) -> impl Future<Output = Result<(), E::Error>>;
 }
 
-/// A TransportStream is a trait for sending and receiving RPC requests and responses.
-/// It abstracts the underlying transport mechanism, allowing for different implementations
-/// (e.g., TCP, QUIC, WebTransport) to be used without changing the RPC logic.
-pub trait TransportStream: AsyncEncoder + AsyncDecoder + Unpin + Sized {}
-
-impl<T: AsyncEncoder + AsyncDecoder + Unpin> TransportStream for T {}
-
-struct Transport<T: TransportStream> {
-    stream: T,
+pub trait RPCResponse: Sized + sealed::Sealed {
+    fn decode_response<D: AsyncDecoder>(r: &mut D) -> impl Future<Output = Result<Self, D::Error>>
+    where
+        D::Error: From<rhp::Error>;
+    fn encode_response<E: AsyncEncoder>(
+        &self,
+        w: &mut E,
+    ) -> impl Future<Output = Result<(), E::Error>>;
 }
 
-impl<T: TransportStream> Transport<T> {
-    async fn write_request<R: RPCRequest>(&mut self, request: &R) -> Result<(), Error> {
-        self.stream.write_all(R::RPC_ID.as_ref()).await?;
-        request.encode_async(&mut self.stream).await?;
-        Ok(())
-    }
+mod sealed {
+    pub trait Sealed {}
+}
 
-    async fn write_response<R: AsyncSiaEncodable>(&mut self, response: &R) -> Result<(), Error> {
-        self.stream.write_all(&[0]).await?; // nil error
-        response.encode_async(&mut self.stream).await?;
-        Ok(())
-    }
+pub trait Transport {
+    type Error: From<Error>;
 
-    async fn read_response<R: AsyncSiaDecodable>(&mut self) -> Result<R, Error> {
-        let has_error = bool::decode_async(&mut self.stream).await?;
-        match has_error {
-            false => {
-                let resp = R::decode_async(&mut self.stream).await?;
-                Ok(resp)
-            }
-            true => {
-                let error = RPCError::decode_async(&mut self.stream)
-                    .await
-                    .map(Error::RPC)?;
-                Err(error)
-            }
-        }
-    }
+    fn write_request<R: RPCRequest>(
+        &mut self,
+        request: &R,
+    ) -> impl Future<Output = Result<(), Self::Error>>;
+
+    fn write_response<R: RPCResponse>(
+        &mut self,
+        response: &R,
+    ) -> impl Future<Output = Result<(), Self::Error>>;
+
+    fn read_response<R: RPCResponse>(&mut self) -> impl Future<Output = Result<R, Self::Error>>;
 }
 
 /// Marker type for the initial stage of the RPC process.
@@ -630,15 +671,14 @@ pub struct RPCComplete;
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCSettingsRequest {}
 
-impl RPCRequest for RPCSettingsRequest {
-    const RPC_ID: Specifier = specifier!("Settings");
-}
+impl_rpc_request!(RPCSettingsRequest, "Settings");
 
 /// RPCSettingsResponse is the response type for the RPC settings endpoint.
 #[derive(Debug, PartialEq, AsyncSiaDecode, AsyncSiaEncode)]
 struct RPCSettingsResponse {
     pub settings: HostSettings,
 }
+impl_rpc_response!(RPCSettingsResponse);
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -648,14 +688,13 @@ pub struct RPCSettingsResult {
 }
 
 /// RPCSettings returns the host's current settings.
-pub struct RPCSettings<T: TransportStream, State> {
-    transport: Transport<T>,
+pub struct RPCSettings<T: Transport, State> {
+    transport: T,
     state: PhantomData<State>,
 }
 
-impl<T: TransportStream> RPCSettings<T, RPCInit> {
-    pub async fn send_request(stream: T) -> Result<RPCSettings<T, RPCComplete>, Error> {
-        let mut transport = Transport { stream };
+impl<T: Transport> RPCSettings<T, RPCInit> {
+    pub async fn send_request(mut transport: T) -> Result<RPCSettings<T, RPCComplete>, T::Error> {
         transport.write_request(&RPCSettingsRequest {}).await?;
 
         Ok(RPCSettings {
@@ -665,8 +704,8 @@ impl<T: TransportStream> RPCSettings<T, RPCInit> {
     }
 }
 
-impl<T: TransportStream> RPCSettings<T, RPCComplete> {
-    pub async fn complete(mut self) -> Result<RPCSettingsResult, Error> {
+impl<T: Transport> RPCSettings<T, RPCComplete> {
+    pub async fn complete(mut self) -> Result<RPCSettingsResult, T::Error> {
         let response: RPCSettingsResponse = self.transport.read_response().await?;
         Ok(RPCSettingsResult {
             settings: response.settings,
@@ -686,10 +725,7 @@ struct RPCWriteSectorRequest {
     pub token: AccountToken,
     pub data: Vec<u8>,
 }
-
-impl RPCRequest for RPCWriteSectorRequest {
-    const RPC_ID: Specifier = specifier!("WriteSector");
-}
+impl_rpc_request!(RPCWriteSectorRequest, "WriteSector");
 
 /// RPCWriteSectorResponse contains the root hash of the written sector.
 ///
@@ -698,6 +734,7 @@ impl RPCRequest for RPCWriteSectorRequest {
 struct RPCWriteSectorResponse {
     pub root: Hash256,
 }
+impl_rpc_response!(RPCWriteSectorResponse);
 
 /// RPCWriteSectorResult contains the result of a write sector operation,
 pub struct RPCWriteSectorResult {
@@ -708,21 +745,20 @@ pub struct RPCWriteSectorResult {
 /// RPCWriteSector writes a sector to the host's temporary storage.
 /// The host will store the sector for 432 blocks.
 /// If the sector is not appended to a contract within that time, it will be deleted.
-pub struct RPCWriteSector<T: TransportStream, State> {
+pub struct RPCWriteSector<T: Transport, State> {
     root: Hash256,
-    transport: Transport<T>,
+    transport: T,
     usage: Usage,
     state: PhantomData<State>,
 }
 
-impl<T: TransportStream> RPCWriteSector<T, RPCInit> {
+impl<T: Transport> RPCWriteSector<T, RPCInit> {
     pub async fn send_request(
-        stream: T,
+        mut transport: T,
         prices: HostPrices,
         token: AccountToken,
         data: Vec<u8>,
-    ) -> Result<RPCWriteSector<T, RPCComplete>, Error> {
-        let mut transport = Transport { stream };
+    ) -> Result<RPCWriteSector<T, RPCComplete>, T::Error> {
         let usage = Usage::write_sector(&prices, data.len());
         let request = RPCWriteSectorRequest {
             prices,
@@ -731,10 +767,11 @@ impl<T: TransportStream> RPCWriteSector<T, RPCInit> {
         };
 
         let mut data = &request.data[..];
-        let (_, root) = try_join!(
-            transport.write_request(&request),
-            merkle::sector_root_from_reader(&mut data).map_err(Error::ProofValidation),
-        )?;
+        let (_, root) = try_join!(transport.write_request(&request), async move {
+            merkle::sector_root_from_reader(&mut data)
+                .await
+                .map_err(|e| Error::from(e).into())
+        },)?;
 
         Ok(RPCWriteSector {
             root,
@@ -745,14 +782,15 @@ impl<T: TransportStream> RPCWriteSector<T, RPCInit> {
     }
 }
 
-impl<T: TransportStream> RPCWriteSector<T, RPCComplete> {
-    pub async fn complete(mut self) -> Result<RPCWriteSectorResult, Error> {
+impl<T: Transport> RPCWriteSector<T, RPCComplete> {
+    pub async fn complete(mut self) -> Result<RPCWriteSectorResult, T::Error> {
         let response: RPCWriteSectorResponse = self.transport.read_response().await?;
         if response.root != self.root {
             return Err(Error::SectorRootMismatch {
                 expected: self.root,
                 got: response.root,
-            });
+            }
+            .into());
         }
 
         Ok(RPCWriteSectorResult {
@@ -772,10 +810,7 @@ struct RPCReadSectorRequest {
     pub offset: u64,
     pub length: u64,
 }
-
-impl RPCRequest for RPCReadSectorRequest {
-    const RPC_ID: Specifier = specifier!("ReadSector");
-}
+impl_rpc_request!(RPCReadSectorRequest, "ReadSector");
 
 /// RPCReadSectorResponse contains the proof and data for a sector read request.
 /// The renter must validate the proof against the root hash.
@@ -783,6 +818,7 @@ impl RPCRequest for RPCReadSectorRequest {
 struct RPCReadSectorResponse {
     pub data: merkle::RangeProof,
 }
+impl_rpc_response!(RPCReadSectorResponse);
 
 pub struct RPCReadSectorResult {
     pub data: Vec<u8>,
@@ -792,8 +828,8 @@ pub struct RPCReadSectorResult {
 /// RPCReadSector reads a sector from the host.
 /// The proof must be validated against the expected
 /// root hash.
-pub struct RPCReadSector<T: TransportStream, State> {
-    transport: Transport<T>,
+pub struct RPCReadSector<T: Transport, State> {
+    transport: T,
     usage: Usage,
     state: PhantomData<State>,
     offset: usize,
@@ -801,16 +837,15 @@ pub struct RPCReadSector<T: TransportStream, State> {
     root: Hash256,
 }
 
-impl<T: TransportStream> RPCReadSector<T, RPCInit> {
+impl<T: Transport> RPCReadSector<T, RPCInit> {
     pub async fn send_request(
-        stream: T,
+        mut transport: T,
         prices: HostPrices,
         token: AccountToken,
         root: Hash256,
         length: usize,
         offset: usize,
-    ) -> Result<RPCReadSector<T, RPCComplete>, Error> {
-        let mut transport = Transport { stream };
+    ) -> Result<RPCReadSector<T, RPCComplete>, T::Error> {
         let usage = Usage::read_sector(&prices, length);
         let request = RPCReadSectorRequest {
             prices,
@@ -832,14 +867,18 @@ impl<T: TransportStream> RPCReadSector<T, RPCInit> {
     }
 }
 
-impl<T: TransportStream> RPCReadSector<T, RPCComplete> {
-    pub async fn complete(mut self) -> Result<RPCReadSectorResult, Error> {
+impl<T: Transport> RPCReadSector<T, RPCComplete> {
+    pub async fn complete(mut self) -> Result<RPCReadSectorResult, T::Error> {
         let response: RPCReadSectorResponse = self.transport.read_response().await?;
 
         // verify proof
         let start = self.offset / SEGMENT_SIZE;
         let end = (self.offset + self.length).div_ceil(SEGMENT_SIZE);
-        let data = response.data.verify(&self.root, start, end).await?;
+        let data = response
+            .data
+            .verify(&self.root, start, end)
+            .await
+            .map_err(Error::ProofValidation)?;
 
         Ok(RPCReadSectorResult {
             usage: self.usage,
@@ -854,16 +893,14 @@ impl<T: TransportStream> RPCReadSector<T, RPCComplete> {
 struct RPCAccountBalanceRequest {
     pub account: PublicKey,
 }
-
-impl RPCRequest for RPCAccountBalanceRequest {
-    const RPC_ID: Specifier = specifier!("AccountBalance");
-}
+impl_rpc_request!(RPCAccountBalanceRequest, "AccountBalance");
 
 /// RPCAccountBalanceResponse contains the balance of an account.
 #[derive(Debug, PartialEq, AsyncSiaEncode, AsyncSiaDecode)]
 struct RPCAccountBalanceResponse {
     pub balance: Currency,
 }
+impl_rpc_response!(RPCAccountBalanceResponse);
 
 /// RPCAccountBalanceResult contains the result of an account balance RPC.
 pub struct RPCAccountBalanceResult {
@@ -872,17 +909,16 @@ pub struct RPCAccountBalanceResult {
 }
 
 /// Requests the current balance of an account.
-pub struct RPCAccountBalance<T: TransportStream, State> {
-    transport: Transport<T>,
+pub struct RPCAccountBalance<T: Transport, State> {
+    transport: T,
     state: PhantomData<State>,
 }
 
-impl<T: TransportStream> RPCAccountBalance<T, RPCInit> {
+impl<T: Transport> RPCAccountBalance<T, RPCInit> {
     pub async fn send_request(
-        stream: T,
+        mut transport: T,
         account: PublicKey,
-    ) -> Result<RPCAccountBalance<T, RPCComplete>, Error> {
-        let mut transport = Transport { stream };
+    ) -> Result<RPCAccountBalance<T, RPCComplete>, T::Error> {
         let request = RPCAccountBalanceRequest { account };
         transport.write_request(&request).await?;
 
@@ -893,8 +929,8 @@ impl<T: TransportStream> RPCAccountBalance<T, RPCInit> {
     }
 }
 
-impl<T: TransportStream> RPCAccountBalance<T, RPCComplete> {
-    pub async fn complete(mut self) -> Result<RPCAccountBalanceResult, Error> {
+impl<T: Transport> RPCAccountBalance<T, RPCComplete> {
+    pub async fn complete(mut self) -> Result<RPCAccountBalanceResult, T::Error> {
         let response: RPCAccountBalanceResponse = self.transport.read_response().await?;
         Ok(RPCAccountBalanceResult {
             balance: response.balance,
@@ -923,10 +959,7 @@ struct RPCFormContractRequest {
     pub renter_inputs: Vec<SiacoinElement>,
     pub renter_parents: Vec<Transaction>,
 }
-
-impl RPCRequest for RPCFormContractRequest {
-    const RPC_ID: Specifier = specifier!("FormContract");
-}
+impl_rpc_request!(RPCFormContractRequest, "FormContract");
 
 /// RenterFormContractSignaturesResponse contains the renter's contract signature and
 /// Siacoin input signatures for the contract formation transaction.
@@ -937,6 +970,7 @@ struct RenterFormContractSignaturesResponse {
     pub renter_contract_signature: Signature,
     pub renter_satisfied_policies: Vec<SatisfiedPolicy>,
 }
+impl_rpc_response!(RenterFormContractSignaturesResponse);
 
 pub struct RPCFormContractParams {
     state: ChainState,
@@ -948,11 +982,11 @@ pub struct RPCFormContractParams {
 
 pub struct RPCFormContract<T, S, B, State>
 where
-    T: TransportStream,
+    T: Transport,
     S: RenterContractSigner,
     B: TransactionBuilder,
 {
-    transport: Transport<T>,
+    transport: T,
     contract_signer: S,
     transaction_builder: B,
     state: PhantomData<State>,
@@ -964,7 +998,7 @@ where
     renter_inputs_len: usize,
 }
 
-impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder, State>
+impl<T: Transport, S: RenterContractSigner, B: TransactionBuilder, State>
     RPCFormContract<T, S, B, State>
 {
     pub fn file_contract(&self) -> &FileContract {
@@ -987,16 +1021,15 @@ pub struct RPCFormContractResult {
     pub usage: Usage,
 }
 
-impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
+impl<T: Transport, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, RPCInit>
 {
     pub async fn send_request(
-        stream: T,
+        mut transport: T,
         contract_signer: S,
         transaction_builder: B,
         params: RPCFormContractParams,
-    ) -> Result<RPCFormContract<T, S, B, RPCAwaitingHostInputs>, Error> {
-        let mut transport = Transport { stream };
+    ) -> Result<RPCFormContract<T, S, B, RPCAwaitingHostInputs>, T::Error> {
         let usage = Usage::form_contract(&params.prices);
         let mut contract = FileContract {
             revision_number: 0,
@@ -1033,8 +1066,9 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
             + params.prices.contract_price
             + miner_fee
             + contract.tax(&params.state);
-        let renter_basis =
-            transaction_builder.fund_transaction(&mut formation_txn, renter_fund_amount)?;
+        let renter_basis = transaction_builder
+            .fund_transaction(&mut formation_txn, renter_fund_amount)
+            .map_err(Error::from)?;
 
         let request = RPCFormContractRequest {
             prices: params.prices,
@@ -1064,12 +1098,12 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     }
 }
 
-impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
+impl<T: Transport, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, RPCAwaitingHostInputs>
 {
     pub async fn receive_host_inputs(
         mut self,
-    ) -> Result<RPCFormContract<T, S, B, RPCAwaitingRenterSignatures>, Error> {
+    ) -> Result<RPCFormContract<T, S, B, RPCAwaitingRenterSignatures>, T::Error> {
         let host_inputs_response: HostInputsResponse = self.transport.read_response().await?;
         let mut formation_txn = self.formation_transaction;
 
@@ -1080,7 +1114,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
             .map(|si| si.parent.siacoin_output.value)
             .sum();
         if host_sum < host_funding {
-            return Err(Error::NotEnoughHostFunds(host_sum, host_funding));
+            return Err(Error::NotEnoughHostFunds(host_sum, host_funding).into());
         } else if host_sum > host_funding {
             formation_txn.siacoin_outputs.push(SiacoinOutput {
                 address: self.contract.host_output.address.clone(),
@@ -1103,7 +1137,7 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     }
 }
 
-impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
+impl<T: Transport, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, RPCAwaitingRenterSignatures>
 {
     pub fn host_inputs(&self) -> &[SiacoinInput] {
@@ -1112,14 +1146,15 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
 
     pub async fn send_renter_signatures(
         mut self,
-    ) -> Result<RPCFormContract<T, S, B, RPCComplete>, Error> {
+    ) -> Result<RPCFormContract<T, S, B, RPCComplete>, T::Error> {
         let mut formation_txn = self.formation_transaction;
         let mut contract = self.contract;
 
         self.contract_signer
             .sign_revision(&self.chain_state, &mut contract);
         self.transaction_builder
-            .sign_transaction(&mut formation_txn)?;
+            .sign_transaction(&mut formation_txn)
+            .map_err(Error::from)?;
 
         let renter_sigs_response = RenterFormContractSignaturesResponse {
             renter_contract_signature: contract.renter_signature.clone(),
@@ -1144,19 +1179,19 @@ impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
     }
 }
 
-impl<T: TransportStream, S: RenterContractSigner, B: TransactionBuilder>
+impl<T: Transport, S: RenterContractSigner, B: TransactionBuilder>
     RPCFormContract<T, S, B, RPCComplete>
 {
-    pub async fn complete(mut self) -> Result<RPCFormContractResult, Error> {
+    pub async fn complete(mut self) -> Result<RPCFormContractResult, T::Error> {
         let resp: TransactionSetResponse = self.transport.read_response().await?;
         let formation_txn = resp
             .transaction_set
             .last()
             .ok_or(Error::ExpectedTransactionSet)?;
         if formation_txn.file_contracts.len() != 1 {
-            return Err(Error::ExpectedContractTransaction(
-                formation_txn.file_contracts.len(),
-            ));
+            return Err(
+                Error::ExpectedContractTransaction(formation_txn.file_contracts.len()).into(),
+            );
         }
         let contract = formation_txn.file_contracts.first().unwrap().clone();
 
@@ -1176,6 +1211,69 @@ mod test {
     use tokio::io::AsyncWriteExt;
 
     use super::*;
+
+    struct BufStream {
+        buf: Cursor<Vec<u8>>,
+    }
+
+    impl BufStream {
+        fn new() -> Self {
+            Self {
+                buf: Cursor::new(Vec::new()),
+            }
+        }
+
+        fn inner(self) -> Vec<u8> {
+            self.buf.clone().into_inner()
+        }
+    }
+
+    impl From<Cursor<Vec<u8>>> for BufStream {
+        fn from(buf: Cursor<Vec<u8>>) -> Self {
+            Self { buf }
+        }
+    }
+
+    impl AsyncDecoder for BufStream {
+        type Error = Error;
+        async fn decode_buf(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
+            self.buf.decode_buf(buf).await?;
+            Ok(())
+        }
+    }
+
+    impl AsyncEncoder for BufStream {
+        type Error = Error;
+        async fn encode_buf(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
+            self.buf.encode_buf(buf).await?;
+            Ok(())
+        }
+    }
+
+    impl Transport for BufStream {
+        type Error = Error;
+
+        async fn write_request<R: RPCRequest>(&mut self, request: &R) -> Result<(), Self::Error> {
+            request.encode_request(self).await?;
+            self.buf.flush().await?;
+            self.buf.set_position(0); // ready to read
+            Ok(())
+        }
+
+        async fn write_response<R: RPCResponse>(
+            &mut self,
+            response: &R,
+        ) -> Result<(), Self::Error> {
+            response.encode_response(self).await?;
+            self.buf.flush().await?;
+            self.buf.set_position(0); // ready to read
+            Ok(())
+        }
+
+        async fn read_response<R: RPCResponse>(&mut self) -> Result<R, Self::Error> {
+            R::decode_response(self).await
+        }
+    }
 
     const TEST_PRICES: HostPrices = HostPrices {
         contract_price: Currency::siacoins(1),
@@ -1242,19 +1340,16 @@ mod test {
             length: 16,
         };
 
-        let mut buf = Cursor::new(Vec::<u8>::new());
-        let mut transport = Transport { stream: &mut buf };
+        let mut transport = BufStream::new();
         transport.write_request(&req).await.unwrap();
-        buf.flush().await.unwrap();
-        assert_eq!(buf.into_inner(), hex::decode(EXPECTED_HEX).unwrap());
+        assert_eq!(transport.inner(), hex::decode(EXPECTED_HEX).unwrap());
     }
 
     #[tokio::test]
     async fn test_read_response() {
         const HEX_BYTES: &str = "00030000000000000001000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000000003000000000000000400000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000";
 
-        let mut buf = Cursor::new(hex::decode(HEX_BYTES).unwrap());
-        let mut transport = Transport { stream: &mut buf };
+        let mut transport = BufStream::from(Cursor::new(hex::decode(HEX_BYTES).unwrap()));
         let resp: RPCFreeSectorsResponse = transport.read_response().await.unwrap();
 
         let expected = RPCFreeSectorsResponse {
@@ -1306,8 +1401,7 @@ mod test {
     async fn test_response_error() {
         const HEX_BYTES: &str = "01010b00000000000000666f6f206261722062617a";
 
-        let mut buf = Cursor::new(hex::decode(HEX_BYTES).unwrap());
-        let mut transport = Transport { stream: &mut buf };
+        let mut transport = BufStream::from(Cursor::new(hex::decode(HEX_BYTES).unwrap()));
         let err = transport
             .read_response::<RPCReadSectorResponse>()
             .await
@@ -1331,8 +1425,8 @@ mod test {
         let mut data: Vec<u8> = vec![0u8; SECTOR_SIZE];
         rand::fill(&mut data[..]);
         let root = merkle::sector_root(&data);
-        let stream = Cursor::new(Vec::<u8>::new());
-        let rpc = RPCWriteSector::send_request(stream, TEST_PRICES, TEST_ACCOUNT_TOKEN, data)
+        let transport = BufStream::new();
+        let rpc = RPCWriteSector::send_request(transport, TEST_PRICES, TEST_ACCOUNT_TOKEN, data)
             .await
             .unwrap();
         assert_eq!(rpc.root, root);
@@ -1346,13 +1440,10 @@ mod test {
 
         // helper to prepare the transport and fill it with the expected host
         // response
-        let transport = async || -> Transport<_> {
-            let mut transport = Transport {
-                stream: Cursor::new(Vec::<u8>::new()),
-            };
+        let transport = async || -> BufStream {
+            let mut transport = BufStream::new();
             let response = RPCWriteSectorResponse { root };
             transport.write_response(&response).await.unwrap();
-            transport.stream.set_position(0);
             transport
         };
 

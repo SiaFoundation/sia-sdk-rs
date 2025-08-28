@@ -1,102 +1,111 @@
-use super::{Error, Result};
+use super::Error as EncodingError;
 use time::{Duration, OffsetDateTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub trait AsyncEncoder {
-    fn write_all(&mut self, buf: &[u8]) -> impl Future<Output = Result<()>>;
+    type Error: From<EncodingError>;
+    fn encode_buf(&mut self, buf: &[u8]) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
 pub trait AsyncDecoder {
-    fn read_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<()>>;
+    type Error: From<EncodingError>;
+    fn decode_buf(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
 pub trait AsyncSiaEncodable {
-    fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> impl Future<Output = Result<()>>;
+    fn encode_async<E: AsyncEncoder>(
+        &self,
+        w: &mut E,
+    ) -> impl Future<Output = Result<(), E::Error>>;
 }
 
 pub trait AsyncSiaDecodable: Sized {
-    fn decode_async<D: AsyncDecoder>(r: &mut D) -> impl Future<Output = Result<Self>>;
+    fn decode_async<D: AsyncDecoder>(r: &mut D) -> impl Future<Output = Result<Self, D::Error>>;
 }
 
 impl<T: AsyncWriteExt + Unpin> AsyncEncoder for T {
-    async fn write_all(&mut self, buf: &[u8]) -> Result<()> {
+    type Error = EncodingError;
+    async fn encode_buf(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
         self.write_all(buf).await?;
         Ok(())
     }
 }
 
 impl<T: AsyncReadExt + Unpin> AsyncDecoder for T {
-    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+    type Error = EncodingError;
+    async fn decode_buf(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
         self.read_exact(buf).await?;
         Ok(())
     }
 }
 
 impl AsyncSiaEncodable for u8 {
-    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<()> {
-        w.write_all(&[*self]).await
+    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
+        w.encode_buf(&[*self]).await
     }
 }
 
 impl AsyncSiaDecodable for u8 {
-    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
+    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self, D::Error> {
         let mut buf = [0; 1];
-        r.read_exact(&mut buf).await?;
+        r.decode_buf(&mut buf).await?;
         Ok(buf[0])
     }
 }
 
 impl AsyncSiaEncodable for bool {
-    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<()> {
+    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
         (*self as u8).encode_async(w).await
     }
 }
 
 impl AsyncSiaDecodable for bool {
-    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
+    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self, D::Error> {
         let v = u8::decode_async(r).await?;
         match v {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(Error::InvalidValue("requires 0 or 1".into())),
+            _ => Err(EncodingError::InvalidValue("requires 0 or 1".into()).into()),
         }
     }
 }
 
 impl AsyncSiaEncodable for OffsetDateTime {
-    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<()> {
+    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
         self.unix_timestamp().encode_async(w).await
     }
 }
 
 impl AsyncSiaDecodable for OffsetDateTime {
-    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
+    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self, D::Error> {
         let timestamp = i64::decode_async(r).await?;
-        OffsetDateTime::from_unix_timestamp(timestamp).map_err(|_| Error::InvalidTimestamp)
+        OffsetDateTime::from_unix_timestamp(timestamp)
+            .map_err(|e| EncodingError::InvalidValue(e.to_string()).into())
     }
 }
 
 impl AsyncSiaEncodable for Duration {
-    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<()> {
+    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
         (self.whole_nanoseconds() as u64).encode_async(w).await
     }
 }
 
 impl AsyncSiaDecodable for Duration {
-    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
+    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self, D::Error> {
         let ns = u64::decode_async(r).await?;
         if ns > i64::MAX as u64 {
-            return Err(Error::InvalidValue(format!(
+            return Err(EncodingError::InvalidValue(format!(
                 "duration {ns} must be less than {}",
                 i64::MAX
-            )));
+            ))
+            .into());
         }
         Ok(Duration::nanoseconds(ns as i64))
     }
 }
 
 impl<T: AsyncSiaEncodable> AsyncSiaEncodable for [T] {
-    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<()> {
+    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
         self.len().encode_async(w).await?;
         for item in self {
             item.encode_async(w).await?;
@@ -106,7 +115,7 @@ impl<T: AsyncSiaEncodable> AsyncSiaEncodable for [T] {
 }
 
 impl<T: AsyncSiaEncodable> AsyncSiaEncodable for Option<T> {
-    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<()> {
+    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
         match self {
             Some(value) => {
                 1u8.encode_async(w).await?;
@@ -119,7 +128,7 @@ impl<T: AsyncSiaEncodable> AsyncSiaEncodable for Option<T> {
 }
 
 impl<T: AsyncSiaDecodable> AsyncSiaDecodable for Option<T> {
-    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
+    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self, D::Error> {
         match bool::decode_async(r).await? {
             true => Ok(Some(T::decode_async(r).await?)),
             false => Ok(None),
@@ -131,7 +140,7 @@ impl<T> AsyncSiaEncodable for Vec<T>
 where
     T: AsyncSiaEncodable,
 {
-    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<()> {
+    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
         self.len().encode_async(w).await?;
         for item in self {
             item.encode_async(w).await?;
@@ -144,7 +153,7 @@ impl<T> AsyncSiaDecodable for Vec<T>
 where
     T: AsyncSiaDecodable,
 {
-    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
+    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self, D::Error> {
         let mut vec = Vec::new();
         // note: the vec is not pre-allocated
         // to prevent abuse by sending a large len
@@ -156,7 +165,7 @@ where
 }
 
 impl AsyncSiaEncodable for String {
-    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<()> {
+    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
         let bytes = self.as_bytes();
         bytes.encode_async(w).await?;
         Ok(())
@@ -164,22 +173,22 @@ impl AsyncSiaEncodable for String {
 }
 
 impl AsyncSiaDecodable for String {
-    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
+    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self, D::Error> {
         let bytes = Vec::<u8>::decode_async(r).await?;
-        String::from_utf8(bytes).map_err(|e| Error::InvalidValue(e.to_string()))
+        String::from_utf8(bytes).map_err(|e| EncodingError::InvalidValue(e.to_string()).into())
     }
 }
 
 impl<const N: usize> AsyncSiaEncodable for [u8; N] {
-    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<()> {
-        w.write_all(self).await
+    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
+        w.encode_buf(self).await
     }
 }
 
 impl<const N: usize> AsyncSiaDecodable for [u8; N] {
-    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
+    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self, D::Error> {
         let mut arr = [0u8; N];
-        r.read_exact(&mut arr).await?;
+        r.decode_buf(&mut arr).await?;
         Ok(arr)
     }
 }
@@ -188,15 +197,15 @@ macro_rules! impl_sia_numeric {
     ($($t:ty),*) => {
         $(
             impl AsyncSiaEncodable for $t {
-                async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<()> {
-                    w.write_all(&(*self as u64).to_le_bytes()).await
+                async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
+                    w.encode_buf(&(*self as u64).to_le_bytes()).await
                 }
             }
 
             impl AsyncSiaDecodable for $t {
-                async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self> {
+                async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self, D::Error> {
                     let mut buf = [0u8; 8];
-                    r.read_exact(&mut buf).await?;
+                    r.decode_buf(&mut buf).await?;
                     Ok(u64::from_le_bytes(buf) as Self)
                 }
             }
