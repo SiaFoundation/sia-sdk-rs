@@ -474,7 +474,11 @@ mod test {
                 return Err(Error::NoMoreHosts);
             }
             let root = sector_root(data.as_ref());
-            self.inner.sectors.lock().unwrap().insert(root, data.to_vec());
+            self.inner
+                .sectors
+                .lock()
+                .unwrap()
+                .insert(root, data.to_vec());
             Ok(root)
         }
 
