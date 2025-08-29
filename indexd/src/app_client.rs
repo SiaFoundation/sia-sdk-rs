@@ -197,7 +197,7 @@ impl Client {
     /// Helper to send a signed DELETE request.
     async fn delete(&self, path: &str) -> Result<()> {
         let url = self.url.join(path)?;
-        Self::handle_response(
+        Self::handle_empty_response(
             self.client
                 .delete(url.clone())
                 .query(&self.sign(url, Method::DELETE, None, OffsetDateTime::now_utc()))
@@ -233,6 +233,15 @@ impl Client {
     async fn handle_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
         if resp.status().is_success() {
             Ok(resp.json::<T>().await?)
+        } else {
+            Err(Error::ApiError(resp.text().await?))
+        }
+    }
+
+    /// Same as handle_response but for empty responses.
+    async fn handle_empty_response(resp: reqwest::Response) -> Result<()> {
+        if resp.status().is_success() {
+            Ok(())
         } else {
             Err(Error::ApiError(resp.text().await?))
         }
@@ -388,7 +397,12 @@ mod tests {
                 contains(("SiaIdx-Signature", any()))
             ])))
             .times(3)
-            .respond_with(Response::builder().status(200).body("{}").unwrap()),
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body("{}")
+                    .unwrap(),
+            ),
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
@@ -440,7 +454,7 @@ mod tests {
             ))
             .respond_with(
                 Response::builder()
-                    .status(200)
+                    .status(StatusCode::OK)
                     .body(TEST_SLAB_JSON)
                     .unwrap(),
             ),
@@ -476,7 +490,7 @@ mod tests {
             ])
             .respond_with(
                 Response::builder()
-                    .status(200)
+                    .status(StatusCode::OK)
                     .body("\"43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28\"")
                     .unwrap(),
             ),
@@ -485,6 +499,21 @@ mod tests {
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string(), app_key).unwrap();
         assert_eq!(client.pin_slab(&slab).await.unwrap(), slab_id);
+    }
+
+    #[tokio::test]
+    async fn test_unpin_slab() {
+        let slab_id = hash_256!("43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28");
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(request::method_path("DELETE", format!("/slabs/{slab_id}")))
+                .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        client.unpin_slab(&slab_id).await.unwrap();
     }
 
     #[tokio::test]
