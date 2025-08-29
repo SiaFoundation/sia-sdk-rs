@@ -1,7 +1,6 @@
 use blake2b_simd::Params;
-use reqwest::header::HeaderMap;
-use reqwest::{Body, IntoUrl, Method, Request, Url};
-use serde_json::{to_string, to_vec};
+use reqwest::{IntoUrl, Method, Url};
+use serde_json::to_vec;
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -14,6 +13,9 @@ use sia::types::Hash256;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("invalid header value: {0}")]
+    InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),
+
     #[error("http error: {0}")]
     Reqwest(#[from] reqwest::Error),
 
@@ -73,7 +75,7 @@ impl Client {
         Ok(self
             .client
             .get(&url)
-            .headers(self.sign(&url, Method::GET, None))
+            .query(&self.sign(&url, Method::GET, None, OffsetDateTime::now_utc())?)
             .send()
             .await?
             .json::<D>()
@@ -92,7 +94,7 @@ impl Client {
         Ok(self
             .client
             .post(&url)
-            .headers(self.sign(&url, Method::POST, Some(&body)))
+            .query(&self.sign(&url, Method::POST, Some(&body), OffsetDateTime::now_utc())?)
             .body(body)
             .send()
             .await?
@@ -117,9 +119,26 @@ impl Client {
         state.finalize().into()
     }
 
-    fn sign<U: IntoUrl>(&self, url: U, method: Method, body: Option<&[u8]>) -> HeaderMap {
-        let valid_until = OffsetDateTime::now_utc() + time::Duration::hours(1);
-        unimplemented!();
+    fn sign<U: IntoUrl>(
+        &self,
+        url: U,
+        method: Method,
+        body: Option<&[u8]>,
+        current_time: OffsetDateTime,
+    ) -> Result<[(&'static str, String); 3]> {
+        let valid_until = current_time + time::Duration::hours(1);
+        let hash = Self::request_hash(url.into_url()?, method, body, valid_until);
+        Ok([
+            (
+                "SiaIdx-ValidUntil",
+                valid_until.unix_timestamp().to_string(),
+            ),
+            ("SiaIdx-Credential", self.app_key.public_key().to_string()),
+            (
+                "SiaIdx-Signature",
+                self.app_key.sign(hash.as_ref()).to_string(),
+            ),
+        ])
     }
 }
 
@@ -132,8 +151,81 @@ mod tests {
     use httptest::matchers::*;
     use httptest::{Expectation, Server};
 
+    #[test]
+    fn test_request_hash() {
+        let method = Method::POST;
+        let url = Url::parse("https://foo.bar").unwrap();
+        let valid_until = OffsetDateTime::from_unix_timestamp(123).unwrap();
+        let body = b"hello world!";
+        let hash = Client::request_hash(url, method, Some(body), valid_until);
+        assert_eq!(
+            hash,
+            hash_256!("b94c04c0a6ffbac6bfa9ce847d2a5de34db3bc33ac4824412acf2597ba043bce")
+        )
+    }
+
+    #[test]
+    fn test_sign() {
+        let app_key = PrivateKey::from_seed(&[0u8; 32]);
+        let client = Client::new("https://foo.bar", app_key).unwrap();
+
+        // with body
+        let params = client
+            .sign(
+                "https://foo.bar/baz.jpg",
+                Method::POST,
+                Some("{}".as_bytes()),
+                OffsetDateTime::from_unix_timestamp(123).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(params[0], ("SiaIdx-ValidUntil", "3723".to_string()));
+        assert_eq!(
+            params[1],
+            (
+                "SiaIdx-Credential",
+                "ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            params[2],
+            (
+                "SiaIdx-Signature",
+                "8046d35eb80ea9cf8a4b1f3478bb1508bfc6aa1c4617e2841f32684c3f39b59fff02f9283e37976da2f5e5b4e2f3c9f1640228a451c29be3024a9a3271af4e0a"
+                    .to_string()
+            )
+        );
+
+        // without body
+        let params = client
+            .sign(
+                "https://foo.bar/baz.jpg",
+                Method::GET,
+                None,
+                OffsetDateTime::from_unix_timestamp(123).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(params[0], ("SiaIdx-ValidUntil", "3723".to_string()));
+        assert_eq!(
+            params[1],
+            (
+                "SiaIdx-Credential",
+                "ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            params[2],
+            (
+                "SiaIdx-Signature",
+                "40b37ae7db469c351797bc69e01277a8818d75b6cbcef922f0cffedd4229bcecdbdcf038010badda0eb35c38171bcc41aca5e4fab2f639bcd93e54aec3ef8005"
+                    .to_string()
+            )
+        );
+    }
+
     #[tokio::test]
-    async fn test_basic_auth() {
+    async fn test_signed_auth() {
         let server = Server::run();
 
         // expect 1 authenticated get and 1 authenticated post request
