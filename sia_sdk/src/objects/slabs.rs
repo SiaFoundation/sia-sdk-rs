@@ -1,8 +1,11 @@
+use serde::{Deserialize, Serialize};
+
 use crate::encoding::SiaEncodable;
 use crate::signing::PublicKey;
 use crate::types::Hash256;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 /// A Sector is a unit of data stored on the Sia network. It can be referenced by its Merkle root.
 pub struct Sector {
     pub root: Hash256,

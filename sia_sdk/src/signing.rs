@@ -29,12 +29,20 @@ impl<'de> Deserialize<'de> for PublicKey {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        let s = s.strip_prefix(Self::PREFIX).ok_or(Error::custom(format!(
-            "key must have prefix '{}'",
-            Self::PREFIX
-        )))?;
+        let result = s.parse().map_err(|e| Error::custom(format!("{e:?}")))?;
+        Ok(result)
+    }
+}
+
+impl std::str::FromStr for PublicKey {
+    type Err = crate::types::HexParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s
+            .strip_prefix(Self::PREFIX)
+            .ok_or(HexParseError::MissingPrefix)?;
         let mut pk = [0; 32];
-        hex::decode_to_slice(s, &mut pk).map_err(|e| Error::custom(format!("{e:?}")))?;
+        hex::decode_to_slice(s, &mut pk)?;
         Ok(Self::new(pk))
     }
 }
@@ -174,7 +182,7 @@ impl std::str::FromStr for Signature {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let data = hex::decode(s).map_err(HexParseError::HexError)?;
         if data.len() != 64 {
-            return Err(HexParseError::InvalidLength);
+            return Err(HexParseError::InvalidLength(data.len()));
         }
 
         let mut sig = [0u8; 64];

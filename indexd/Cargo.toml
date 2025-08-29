@@ -1,0 +1,26 @@
+[package]
+name = "indexd"
+version = "0.0.1"
+edition = "2024"
+repository = "https://github.com/SiaFoundation/sia-sdk-rs"
+license = "MIT"
+description = "SDK for interacting with the Indexd API"
+authors = ["The Sia Foundation"]
+categories = ["cryptography::cryptocurrencies"]
+keywords = ["sia", "decentralized", "blockchain", "depin", "storage"]
+
+[lib]
+name = "indexd"
+path = "src/lib.rs"
+
+[dependencies]
+reqwest = { version = "0.12.23", features = ["json"] }
+serde = "1.0.219"
+serde_json = "1.0.143"
+thiserror = "2.0.16"
+zeroize = "1.8.1"
+sia_sdk = { path = "../sia_sdk" }
+
+[dev-dependencies]
+httptest = "0.16.3"
+tokio = { version = "1.47.1", features = ["macros"] }

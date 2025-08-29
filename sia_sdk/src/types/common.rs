@@ -3,6 +3,7 @@ use core::fmt;
 use crate::encoding_async::{AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable, AsyncSiaEncode};
 use blake2b_simd::Params;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::encoding::{
@@ -204,13 +205,22 @@ impl V1SiaDecodable for Block {
 
 /// encapsulates the various errors that can occur when parsing a Sia object
 /// from a string
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Error, PartialEq)]
 pub enum HexParseError {
+    #[error("Missing prefix")]
     MissingPrefix,
-    InvalidLength,
-    InvalidPrefix,
+
+    #[error("Unexpected length")]
+    InvalidLength(usize),
+
+    #[error("Invalid prefix {0}")]
+    InvalidPrefix(String),
+
+    #[error("Invalid checksum")]
     InvalidChecksum, // not every object has a checksum
-    HexError(hex::FromHexError),
+
+    #[error("Hex error: {0}")]
+    HexError(#[from] hex::FromHexError),
 }
 
 /// An address that can be used to receive UTXOs
@@ -279,7 +289,7 @@ impl std::str::FromStr for Address {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.len() != 76 {
-            return Err(HexParseError::InvalidLength);
+            return Err(HexParseError::InvalidLength(s.len()));
         }
 
         let mut data = [0u8; 38];
@@ -394,7 +404,7 @@ impl std::str::FromStr for Leaf {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.len() != 128 {
-            return Err(HexParseError::InvalidLength);
+            return Err(HexParseError::InvalidLength(s.len()));
         }
 
         let mut data = [0u8; 64];
