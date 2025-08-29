@@ -80,7 +80,7 @@ impl AsRef<[u8]> for PublicKey {
 }
 
 /// An ed25519 private key that can be used to sign a hash
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Zeroize)]
 pub struct PrivateKey([u8; 64]);
 
 impl PrivateKey {

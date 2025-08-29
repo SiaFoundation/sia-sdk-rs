@@ -96,7 +96,6 @@ pub struct SlabPinParams {
 }
 
 impl Client {
-    #[allow(dead_code)]
     pub fn new<U: IntoUrl>(url: U, app_key: PrivateKey) -> Result<Self> {
         Ok(Self {
             client: reqwest::Client::new(),
@@ -148,13 +147,11 @@ impl Client {
     }
 
     /// Returns all usable hosts.
-    #[allow(dead_code)]
     pub async fn hosts(&self) -> Result<Vec<Host>> {
         self.get_json::<_, ()>("hosts", None).await
     }
 
     /// Requests an application connection to the indexer.
-    #[allow(dead_code)]
     pub async fn request_app_connection(
         &self,
         opts: &RegisterAppRequest,
@@ -163,7 +160,6 @@ impl Client {
     }
 
     /// Retrieves a slab from the indexer by its ID.
-    #[allow(dead_code)]
     pub async fn slab(&self, slab_id: &Hash256) -> Result<Slab> {
         self.get_json::<_, ()>(&format!("slab/{slab_id}"), None)
             .await
@@ -171,7 +167,6 @@ impl Client {
 
     /// Fetches the digests of slabs associated with the account. It supports
     /// pagination through the provided options.
-    #[allow(dead_code)]
     pub async fn slab_ids(&self, offset: Option<u64>, limit: Option<u64>) -> Result<Vec<Hash256>> {
         #[derive(Serialize)]
         struct QueryParams {
@@ -183,13 +178,11 @@ impl Client {
     }
 
     /// Pins a slab to the indexer.
-    #[allow(dead_code)]
     pub async fn pin_slab(&self, slab: &SlabPinParams) -> Result<Hash256> {
         self.post_json("slabs", &slab).await
     }
 
     /// Unpins a slab from the indexer.
-    #[allow(dead_code)]
     pub async fn unpin_slab(&self, slab_id: &Hash256) -> Result<()> {
         self.delete(&format!("slabs/{slab_id}")).await
     }
