@@ -105,6 +105,8 @@ impl Client {
         })
     }
 
+    /// Checks if the application is authenticated with the indexer. It returns
+    /// true if authenticated, false if not, and an error if the request fails.
     pub async fn check_app_authenticated(&self, status_url: &Url) -> Result<bool> {
         let resp = self
             .client
@@ -124,10 +126,9 @@ impl Client {
         }
     }
 
-    pub async fn check_request_status(
-        &self,
-        status_url: &Url,
-    ) -> Result<AuthConnectStatusResponse> {
+    /// Checks if an auth request has been approved. If the auth request is
+    /// still pending, it returns false.
+    pub async fn check_request_status(&self, status_url: &Url) -> Result<bool> {
         let resp = self
             .client
             .get(status_url.clone())
@@ -140,25 +141,19 @@ impl Client {
             .send()
             .await?;
         match resp.status() {
-            StatusCode::OK => Ok(resp.json().await?),
+            StatusCode::OK => Ok(resp.json::<AuthConnectStatusResponse>().await?.approved),
             StatusCode::NOT_FOUND => Err(Error::UserRejected),
             _ => Err(Error::ApiError(resp.text().await?)),
         }
     }
 
-    async fn handle_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
-        if resp.status().is_success() {
-            Ok(resp.json::<T>().await?)
-        } else {
-            Err(Error::ApiError(resp.text().await?))
-        }
-    }
-
+    /// Returns all usable hosts.
     #[allow(dead_code)]
     pub async fn hosts(&self) -> Result<Vec<Host>> {
         self.get_json::<_, ()>("hosts", None).await
     }
 
+    /// Requests an application connection to the indexer.
     #[allow(dead_code)]
     pub async fn request_app_connection(
         &self,
@@ -167,12 +162,15 @@ impl Client {
         self.post_json("auth/connect", opts).await
     }
 
+    /// Retrieves a slab from the indexer by its ID.
     #[allow(dead_code)]
     pub async fn slab(&self, slab_id: &Hash256) -> Result<Slab> {
         self.get_json::<_, ()>(&format!("slab/{slab_id}"), None)
             .await
     }
 
+    /// Fetches the digests of slabs associated with the account. It supports
+    /// pagination through the provided options.
     #[allow(dead_code)]
     pub async fn slab_ids(&self, offset: Option<u64>, limit: Option<u64>) -> Result<Vec<Hash256>> {
         #[derive(Serialize)]
@@ -184,11 +182,13 @@ impl Client {
         self.get_json("slabs", Some(&params)).await
     }
 
+    /// Pins a slab to the indexer.
     #[allow(dead_code)]
     pub async fn pin_slab(&self, slab: &SlabPinParams) -> Result<Hash256> {
         self.post_json("slabs", &slab).await
     }
 
+    /// Unpins a slab from the indexer.
     #[allow(dead_code)]
     pub async fn unpin_slab(&self, slab_id: &Hash256) -> Result<()> {
         self.delete(&format!("slabs/{slab_id}")).await
@@ -226,6 +226,16 @@ impl Client {
                 .await?,
         )
         .await
+    }
+
+    /// Helper to either parse a successfuly JSON response or return the error
+    /// message from the API.
+    async fn handle_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
+        if resp.status().is_success() {
+            Ok(resp.json::<T>().await?)
+        } else {
+            Err(Error::ApiError(resp.text().await?))
+        }
     }
 
     // Helper to send a signed POST request and parse the JSON
@@ -534,8 +544,7 @@ mod tests {
 
         // approved request
         let status_url: Url = server.url("/approved").to_string().parse().unwrap();
-        let status = client.check_request_status(&status_url).await.unwrap();
-        assert!(status.approved);
+        assert!(client.check_request_status(&status_url).await.unwrap());
 
         // rejected request
         let status_url: Url = server.url("/rejected").to_string().parse().unwrap();
