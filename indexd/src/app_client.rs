@@ -1,6 +1,7 @@
 use blake2b_simd::Params;
-use reqwest::{IntoUrl, Method, Url};
+use reqwest::{IntoUrl, Method, StatusCode, Url};
 use serde_json::to_vec;
+use sia::types::v2::NetAddress;
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -8,11 +9,14 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use sia::objects::slabs::Sector;
-use sia::signing::PrivateKey;
+use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("indexd responded with an error: {0}")]
+    ApiError(String),
+
     #[error("invalid header value: {0}")]
     InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),
 
@@ -24,6 +28,9 @@ pub enum Error {
 
     #[error("url parse error: {0}")]
     UrlParse(#[from] url::ParseError),
+
+    #[error("user rejected connection request")]
+    UserRejected,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -32,6 +39,37 @@ pub struct Client {
     client: reqwest::Client,
     url: Url,
     app_key: PrivateKey,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthConnectStatusResponse {
+    approved: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Host {
+    pub public_key: PublicKey,
+    pub addresses: Vec<NetAddress>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterAppRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub logo_url: Option<Url>,
+    pub service_url: Option<Url>,
+    pub callback_url: Option<Url>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterAppResponse {
+    pub response_url: String,
+    pub status_url: String,
+    pub expiration: OffsetDateTime,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -61,9 +99,85 @@ impl Client {
         })
     }
 
+    pub async fn check_app_authenticated(&self, status_url: &Url) -> Result<bool> {
+        let resp = self
+            .client
+            .get(status_url.clone())
+            .query(&self.sign(
+                status_url.clone(),
+                Method::POST,
+                None,
+                OffsetDateTime::now_utc(),
+            ))
+            .send()
+            .await?;
+        match resp.status() {
+            StatusCode::UNAUTHORIZED => Ok(false),
+            StatusCode::NO_CONTENT => Ok(true),
+            _ => Err(Error::ApiError(resp.text().await?)),
+        }
+    }
+
+    pub async fn check_request_status(
+        &self,
+        status_url: &Url,
+    ) -> Result<AuthConnectStatusResponse> {
+        let resp = self
+            .client
+            .get(status_url.clone())
+            .query(&self.sign(
+                status_url.clone(),
+                Method::POST,
+                None,
+                OffsetDateTime::now_utc(),
+            ))
+            .send()
+            .await?;
+        if resp.status().is_success() {
+            return Ok(resp.json().await?);
+        }
+        match resp.status() {
+            StatusCode::NOT_FOUND => Err(Error::UserRejected),
+            _ => Err(Error::ApiError(resp.text().await?)),
+        }
+    }
+
+    async fn handle_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
+        if resp.status().is_success() {
+            Ok(resp.json::<T>().await?)
+        } else {
+            Err(Error::ApiError(resp.text().await?))
+        }
+    }
+
+    #[allow(dead_code)]
+    pub async fn hosts(&self) -> Result<Vec<Host>> {
+        self.get_json::<_, ()>("hosts", None).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn request_app_connection(
+        &self,
+        opts: &RegisterAppRequest,
+    ) -> Result<RegisterAppResponse> {
+        self.post_json("auth/connect", opts).await
+    }
+
     #[allow(dead_code)]
     pub async fn slab(&self, slab_id: &Hash256) -> Result<Slab> {
-        self.get_json(&format!("slab/{slab_id}")).await
+        self.get_json::<_, ()>(&format!("slab/{slab_id}"), None)
+            .await
+    }
+
+    #[allow(dead_code)]
+    pub async fn slab_ids(&self, offset: Option<u64>, limit: Option<u64>) -> Result<Vec<Hash256>> {
+        #[derive(Serialize)]
+        struct QueryParams {
+            offset: Option<u64>,
+            limit: Option<u64>,
+        }
+        let params = QueryParams { offset, limit };
+        self.get_json("slabs", Some(&params)).await
     }
 
     #[allow(dead_code)]
@@ -71,21 +185,45 @@ impl Client {
         self.post_json("slabs", &slab).await
     }
 
-    /// Helper to send a GET request with basic auth and parse the JSON
-    /// response.
-    async fn get_json<D: DeserializeOwned>(&self, path: &str) -> Result<D> {
-        let url = self.url.join(path)?;
-        Ok(self
-            .client
-            .get(url.clone())
-            .query(&self.sign(url, Method::GET, None, OffsetDateTime::now_utc()))
-            .send()
-            .await?
-            .json::<D>()
-            .await?)
+    #[allow(dead_code)]
+    pub async fn unpin_slab(&self, slab_id: &Hash256) -> Result<()> {
+        self.delete(&format!("slabs/{slab_id}")).await
     }
 
-    // Helper to send a POST request with basic auth and parse the JSON
+    /// Helper to send a signed DELETE request.
+    async fn delete(&self, path: &str) -> Result<()> {
+        let url = self.url.join(path)?;
+        self.client
+            .delete(url.clone())
+            .query(&self.sign(url, Method::DELETE, None, OffsetDateTime::now_utc()))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// Helper to send a signed GET request and parse the JSON
+    /// response.
+    async fn get_json<D: DeserializeOwned, Q: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        query_params: Option<&Q>,
+    ) -> Result<D> {
+        let url = self.url.join(path)?;
+        let mut builder = self.client.get(url.clone());
+        if let Some(q) = query_params {
+            builder = builder.query(q); // optional query params
+        }
+        Self::handle_response(
+            builder
+                .query(&self.sign(url, Method::GET, None, OffsetDateTime::now_utc()))
+                .send()
+                .await?,
+        )
+        .await
+    }
+
+    // Helper to send a signed POST request and parse the JSON
     // response.
     async fn post_json<S: Serialize, D: DeserializeOwned>(
         &self,
@@ -94,15 +232,15 @@ impl Client {
     ) -> Result<D> {
         let body = to_vec(body)?;
         let url = self.url.join(path)?;
-        Ok(self
-            .client
-            .post(url.clone())
-            .query(&self.sign(url, Method::POST, Some(&body), OffsetDateTime::now_utc()))
-            .body(body)
-            .send()
-            .await?
-            .json::<D>()
-            .await?)
+        Self::handle_response(
+            self.client
+                .post(url.clone())
+                .query(&self.sign(url, Method::POST, Some(&body), OffsetDateTime::now_utc()))
+                .body(body)
+                .send()
+                .await?,
+        )
+        .await
     }
 
     fn request_hash(
@@ -234,14 +372,15 @@ mod tests {
                 contains(("SiaIdx-Credential", any())),
                 contains(("SiaIdx-Signature", any()))
             ])))
-            .times(2)
+            .times(3)
             .respond_with(Response::builder().status(200).body("{}").unwrap()),
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string(), app_key).unwrap();
-        let _: Result<()> = client.get_json("").await;
+        let _: Result<()> = client.get_json::<_, ()>("", None).await;
         let _: Result<()> = client.post_json("", &"").await;
+        let _: Result<()> = client.delete("").await;
     }
 
     #[tokio::test]
