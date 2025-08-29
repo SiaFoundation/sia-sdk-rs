@@ -415,10 +415,7 @@ where
     fn sector_region(data_shards: usize, offset: usize, length: usize) -> (usize, usize) {
         let chunk_size = SEGMENT_SIZE * data_shards;
         let start = (offset / chunk_size) * SEGMENT_SIZE;
-        let mut end = ((offset + length) / chunk_size) * SEGMENT_SIZE;
-        if (offset + length) % chunk_size != 0 {
-            end += SEGMENT_SIZE;
-        }
+        let end = (offset + length).div_ceil(chunk_size) * SEGMENT_SIZE;
         (start, end - start)
     }
 
@@ -436,7 +433,6 @@ where
             return Ok(());
         }
         let mut w = BufWriter::new(w);
-        let mut first = true;
         for slab in slabs {
             if length == 0 {
                 break;
@@ -447,13 +443,9 @@ where
                 continue;
             }
 
-            let mut slab_offset = slab.offset;
-            if first {
-                // for the first necessary slab, adjust the offset
-                // by the remainder
-                slab_offset += offset;
-                first = false;
-            }
+            let slab_offset = slab.offset + offset;
+            offset = 0;
+
             let slab_length = (slab.length - slab_offset).min(length);
             let (shard_offset, shard_length) =
                 Self::sector_region(slab.min_shards as usize, slab_offset, slab_length);
