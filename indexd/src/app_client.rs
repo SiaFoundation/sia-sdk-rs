@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-use sia::slabs::Sector;
+use sia::objects::slabs::Sector;
 use sia::types::Hash256;
 
 #[derive(Debug, Error)]
