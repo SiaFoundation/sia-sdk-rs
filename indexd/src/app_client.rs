@@ -229,11 +229,11 @@ mod tests {
 
         // expect 1 authenticated get and 1 authenticated post request
         server.expect(
-            Expectation::matching(request::query(url_decoded(contains(all_of![
-                ("SiaIdx-ValidUntil", any()),
-                ("SiaIdx-Credential", any()),
-                ("SiaIdx-Signature", any())
-            ]))))
+            Expectation::matching(request::query(url_decoded(all_of![
+                contains(("SiaIdx-ValidUntil", any())),
+                contains(("SiaIdx-Credential", any())),
+                contains(("SiaIdx-Signature", any()))
+            ])))
             .times(2)
             .respond_with(Response::builder().status(200).body("{}").unwrap()),
         );
