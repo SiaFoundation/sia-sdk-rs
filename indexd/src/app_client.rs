@@ -10,7 +10,7 @@ use sia::types::Hash256;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("reqwest error: {0}")]
+    #[error("http error: {0}")]
     Reqwest(#[from] reqwest::Error),
 
     #[error("serde error: {0}")]
