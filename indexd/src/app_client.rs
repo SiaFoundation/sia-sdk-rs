@@ -59,16 +59,22 @@ pub struct Host {
 pub struct RegisterAppRequest {
     pub name: String,
     pub description: Option<String>,
+    #[serde(rename = "logoURL")]
     pub logo_url: Option<Url>,
+    #[serde(rename = "serviceURL")]
     pub service_url: Option<Url>,
+    #[serde(rename = "callbackURL")]
     pub callback_url: Option<Url>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterAppResponse {
+    #[serde(rename = "responseURL")]
     pub response_url: String,
+    #[serde(rename = "statusURL")]
     pub status_url: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub expiration: OffsetDateTime,
 }
 
@@ -596,5 +602,40 @@ mod tests {
             err.to_string(),
             "indexd responded with an error: something went wrong"
         );
+    }
+
+    #[tokio::test]
+    async fn test_request_app_connection() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/auth/connect"),
+                request::body(r#"{"name":"name","description":"description","logoURL":"https://logo.com/","serviceURL":"https://service.com/","callbackURL":"https://callback.com/"}"#),
+            ])
+                .respond_with(Response::builder().status(StatusCode::OK).body(r#"{"responseURL":"https://response.com","statusURL":"https://status.com","expiration":"1970-01-01T01:01:40+01:00"}"#).unwrap()),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+
+        let resp = client
+            .request_app_connection(&RegisterAppRequest {
+                name: "name".to_string(),
+                description: Some("description".to_string()),
+                logo_url: Some("https://logo.com".parse().unwrap()),
+                service_url: Some("https://service.com".parse().unwrap()),
+                callback_url: Some("https://callback.com".parse().unwrap()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp,
+            RegisterAppResponse {
+                response_url: "https://response.com".parse().unwrap(),
+                status_url: "https://status.com".parse().unwrap(),
+                expiration: OffsetDateTime::from_unix_timestamp(100).unwrap(),
+            }
+        )
     }
 }
