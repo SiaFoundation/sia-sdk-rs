@@ -1172,13 +1172,17 @@ dependencies = [
 name = "indexd"
 version = "0.0.1"
 dependencies = [
+ "blake2b_simd",
  "httptest",
+ "rand",
  "reqwest",
  "serde",
  "serde_json",
  "sia_sdk",
  "thiserror 2.0.16",
+ "time",
  "tokio",
+ "url",
  "zeroize",
 ]
 
@@ -2273,6 +2277,7 @@ dependencies = [
  "time",
  "tokio",
  "uint",
+ "zeroize",
 ]
 
 [[package]]

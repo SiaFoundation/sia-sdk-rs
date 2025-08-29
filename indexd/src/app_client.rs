@@ -1,11 +1,15 @@
-use reqwest::Body;
+use blake2b_simd::Params;
+use reqwest::header::HeaderMap;
+use reqwest::{Body, IntoUrl, Method, Request, Url};
+use serde_json::{to_string, to_vec};
 use thiserror::Error;
+use time::OffsetDateTime;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
 
 use sia::objects::slabs::Sector;
+use sia::signing::PrivateKey;
 use sia::types::Hash256;
 
 #[derive(Debug, Error)]
@@ -21,8 +25,8 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub struct Client {
     client: reqwest::Client,
-    url: String,
-    password: Option<String>,
+    url: Url,
+    app_key: PrivateKey,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -44,12 +48,12 @@ pub struct SlabPinParams {
 
 impl Client {
     #[allow(dead_code)]
-    pub fn new(url: String, password: Option<String>) -> Self {
-        Self {
+    pub fn new<U: IntoUrl>(url: U, app_key: PrivateKey) -> Result<Self> {
+        Ok(Self {
             client: reqwest::Client::new(),
-            url: url.trim_end_matches('/').to_string(),
-            password,
-        }
+            url: url.into_url()?,
+            app_key,
+        })
     }
 
     #[allow(dead_code)]
@@ -59,17 +63,17 @@ impl Client {
 
     #[allow(dead_code)]
     pub async fn pin_slab(&self, slab: &SlabPinParams) -> Result<Hash256> {
-        self.post_json("/slabs", serde_json::to_string(&slab)?)
-            .await
+        self.post_json("/slabs", &slab).await
     }
 
     /// Helper to send a GET request with basic auth and parse the JSON
     /// response.
     async fn get_json<D: DeserializeOwned>(&self, path: &str) -> Result<D> {
+        let url = format!("{}{}", self.url, path);
         Ok(self
             .client
-            .get(format!("{}{}", self.url, path))
-            .basic_auth("", self.password.clone())
+            .get(&url)
+            .headers(self.sign(&url, Method::GET, None))
             .send()
             .await?
             .json::<D>()
@@ -78,28 +82,44 @@ impl Client {
 
     // Helper to send a POST request with basic auth and parse the JSON
     // response.
-    async fn post_json<B: Into<Body>, D: DeserializeOwned>(
+    async fn post_json<S: Serialize, D: DeserializeOwned>(
         &self,
         path: &str,
-        body: B,
+        body: &S,
     ) -> Result<D> {
+        let body = to_vec(body)?;
+        let url = format!("{}{}", self.url, path);
         Ok(self
             .client
-            .post(format!("{}{}", self.url, path))
-            .basic_auth("", self.password.clone())
+            .post(&url)
+            .headers(self.sign(&url, Method::POST, Some(&body)))
             .body(body)
             .send()
             .await?
             .json::<D>()
             .await?)
     }
-}
 
-impl Drop for Client {
-    fn drop(&mut self) {
-        if let Some(password) = &mut self.password {
-            password.zeroize();
+    fn request_hash(
+        url: Url,
+        method: Method,
+        body: Option<&[u8]>,
+        valid_until: time::OffsetDateTime,
+    ) -> Hash256 {
+        let mut state = Params::new().hash_length(32).to_state();
+        state
+            .update(method.as_str().as_bytes())
+            .update(url.host_str().unwrap_or("").as_bytes())
+            .update(&valid_until.unix_timestamp().to_le_bytes());
+        if let Some(body) = body {
+            state.update(body);
         }
+        state.finalize().into()
+    }
+
+    fn sign<U: IntoUrl>(&self, url: U, method: Method, body: Option<&[u8]>) -> HeaderMap {
+        let valid_until = OffsetDateTime::now_utc() + time::Duration::hours(1);
+        unimplemented!();
     }
 }
 
@@ -126,9 +146,10 @@ mod tests {
             .respond_with(Response::builder().status(200).body("{}").unwrap()),
         );
 
-        let client = Client::new(server.url("/").to_string(), Some("password".to_string()));
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
         let _: Result<()> = client.get_json("/").await;
-        let _: Result<()> = client.post_json("/", "").await;
+        let _: Result<()> = client.post_json("/", &"").await;
     }
 
     #[tokio::test]
@@ -179,7 +200,8 @@ mod tests {
             ),
         );
 
-        let client = Client::new(server.url("/").to_string(), Some("password".to_string()));
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
         assert_eq!(client.slab(&slab.id).await.unwrap(), slab);
     }
 
@@ -214,7 +236,8 @@ mod tests {
             ),
         );
 
-        let client = Client::new(server.url("/").to_string(), Some("password".to_string()));
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
         assert_eq!(client.pin_slab(&slab).await.unwrap(), slab_id);
     }
 }
