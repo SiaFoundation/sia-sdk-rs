@@ -1,5 +1,4 @@
 use std::collections::{HashMap, VecDeque};
-use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -60,6 +59,8 @@ pub enum Error {
     #[error("not enough shards: {0}/{1}")]
     NotEnoughShards(u8, u8),
 
+    #[error("invalid range: {0}-{1}")]
+    OutOfRange(usize, usize),
     #[error("no more hosts available")]
     NoMoreHosts,
     #[error("uploader closed")]
@@ -428,22 +429,20 @@ where
         mut offset: usize,
         mut length: usize,
     ) -> Result<(), Error> {
+        let max_length = slabs.iter().fold(0, |sum, slab| sum + slab.length);
+        if offset + length > max_length {
+            return Err(Error::OutOfRange(offset, length));
+        } else if length == 0 {
+            return Ok(());
+        }
         let mut w = BufWriter::new(w);
         let mut first = true;
-        for (i, slab) in slabs.iter().enumerate() {
+        for slab in slabs {
             if length == 0 {
                 break;
             }
             let n = slab.length - slab.offset;
-            if i == slabs.len() - 1 && offset + length > n {
-                // if this is the last slab and there's leftover length
-                // return an error
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "not enough data remaining",
-                )
-                .into());
-            } else if offset >= n {
+            if offset >= n {
                 offset -= n;
                 continue;
             }
