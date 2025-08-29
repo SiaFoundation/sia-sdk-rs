@@ -193,13 +193,14 @@ impl Client {
     /// Helper to send a signed DELETE request.
     async fn delete(&self, path: &str) -> Result<()> {
         let url = self.url.join(path)?;
-        self.client
-            .delete(url.clone())
-            .query(&self.sign(url, Method::DELETE, None, OffsetDateTime::now_utc()))
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
+        Self::handle_response(
+            self.client
+                .delete(url.clone())
+                .query(&self.sign(url, Method::DELETE, None, OffsetDateTime::now_utc()))
+                .send()
+                .await?,
+        )
+        .await
     }
 
     /// Helper to send a signed GET request and parse the JSON
@@ -470,5 +471,29 @@ mod tests {
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string(), app_key).unwrap();
         assert_eq!(client.pin_slab(&slab).await.unwrap(), slab_id);
+    }
+
+    #[tokio::test]
+    async fn test_handle_response() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(any()).times(3).respond_with(
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body("something went wrong")
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+
+        let expected_error = Error::ApiError("something went wrong".to_string());
+        let get_error = client.get_json::<(), ()>("", None).await.unwrap_err();
+        assert_eq!(get_error.to_string(), expected_error.to_string());
+        let post_error = client.post_json::<(), ()>("", &()).await.unwrap_err();
+        assert_eq!(post_error.to_string(), expected_error.to_string());
+        let delete_error = client.delete("").await.unwrap_err();
+        assert_eq!(delete_error.to_string(), expected_error.to_string());
     }
 }
