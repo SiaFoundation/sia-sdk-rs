@@ -133,10 +133,8 @@ impl Client {
             ))
             .send()
             .await?;
-        if resp.status().is_success() {
-            return Ok(resp.json().await?);
-        }
         match resp.status() {
+            StatusCode::OK => Ok(resp.json().await?),
             StatusCode::NOT_FOUND => Err(Error::UserRejected),
             _ => Err(Error::ApiError(resp.text().await?)),
         }
@@ -495,5 +493,57 @@ mod tests {
         assert_eq!(post_error.to_string(), expected_error.to_string());
         let delete_error = client.delete("").await.unwrap_err();
         assert_eq!(delete_error.to_string(), expected_error.to_string());
+    }
+
+    #[tokio::test]
+    async fn test_check_request_status() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/approved")).respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body("{\"approved\": true}")
+                    .unwrap(),
+            ),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/rejected")).respond_with(
+                Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body("")
+                    .unwrap(),
+            ),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/error")).respond_with(
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body("something went wrong")
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new("https://foo.com", app_key).unwrap();
+
+        // approved request
+        let status_url: Url = server.url("/approved").to_string().parse().unwrap();
+        let status = client.check_request_status(&status_url).await.unwrap();
+        assert!(status.approved);
+
+        // rejected request
+        let status_url: Url = server.url("/rejected").to_string().parse().unwrap();
+        assert!(matches!(
+            client.check_request_status(&status_url).await.unwrap_err(),
+            Error::UserRejected,
+        ));
+
+        // other error
+        let status_url: Url = server.url("/error").to_string().parse().unwrap();
+        let err = client.check_request_status(&status_url).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "indexd responded with an error: something went wrong"
+        );
     }
 }
