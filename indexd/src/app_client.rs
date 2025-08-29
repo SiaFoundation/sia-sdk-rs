@@ -21,6 +21,9 @@ pub enum Error {
 
     #[error("serde error: {0}")]
     Serde(#[from] serde_json::Error),
+
+    #[error("url parse error: {0}")]
+    UrlParse(#[from] url::ParseError),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -60,22 +63,22 @@ impl Client {
 
     #[allow(dead_code)]
     pub async fn slab(&self, slab_id: &Hash256) -> Result<Slab> {
-        self.get_json(&format!("/slab/{slab_id}")).await
+        self.get_json(&format!("slab/{slab_id}")).await
     }
 
     #[allow(dead_code)]
     pub async fn pin_slab(&self, slab: &SlabPinParams) -> Result<Hash256> {
-        self.post_json("/slabs", &slab).await
+        self.post_json("slabs", &slab).await
     }
 
     /// Helper to send a GET request with basic auth and parse the JSON
     /// response.
     async fn get_json<D: DeserializeOwned>(&self, path: &str) -> Result<D> {
-        let url = format!("{}{}", self.url, path);
+        let url = self.url.join(path)?;
         Ok(self
             .client
-            .get(&url)
-            .query(&self.sign(&url, Method::GET, None, OffsetDateTime::now_utc())?)
+            .get(url.clone())
+            .query(&self.sign(url, Method::GET, None, OffsetDateTime::now_utc()))
             .send()
             .await?
             .json::<D>()
@@ -90,11 +93,11 @@ impl Client {
         body: &S,
     ) -> Result<D> {
         let body = to_vec(body)?;
-        let url = format!("{}{}", self.url, path);
+        let url = self.url.join(path)?;
         Ok(self
             .client
-            .post(&url)
-            .query(&self.sign(&url, Method::POST, Some(&body), OffsetDateTime::now_utc())?)
+            .post(url.clone())
+            .query(&self.sign(url, Method::POST, Some(&body), OffsetDateTime::now_utc()))
             .body(body)
             .send()
             .await?
@@ -119,16 +122,16 @@ impl Client {
         state.finalize().into()
     }
 
-    fn sign<U: IntoUrl>(
+    fn sign(
         &self,
-        url: U,
+        url: Url,
         method: Method,
         body: Option<&[u8]>,
         current_time: OffsetDateTime,
-    ) -> Result<[(&'static str, String); 3]> {
+    ) -> [(&'static str, String); 3] {
         let valid_until = current_time + time::Duration::hours(1);
-        let hash = Self::request_hash(url.into_url()?, method, body, valid_until);
-        Ok([
+        let hash = Self::request_hash(url, method, body, valid_until);
+        [
             (
                 "SiaIdx-ValidUntil",
                 valid_until.unix_timestamp().to_string(),
@@ -138,7 +141,7 @@ impl Client {
                 "SiaIdx-Signature",
                 self.app_key.sign(hash.as_ref()).to_string(),
             ),
-        ])
+        ]
     }
 }
 
@@ -170,14 +173,12 @@ mod tests {
         let client = Client::new("https://foo.bar", app_key).unwrap();
 
         // with body
-        let params = client
-            .sign(
-                "https://foo.bar/baz.jpg",
-                Method::POST,
-                Some("{}".as_bytes()),
-                OffsetDateTime::from_unix_timestamp(123).unwrap(),
-            )
-            .unwrap();
+        let params = client.sign(
+            "https://foo.bar/baz.jpg".parse().unwrap(),
+            Method::POST,
+            Some("{}".as_bytes()),
+            OffsetDateTime::from_unix_timestamp(123).unwrap(),
+        );
         assert_eq!(params[0], ("SiaIdx-ValidUntil", "3723".to_string()));
         assert_eq!(
             params[1],
@@ -197,14 +198,12 @@ mod tests {
         );
 
         // without body
-        let params = client
-            .sign(
-                "https://foo.bar/baz.jpg",
-                Method::GET,
-                None,
-                OffsetDateTime::from_unix_timestamp(123).unwrap(),
-            )
-            .unwrap();
+        let params = client.sign(
+            "https://foo.bar/baz.jpg".parse().unwrap(),
+            Method::GET,
+            None,
+            OffsetDateTime::from_unix_timestamp(123).unwrap(),
+        );
         assert_eq!(params[0], ("SiaIdx-ValidUntil", "3723".to_string()));
         assert_eq!(
             params[1],
@@ -230,18 +229,19 @@ mod tests {
 
         // expect 1 authenticated get and 1 authenticated post request
         server.expect(
-            Expectation::matching(request::headers(contains((
-                "authorization",
-                "Basic OnBhc3N3b3Jk",
-            ))))
+            Expectation::matching(request::query(url_decoded(contains(all_of![
+                ("SiaIdx-ValidUntil", any()),
+                ("SiaIdx-Credential", any()),
+                ("SiaIdx-Signature", any())
+            ]))))
             .times(2)
             .respond_with(Response::builder().status(200).body("{}").unwrap()),
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string(), app_key).unwrap();
-        let _: Result<()> = client.get_json("/").await;
-        let _: Result<()> = client.post_json("/", &"").await;
+        let _: Result<()> = client.get_json("").await;
+        let _: Result<()> = client.post_json("", &"").await;
     }
 
     #[tokio::test]
