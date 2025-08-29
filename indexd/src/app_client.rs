@@ -466,6 +466,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_slab_ids() {
+        let slab_id = hash_256!("43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28");
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/slabs"),
+                request::query(url_decoded(all_of![
+                    contains(("offset", "1")),
+                    contains(("limit", "2"))
+                ]))
+            ])
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(format!(r#"["{slab_id}","{slab_id}"]"#))
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        assert_eq!(
+            client.slab_ids(Some(1), Some(2)).await.unwrap(),
+            vec![slab_id, slab_id]
+        );
+    }
+
+    #[tokio::test]
     async fn test_pin_slab() {
         let slab_id = hash_256!("43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28");
         let slab = SlabPinParams {
