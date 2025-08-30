@@ -1,7 +1,7 @@
 use blake2b_simd::Params;
-use reqwest::{IntoUrl, Method, StatusCode, Url};
+use reqwest::{Method, StatusCode, Url};
 use serde_json::to_vec;
-use sia::types::v2::NetAddress;
+use sia::rhp::Host;
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -9,8 +9,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use sia::objects::slabs::Sector;
-use sia::signing::{PrivateKey, PublicKey};
+use sia::signing::PrivateKey;
 use sia::types::Hash256;
+
+pub use reqwest::IntoUrl;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -49,20 +51,13 @@ pub struct AuthConnectStatusResponse {
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Host {
-    pub public_key: PublicKey,
-    pub addresses: Vec<NetAddress>,
-}
-
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct RegisterAppRequest {
     pub name: String,
     pub description: Option<String>,
+    #[serde(rename = "serviceURL")]
+    pub service_url: Url,
     #[serde(rename = "logoURL")]
     pub logo_url: Option<Url>,
-    #[serde(rename = "serviceURL")]
-    pub service_url: Option<Url>,
     #[serde(rename = "callbackURL")]
     pub callback_url: Option<Url>,
 }
@@ -228,15 +223,8 @@ impl Client {
         let body = to_vec(body)?;
         let url = self.url.join(path)?;
         let query_params = self.sign(&url, Method::POST, Some(&body), OffsetDateTime::now_utc());
-        Self::handle_response(
-            self.client
-                .post(url)
-                .query(&query_params)
-                .body(body)
-                .send()
-                .await?,
-        )
-        .await
+        Self::handle_response(self.client.post(url).query(&query_params).body(body).send().await?)
+            .await
     }
 
     fn request_hash(
@@ -308,7 +296,7 @@ mod tests {
 
         // with body
         let params = client.sign(
-            &"https://foo.bar/baz.jpg".parse::<Url>().unwrap(),
+            &"https://foo.bar/baz.jpg".parse().unwrap(),
             Method::POST,
             Some("{}".as_bytes()),
             OffsetDateTime::from_unix_timestamp(123).unwrap(),
@@ -333,7 +321,7 @@ mod tests {
 
         // without body
         let params = client.sign(
-            &"https://foo.bar/baz.jpg".parse::<Url>().unwrap(),
+            &"https://foo.bar/baz.jpg".parse().unwrap(),
             Method::GET,
             None,
             OffsetDateTime::from_unix_timestamp(123).unwrap(),
@@ -655,7 +643,7 @@ mod tests {
                 name: "name".to_string(),
                 description: Some("description".to_string()),
                 logo_url: Some("https://logo.com".parse().unwrap()),
-                service_url: Some("https://service.com".parse().unwrap()),
+                service_url: "https://service.com".parse().unwrap(),
                 callback_url: Some("https://callback.com".parse().unwrap()),
             })
             .await
