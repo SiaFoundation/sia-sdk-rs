@@ -1,4 +1,5 @@
 use super::Error as EncodingError;
+use bytes::{Bytes, BytesMut};
 use time::{Duration, OffsetDateTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -101,6 +102,22 @@ impl AsyncSiaDecodable for Duration {
             .into());
         }
         Ok(Duration::nanoseconds(ns as i64))
+    }
+}
+
+impl AsyncSiaEncodable for Bytes {
+    async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
+        self.len().encode_async(w).await?;
+        w.encode_buf(self).await
+    }
+}
+
+impl AsyncSiaDecodable for Bytes {
+    async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self, D::Error> {
+        let len = usize::decode_async(r).await?;
+        let mut buf = BytesMut::zeroed(len);
+        r.decode_buf(&mut buf).await?;
+        Ok(buf.freeze())
     }
 }
 
@@ -323,6 +340,23 @@ mod tests {
                 2, 0, 0, 0, 0, 0, 0, 0, // second inner vec length
                 3, 4, // second inner vec contents
             ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_bytes() {
+        test_roundtrip(
+            Bytes::from("hello"),
+            vec![
+                5, 0, 0, 0, 0, 0, 0, 0, // length prefix
+                104, 101, 108, 108, 111, // "hello"
+            ],
+        )
+        .await;
+        test_roundtrip(
+            Bytes::from(""),
+            vec![0, 0, 0, 0, 0, 0, 0, 0], // empty string length
         )
         .await;
     }

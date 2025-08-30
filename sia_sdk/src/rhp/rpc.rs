@@ -1,4 +1,5 @@
 use crate::rhp::merkle;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::marker::PhantomData;
@@ -723,7 +724,7 @@ impl<T: Transport> RPCSettings<T, RPCComplete> {
 struct RPCWriteSectorRequest {
     pub prices: HostPrices,
     pub token: AccountToken,
-    pub data: Vec<u8>,
+    pub data: Bytes,
 }
 impl_rpc_request!(RPCWriteSectorRequest, "WriteSector");
 
@@ -757,7 +758,7 @@ impl<T: Transport> RPCWriteSector<T, RPCInit> {
         mut transport: T,
         prices: HostPrices,
         token: AccountToken,
-        data: Vec<u8>,
+        data: Bytes,
     ) -> Result<RPCWriteSector<T, RPCComplete>, T::Error> {
         let usage = Usage::write_sector(&prices, data.len());
         let request = RPCWriteSectorRequest {
@@ -821,7 +822,7 @@ struct RPCReadSectorResponse {
 impl_rpc_response!(RPCReadSectorResponse);
 
 pub struct RPCReadSectorResult {
-    pub data: Vec<u8>,
+    pub data: Bytes,
     pub usage: Usage,
 }
 
@@ -1206,6 +1207,7 @@ impl<T: Transport, S: RenterContractSigner, B: TransactionBuilder>
 
 #[cfg(test)]
 mod test {
+    use bytes::BytesMut;
     use std::io::Cursor;
     use time::OffsetDateTime;
     use tokio::io::AsyncWriteExt;
@@ -1422,19 +1424,20 @@ mod test {
 
     #[tokio::test]
     async fn test_rpc_write_sector_send_request() {
-        let mut data: Vec<u8> = vec![0u8; SECTOR_SIZE];
+        let mut data = BytesMut::zeroed(SECTOR_SIZE);
         rand::fill(&mut data[..]);
         let root = merkle::sector_root(&data);
         let transport = BufStream::new();
-        let rpc = RPCWriteSector::send_request(transport, TEST_PRICES, TEST_ACCOUNT_TOKEN, data)
-            .await
-            .unwrap();
+        let rpc =
+            RPCWriteSector::send_request(transport, TEST_PRICES, TEST_ACCOUNT_TOKEN, data.freeze())
+                .await
+                .unwrap();
         assert_eq!(rpc.root, root);
     }
 
     #[tokio::test]
     async fn test_rpc_write_sector_complete() {
-        let mut data: Vec<u8> = vec![0u8; SECTOR_SIZE];
+        let mut data = BytesMut::zeroed(SECTOR_SIZE);
         rand::fill(&mut data[..]);
         let root = merkle::sector_root(&data);
 

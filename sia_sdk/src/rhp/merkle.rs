@@ -6,6 +6,7 @@ use crate::rhp::{LEAVES_PER_SECTOR, SECTOR_SIZE, SEGMENT_SIZE};
 use crate::types::Hash256;
 use blake2b_simd::Params;
 use blake2b_simd::many::{HashManyJob, hash_many};
+use bytes::Bytes;
 use rayon::prelude::*;
 use sia_derive::{AsyncSiaDecode, AsyncSiaEncode};
 use thiserror::Error;
@@ -95,7 +96,7 @@ pub enum ProofValidationError {
 }
 
 #[derive(Debug, AsyncSiaEncode, AsyncSiaDecode, PartialEq)]
-pub struct RangeProof(Vec<Hash256>, Vec<u8>);
+pub struct RangeProof(Vec<Hash256>, Bytes);
 
 impl RangeProof {
     pub async fn verify(
@@ -103,7 +104,7 @@ impl RangeProof {
         root: &Hash256,
         start: usize,
         end: usize,
-    ) -> Result<Vec<u8>, ProofValidationError> {
+    ) -> Result<Bytes, ProofValidationError> {
         let mut roots: VecDeque<Hash256> = self.roots(start, end)?;
         let mut proof: VecDeque<Hash256> = self.0.into();
 
@@ -328,7 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_range_proof() {
-        let data = vec![0u8; SECTOR_SIZE];
+        let data = Bytes::from(vec![0u8; SECTOR_SIZE]);
         let sector_root = sector_root(&data);
         let proof: Vec<Hash256> = vec![
             hash_256!("f0022a573326ecc0e4c18cf56b9a31d94dc792f8ec20ecbbc57d33c75db24c54"),

@@ -1,13 +1,19 @@
+use bytes::Bytes;
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::ClientConfig;
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::ParseIntError;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::{self, Error};
+use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::net::lookup_host;
+use tokio::time::error::Elapsed;
+use tokio::time::timeout;
 
 use crate::encoding;
-use crate::encoding_async::{AsyncDecoder, AsyncEncoder};
+use crate::encoding_async::AsyncDecoder;
 use crate::objects::{Error as UploadError, HostDialer};
 use crate::rhp::{
     self, AccountToken, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector, Transport,
@@ -65,6 +71,9 @@ pub enum Error {
     #[error("invalid signature")]
     InvalidSignature,
 
+    #[error("timeout error: {0}")]
+    Timeout(#[from] Elapsed),
+
     #[error("no endpoint")]
     NoEndpoint,
 }
@@ -77,27 +86,25 @@ impl AsyncDecoder for Stream {
     }
 }
 
-impl AsyncEncoder for Stream {
-    type Error = Error;
-    async fn encode_buf(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
-        self.send.write_all(buf).await?;
-        Ok(())
-    }
-}
-
 impl Transport for Stream {
     type Error = Error;
 
     async fn write_request<R: rhp::RPCRequest>(&mut self, req: &R) -> Result<(), Self::Error> {
-        req.encode_request(self).await
+        let mut w = BufWriter::new(&mut self.send);
+        req.encode_request(&mut w).await?;
+        w.flush().await?;
+        Ok(())
     }
 
     async fn read_response<R: rhp::RPCResponse>(&mut self) -> Result<R, Self::Error> {
         R::decode_response(self).await
     }
 
-    async fn write_response<R: rhp::RPCResponse>(&mut self, resp: &R) -> Result<(), Self::Error> {
-        resp.encode_response(self).await
+    async fn write_response<RR: rhp::RPCResponse>(&mut self, resp: &RR) -> Result<(), Self::Error> {
+        let mut w = BufWriter::new(&mut self.send);
+        resp.encode_response(&mut w).await?;
+        w.flush().await?;
+        Ok(())
     }
 }
 
@@ -150,57 +157,54 @@ impl Dialer {
         None
     }
 
+    async fn new_conn(&self, host: PublicKey) -> Result<Connection, Error> {
+        let addresses = {
+            let hosts = self.inner.hosts.lock().unwrap();
+            hosts.get(&host).cloned().ok_or(Error::UnknownHost(host))?
+        };
+        for addr in addresses {
+            if addr.protocol != Protocol::QUIC {
+                continue;
+            }
+            let (addr, port_str) = addr
+                .address
+                .rsplit_once(':')
+                .ok_or(Error::InvalidAddress(addr.address.clone()))?;
+            let port: u16 = port_str.parse()?;
+            let resolved_addrs = lookup_host((addr, port)).await?;
+            for socket in resolved_addrs {
+                if socket.is_ipv6()
+                    && let Some(endpoint) = &self.inner.endpoint_v6
+                {
+                    let conn = endpoint.connect(socket, addr).unwrap().await.ok();
+                    if let Some(conn) = conn {
+                        return Ok(conn);
+                    }
+                } else if socket.is_ipv4()
+                    && let Some(endpoint) = &self.inner.endpoint_v4
+                {
+                    let conn = endpoint.connect(socket, addr).unwrap().await.ok();
+                    if let Some(conn) = conn {
+                        return Ok(conn);
+                    }
+                }
+            }
+        }
+        Err(Error::FailedToConnect)
+    }
+
     async fn host_stream(&self, host: PublicKey) -> Result<Stream, Error> {
         let conn = if let Some(conn) = self.existing_conn(host) {
             conn
         } else {
-            let addresses = {
-                let hosts = self.inner.hosts.lock().unwrap();
-                hosts.get(&host).cloned().ok_or(Error::UnknownHost(host))?
-            };
-            let mut new_conn = None;
-            for addr in addresses {
-                if addr.protocol != Protocol::QUIC {
-                    continue;
-                }
-                let (addr, port_str) = addr
-                    .address
-                    .rsplit_once(':')
-                    .ok_or(Error::InvalidAddress(addr.address.clone()))?;
-                let port: u16 = port_str.parse()?;
-                let resolved_addrs = (addr, port).to_socket_addrs()?;
-                for socket in resolved_addrs {
-                    if socket.is_ipv6()
-                        && let Some(endpoint) = &self.inner.endpoint_v6
-                    {
-                        let conn = endpoint.connect(socket, addr).unwrap().await.ok();
-                        if let Some(conn) = conn {
-                            new_conn = Some(conn);
-                            break;
-                        }
-                    } else if socket.is_ipv4()
-                        && let Some(endpoint) = &self.inner.endpoint_v4
-                    {
-                        let conn = endpoint.connect(socket, addr).unwrap().await.ok();
-                        if let Some(conn) = conn {
-                            new_conn = Some(conn);
-                            break;
-                        }
-                    }
-                }
-
-                if new_conn.is_some() {
-                    break;
-                }
-            }
-
-            let conn = new_conn.ok_or(Error::FailedToConnect)?;
+            let new_conn = timeout(Duration::from_secs(10), self.new_conn(host)).await??;
             let open_conns = &mut self.inner.open_conns.lock().unwrap();
-            open_conns.insert(host, conn.clone());
-            conn
+            open_conns.insert(host, new_conn.clone());
+            new_conn
         };
 
-        let (send, recv) = conn.open_bi().await?;
+        // open_bi will block if there are too many open streams. Most of the time it should complete immediately
+        let (send, recv) = timeout(Duration::from_secs(2), conn.open_bi()).await??;
         Ok(Stream { send, recv })
     }
 
@@ -284,12 +288,12 @@ impl HostDialer for Dialer {
         &self,
         host_key: PublicKey,
         account_key: &PrivateKey,
-        sector: &[u8],
+        sector: Bytes,
     ) -> Result<Hash256, Self::Error> {
         let prices = self.host_prices(host_key, false).await?;
         let token = AccountToken::new(account_key, host_key);
         let stream = self.host_stream(host_key).await?;
-        let resp = RPCWriteSector::send_request(stream, prices, token, sector.to_vec())
+        let resp = RPCWriteSector::send_request(stream, prices, token, sector)
             .await?
             .complete()
             .await?;
@@ -303,7 +307,7 @@ impl HostDialer for Dialer {
         root: Hash256,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<u8>, Self::Error> {
+    ) -> Result<Bytes, Self::Error> {
         let prices = self.host_prices(host_key, false).await?;
         let token = AccountToken::new(account_key, host_key);
         let stream = self.host_stream(host_key).await?;

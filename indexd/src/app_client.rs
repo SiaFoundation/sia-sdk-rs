@@ -1,7 +1,7 @@
 use blake2b_simd::Params;
-use reqwest::{IntoUrl, Method, StatusCode, Url};
+use reqwest::{Method, StatusCode, Url};
 use serde_json::to_vec;
-use sia::types::v2::NetAddress;
+use sia::rhp::Host;
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -9,8 +9,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use sia::objects::slabs::Sector;
-use sia::signing::{PrivateKey, PublicKey};
+use sia::signing::PrivateKey;
 use sia::types::Hash256;
+
+pub use reqwest::IntoUrl;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -49,20 +51,13 @@ pub struct AuthConnectStatusResponse {
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Host {
-    pub public_key: PublicKey,
-    pub addresses: Vec<NetAddress>,
-}
-
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct RegisterAppRequest {
     pub name: String,
     pub description: Option<String>,
     #[serde(rename = "logoURL")]
-    pub logo_url: Option<Url>,
+    pub logo_url: Url,
     #[serde(rename = "serviceURL")]
-    pub service_url: Option<Url>,
+    pub service_url: Url,
     #[serde(rename = "callbackURL")]
     pub callback_url: Option<Url>,
 }
@@ -96,7 +91,7 @@ pub struct SlabPinParams {
 }
 
 impl Client {
-    pub fn new<U: IntoUrl>(url: U, app_key: PrivateKey) -> Result<Self> {
+    pub fn new(url: impl IntoUrl, app_key: PrivateKey) -> Result<Self> {
         Ok(Self {
             client: reqwest::Client::new(),
             url: url.into_url()?,
@@ -106,18 +101,10 @@ impl Client {
 
     /// Checks if the application is authenticated with the indexer. It returns
     /// true if authenticated, false if not, and an error if the request fails.
-    pub async fn check_app_authenticated(&self, status_url: &Url) -> Result<bool> {
-        let resp = self
-            .client
-            .get(status_url.clone())
-            .query(&self.sign(
-                status_url.clone(),
-                Method::POST,
-                None,
-                OffsetDateTime::now_utc(),
-            ))
-            .send()
-            .await?;
+    pub async fn check_app_authenticated(&self) -> Result<bool> {
+        let url = self.url.join("auth/check")?;
+        let req = self.sign(&url, Method::GET, None, OffsetDateTime::now_utc());
+        let resp = self.client.get(url).query(&req).send().await?;
         match resp.status() {
             StatusCode::UNAUTHORIZED => Ok(false),
             StatusCode::NO_CONTENT => Ok(true),
@@ -127,18 +114,10 @@ impl Client {
 
     /// Checks if an auth request has been approved. If the auth request is
     /// still pending, it returns false.
-    pub async fn check_request_status(&self, status_url: &Url) -> Result<bool> {
-        let resp = self
-            .client
-            .get(status_url.clone())
-            .query(&self.sign(
-                status_url.clone(),
-                Method::POST,
-                None,
-                OffsetDateTime::now_utc(),
-            ))
-            .send()
-            .await?;
+    pub async fn check_request_status(&self, status_url: impl IntoUrl) -> Result<bool> {
+        let status_url = status_url.into_url()?;
+        let req = self.sign(&status_url, Method::GET, None, OffsetDateTime::now_utc());
+        let resp = self.client.get(status_url).query(&req).send().await?;
         match resp.status() {
             StatusCode::OK => Ok(resp.json::<AuthConnectStatusResponse>().await?.approved),
             StatusCode::NOT_FOUND => Err(Error::UserRejected),
@@ -190,14 +169,8 @@ impl Client {
     /// Helper to send a signed DELETE request.
     async fn delete(&self, path: &str) -> Result<()> {
         let url = self.url.join(path)?;
-        Self::handle_empty_response(
-            self.client
-                .delete(url.clone())
-                .query(&self.sign(url, Method::DELETE, None, OffsetDateTime::now_utc()))
-                .send()
-                .await?,
-        )
-        .await
+        let req = self.sign(&url, Method::DELETE, None, OffsetDateTime::now_utc());
+        Self::handle_empty_response(self.client.delete(url).query(&req).send().await?).await
     }
 
     /// Helper to send a signed GET request and parse the JSON
@@ -208,20 +181,15 @@ impl Client {
         query_params: Option<&Q>,
     ) -> Result<D> {
         let url = self.url.join(path)?;
-        let mut builder = self.client.get(url.clone());
+        let req = self.sign(&url, Method::GET, None, OffsetDateTime::now_utc());
+        let mut builder = self.client.get(url);
         if let Some(q) = query_params {
             builder = builder.query(q); // optional query params
         }
-        Self::handle_response(
-            builder
-                .query(&self.sign(url, Method::GET, None, OffsetDateTime::now_utc()))
-                .send()
-                .await?,
-        )
-        .await
+        Self::handle_response(builder.query(&req).send().await?).await
     }
 
-    /// Helper to either parse a successfuly JSON response or return the error
+    /// Helper to either parse a successfully JSON response or return the error
     /// message from the API.
     async fn handle_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
         if resp.status().is_success() {
@@ -249,19 +217,12 @@ impl Client {
     ) -> Result<D> {
         let body = to_vec(body)?;
         let url = self.url.join(path)?;
-        Self::handle_response(
-            self.client
-                .post(url.clone())
-                .query(&self.sign(url, Method::POST, Some(&body), OffsetDateTime::now_utc()))
-                .body(body)
-                .send()
-                .await?,
-        )
-        .await
+        let req = self.sign(&url, Method::POST, Some(&body), OffsetDateTime::now_utc());
+        Self::handle_response(self.client.post(url).query(&req).body(body).send().await?).await
     }
 
     fn request_hash(
-        url: Url,
+        url: &Url,
         method: Method,
         body: Option<&[u8]>,
         valid_until: time::OffsetDateTime,
@@ -279,7 +240,7 @@ impl Client {
 
     fn sign(
         &self,
-        url: Url,
+        url: &Url,
         method: Method,
         body: Option<&[u8]>,
         current_time: OffsetDateTime,
@@ -315,7 +276,7 @@ mod tests {
         let url = Url::parse("https://foo.bar").unwrap();
         let valid_until = OffsetDateTime::from_unix_timestamp(123).unwrap();
         let body = b"hello world!";
-        let hash = Client::request_hash(url, method, Some(body), valid_until);
+        let hash = Client::request_hash(&url, method, Some(body), valid_until);
         assert_eq!(
             hash,
             hash_256!("b94c04c0a6ffbac6bfa9ce847d2a5de34db3bc33ac4824412acf2597ba043bce")
@@ -329,7 +290,7 @@ mod tests {
 
         // with body
         let params = client.sign(
-            "https://foo.bar/baz.jpg".parse().unwrap(),
+            &"https://foo.bar/baz.jpg".parse().unwrap(),
             Method::POST,
             Some("{}".as_bytes()),
             OffsetDateTime::from_unix_timestamp(123).unwrap(),
@@ -354,7 +315,7 @@ mod tests {
 
         // without body
         let params = client.sign(
-            "https://foo.bar/baz.jpg".parse().unwrap(),
+            &"https://foo.bar/baz.jpg".parse().unwrap(),
             Method::GET,
             None,
             OffsetDateTime::from_unix_timestamp(123).unwrap(),
@@ -594,19 +555,27 @@ mod tests {
         let client = Client::new("https://foo.com", app_key).unwrap();
 
         // approved request
-        let status_url: Url = server.url("/approved").to_string().parse().unwrap();
-        assert!(client.check_request_status(&status_url).await.unwrap());
+        assert!(
+            client
+                .check_request_status(server.url("/approved").to_string())
+                .await
+                .unwrap()
+        );
 
         // rejected request
-        let status_url: Url = server.url("/rejected").to_string().parse().unwrap();
         assert!(matches!(
-            client.check_request_status(&status_url).await.unwrap_err(),
+            client
+                .check_request_status(server.url("/rejected").to_string())
+                .await
+                .unwrap_err(),
             Error::UserRejected,
         ));
 
         // other error
-        let status_url: Url = server.url("/error").to_string().parse().unwrap();
-        let err = client.check_request_status(&status_url).await.unwrap_err();
+        let err = client
+            .check_request_status(server.url("/error").to_string())
+            .await
+            .unwrap_err();
         assert_eq!(
             err.to_string(),
             "indexd responded with an error: something went wrong"
@@ -615,49 +584,52 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_app_auth() {
-        let server = Server::run();
-        server.expect(
-            Expectation::matching(request::method_path("GET", "/approved")).respond_with(
-                Response::builder()
-                    .status(StatusCode::NO_CONTENT)
-                    .body("")
-                    .unwrap(),
-            ),
-        );
-        server.expect(
-            Expectation::matching(request::method_path("GET", "/rejected")).respond_with(
-                Response::builder()
-                    .status(StatusCode::UNAUTHORIZED)
-                    .body("")
-                    .unwrap(),
-            ),
-        );
-        server.expect(
-            Expectation::matching(request::method_path("GET", "/error")).respond_with(
-                Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body("something went wrong")
-                    .unwrap(),
-            ),
-        );
-
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new("https://foo.com", app_key).unwrap();
 
         // approved request
-        let status_url: Url = server.url("/approved").to_string().parse().unwrap();
-        assert!(client.check_app_authenticated(&status_url).await.unwrap());
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/auth/check"))
+                .times(1)
+                .respond_with(
+                    Response::builder()
+                        .status(StatusCode::NO_CONTENT)
+                        .body("")
+                        .unwrap(),
+                ),
+        );
+
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        assert!(client.check_app_authenticated().await.unwrap());
 
         // rejected request
-        let status_url: Url = server.url("/rejected").to_string().parse().unwrap();
-        assert!(!client.check_app_authenticated(&status_url).await.unwrap());
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/auth/check"))
+                .times(1)
+                .respond_with(
+                    Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .body("")
+                        .unwrap(),
+                ),
+        );
+        assert!(!client.check_app_authenticated().await.unwrap());
 
         // other error
-        let status_url: Url = server.url("/error").to_string().parse().unwrap();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/auth/check"))
+                .times(1)
+                .respond_with(
+                    Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body("something went wrong")
+                        .unwrap(),
+                ),
+        );
         let err = client
-            .check_app_authenticated(&status_url)
+            .check_app_authenticated()
             .await
-            .unwrap_err();
+            .expect_err("expected error");
         assert_eq!(
             err.to_string(),
             "indexd responded with an error: something went wrong"
@@ -682,8 +654,8 @@ mod tests {
             .request_app_connection(&RegisterAppRequest {
                 name: "name".to_string(),
                 description: Some("description".to_string()),
-                logo_url: Some("https://logo.com".parse().unwrap()),
-                service_url: Some("https://service.com".parse().unwrap()),
+                logo_url: "https://logo.com".parse().unwrap(),
+                service_url: "https://service.com".parse().unwrap(),
                 callback_url: Some("https://callback.com".parse().unwrap()),
             })
             .await
