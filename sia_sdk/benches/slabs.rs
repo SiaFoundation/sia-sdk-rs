@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rand::RngCore;
 use sia::objects::{Downloader, Error as UploadError, HostDialer, Uploader};
-use sia::rhp::{Host, SECTOR_SIZE, sector_root};
+use sia::rhp::{self, Host, SECTOR_SIZE, sector_root};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use tokio::runtime::Runtime;
@@ -19,7 +20,7 @@ struct MockUploader {
 #[derive(Debug)]
 struct MockUploaderInner {
     hosts: Mutex<HashMap<PublicKey, Host>>,
-    sectors: Mutex<HashMap<Hash256, Vec<u8>>>,
+    sectors: Mutex<HashMap<Hash256, Bytes>>,
 }
 
 impl MockUploader {
@@ -40,12 +41,12 @@ impl HostDialer for MockUploader {
         &self,
         _: PublicKey,
         _: &PrivateKey,
-        data: &[u8],
+        data: Bytes,
     ) -> Result<Hash256, Self::Error> {
         let inner = self.inner.clone();
-        let root = sector_root(data);
+        let root = sector_root(data.as_ref());
         sleep(Duration::from_millis(10)).await;
-        inner.sectors.lock().unwrap().insert(root, data.to_vec());
+        inner.sectors.lock().unwrap().insert(root, data);
         Ok(root)
     }
 
@@ -56,11 +57,18 @@ impl HostDialer for MockUploader {
         root: Hash256,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<u8>, Self::Error> {
-        let inner = self.inner.clone();
+    ) -> Result<Bytes, Self::Error> {
         sleep(Duration::from_millis(10)).await;
-        let sector = inner.sectors.lock().unwrap().get(&root).unwrap().clone();
-        Ok(sector[offset..offset + limit].to_vec())
+        let sectors = self.inner.sectors.lock().unwrap();
+        if let Some(data) = sectors.get(&root) {
+            Ok(data[offset..offset + limit].to_vec().into())
+        } else {
+            Err(rhp::Error::RPC(rhp::RPCError {
+                code: 3,
+                description: "sector not found".into(),
+            })
+            .into())
+        }
     }
 
     fn hosts(&self) -> Vec<PublicKey> {

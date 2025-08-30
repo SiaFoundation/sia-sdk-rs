@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::StreamExt;
 use futures::future::try_join_all;
 use futures::stream::FuturesUnordered;
@@ -31,7 +32,7 @@ pub trait HostDialer: Send + Sync {
         &self,
         host_key: PublicKey,
         account_key: &PrivateKey,
-        sector: &[u8],
+        sector: Bytes,
     ) -> impl Future<Output = Result<Hash256, Self::Error>> + Send;
 
     fn read_sector(
@@ -41,7 +42,7 @@ pub trait HostDialer: Send + Sync {
         root: Hash256,
         offset: usize,
         limit: usize,
-    ) -> impl Future<Output = Result<Vec<u8>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Bytes, Self::Error>> + Send;
 
     fn hosts(&self) -> Vec<PublicKey>;
     fn update_hosts(&mut self, hosts: Vec<Host>);
@@ -125,7 +126,7 @@ where
     async fn try_upload_sector(
         &self,
         host_queue: HostQueue,
-        sector: &[u8],
+        sector: Bytes,
     ) -> Result<Sector, D::Error> {
         let _permit = self.semaphore.acquire().await.map_err(|_| Error::Closed)?;
 
@@ -147,10 +148,10 @@ where
     async fn upload_slab_sector(
         &self,
         host_queue: HostQueue,
-        sector: Vec<u8>,
+        sector: Bytes,
     ) -> Result<Sector, D::Error> {
         let mut tasks = FuturesUnordered::new();
-        tasks.push(self.try_upload_sector(host_queue.clone(), sector.as_ref()));
+        tasks.push(self.try_upload_sector(host_queue.clone(), sector.clone()));
         loop {
             tokio::select! {
                 Some(res) = tasks.next() => {
@@ -161,14 +162,14 @@ where
                         Err(_) => {
                             if tasks.is_empty() {
                                 // try the next host
-                                tasks.push(self.try_upload_sector(host_queue.clone(), sector.as_ref()));
+                                tasks.push(self.try_upload_sector(host_queue.clone(), sector.clone()));
                             }
                         }
                     }
                 },
                 _ = tokio::time::sleep(Duration::from_secs(15)) => {
                     // race another host to prevent slow hosts from stalling uploads
-                    tasks.push(self.try_upload_sector(host_queue.clone(), sector.as_ref()));
+                    tasks.push(self.try_upload_sector(host_queue.clone(), sector.clone()));
                 }
             }
         }
@@ -199,7 +200,7 @@ where
     /// take `self` is necessary for tokio::spawn
     async fn try_upload_shards(
         uploader: Arc<UploaderInner<D>>,
-        shards: Vec<Vec<u8>>,
+        shards: Vec<Bytes>,
     ) -> Result<Vec<Sector>, D::Error>
     where
         D::Error: From<Error>,
@@ -221,7 +222,7 @@ where
     /// special concurrency requirements.
     pub async fn upload_shards<R: AsyncReadExt + Unpin>(
         &self,
-        shards: Vec<Vec<u8>>,
+        shards: Vec<Bytes>,
         encryption_key: [u8; 32],
         data_shards: u8,
         length: usize,
@@ -266,7 +267,7 @@ where
             let index = slabs.len();
             sector_jobs.spawn(async move {
                 encrypt_shards(&encryption_key, &mut shards, 0);
-                Self::try_upload_shards(inner, shards)
+                Self::try_upload_shards(inner, shards.drain(..).map(Bytes::from).collect())
                     .await
                     .map(|sectors| (index, sectors))
             });
@@ -323,7 +324,7 @@ where
             .dialer
             .read_sector(host_key, &self.account_key, root, offset, limit)
             .await?;
-        Ok((index, data))
+        Ok((index, data.to_vec()))
     }
 
     /// Downloads the shards of an erasure-coded slab.
@@ -499,7 +500,7 @@ mod test {
     #[derive(Debug)]
     struct MockDialerInner {
         hosts: Mutex<HashMap<PublicKey, Host>>,
-        sectors: Mutex<HashMap<Hash256, Vec<u8>>>,
+        sectors: Mutex<HashMap<Hash256, Bytes>>,
     }
 
     #[derive(Debug, Clone)]
@@ -525,7 +526,7 @@ mod test {
             &self,
             host_key: PublicKey,
             _: &PrivateKey,
-            data: &[u8],
+            data: Bytes,
         ) -> Result<Hash256, Self::Error> {
             let host_exists = {
                 let hosts = self.inner.hosts.lock().unwrap();
@@ -535,11 +536,7 @@ mod test {
                 return Err(Error::NoMoreHosts);
             }
             let root = sector_root(data.as_ref());
-            self.inner
-                .sectors
-                .lock()
-                .unwrap()
-                .insert(root, data.to_vec());
+            self.inner.sectors.lock().unwrap().insert(root, data);
             Ok(root)
         }
 
@@ -550,7 +547,7 @@ mod test {
             root: Hash256,
             offset: usize,
             limit: usize,
-        ) -> Result<Vec<u8>, Self::Error> {
+        ) -> Result<Bytes, Self::Error> {
             let host_exists = {
                 let hosts = self.inner.hosts.lock().unwrap();
                 hosts.contains_key(&host_key)
@@ -560,7 +557,7 @@ mod test {
             }
             let sectors = self.inner.sectors.lock().unwrap();
             if let Some(data) = sectors.get(&root) {
-                Ok(data[offset..offset + limit].to_vec())
+                Ok(data[offset..offset + limit].to_vec().into())
             } else {
                 Err(rhp::Error::RPC(rhp::RPCError {
                     code: 3,
