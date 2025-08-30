@@ -1,11 +1,12 @@
 use bytes::Bytes;
+use log::debug;
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::ClientConfig;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::ParseIntError;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::{self, Error};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::lookup_host;
@@ -195,16 +196,18 @@ impl Dialer {
 
     async fn host_stream(&self, host: PublicKey) -> Result<Stream, Error> {
         let conn = if let Some(conn) = self.existing_conn(host) {
+            debug!("reusing existing connection to {host}");
             conn
         } else {
-            let new_conn = timeout(Duration::from_secs(10), self.new_conn(host)).await??;
+            debug!("establishing new connection to {host}");
+            let new_conn = timeout(Duration::from_secs(30), self.new_conn(host)).await??;
             let open_conns = &mut self.inner.open_conns.lock().unwrap();
             open_conns.insert(host, new_conn.clone());
+            debug!("established new connection to {host}");
             new_conn
         };
 
-        // open_bi will block if there are too many open streams. Most of the time it should complete immediately
-        let (send, recv) = timeout(Duration::from_secs(2), conn.open_bi()).await??;
+        let (send, recv) = conn.open_bi().await?;
         Ok(Stream { send, recv })
     }
 
@@ -216,9 +219,14 @@ impl Dialer {
         if !refresh && let Some(prices) = self.get_cached_prices(&host_key) {
             return Ok(prices);
         }
-
+        debug!("fetching prices for {host_key}");
         let stream = self.host_stream(host_key).await?;
+        let start = Instant::now();
         let resp = RPCSettings::send_request(stream).await?.complete().await?;
+        debug!(
+            "fetched prices for {host_key} in {}ms",
+            start.elapsed().as_millis()
+        );
         let prices = resp.settings.prices;
         if prices.valid_until < OffsetDateTime::now_utc() {
             return Err(Error::InvalidPrices);
@@ -293,10 +301,15 @@ impl HostDialer for Dialer {
         let prices = self.host_prices(host_key, false).await?;
         let token = AccountToken::new(account_key, host_key);
         let stream = self.host_stream(host_key).await?;
+        let start = Instant::now();
         let resp = RPCWriteSector::send_request(stream, prices, token, sector)
             .await?
             .complete()
             .await?;
+        debug!(
+            "wrote sector to {host_key} in {}ms",
+            start.elapsed().as_millis()
+        );
         Ok(resp.root)
     }
 
@@ -306,15 +319,20 @@ impl HostDialer for Dialer {
         account_key: &PrivateKey,
         root: Hash256,
         offset: usize,
-        limit: usize,
+        length: usize,
     ) -> Result<Bytes, Self::Error> {
         let prices = self.host_prices(host_key, false).await?;
         let token = AccountToken::new(account_key, host_key);
         let stream = self.host_stream(host_key).await?;
-        let resp = RPCReadSector::send_request(stream, prices, token, root, offset, limit)
+        let start = Instant::now();
+        let resp = RPCReadSector::send_request(stream, prices, token, root, offset, length)
             .await?
             .complete()
             .await?;
+        debug!(
+            "read {length} bytes from {host_key} in {}ms",
+            start.elapsed().as_millis()
+        );
         Ok(resp.data)
     }
 

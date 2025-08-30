@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, BufReader, BufWriter};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
+use log::debug;
 
 use crate::objects::encryption::{encrypt_shard, encrypt_shards};
 use crate::objects::erasure_coding::ErasureCoder;
@@ -26,7 +28,7 @@ pub mod erasure_coding;
 pub mod slabs;
 
 pub trait HostDialer: Send + Sync {
-    type Error: From<Error> + Send;
+    type Error: From<Error> + Debug + Send;
 
     fn write_sector(
         &self,
@@ -129,9 +131,7 @@ where
         sector: Bytes,
     ) -> Result<Sector, D::Error> {
         let _permit = self.semaphore.acquire().await.map_err(|_| Error::Closed)?;
-
         let host_key = host_queue.pop_front()?;
-
         match self
             .dialer
             .write_sector(host_key, &self.account_key, sector)
@@ -139,6 +139,7 @@ where
         {
             Ok(root) => Ok(Sector { root, host_key }),
             Err(err) => {
+                log::debug!("sector upload to {host_key} failed {err:?}");
                 host_queue.retry(host_key);
                 Err(err)
             }
@@ -168,6 +169,7 @@ where
                     }
                 },
                 _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                    log::debug!("starting additional upload attempt for slow sector");
                     // race another host to prevent slow hosts from stalling uploads
                     tasks.push(self.try_upload_sector(host_queue.clone(), sector.clone()));
                 }
@@ -375,7 +377,8 @@ where
                                return Ok(shards);
                             }
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            debug!("sector download failed {:?}", e);
                             let rem = min_shards.saturating_sub(successful);
                             if rem == 0 {
                                 return Ok(shards); // sanity check

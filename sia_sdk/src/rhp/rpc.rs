@@ -844,16 +844,16 @@ impl<T: Transport> RPCReadSector<T, RPCInit> {
         prices: HostPrices,
         token: AccountToken,
         root: Hash256,
-        length: usize,
         offset: usize,
+        length: usize,
     ) -> Result<RPCReadSector<T, RPCComplete>, T::Error> {
         let usage = Usage::read_sector(&prices, length);
         let request = RPCReadSectorRequest {
             prices,
             token,
             root,
-            length: length as u64,
             offset: offset as u64,
+            length: length as u64,
         };
         transport.write_request(&request).await?;
 
