@@ -1,5 +1,5 @@
 use blake2b_simd::Params;
-use reqwest::{Method, StatusCode, Url};
+use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
 use sia::rhp::Host;
 use thiserror::Error;
@@ -12,7 +12,7 @@ use sia::objects::slabs::Sector;
 use sia::signing::PrivateKey;
 use sia::types::Hash256;
 
-pub use reqwest::IntoUrl;
+pub use reqwest::{IntoUrl, Url};
 
 #[derive(Debug, Error)]
 pub enum Error {
