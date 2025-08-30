@@ -2253,6 +2253,7 @@ dependencies = [
  "base64",
  "bip39",
  "blake2b_simd",
+ "bytes",
  "chacha20",
  "criterion",
  "ed25519-dalek",
