@@ -1,7 +1,7 @@
 use crate::rhp::{SECTOR_SIZE, SEGMENT_SIZE};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use thiserror::Error;
-use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -35,8 +35,7 @@ impl ErasureCoder {
         &mut self,
         r: &mut R,
     ) -> Result<(Vec<Vec<u8>>, usize)> {
-        // use a buffered reader since striped_read will read 64 bytes at a time
-        let (mut shards, size) = self.striped_read(&mut BufReader::new(r)).await?;
+        let (mut shards, size) = self.striped_read(r).await?;
         self.encode_shards(&mut shards)?;
         Ok((shards, size))
     }
@@ -54,10 +53,7 @@ impl ErasureCoder {
     ) -> Result<()> {
         // reconstruct just the data, that's all we need
         self.reconstruct_data(shards)?;
-
-        // use a buffered writer since striped_write will write 64 bytes at a time
-        let mut w = BufWriter::new(w);
-        self.striped_write(&mut w, shards, skip, n).await?;
+        self.striped_write(w, shards, skip, n).await?;
         w.flush().await?;
         Ok(())
     }
@@ -88,40 +84,34 @@ impl ErasureCoder {
         &self,
         w: &mut W,
         shards: &[Option<Vec<u8>>],
-        skip: usize,
-        n: usize,
+        mut skip: usize,
+        mut n: usize,
     ) -> Result<()> {
-        let mut skip = skip;
-        let mut n = n;
-
-        for off in (0..).map(|n| n * SEGMENT_SIZE) {
-            if n == 0 {
-                return Ok(()); // done
-            }
-
+        let row_bytes = self.data_shards * SEGMENT_SIZE;
+        let rows = skip / row_bytes;
+        let mut offset = rows * SEGMENT_SIZE;
+        skip %= row_bytes;
+        while n > 0 {
             for shard in &shards[..self.data_shards] {
-                let mut segment = match shard {
-                    Some(s) => &s[off..off + SEGMENT_SIZE],
-                    None => {
-                        return Err(Error::ReedSolomon(
-                            reed_solomon_erasure::Error::TooFewDataShards,
-                        ));
-                    }
-                };
-
-                if skip > segment.len() {
-                    skip -= segment.len();
+                if n == 0 {
+                    return Ok(());
+                } else if skip > SEGMENT_SIZE {
+                    skip -= SEGMENT_SIZE;
                     continue;
-                } else if skip > 0 {
-                    segment = &segment[skip..];
-                    skip = 0;
                 }
-                if n < segment.len() {
-                    segment = &segment[..n];
-                }
-                w.write_all(segment).await?;
-                n -= segment.len();
+
+                let segment = shard.as_ref().ok_or(Error::ReedSolomon(
+                    reed_solomon_erasure::Error::TooFewDataShards,
+                ))?;
+
+                let start = offset + skip;
+                let length = n.min(SEGMENT_SIZE - skip);
+
+                w.write_all(&segment[start..start + length]).await?;
+                n -= length;
+                skip = 0;
             }
+            offset += SEGMENT_SIZE;
         }
         Ok(())
     }
