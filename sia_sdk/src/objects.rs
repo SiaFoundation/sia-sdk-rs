@@ -7,11 +7,11 @@ use bytes::Bytes;
 use futures::StreamExt;
 use futures::future::try_join_all;
 use futures::stream::FuturesUnordered;
+use log::debug;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, BufReader, BufWriter};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use log::debug;
 
 use crate::objects::encryption::{encrypt_shard, encrypt_shards};
 use crate::objects::erasure_coding::ErasureCoder;

@@ -223,8 +223,15 @@ impl Client {
         let body = to_vec(body)?;
         let url = self.url.join(path)?;
         let query_params = self.sign(&url, Method::POST, Some(&body), OffsetDateTime::now_utc());
-        Self::handle_response(self.client.post(url).query(&query_params).body(body).send().await?)
-            .await
+        Self::handle_response(
+            self.client
+                .post(url)
+                .query(&query_params)
+                .body(body)
+                .send()
+                .await?,
+        )
+        .await
     }
 
     fn request_hash(
@@ -630,7 +637,7 @@ mod tests {
         server.expect(
             Expectation::matching(all_of![
                 request::method_path("POST", "/auth/connect"),
-                request::body(r#"{"name":"name","description":"description","logoURL":"https://logo.com/","serviceURL":"https://service.com/","callbackURL":"https://callback.com/"}"#),
+                request::body(r#"{"name":"name","description":"description","serviceURL":"https://service.com/","logoURL":"https://logo.com/","callbackURL":"https://callback.com/"}"#),
             ])
                 .respond_with(Response::builder().status(StatusCode::OK).body(r#"{"responseURL":"https://response.com","statusURL":"https://status.com","expiration":"1970-01-01T01:01:40+01:00"}"#).unwrap()),
         );
@@ -642,8 +649,8 @@ mod tests {
             .request_app_connection(&RegisterAppRequest {
                 name: "name".to_string(),
                 description: Some("description".to_string()),
-                logo_url: Some("https://logo.com".parse().unwrap()),
                 service_url: "https://service.com".parse().unwrap(),
+                logo_url: Some("https://logo.com".parse().unwrap()),
                 callback_url: Some("https://callback.com".parse().unwrap()),
             })
             .await
