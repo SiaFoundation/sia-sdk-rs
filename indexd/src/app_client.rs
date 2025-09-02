@@ -179,14 +179,8 @@ impl Client {
     async fn delete(&self, path: &str) -> Result<()> {
         let url = self.url.join(path)?;
         let query_params = self.sign(&url, Method::DELETE, None, OffsetDateTime::now_utc());
-        Self::handle_empty_response(
-            self.client
-                .delete(url.clone())
-                .query(&query_params)
-                .send()
-                .await?,
-        )
-        .await
+        Self::handle_empty_response(self.client.delete(url).query(&query_params).send().await?)
+            .await
     }
 
     /// Helper to send a signed GET request and parse the JSON
@@ -197,17 +191,12 @@ impl Client {
         query_params: Option<&Q>,
     ) -> Result<D> {
         let url = self.url.join(path)?;
-        let mut builder = self.client.get(url.clone());
+        let params = self.sign(&url, Method::GET, None, OffsetDateTime::now_utc());
+        let mut builder = self.client.get(url);
         if let Some(q) = query_params {
             builder = builder.query(q); // optional query params
         }
-        Self::handle_response(
-            builder
-                .query(&self.sign(&url, Method::GET, None, OffsetDateTime::now_utc()))
-                .send()
-                .await?,
-        )
-        .await
+        Self::handle_response(builder.query(&params).send().await?).await
     }
 
     /// Helper to either parse a successfully JSON response or return the error
@@ -241,7 +230,7 @@ impl Client {
         let query_params = self.sign(&url, Method::POST, Some(&body), OffsetDateTime::now_utc());
         Self::handle_response(
             self.client
-                .post(url.clone())
+                .post(url)
                 .query(&query_params)
                 .body(body)
                 .send()
@@ -585,29 +574,18 @@ mod tests {
 
         // approved request
         let status_url: Url = server.url("/approved").to_string().parse().unwrap();
-        assert!(
-            client
-                .check_request_status(status_url.clone())
-                .await
-                .unwrap()
-        );
+        assert!(client.check_request_status(status_url).await.unwrap());
 
         // rejected request
         let status_url: Url = server.url("/rejected").to_string().parse().unwrap();
         assert!(matches!(
-            client
-                .check_request_status(status_url.clone())
-                .await
-                .unwrap_err(),
+            client.check_request_status(status_url).await.unwrap_err(),
             Error::UserRejected,
         ));
 
         // other error
         let status_url: Url = server.url("/error").to_string().parse().unwrap();
-        let err = client
-            .check_request_status(status_url.clone())
-            .await
-            .unwrap_err();
+        let err = client.check_request_status(status_url).await.unwrap_err();
         assert_eq!(
             err.to_string(),
             "indexd responded with an error: something went wrong"
