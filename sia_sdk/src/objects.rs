@@ -269,7 +269,7 @@ where
             let index = slabs.len();
             sector_jobs.spawn(async move {
                 encrypt_shards(&encryption_key, &mut shards, 0);
-                Self::try_upload_shards(inner, shards.drain(..).map(Bytes::from).collect())
+                Self::try_upload_shards(inner, shards.into_iter().map(Bytes::from).collect())
                     .await
                     .map(|sectors| (index, sectors))
             });
