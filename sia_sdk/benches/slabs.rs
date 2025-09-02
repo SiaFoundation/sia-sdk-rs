@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::io::Cursor;
 use rand::RngCore;
 use sia::objects::{Downloader, Error as UploadError, HostDialer, Uploader};
 use sia::rhp::{self, Host, SECTOR_SIZE, sector_root};
@@ -111,7 +112,7 @@ fn benchmark_upload(c: &mut Criterion) {
 
             let slabs = slab_uploader
                 .upload(
-                    &mut &data[..],
+                    Cursor::new(data.clone()),
                     encryption_key,
                     DATA_SHARDS as u8,
                     PARITY_SHARDS as u8,
@@ -151,7 +152,7 @@ fn benchmark_download(c: &mut Criterion) {
 
         slab_uploader
             .upload(
-                &mut &data[..],
+                Cursor::new(data.clone()),
                 encryption_key,
                 DATA_SHARDS as u8,
                 PARITY_SHARDS as u8,
