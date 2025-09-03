@@ -1,10 +1,10 @@
 use crate::rhp::merkle;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 use std::fmt::Display;
 use std::marker::PhantomData;
 use thiserror::Error;
-use tokio::try_join;
 
 use super::types::*;
 use crate::consensus::ChainState;
@@ -764,15 +764,17 @@ impl<T: Transport> RPCWriteSector<T, RPCInit> {
         let request = RPCWriteSectorRequest {
             prices,
             token,
-            data,
+            data: data.clone(),
         };
 
-        let mut data = &request.data[..];
-        let (_, root) = try_join!(transport.write_request(&request), async move {
-            merkle::sector_root_from_reader(&mut data)
-                .await
-                .map_err(|e| Error::from(e).into())
-        },)?;
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let root = merkle::sector_root(data.as_ref());
+            let _ = tx.send(root).unwrap();
+        });
+
+        transport.write_request(&request).await?;
+        let root = rx.await.unwrap();
 
         Ok(RPCWriteSector {
             root,

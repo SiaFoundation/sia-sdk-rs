@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt, BufReader, BufWriter};
 use tokio::select;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinSet;
+use tokio::time::error::Elapsed;
 
 use crate::objects::encryption::{encrypt_shard, encrypt_shards};
 use crate::objects::erasure_coding::ErasureCoder;
@@ -21,7 +22,7 @@ use crate::signing::{PrivateKey, PublicKey};
 use crate::types::Hash256;
 
 use tokio::io::AsyncWriteExt;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 pub mod encryption;
 pub mod erasure_coding;
@@ -68,49 +69,31 @@ pub enum Error {
     NoMoreHosts,
     #[error("uploader closed")]
     Closed,
-}
 
-#[derive(Debug)]
-struct HostQueueInner {
-    queue: VecDeque<PublicKey>,
-    failures: HashMap<PublicKey, usize>,
-    max_attempts: usize,
+    #[error("timeout error: {0}")]
+    Timeout(#[from] Elapsed),
 }
 
 /// A thread-safe queue of host public keys.
 #[derive(Debug, Clone)]
-struct HostQueue {
-    inner: Arc<Mutex<HostQueueInner>>,
-}
+struct HostQueue(Arc<Mutex<VecDeque<PublicKey>>>);
 
 impl HostQueue {
-    pub fn new(hosts: Vec<PublicKey>, max_attempts: usize) -> Self {
-        HostQueue {
-            inner: Arc::new(Mutex::new(HostQueueInner {
-                queue: VecDeque::from(hosts),
-                failures: HashMap::new(),
-                max_attempts,
-            })),
-        }
+    pub fn new(hosts: Vec<PublicKey>) -> Self {
+        Self(Arc::new(Mutex::new(VecDeque::from(hosts))))
     }
 
     pub fn pop_front(&self) -> Result<PublicKey, Error> {
-        self.inner
+        self.0
             .lock()
-            .unwrap()
-            .queue
+            .map_err(|_| Error::Closed)?
             .pop_front()
             .ok_or(Error::NoMoreHosts)
     }
 
-    pub fn retry(&self, host: PublicKey) {
-        let mut inner = self.inner.lock().unwrap();
-        let max_attempts = inner.max_attempts;
-        let attempts = inner.failures.entry(host).or_insert(0);
-        if *attempts < max_attempts {
-            *attempts += 1;
-            inner.queue.push_back(host);
-        }
+    pub fn retry(&self, host: PublicKey) -> Result<(), Error> {
+        self.0.lock().map_err(|_| Error::Closed)?.push_back(host);
+        Ok(())
     }
 }
 
@@ -135,24 +118,30 @@ where
     }
 
     async fn upload_shard(
-        _permit: OwnedSemaphorePermit,
         dialer: D,
         hosts: HostQueue,
         account_key: PrivateKey,
         data: Bytes,
+        write_timeout: Duration,
     ) -> Result<Sector, D::Error> {
         let host_key = hosts.pop_front()?;
-        match dialer.write_sector(host_key, &account_key, data).await {
-            Ok(root) => Ok(Sector { root, host_key }),
-            Err(e) => {
-                hosts.retry(host_key);
-                Err(e.into())
-            }
-        }
+        let root = timeout(
+            write_timeout,
+            dialer.write_sector(host_key, &account_key, data),
+        )
+        .await
+        .map_err(|e| Error::Timeout(e).into())
+        .and_then(|res| res)
+        .inspect_err(|_| {
+            debug!("upload to {host_key} failed, retrying");
+            let _ = hosts.retry(host_key);
+        })?;
+
+        Ok(Sector { root, host_key })
     }
 
     async fn upload_slab_shard(
-        permit: OwnedSemaphorePermit,
+        _permit: OwnedSemaphorePermit,
         dialer: D,
         hosts: HostQueue,
         account_key: PrivateKey,
@@ -160,19 +149,23 @@ where
         slab_index: usize,
         shard_index: usize,
     ) -> Result<(usize, usize, Sector), D::Error> {
-        let sema = permit.semaphore().clone();
-        let mut tasks = FuturesUnordered::new();
-        tasks.push(Self::upload_shard(
-            permit,
+        const N: u32 = 2;
+
+        let initial_timeout = Duration::from_secs(10);
+        let mut tasks = JoinSet::new();
+        tasks.spawn(Self::upload_shard(
             dialer.clone(),
             hosts.clone(),
             account_key.clone(),
             data.clone(),
+            initial_timeout,
         ));
+        let mut attempts = 0;
         loop {
+            let timeout = initial_timeout * N.pow(attempts);
             tokio::select! {
-                Some(res) = tasks.next() => {
-                    match res {
+                Some(res) = tasks.join_next() => {
+                    match res.unwrap() {
                         Ok(sector) => {
                             debug!("slab {slab_index} shard {shard_index} uploaded");
                             return Ok((slab_index, shard_index, sector));
@@ -180,18 +173,17 @@ where
                         Err(e) => {
                             debug!("slab {slab_index} shard {shard_index} upload failed {e:?}");
                             if tasks.is_empty() {
-                                let permit = sema.clone().acquire_owned().await.unwrap();
-                                tasks.push(Self::upload_shard(permit, dialer.clone(), hosts.clone(), account_key.clone(), data.clone()));
+                                tasks.spawn(Self::upload_shard(dialer.clone(), hosts.clone(), account_key.clone(), data.clone(), 2*timeout));
                             }
                         }
                     }
                 },
-                _ = tokio::time::sleep(Duration::from_secs(4)) => {
+                _ = tokio::time::sleep(timeout / 2) => {
                     debug!("racing slow host for slab {slab_index} shard {shard_index}");
-                    let permit = sema.clone().acquire_owned().await.unwrap();
-                    tasks.push(Self::upload_shard(permit, dialer.clone(), hosts.clone(), account_key.clone(), data.clone()));
+                    tasks.spawn(Self::upload_shard(dialer.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
                 }
             }
+            attempts += 1;
         }
     }
 
@@ -247,7 +239,7 @@ where
                     slabs.push(slab);
                     encrypt_shards(&encryption_key, &mut shards, 0);
                     debug!("slab {slab_index} encrypted, uploading shards");
-                    let hosts = HostQueue::new(dialer.hosts(), 3);
+                    let hosts = HostQueue::new(dialer.hosts());
                     for (shard_index, shard) in shards.into_iter().enumerate() {
                         let permit = semaphore.clone().acquire_owned().await.map_err(|_| Error::Closed)?;
                         sector_jobs.spawn(Self::upload_slab_shard(permit, dialer.clone(), hosts.clone(), self.account_key.clone(), shard.into(), slab_index, shard_index));
