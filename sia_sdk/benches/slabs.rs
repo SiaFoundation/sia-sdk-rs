@@ -4,12 +4,12 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use std::io::Cursor;
 use rand::RngCore;
 use sia::objects::{Downloader, Error as UploadError, HostDialer, Uploader};
 use sia::rhp::{self, Host, SECTOR_SIZE, sector_root};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
+use std::io::Cursor;
 use tokio::runtime::Runtime;
 use tokio::time::sleep;
 

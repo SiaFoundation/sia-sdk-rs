@@ -1,10 +1,10 @@
 use crate::rhp::merkle;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
 use std::fmt::Display;
 use std::marker::PhantomData;
 use thiserror::Error;
+use tokio::sync::oneshot;
 
 use super::types::*;
 use crate::consensus::ChainState;
@@ -770,7 +770,7 @@ impl<T: Transport> RPCWriteSector<T, RPCInit> {
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let root = merkle::sector_root(data.as_ref());
-            let _ = tx.send(root).unwrap();
+            tx.send(root).unwrap();
         });
 
         transport.write_request(&request).await?;
