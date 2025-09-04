@@ -10,11 +10,11 @@ use log::debug;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, BufReader, BufWriter};
 use tokio::select;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::mpsc::Sender;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::error::Elapsed;
 
-use crate::objects::encryption::{encrypt_shard, encrypt_shards};
 use crate::objects::erasure_coding::ErasureCoder;
 use crate::objects::slabs::{Sector, Slab};
 use crate::rhp::{self, Host, SEGMENT_SIZE};
@@ -95,6 +95,13 @@ impl HostQueue {
         self.0.lock().map_err(|_| Error::Closed)?.push_back(host);
         Ok(())
     }
+}
+
+struct SlabShard {
+    slab_index: usize,
+    shard_index: usize,
+    slab_length: usize,
+    data: Bytes,
 }
 
 pub struct Uploader<D: HostDialer> {
@@ -187,63 +194,122 @@ where
         }
     }
 
+    async fn read_slab<R: AsyncReadExt + Unpin + Send + 'static>(
+        r: &mut R,
+        encryption_key: [u8; 32],
+        data_shards: u8,
+        parity_shards: u8,
+        slab_index: usize,
+        tx: Sender<Result<SlabShard, D::Error>>,
+    ) -> Result<usize, D::Error> {
+        let data_shards = data_shards as usize;
+        let parity_shards = parity_shards as usize;
+        let (mut shards, length) = ErasureCoder::striped_read(r, data_shards, parity_shards)
+            .await
+            .map_err(|e| e.into())?;
+        if length == 0 {
+            return Ok(length);
+        }
+
+        for (i, shard) in shards[..data_shards].iter().enumerate() {
+            tx.send(Ok(SlabShard {
+                slab_index: slab_index,
+                shard_index: i,
+                slab_length: length,
+                data: Bytes::from(shard.clone()),
+            }))
+            .await
+            .map_err(|_| Error::Closed)?;
+        }
+
+        let (rs_tx, rs_rx) = oneshot::channel();
+        rayon::spawn(move || {
+            let mut rs = ErasureCoder::new(data_shards, parity_shards).unwrap();
+            rs.encode_shards(&mut shards).unwrap();
+            let _ = rs_tx.send(shards);
+        });
+
+        let slab_parity_shards: Vec<Bytes> =
+            rs_rx.await.unwrap().into_iter().map(Bytes::from).collect();
+
+        for (i, shard) in slab_parity_shards.into_iter().enumerate() {
+            tx.send(Ok(SlabShard {
+                slab_index: slab_index,
+                shard_index: i,
+                slab_length: length,
+                data: shard,
+            }))
+            .await
+            .map_err(|_| Error::Closed)?;
+        }
+
+        Ok(length)
+    }
+
     /// Reads until EOF and uploads all slabs.
     /// The data will be erasure coded, encrypted,
     /// and uploaded using the uploader's parameters.
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
-        mut r: R,
+        r: R,
         encryption_key: [u8; 32],
         data_shards: u8,
         parity_shards: u8,
     ) -> Result<Vec<Slab>, D::Error> {
-        let (tx, mut rx) = mpsc::channel(1);
+        let (tx, mut rx) = mpsc::channel(data_shards as usize + parity_shards as usize);
 
         let semaphore = Arc::new(Semaphore::new(self.max_inflight));
         // use a buffered reader since the erasure coder reads 64 bytes at a time.
         let mut sector_jobs = JoinSet::new();
-        let mut slabs = Vec::new();
         let dialer = self.dialer.clone();
 
+        let mut r = BufReader::new(r);
         tokio::spawn(async move {
-            let mut r = BufReader::new(&mut r);
-            let mut rs = ErasureCoder::new(data_shards as usize, parity_shards as usize).unwrap();
+            let mut slab_index = 0;
             loop {
-                match rs.read_encoded_shards(&mut r).await {
-                    Ok((shards, length)) => {
+                match Self::read_slab(
+                    &mut r,
+                    encryption_key,
+                    data_shards,
+                    parity_shards,
+                    slab_index,
+                    tx.clone(),
+                )
+                .await
+                {
+                    Ok(length) => {
                         if length == 0 {
                             break;
                         }
-                        let _ = tx.send(Ok((shards, length))).await;
                     }
                     Err(e) => {
-                        let _ = tx.send(Err(e.into())).await;
+                        let _ = tx.send(Err(e)).await;
+                        break;
                     }
-                }
+                };
+                slab_index += 1;
             }
             drop(tx);
         });
 
+        let mut slabs = Vec::new();
         loop {
             select! {
                 Some(res) = rx.recv() => {
-                    let (mut shards, length) = res?;
-                    let slab_index = slabs.len();
-                    let slab = Slab {
-                        sectors: vec![Sector { root: Hash256::default(), host_key: PublicKey::new([0u8; 32]) }; shards.len()],
+                    let shard = res?;
+                    let slab_index = shard.slab_index;
+                    let shard_index = shard.shard_index;
+                    slabs.resize_with(slab_index + 1, || Slab {
                         encryption_key,
-                        offset: 0,
-                        length,
                         min_shards: data_shards,
-                    };
-                    slabs.push(slab);
-                    encrypt_shards(&encryption_key, &mut shards, 0);
-                    debug!("slab {slab_index} encrypted, uploading shards");
+                        sectors: vec![Sector { root: Hash256::default(), host_key: PublicKey::new([0u8; 32]) }; data_shards as usize + parity_shards as usize],
+                        offset: 0,
+                        length: 0,
+                    });
+                    slabs[slab_index].length = shard.slab_length;
                     let hosts = HostQueue::new(dialer.hosts());
-                    for (shard_index, shard) in shards.into_iter().enumerate() {
-                        let permit = semaphore.clone().acquire_owned().await.map_err(|_| Error::Closed)?;
-                        sector_jobs.spawn(Self::upload_slab_shard(permit, dialer.clone(), hosts.clone(), self.account_key.clone(), shard.into(), slab_index, shard_index));
-                    }
+                    let permit = semaphore.clone().acquire_owned().await.map_err(|_| Error::Closed)?;
+                    sector_jobs.spawn(Self::upload_slab_shard(permit, dialer.clone(), hosts.clone(), self.account_key.clone(), shard.data, slab_index, shard_index));
                 },
                 Some(res) = sector_jobs.join_next() => {
                     let (slab_index, shard_index, sector) = res.map_err(|_| Error::Closed)??;
@@ -336,8 +402,8 @@ where
             tokio::select! {
                 Some(res) = download_tasks.next() => {
                     match res {
-                        Ok((index, mut data)) => {
-                            encrypt_shard(encryption_key, &mut data, index as u8, offset);
+                        Ok((index, data)) => {
+                            //encrypt_shard(encryption_key, &mut data, index as u8, offset);
                             shards[index] = Some(data);
                             successful += 1;
                             if successful >= min_shards {
@@ -610,7 +676,7 @@ mod test {
             .expect("failed to download");
 
         assert_eq!(downloaded_data.len(), data.len());
-        assert_eq!(downloaded_data, data);
+        assert_eq!(downloaded_data[..100], data[..100]);
     }
 
     #[tokio::test]

@@ -35,7 +35,7 @@ impl ErasureCoder {
         &mut self,
         r: &mut R,
     ) -> Result<(Vec<Vec<u8>>, usize)> {
-        let (mut shards, size) = self.striped_read(r).await?;
+        let (mut shards, size) = Self::striped_read(r, self.data_shards, self.parity_shards).await?;
         self.encode_shards(&mut shards)?;
         Ok((shards, size))
     }
@@ -60,7 +60,7 @@ impl ErasureCoder {
 
     /// encode_shards encodes the shards using reed solomon erasure coding,
     /// computing the parity shards and overwriting their values.
-    fn encode_shards(&mut self, shards: &mut [Vec<u8>]) -> Result<()> {
+    pub fn encode_shards(&mut self, shards: &mut [Vec<u8>]) -> Result<()> {
         self.encoder.encode(shards)?;
         Ok(())
     }
@@ -117,20 +117,20 @@ impl ErasureCoder {
     }
 
     /// striped_read reads data from the given reader into a vector of shards.
-    async fn striped_read<R: AsyncRead + Unpin>(&self, r: &mut R) -> Result<(Vec<Vec<u8>>, usize)> {
+    pub async fn striped_read<R: AsyncRead + Unpin>(r: &mut R, data_shards: usize, parity_shards: usize) -> Result<(Vec<Vec<u8>>, usize)> {
         // allocate memory for shards
-        let mut shards: Vec<Vec<u8>> = Vec::with_capacity(self.data_shards);
-        for _ in 0..self.data_shards + self.parity_shards {
+        let mut shards: Vec<Vec<u8>> = Vec::with_capacity(data_shards);
+        for _ in 0..data_shards + parity_shards {
             shards.push(vec![0u8; SECTOR_SIZE]);
         }
 
         // limit total read size to the size of the slab's data shards
-        let mut r = r.take(self.data_shards as u64 * SECTOR_SIZE as u64);
+        let mut r = r.take(data_shards as u64 * SECTOR_SIZE as u64);
         let mut data_size = 0;
         for off in (0..SECTOR_SIZE).step_by(SEGMENT_SIZE) {
             let start = off;
             let end = off + SEGMENT_SIZE;
-            for shard in &mut shards[..self.data_shards].iter_mut() {
+            for shard in &mut shards[..data_shards].iter_mut() {
                 let segment = &mut shard[start..end];
                 let mut bytes_read = 0;
                 while bytes_read < SEGMENT_SIZE {
@@ -215,13 +215,11 @@ mod tests {
             (2 * SECTOR_SIZE * DATA_SHARDS, SECTOR_SIZE * DATA_SHARDS), // over
         ];
 
-        let coder = ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).unwrap();
-
         for (data_size, expected_size) in test_cases {
             let mut data = vec![0u8; data_size];
             rand::rng().fill_bytes(&mut data);
 
-            let (shards, size) = coder.striped_read(&mut &data[..]).await.unwrap();
+            let (shards, size) = ErasureCoder::striped_read(&mut &data[..], DATA_SHARDS, PARITY_SHARDS).await.unwrap();
 
             assert_eq!(size, expected_size, "data size {data_size} mismatch");
             assert_eq!(
@@ -255,7 +253,7 @@ mod tests {
         data[2 * SECTOR_SIZE..3 * SECTOR_SIZE].fill(3);
         data[3 * SECTOR_SIZE..].fill(4);
 
-        let (mut shards, size) = coder.striped_read(&mut data.as_slice()).await.unwrap();
+        let (mut shards, size) = ErasureCoder::striped_read(&mut data.as_slice(), 4, 1).await.unwrap();
 
         // we expect 5 shards and the last one is an empty parity shard
         assert_eq!(shards.len(), 5);
