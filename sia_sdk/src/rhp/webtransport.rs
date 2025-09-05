@@ -124,7 +124,7 @@ impl Dialer {
 struct DialerInner {
     client: web_transport::Client,
     hosts: Mutex<HashMap<PublicKey, Vec<NetAddress>>>,
-    open_conns: Mutex<HashMap<PublicKey, Session>>,
+    open_sessions: Mutex<HashMap<PublicKey, Session>>,
     cached_prices: Mutex<HashMap<PublicKey, HostPrices>>,
 }
 
@@ -134,7 +134,7 @@ impl DialerInner {
         Ok(Self {
             client,
             hosts: Mutex::new(HashMap::new()),
-            open_conns: Mutex::new(HashMap::new()),
+            open_sessions: Mutex::new(HashMap::new()),
             cached_prices: Mutex::new(HashMap::new()),
         })
     }
@@ -159,14 +159,14 @@ impl DialerInner {
     }
 
     fn existing_session(&self, host: PublicKey) -> Option<Session> {
-        let open_conns = self.open_conns.lock().unwrap();
-        if let Some(conn) = open_conns.get(&host) {
-            return Some(conn.clone());
+        let open_sessions = self.open_sessions.lock().unwrap();
+        if let Some(session) = open_sessions.get(&host) {
+            return Some(session.clone());
         }
         None
     }
 
-    async fn new_conn(&self, host: PublicKey) -> Result<Session, Error> {
+    async fn new_session(&self, host: PublicKey) -> Result<Session, Error> {
         let addresses = {
             let hosts = self.hosts.lock().unwrap();
             hosts.get(&host).cloned().ok_or(Error::UnknownHost(host))?
@@ -176,26 +176,26 @@ impl DialerInner {
                 continue;
             }
 
-            // TODO: handle closing conn
+            // TODO: handle closing session
             return Ok(self.client.connect(addr.address.parse()?).await?);
         }
         Err(Error::FailedToConnect)
     }
 
     async fn host_stream(&self, host: PublicKey) -> Result<Stream, Error> {
-        let mut conn = if let Some(conn) = self.existing_session(host) {
-            debug!("reusing existing connection to {host}");
-            conn
+        let mut session = if let Some(session) = self.existing_session(host) {
+            debug!("reusing existing session to {host}");
+            session
         } else {
-            debug!("establishing new connection to {host}");
-            let new_conn = timeout(Duration::from_secs(30), self.new_conn(host)).await??;
-            let open_conns = &mut self.open_conns.lock().unwrap();
-            open_conns.insert(host, new_conn.clone());
-            debug!("established new connection to {host}");
-            new_conn
+            debug!("establishing new session to {host}");
+            let new_session = timeout(Duration::from_secs(30), self.new_session(host)).await??;
+            let open_sessions = &mut self.open_sessions.lock().unwrap();
+            open_sessions.insert(host, new_session.clone());
+            debug!("established new session to {host}");
+            new_session
         };
 
-        let (send, recv) = conn.open_bi().await?;
+        let (send, recv) = session.open_bi().await?;
         Ok(Stream { send, recv })
     }
 
