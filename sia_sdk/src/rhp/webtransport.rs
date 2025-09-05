@@ -141,7 +141,7 @@ impl Dialer {
         None
     }
 
-    async fn remove_closed_session(dialer: Arc<DialerInner>, host: PublicKey, session: Session) {
+    async fn track_session_closed(dialer: Arc<DialerInner>, host: PublicKey, session: Session) {
         let _ = session.closed().await;
         dialer.open_sessions.lock().unwrap().remove(&host);
     }
@@ -159,7 +159,7 @@ impl Dialer {
             let session = self.inner.client.connect(addr.address.parse()?).await?;
             tokio::spawn({
                 let dialer = self.inner.clone();
-                Self::remove_closed_session(dialer, host, session.clone())
+                Self::track_session_closed(dialer, host, session.clone())
             });
             return Ok(session);
         }
