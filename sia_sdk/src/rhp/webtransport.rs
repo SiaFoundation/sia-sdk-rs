@@ -110,39 +110,8 @@ impl Dialer {
         })
     }
 
-    async fn host_stream(&self, host: PublicKey) -> Result<Stream, Error> {
-        self.inner.host_stream(host).await
-    }
-
-    pub async fn host_prices(
-        &self,
-        host_key: PublicKey,
-        refresh: bool,
-    ) -> Result<HostPrices, Error> {
-        self.inner.host_prices(host_key, refresh).await
-    }
-}
-
-struct DialerInner {
-    client: web_transport::Client,
-    hosts: Mutex<HashMap<PublicKey, Vec<NetAddress>>>,
-    open_sessions: Mutex<HashMap<PublicKey, Session>>,
-    cached_prices: Mutex<HashMap<PublicKey, HostPrices>>,
-}
-
-impl DialerInner {
-    fn new() -> Result<Self, Error> {
-        let client = ClientBuilder::new().with_system_roots()?;
-        Ok(Self {
-            client,
-            hosts: Mutex::new(HashMap::new()),
-            open_sessions: Mutex::new(HashMap::new()),
-            cached_prices: Mutex::new(HashMap::new()),
-        })
-    }
-
     fn get_cached_prices(&self, host_key: &PublicKey) -> Option<HostPrices> {
-        let mut cached_prices = self.cached_prices.lock().unwrap();
+        let mut cached_prices = self.inner.cached_prices.lock().unwrap();
         match cached_prices.get(host_key) {
             Some(prices) => {
                 if prices.valid_until < OffsetDateTime::now_utc() {
@@ -157,20 +126,29 @@ impl DialerInner {
     }
 
     fn set_cached_prices(&self, host_key: &PublicKey, prices: HostPrices) {
-        self.cached_prices.lock().unwrap().insert(*host_key, prices);
+        self.inner
+            .cached_prices
+            .lock()
+            .unwrap()
+            .insert(*host_key, prices);
     }
 
     fn existing_session(&self, host: PublicKey) -> Option<Session> {
-        let open_sessions = self.open_sessions.lock().unwrap();
+        let open_sessions = self.inner.open_sessions.lock().unwrap();
         if let Some(session) = open_sessions.get(&host) {
             return Some(session.clone());
         }
         None
     }
 
+    async fn remove_closed_session(dialer: Arc<DialerInner>, host: PublicKey, session: Session) {
+        let _ = session.closed().await;
+        dialer.open_sessions.lock().unwrap().remove(&host);
+    }
+
     async fn new_session(&self, host: PublicKey) -> Result<Session, Error> {
         let addresses = {
-            let hosts = self.hosts.lock().unwrap();
+            let hosts = self.inner.hosts.lock().unwrap();
             hosts.get(&host).cloned().ok_or(Error::UnknownHost(host))?
         };
         for addr in addresses {
@@ -178,8 +156,12 @@ impl DialerInner {
                 continue;
             }
 
-            // TODO: handle closing session
-            return Ok(self.client.connect(addr.address.parse()?).await?);
+            let session = self.inner.client.connect(addr.address.parse()?).await?;
+            tokio::spawn({
+                let dialer = self.inner.clone();
+                Self::remove_closed_session(dialer, host, session.clone())
+            });
+            return Ok(session);
         }
         Err(Error::FailedToConnect)
     }
@@ -191,7 +173,7 @@ impl DialerInner {
         } else {
             debug!("establishing new session to {host}");
             let new_session = timeout(Duration::from_secs(30), self.new_session(host)).await??;
-            let open_sessions = &mut self.open_sessions.lock().unwrap();
+            let open_sessions = &mut self.inner.open_sessions.lock().unwrap();
             open_sessions.insert(host, new_session.clone());
             debug!("established new session to {host}");
             new_session
@@ -225,6 +207,25 @@ impl DialerInner {
         }
         self.set_cached_prices(&host_key, prices.clone());
         Ok(prices)
+    }
+}
+
+struct DialerInner {
+    client: web_transport::Client,
+    hosts: Mutex<HashMap<PublicKey, Vec<NetAddress>>>,
+    open_sessions: Mutex<HashMap<PublicKey, Session>>,
+    cached_prices: Mutex<HashMap<PublicKey, HostPrices>>,
+}
+
+impl DialerInner {
+    fn new() -> Result<Self, Error> {
+        let client = ClientBuilder::new().with_system_roots()?;
+        Ok(Self {
+            client,
+            hosts: Mutex::new(HashMap::new()),
+            open_sessions: Mutex::new(HashMap::new()),
+            cached_prices: Mutex::new(HashMap::new()),
+        })
     }
 }
 
