@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 use log::debug;
 use thiserror::{self, Error};
 use time::OffsetDateTime;
-use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 use web_transport::{ClientBuilder, Session};
@@ -82,7 +81,7 @@ impl Transport for Stream {
     async fn write_request<R: rhp::RPCRequest>(&mut self, req: &R) -> Result<(), Self::Error> {
         let mut buf = Vec::new();
         req.encode_request(&mut buf).await?;
-        self.send.write(&mut &buf[..]).await?;
+        self.send.write(&buf[..]).await?;
         Ok(())
     }
 
@@ -93,17 +92,17 @@ impl Transport for Stream {
     async fn write_response<RR: rhp::RPCResponse>(&mut self, resp: &RR) -> Result<(), Self::Error> {
         let mut buf = Vec::new();
         resp.encode_response(&mut buf).await?;
-        self.send.write(&mut &buf[..]).await?;
+        self.send.write(&buf[..]).await?;
         Ok(())
     }
 }
 
-struct Dialer {
+pub struct Dialer {
     inner: Arc<DialerInner>,
 }
 
 impl Dialer {
-    fn new() -> Result<Self, Error> {
+    pub fn new() -> Result<Self, Error> {
         Ok(Self {
             inner: Arc::new(DialerInner::new()?),
         })
@@ -160,7 +159,7 @@ impl DialerInner {
     }
 
     fn existing_session(&self, host: PublicKey) -> Option<Session> {
-        let mut open_conns = self.open_conns.lock().unwrap();
+        let open_conns = self.open_conns.lock().unwrap();
         if let Some(conn) = open_conns.get(&host) {
             return Some(conn.clone());
         }
