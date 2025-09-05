@@ -20,6 +20,8 @@ use crate::types::Hash256;
 use crate::types::v2::{NetAddress, Protocol};
 use crate::{encoding, objects};
 
+const DEFAULT_BUFFER_SIZE: usize = 8 * 1024;
+
 struct Stream {
     send: web_transport::SendStream,
     recv: web_transport::RecvStream,
@@ -79,7 +81,7 @@ impl Transport for Stream {
     type Error = Error;
 
     async fn write_request<R: rhp::RPCRequest>(&mut self, req: &R) -> Result<(), Self::Error> {
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(DEFAULT_BUFFER_SIZE);
         req.encode_request(&mut buf).await?;
         self.send.write(&buf[..]).await?;
         Ok(())
@@ -90,7 +92,7 @@ impl Transport for Stream {
     }
 
     async fn write_response<RR: rhp::RPCResponse>(&mut self, resp: &RR) -> Result<(), Self::Error> {
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(DEFAULT_BUFFER_SIZE);
         resp.encode_response(&mut buf).await?;
         self.send.write(&buf[..]).await?;
         Ok(())
