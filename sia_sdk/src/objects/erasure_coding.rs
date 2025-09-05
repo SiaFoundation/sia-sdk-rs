@@ -314,6 +314,7 @@ mod tests {
 
         // reconstruct the data shards
         let mut reconstructed_data: Vec<u8> = Vec::new();
+        coder.reconstruct_data_shards(&mut encoded_shards).unwrap();
         coder
             .write_shards(&mut reconstructed_data, &mut encoded_shards, 0, data.len())
             .await
