@@ -878,12 +878,17 @@ impl<T: Transport> RPCReadSector<T, RPCComplete> {
         // verify proof
         let start = self.offset / SEGMENT_SIZE;
         let end = (self.offset + self.length).div_ceil(SEGMENT_SIZE);
-        let data = response
-            .data
-            .verify(&self.root, start, end)
-            .await
-            .map_err(Error::ProofValidation)?;
+        let (tx, rx) = oneshot::channel();
+        rayon::spawn(move || {
+            let res = response
+                .data
+                .verify(&self.root, start, end)
+                .map_err(Error::ProofValidation);
+            // rx never goes out of scope and never sends more than once, so this can't fail
+            tx.send(res).unwrap();
+        });
 
+        let data = rx.await.unwrap()?;
         Ok(RPCReadSectorResult {
             usage: self.usage,
             data,

@@ -99,7 +99,7 @@ pub enum ProofValidationError {
 pub struct RangeProof(Vec<Hash256>, Bytes);
 
 impl RangeProof {
-    pub async fn verify(
+    pub fn verify(
         self,
         root: &Hash256,
         start: usize,
@@ -327,8 +327,8 @@ mod tests {
         assert_eq!(root, expected_root);
     }
 
-    #[tokio::test]
-    async fn test_verify_range_proof() {
+    #[test]
+    fn test_verify_range_proof() {
         let data = Bytes::from(vec![0u8; SECTOR_SIZE]);
         let sector_root = sector_root(&data);
         let proof: Vec<Hash256> = vec![
@@ -351,7 +351,6 @@ mod tests {
 
         let verified_data = RangeProof(proof, data.clone()) // clone since RangeProof usually owns the data
             .verify(&sector_root, 24, 42)
-            .await
             .expect("proof validation failed");
         assert_eq!(&data, &verified_data);
     }
