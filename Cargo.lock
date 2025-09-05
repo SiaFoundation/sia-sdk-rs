@@ -1720,6 +1720,7 @@ version = "0.11.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49df843a9161c85bb8aae55f101bc0bac8bcafd637a620d9122fd7e0b2f7422e"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
  "fastbloom",
  "getrandom 0.3.3",
@@ -2278,6 +2279,8 @@ dependencies = [
  "time",
  "tokio",
  "uint",
+ "url",
+ "web-transport",
  "zeroize",
 ]
 
@@ -2841,6 +2844,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "web-streams"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15c4d5dbf19463c4b65e974303d453cc11991873c7a4a4953214f791d73303a2"
+dependencies = [
+ "thiserror 2.0.16",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "web-sys"
 version = "0.3.77"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2858,6 +2873,76 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "web-transport"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03efb036f13785e3cbb9285e9fb94872a0887a9f4e7efeb02647cc12f5e55eea"
+dependencies = [
+ "bytes",
+ "thiserror 2.0.16",
+ "url",
+ "web-transport-quinn",
+ "web-transport-wasm",
+]
+
+[[package]]
+name = "web-transport-proto"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb650c577c46254d16041c7fe0dc9901d9a42df3f46e77e9d05d1b3c17294b19"
+dependencies = [
+ "bytes",
+ "http",
+ "thiserror 2.0.16",
+ "url",
+]
+
+[[package]]
+name = "web-transport-quinn"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccba8a1ab2aae70119c9ada57e4a2324ebe1820a18814ca47a818f01dcd00f46"
+dependencies = [
+ "bytes",
+ "futures",
+ "http",
+ "log",
+ "quinn",
+ "rustls",
+ "rustls-native-certs",
+ "thiserror 2.0.16",
+ "tokio",
+ "url",
+ "web-transport-proto",
+ "web-transport-trait",
+]
+
+[[package]]
+name = "web-transport-trait"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4850148841799c83f033f4dddccb219f1f097aff6db1bda5b0d3be69fefb32bd"
+dependencies = [
+ "bytes",
+]
+
+[[package]]
+name = "web-transport-wasm"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44b2af1bed400caa442d75217bb7ece5e1ec853daf60affd5d2448c0a2063662"
+dependencies = [
+ "bytes",
+ "js-sys",
+ "thiserror 2.0.16",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-streams",
+ "web-sys",
 ]
 
 [[package]]
