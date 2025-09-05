@@ -770,6 +770,7 @@ impl<T: Transport> RPCWriteSector<T, RPCInit> {
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let root = merkle::sector_root(data.as_ref());
+            // rx never goes out of scope and never sends more than once, so this can't fail
             tx.send(root).unwrap();
         });
 

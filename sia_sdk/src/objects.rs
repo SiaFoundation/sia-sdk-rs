@@ -149,7 +149,7 @@ where
         slab_index: usize,
         shard_index: usize,
     ) -> Result<(usize, usize, Sector), D::Error> {
-        const N: u32 = 2;
+        const BACKOFF_MULTIPLIER: u32 = 2;
 
         let initial_timeout = Duration::from_secs(10);
         let mut tasks = JoinSet::new();
@@ -162,7 +162,7 @@ where
         ));
         let mut attempts = 0;
         loop {
-            let timeout = initial_timeout * N.pow(attempts);
+            let timeout = initial_timeout * BACKOFF_MULTIPLIER.pow(attempts);
             tokio::select! {
                 Some(res) = tasks.join_next() => {
                     match res.unwrap() {
@@ -173,7 +173,7 @@ where
                         Err(e) => {
                             debug!("slab {slab_index} shard {shard_index} upload failed {e:?}");
                             if tasks.is_empty() {
-                                tasks.spawn(Self::upload_shard(dialer.clone(), hosts.clone(), account_key.clone(), data.clone(), 2*timeout));
+                                tasks.spawn(Self::upload_shard(dialer.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
                             }
                         }
                     }
