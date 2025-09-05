@@ -11,7 +11,7 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, BufReader, BufWriter};
 use tokio::select;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio::task::JoinSet;
+use tokio::task::{JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
 
 use crate::objects::encryption::{encrypt_shard, encrypt_shards};
@@ -207,14 +207,33 @@ where
 
         tokio::spawn(async move {
             let mut r = BufReader::new(&mut r);
-            let mut rs = ErasureCoder::new(data_shards as usize, parity_shards as usize).unwrap();
+            let rs = ErasureCoder::new(data_shards as usize, parity_shards as usize).unwrap();
             loop {
-                match rs.read_encoded_shards(&mut r).await {
-                    Ok((shards, length)) => {
+                match rs.read_shards(&mut r).await {
+                    Ok((mut shards, length)) => {
                         if length == 0 {
                             break;
                         }
-                        let _ = tx.send(Ok((shards, length))).await;
+                        let res = spawn_blocking(move || -> Vec<Vec<u8>> {
+                            let rs =
+                                ErasureCoder::new(data_shards as usize, parity_shards as usize)
+                                    .unwrap();
+                            rs.encode_shards(&mut shards).unwrap();
+                            encrypt_shards(&encryption_key, &mut shards, 0);
+                            shards
+                        })
+                        .await
+                        .map_err(|_| Error::Closed);
+
+                        match res {
+                            Ok(shards) => {
+                                let _ = tx.send(Ok((shards, length))).await;
+                            }
+                            Err(_) => {
+                                let _ = tx.send(Err(Error::Closed)).await;
+                                break;
+                            }
+                        };
                     }
                     Err(e) => {
                         let _ = tx.send(Err(e.into())).await;
@@ -227,7 +246,7 @@ where
         loop {
             select! {
                 Some(res) = rx.recv() => {
-                    let (mut shards, length) = res?;
+                    let (shards, length) = res?;
                     let slab_index = slabs.len();
                     let slab = Slab {
                         sectors: vec![Sector { root: Hash256::default(), host_key: PublicKey::new([0u8; 32]) }; shards.len()],
@@ -237,7 +256,6 @@ where
                         min_shards: data_shards,
                     };
                     slabs.push(slab);
-                    encrypt_shards(&encryption_key, &mut shards, 0);
                     debug!("slab {slab_index} encrypted, uploading shards");
                     let hosts = HostQueue::new(dialer.hosts());
                     for (shard_index, shard) in shards.into_iter().enumerate() {
@@ -337,7 +355,11 @@ where
                 Some(res) = download_tasks.next() => {
                     match res {
                         Ok((index, mut data)) => {
-                            encrypt_shard(encryption_key, &mut data, index as u8, offset);
+                            let encryption_key = *encryption_key;
+                            let data = spawn_blocking(move || {
+                                encrypt_shard(&encryption_key, &mut data, index as u8, offset);
+                                data
+                            }).await.map_err(|_| Error::Closed)?;
                             shards[index] = Some(data);
                             successful += 1;
                             if successful >= min_shards {
@@ -429,13 +451,23 @@ where
                     shard_length,
                 )
                 .await?;
-            let mut rs = ErasureCoder::new(
+            let data_shards = slab.min_shards as usize;
+            let parity_shards = slab.sectors.len() - slab.min_shards as usize;
+            let shards = spawn_blocking(move || {
+                let rs = ErasureCoder::new(data_shards, parity_shards).unwrap();
+                rs.reconstruct_data_shards(&mut shards).unwrap();
+                shards
+            })
+            .await
+            .map_err(|_| Error::Closed)?;
+            let rs = ErasureCoder::new(
                 slab.min_shards as usize,
                 slab.sectors.len() - slab.min_shards as usize,
-            )?;
-            rs.write_reconstructed_shards(
+            )
+            .unwrap();
+            rs.write_shards(
                 &mut w,
-                &mut shards,
+                &shards,
                 slab_offset % (SEGMENT_SIZE * slab.min_shards as usize),
                 slab_length,
             )

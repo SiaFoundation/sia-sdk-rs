@@ -29,58 +29,28 @@ impl ErasureCoder {
         })
     }
 
-    /// read_encoded_shards is a convenience method that reads data from the
-    /// given reader and returns erasure coded shards in a single call.
-    pub async fn read_encoded_shards<R: AsyncRead + Unpin>(
-        &mut self,
-        r: &mut R,
-    ) -> Result<(Vec<Vec<u8>>, usize)> {
-        let (mut shards, size) = self.striped_read(r).await?;
-        self.encode_shards(&mut shards)?;
-        Ok((shards, size))
-    }
-
-    /// write_reconstructed_shards is a convenience method that attempts to
-    /// recover the data shards of the provided shards, join them and write the
-    /// result to the provided writer. It skips the first `skip` bytes and
-    /// writes 'n' bytes in total.
-    pub async fn write_reconstructed_shards<W: AsyncWrite + Unpin>(
-        &mut self,
-        w: &mut W,
-        shards: &mut [Option<Vec<u8>>],
-        skip: usize,
-        n: usize,
-    ) -> Result<()> {
-        // reconstruct just the data, that's all we need
-        self.reconstruct_data(shards)?;
-        self.striped_write(w, shards, skip, n).await?;
-        w.flush().await?;
-        Ok(())
-    }
-
-    /// encode_shards encodes the shards using reed solomon erasure coding,
+    /// encodes the shards using reed solomon erasure coding,
     /// computing the parity shards and overwriting their values.
-    fn encode_shards(&mut self, shards: &mut [Vec<u8>]) -> Result<()> {
+    pub fn encode_shards(&self, shards: &mut [Vec<u8>]) -> Result<()> {
         self.encoder.encode(shards)?;
         Ok(())
     }
 
-    /// reconstruct reconstructs the missing shards from the available ones.
-    #[allow(dead_code)]
-    fn reconstruct(&mut self, shards: &mut [Option<Vec<u8>>]) -> Result<()> {
+    /// reconstructs the missing shards from the available ones.
+    pub fn reconstruct(&self, shards: &mut [Option<Vec<u8>>]) -> Result<()> {
         self.encoder.reconstruct(shards)?;
         Ok(())
     }
 
-    /// reconstruct reconstructs the missing datashards from the available ones.
-    fn reconstruct_data(&mut self, shards: &mut [Option<Vec<u8>>]) -> Result<()> {
+    /// reconstructs the missing datashards from the available ones.
+    pub fn reconstruct_data_shards(&self, shards: &mut [Option<Vec<u8>>]) -> Result<()> {
         self.encoder.reconstruct_data(shards)?;
         Ok(())
     }
 
-    /// striped_write writes up to 'n' bytes from the given reconstructed shards
+    /// write_shards writes up to 'n' bytes from the given reconstructed shards
     /// to the provided writer, skipping the first `skip` bytes.
-    async fn striped_write<W: AsyncWrite + Unpin>(
+    pub async fn write_shards<W: AsyncWrite + Unpin>(
         &self,
         w: &mut W,
         shards: &[Option<Vec<u8>>],
@@ -116,8 +86,11 @@ impl ErasureCoder {
         Ok(())
     }
 
-    /// striped_read reads data from the given reader into a vector of shards.
-    async fn striped_read<R: AsyncRead + Unpin>(&self, r: &mut R) -> Result<(Vec<Vec<u8>>, usize)> {
+    /// read_shards reads data from the given reader into a vector of shards.
+    pub async fn read_shards<R: AsyncRead + Unpin>(
+        &self,
+        r: &mut R,
+    ) -> Result<(Vec<Vec<u8>>, usize)> {
         // allocate memory for shards
         let mut shards: Vec<Vec<u8>> = Vec::with_capacity(self.data_shards);
         for _ in 0..self.data_shards + self.parity_shards {
@@ -162,7 +135,7 @@ mod tests {
     async fn test_encode_shards() {
         let data_shards = 2;
         let parity_shards = 3;
-        let mut coder = ErasureCoder::new(data_shards, parity_shards).unwrap();
+        let coder = ErasureCoder::new(data_shards, parity_shards).unwrap();
 
         let mut shards: Vec<Vec<u8>> = [
             vec![1u8; SECTOR_SIZE],
@@ -197,7 +170,7 @@ mod tests {
         for i in 0..data_shards {
             let mut shards: Vec<Option<Vec<u8>>> = shards.iter().cloned().map(Some).collect();
             shards[i] = None;
-            coder.reconstruct_data(&mut shards).unwrap();
+            coder.reconstruct_data_shards(&mut shards).unwrap();
             let shards: Vec<Vec<u8>> = shards.into_iter().map(|s| s.unwrap()).collect();
             assert_eq!(shards, expected_shards);
         }
@@ -221,7 +194,7 @@ mod tests {
             let mut data = vec![0u8; data_size];
             rand::rng().fill_bytes(&mut data);
 
-            let (shards, size) = coder.striped_read(&mut &data[..]).await.unwrap();
+            let (shards, size) = coder.read_shards(&mut &data[..]).await.unwrap();
 
             assert_eq!(size, expected_size, "data size {data_size} mismatch");
             assert_eq!(
@@ -247,7 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_striped_read_write() {
-        let mut coder = ErasureCoder::new(4, 1).unwrap();
+        let coder = ErasureCoder::new(4, 1).unwrap();
 
         let mut data = vec![0u8; SECTOR_SIZE * 7 / 2]; // 3.5 shards of data
         data[..SECTOR_SIZE].fill(1);
@@ -255,7 +228,7 @@ mod tests {
         data[2 * SECTOR_SIZE..3 * SECTOR_SIZE].fill(3);
         data[3 * SECTOR_SIZE..].fill(4);
 
-        let (mut shards, size) = coder.striped_read(&mut data.as_slice()).await.unwrap();
+        let (mut shards, size) = coder.read_shards(&mut data.as_slice()).await.unwrap();
 
         // we expect 5 shards and the last one is an empty parity shard
         assert_eq!(shards.len(), 5);
@@ -300,7 +273,7 @@ mod tests {
         let shards: Vec<Option<Vec<u8>>> = shards.iter().cloned().map(Some).collect();
         let mut joined_data = Vec::new();
         coder
-            .striped_write(&mut joined_data, &shards, 0, data.len())
+            .write_shards(&mut joined_data, &shards, 0, data.len())
             .await
             .unwrap();
         assert_eq!(joined_data, data);
@@ -308,7 +281,7 @@ mod tests {
         // join only the first half
         let mut joined_data = Vec::new();
         coder
-            .striped_write(&mut joined_data, &shards, 0, data.len() / 2)
+            .write_shards(&mut joined_data, &shards, 0, data.len() / 2)
             .await
             .unwrap();
         assert_eq!(joined_data, data[..data.len() / 2]);
@@ -316,7 +289,7 @@ mod tests {
         // join only the second half
         let mut joined_data = Vec::new();
         coder
-            .striped_write(&mut joined_data, &shards, data.len() / 2, data.len() / 2)
+            .write_shards(&mut joined_data, &shards, data.len() / 2, data.len() / 2)
             .await
             .unwrap();
         assert_eq!(joined_data, data[data.len() / 2..]);
@@ -324,7 +297,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_encoded_write_reconstructed() {
-        let mut coder = ErasureCoder::new(4, 1).unwrap();
+        let coder = ErasureCoder::new(4, 1).unwrap();
         let mut data = vec![0u8; SECTOR_SIZE * 7 / 2]; // 3.5 shards of data
         data[..SECTOR_SIZE].fill(1);
         data[SECTOR_SIZE..2 * SECTOR_SIZE].fill(2);
@@ -332,16 +305,17 @@ mod tests {
         data[3 * SECTOR_SIZE..].fill(4);
 
         // encode the data
-        let (encoded_shards, _) = coder.read_encoded_shards(&mut &data[..]).await.unwrap();
+        let (mut shards, _) = coder.read_shards(&mut &data[..]).await.unwrap();
+        coder.encode_shards(&mut shards).unwrap();
 
         // drop a shard
-        let mut encoded_shards = encoded_shards.into_iter().map(Some).collect::<Vec<_>>();
+        let mut encoded_shards = shards.into_iter().map(Some).collect::<Vec<_>>();
         encoded_shards[2] = None; // drop the third shard
 
         // reconstruct the data shards
         let mut reconstructed_data: Vec<u8> = Vec::new();
         coder
-            .write_reconstructed_shards(&mut reconstructed_data, &mut encoded_shards, 0, data.len())
+            .write_shards(&mut reconstructed_data, &mut encoded_shards, 0, data.len())
             .await
             .unwrap();
         assert_eq!(data, reconstructed_data);
