@@ -17,7 +17,7 @@ pub use reqwest::{IntoUrl, Url};
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("indexd responded with an error: {0}")]
-    ApiError(String),
+    Api(String),
 
     #[error("invalid header value: {0}")]
     InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),
@@ -53,7 +53,7 @@ pub struct AuthConnectStatusResponse {
 #[serde(rename_all = "camelCase")]
 pub struct RegisterAppRequest {
     pub name: String,
-    pub description: Option<String>,
+    pub description: String,
     #[serde(rename = "serviceURL")]
     pub service_url: Url,
     #[serde(rename = "logoURL")]
@@ -73,6 +73,7 @@ pub struct RegisterAppResponse {
     pub expiration: OffsetDateTime,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Slab {
@@ -82,6 +83,7 @@ pub struct Slab {
     pub sectors: Vec<Sector>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SlabPinParams {
@@ -108,7 +110,7 @@ impl Client {
         match resp.status() {
             StatusCode::UNAUTHORIZED => Ok(false),
             StatusCode::NO_CONTENT => Ok(true),
-            _ => Err(Error::ApiError(resp.text().await?)),
+            _ => Err(Error::Api(resp.text().await?)),
         }
     }
 
@@ -125,7 +127,7 @@ impl Client {
         match resp.status() {
             StatusCode::OK => Ok(resp.json::<AuthConnectStatusResponse>().await?.approved),
             StatusCode::NOT_FOUND => Err(Error::UserRejected),
-            _ => Err(Error::ApiError(resp.text().await?)),
+            _ => Err(Error::Api(resp.text().await?)),
         }
     }
 
@@ -143,6 +145,7 @@ impl Client {
     }
 
     /// Retrieves a slab from the indexer by its ID.
+    #[allow(dead_code)]
     pub async fn slab(&self, slab_id: &Hash256) -> Result<Slab> {
         self.get_json::<_, ()>(&format!("slab/{slab_id}"), None)
             .await
@@ -150,6 +153,7 @@ impl Client {
 
     /// Fetches the digests of slabs associated with the account. It supports
     /// pagination through the provided options.
+    #[allow(dead_code)]
     pub async fn slab_ids(&self, offset: Option<u64>, limit: Option<u64>) -> Result<Vec<Hash256>> {
         #[derive(Serialize)]
         struct QueryParams {
@@ -161,16 +165,19 @@ impl Client {
     }
 
     /// Pins a slab to the indexer.
+    #[allow(dead_code)]
     pub async fn pin_slab(&self, slab: &SlabPinParams) -> Result<Hash256> {
         self.post_json("slabs", &slab).await
     }
 
     /// Unpins a slab from the indexer.
+    #[allow(dead_code)]
     pub async fn unpin_slab(&self, slab_id: &Hash256) -> Result<()> {
         self.delete(&format!("slabs/{slab_id}")).await
     }
 
     /// Helper to send a signed DELETE request.
+    #[allow(dead_code)]
     async fn delete(&self, path: &str) -> Result<()> {
         let url = self.url.join(path)?;
         let query_params = self.sign(&url, Method::DELETE, None, OffsetDateTime::now_utc());
@@ -200,16 +207,17 @@ impl Client {
         if resp.status().is_success() {
             Ok(resp.json::<T>().await?)
         } else {
-            Err(Error::ApiError(resp.text().await?))
+            Err(Error::Api(resp.text().await?))
         }
     }
 
     /// Same as handle_response but for empty responses.
+    #[allow(dead_code)]
     async fn handle_empty_response(resp: reqwest::Response) -> Result<()> {
         if resp.status().is_success() {
             Ok(())
         } else {
-            Err(Error::ApiError(resp.text().await?))
+            Err(Error::Api(resp.text().await?))
         }
     }
 
@@ -527,7 +535,7 @@ mod tests {
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string(), app_key).unwrap();
 
-        let expected_error = Error::ApiError("something went wrong".to_string());
+        let expected_error = Error::Api("something went wrong".to_string());
         let get_error = client.get_json::<(), ()>("", None).await.unwrap_err();
         assert_eq!(get_error.to_string(), expected_error.to_string());
         let post_error = client.post_json::<(), ()>("", &()).await.unwrap_err();
@@ -648,7 +656,7 @@ mod tests {
         let resp = client
             .request_app_connection(&RegisterAppRequest {
                 name: "name".to_string(),
-                description: Some("description".to_string()),
+                description: "description".to_string(),
                 service_url: "https://service.com".parse().unwrap(),
                 logo_url: Some("https://logo.com".parse().unwrap()),
                 callback_url: Some("https://callback.com".parse().unwrap()),

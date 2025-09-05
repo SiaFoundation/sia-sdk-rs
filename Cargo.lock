@@ -1176,6 +1176,8 @@ dependencies = [
  "httptest",
  "rand",
  "reqwest",
+ "rustls",
+ "rustls-platform-verifier 0.6.1",
  "serde",
  "serde_json",
  "sia_sdk",
