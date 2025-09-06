@@ -162,7 +162,7 @@ impl SDK<RegisteredState> {
 impl SDK<ConnectedState> {
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
-        reader: &mut R,
+        reader: R,
         encryption_key: [u8; 32],
         data_shards: u8,
         parity_shards: u8,
