@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::marker::PhantomData;
 use thiserror::Error;
-use tokio::try_join;
+use tokio::sync::oneshot;
 
 use super::types::*;
 use crate::consensus::ChainState;
@@ -764,15 +764,18 @@ impl<T: Transport> RPCWriteSector<T, RPCInit> {
         let request = RPCWriteSectorRequest {
             prices,
             token,
-            data,
+            data: data.clone(),
         };
 
-        let mut data = &request.data[..];
-        let (_, root) = try_join!(transport.write_request(&request), async move {
-            merkle::sector_root_from_reader(&mut data)
-                .await
-                .map_err(|e| Error::from(e).into())
-        },)?;
+        let (tx, rx) = oneshot::channel();
+        rayon::spawn(move || {
+            let root = merkle::sector_root(data.as_ref());
+            // rx never goes out of scope and never sends more than once, so this can't fail
+            tx.send(root).unwrap();
+        });
+
+        transport.write_request(&request).await?;
+        let root = rx.await.unwrap();
 
         Ok(RPCWriteSector {
             root,
@@ -875,12 +878,17 @@ impl<T: Transport> RPCReadSector<T, RPCComplete> {
         // verify proof
         let start = self.offset / SEGMENT_SIZE;
         let end = (self.offset + self.length).div_ceil(SEGMENT_SIZE);
-        let data = response
-            .data
-            .verify(&self.root, start, end)
-            .await
-            .map_err(Error::ProofValidation)?;
+        let (tx, rx) = oneshot::channel();
+        rayon::spawn(move || {
+            let res = response
+                .data
+                .verify(&self.root, start, end)
+                .map_err(Error::ProofValidation);
+            // rx never goes out of scope and never sends more than once, so this can't fail
+            tx.send(res).unwrap();
+        });
 
+        let data = rx.await.unwrap()?;
         Ok(RPCReadSectorResult {
             usage: self.usage,
             data,
