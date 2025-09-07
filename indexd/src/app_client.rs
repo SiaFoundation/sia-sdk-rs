@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use sia::objects::slabs::Sector;
+use crate::slabs::Sector;
 use sia::signing::PrivateKey;
 use sia::types::Hash256;
 
@@ -33,14 +33,6 @@ pub enum Error {
 
     #[error("user rejected connection request")]
     UserRejected,
-}
-
-type Result<T> = std::result::Result<T, Error>;
-
-pub struct Client {
-    client: reqwest::Client,
-    url: Url,
-    app_key: PrivateKey,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -73,7 +65,6 @@ pub struct RegisterAppResponse {
     pub expiration: OffsetDateTime,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Slab {
@@ -82,14 +73,21 @@ pub struct Slab {
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
 }
-
-#[allow(dead_code)]
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SlabPinParams {
     pub encryption_key: [u8; 32],
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
+}
+
+type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Clone)]
+pub struct Client {
+    client: reqwest::Client,
+    url: Url,
+    app_key: PrivateKey,
 }
 
 impl Client {
@@ -145,15 +143,13 @@ impl Client {
     }
 
     /// Retrieves a slab from the indexer by its ID.
-    #[allow(dead_code)]
     pub async fn slab(&self, slab_id: &Hash256) -> Result<Slab> {
-        self.get_json::<_, ()>(&format!("slab/{slab_id}"), None)
+        self.get_json::<_, ()>(&format!("slabs/{slab_id}"), None)
             .await
     }
 
     /// Fetches the digests of slabs associated with the account. It supports
     /// pagination through the provided options.
-    #[allow(dead_code)]
     pub async fn slab_ids(&self, offset: Option<u64>, limit: Option<u64>) -> Result<Vec<Hash256>> {
         #[derive(Serialize)]
         struct QueryParams {
@@ -165,19 +161,16 @@ impl Client {
     }
 
     /// Pins a slab to the indexer.
-    #[allow(dead_code)]
-    pub async fn pin_slab(&self, slab: &SlabPinParams) -> Result<Hash256> {
+    pub async fn pin_slab(&self, slab: SlabPinParams) -> Result<Hash256> {
         self.post_json("slabs", &slab).await
     }
 
     /// Unpins a slab from the indexer.
-    #[allow(dead_code)]
     pub async fn unpin_slab(&self, slab_id: &Hash256) -> Result<()> {
         self.delete(&format!("slabs/{slab_id}")).await
     }
 
     /// Helper to send a signed DELETE request.
-    #[allow(dead_code)]
     async fn delete(&self, path: &str) -> Result<()> {
         let url = self.url.join(path)?;
         let query_params = self.sign(&url, Method::DELETE, None, OffsetDateTime::now_utc());
@@ -212,7 +205,6 @@ impl Client {
     }
 
     /// Same as handle_response but for empty responses.
-    #[allow(dead_code)]
     async fn handle_empty_response(resp: reqwest::Response) -> Result<()> {
         if resp.status().is_success() {
             Ok(())
@@ -425,7 +417,7 @@ mod tests {
         server.expect(
             Expectation::matching(request::method_path(
                 "GET",
-                "/slab/43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28",
+                "/slabs/43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28",
             ))
             .respond_with(
                 Response::builder()
@@ -502,7 +494,7 @@ mod tests {
 
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string(), app_key).unwrap();
-        assert_eq!(client.pin_slab(&slab).await.unwrap(), slab_id);
+        assert_eq!(client.pin_slab(slab).await.unwrap(), slab_id);
     }
 
     #[tokio::test]

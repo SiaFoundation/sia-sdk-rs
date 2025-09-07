@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::encoding::SiaEncodable;
-use crate::signing::PublicKey;
-use crate::types::Hash256;
+use sia::encoding::SiaEncodable;
+use sia::signing::PublicKey;
+use sia::types::Hash256;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +19,16 @@ pub struct Slab {
     pub encryption_key: [u8; 32],
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
+    pub offset: usize,
+    pub length: usize,
+}
+
+// A PinnedSlab is a reference to a Slab that has been pinned to an indexd service.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PinnedSlab {
+    pub id: Hash256,
+    pub encryption_key: [u8; 32],
+    pub min_shards: u8,
     pub offset: usize,
     pub length: usize,
 }
@@ -41,7 +51,7 @@ impl Slab {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::hash_256;
+    use sia::hash_256;
 
     /// tests Slab.digest against a reference digest
     #[test]

@@ -2,7 +2,7 @@ use bytes::Bytes;
 use log::debug;
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::ClientConfig;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::ParseIntError;
 use std::sync::Arc;
@@ -13,16 +13,15 @@ use tokio::net::lookup_host;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 
-use crate::encoding;
-use crate::encoding_async::AsyncDecoder;
-use crate::objects::{Error as UploadError, HostDialer};
-use crate::rhp::{
+use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use sia::encoding;
+use sia::encoding_async::AsyncDecoder;
+use sia::rhp::{
     self, AccountToken, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector, Transport,
 };
-use crate::signing::{PrivateKey, PublicKey};
-use crate::types::Hash256;
-use crate::types::v2::{NetAddress, Protocol};
-use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use sia::signing::{PrivateKey, PublicKey};
+use sia::types::Hash256;
+use sia::types::v2::{NetAddress, Protocol};
 use std::sync::Mutex;
 use time::OffsetDateTime;
 
@@ -62,9 +61,6 @@ pub enum Error {
 
     #[error("write error: {0}")]
     Write(#[from] quinn::WriteError),
-
-    #[error("upload error: {0}")]
-    Upload(#[from] UploadError),
 
     #[error("invalid prices")]
     InvalidPrices,
@@ -109,17 +105,17 @@ impl Transport for Stream {
     }
 }
 
-/// A Dialer manages QUIC connections to Sia hosts.
+/// A Client manages QUIC connections to Sia hosts.
 /// Connections will be cached for reuse whenever possible.
 #[derive(Debug, Clone)]
-pub struct Dialer {
-    inner: Arc<DialerInner>,
+pub struct Client {
+    inner: Arc<ClientInner>,
 }
 
-impl Dialer {
+impl Client {
     pub fn new(client_config: ClientConfig) -> Result<Self, Error> {
-        let inner = DialerInner::new(client_config)?;
-        Ok(Dialer {
+        let inner = ClientInner::new(client_config)?;
+        Ok(Client {
             inner: Arc::new(inner),
         })
     }
@@ -236,10 +232,66 @@ impl Dialer {
         self.set_cached_prices(&host_key, prices.clone());
         Ok(prices)
     }
+
+    pub async fn write_sector(
+        &self,
+        host_key: PublicKey,
+        account_key: &PrivateKey,
+        sector: Bytes,
+    ) -> Result<Hash256, Error> {
+        let prices = self.host_prices(host_key, false).await?;
+        let token = AccountToken::new(account_key, host_key);
+        let stream = self.host_stream(host_key).await?;
+        let start = Instant::now();
+        let resp = RPCWriteSector::send_request(stream, prices, token, sector)
+            .await?
+            .complete()
+            .await?;
+        debug!(
+            "wrote sector to {host_key} in {}ms",
+            start.elapsed().as_millis()
+        );
+        Ok(resp.root)
+    }
+
+    pub async fn read_sector(
+        &self,
+        host_key: PublicKey,
+        account_key: &PrivateKey,
+        root: Hash256,
+        offset: usize,
+        length: usize,
+    ) -> Result<Bytes, Error> {
+        let prices = self.host_prices(host_key, false).await?;
+        let token = AccountToken::new(account_key, host_key);
+        let stream = self.host_stream(host_key).await?;
+        let start = Instant::now();
+        let resp = RPCReadSector::send_request(stream, prices, token, root, offset, length)
+            .await?
+            .complete()
+            .await?;
+        debug!(
+            "read {length} bytes from {host_key} in {}ms",
+            start.elapsed().as_millis()
+        );
+        Ok(resp.data)
+    }
+
+    pub fn hosts(&self) -> Vec<PublicKey> {
+        self.inner.hosts.lock().unwrap().keys().cloned().collect()
+    }
+
+    pub fn update_hosts(&mut self, hosts: Vec<Host>) {
+        let mut hosts_map = self.inner.hosts.lock().unwrap();
+        hosts_map.clear();
+        for host in hosts {
+            hosts_map.insert(host.public_key, host.addresses);
+        }
+    }
 }
 
 #[derive(Debug)]
-struct DialerInner {
+struct ClientInner {
     /*
         note: quinn's documentation (https://docs.rs/quinn/latest/quinn/struct.Endpoint.html#method.client) suggests
         non-ideal fallback behavior when dual-stack is not supported. This effectively treats every platform as
@@ -253,7 +305,7 @@ struct DialerInner {
     cached_prices: Mutex<HashMap<PublicKey, HostPrices>>,
 }
 
-impl DialerInner {
+impl ClientInner {
     fn new(mut client_config: ClientConfig) -> Result<Self, Error> {
         client_config.alpn_protocols = vec![b"sia/rhp4".to_vec()];
 
@@ -289,63 +341,40 @@ impl DialerInner {
     }
 }
 
-impl HostDialer for Dialer {
-    type Error = Error;
+#[derive(Debug, Error)]
+pub enum QueueError {
+    #[error("no more hosts available")]
+    NoMoreHosts,
+    #[error("client closed")]
+    Closed,
 
-    async fn write_sector(
-        &self,
-        host_key: PublicKey,
-        account_key: &PrivateKey,
-        sector: Bytes,
-    ) -> Result<Hash256, Self::Error> {
-        let prices = self.host_prices(host_key, false).await?;
-        let token = AccountToken::new(account_key, host_key);
-        let stream = self.host_stream(host_key).await?;
-        let start = Instant::now();
-        let resp = RPCWriteSector::send_request(stream, prices, token, sector)
-            .await?
-            .complete()
-            .await?;
-        debug!(
-            "wrote sector to {host_key} in {}ms",
-            start.elapsed().as_millis()
-        );
-        Ok(resp.root)
+    #[error("internal mutex error")]
+    MutexError,
+}
+
+/// A thread-safe queue of host public keys.
+#[derive(Debug, Clone)]
+pub struct HostQueue(Arc<Mutex<VecDeque<PublicKey>>>);
+
+impl HostQueue {
+    pub fn new(hosts: Vec<PublicKey>) -> Self {
+        Self(Arc::new(Mutex::new(VecDeque::from(hosts))))
     }
 
-    async fn read_sector(
-        &self,
-        host_key: PublicKey,
-        account_key: &PrivateKey,
-        root: Hash256,
-        offset: usize,
-        length: usize,
-    ) -> Result<Bytes, Self::Error> {
-        let prices = self.host_prices(host_key, false).await?;
-        let token = AccountToken::new(account_key, host_key);
-        let stream = self.host_stream(host_key).await?;
-        let start = Instant::now();
-        let resp = RPCReadSector::send_request(stream, prices, token, root, offset, length)
-            .await?
-            .complete()
-            .await?;
-        debug!(
-            "read {length} bytes from {host_key} in {}ms",
-            start.elapsed().as_millis()
-        );
-        Ok(resp.data)
+    pub fn pop_front(&self) -> Result<PublicKey, QueueError> {
+        self.0
+            .lock()
+            .map_err(|_| QueueError::MutexError)?
+            .pop_front()
+            .ok_or(QueueError::NoMoreHosts)
     }
 
-    fn hosts(&self) -> Vec<PublicKey> {
-        self.inner.hosts.lock().unwrap().keys().cloned().collect()
-    }
-
-    fn update_hosts(&mut self, hosts: Vec<Host>) {
-        let mut hosts_map = self.inner.hosts.lock().unwrap();
-        hosts_map.clear();
-        for host in hosts {
-            hosts_map.insert(host.public_key, host.addresses);
-        }
+    pub fn retry(&self, host: PublicKey) -> Result<(), QueueError> {
+        self.0
+            .lock()
+            .map_err(|_| QueueError::MutexError)?
+            .push_back(host);
+        Ok(())
     }
 }
 
@@ -354,8 +383,8 @@ mod test {
     use std::time::Duration;
 
     use super::*;
-    use crate::public_key;
     use rustls_platform_verifier::ConfigVerifierExt;
+    use sia::public_key;
     use tokio::time::sleep;
 
     #[tokio::test]
@@ -372,7 +401,7 @@ mod test {
         let client_config =
             rustls::ClientConfig::with_platform_verifier().expect("Failed to create client config");
 
-        let mut dialer = Dialer::new(client_config).expect("Failed to create dialer");
+        let mut dialer = Client::new(client_config).expect("Failed to create dialer");
         dialer.update_hosts(vec![Host {
             public_key: host_key,
             addresses: vec![NetAddress {
