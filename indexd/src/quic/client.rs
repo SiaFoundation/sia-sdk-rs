@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use log::debug;
+use priority_queue::PriorityQueue;
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::ClientConfig;
 use std::collections::{HashMap, VecDeque};
@@ -120,8 +121,171 @@ impl Client {
         })
     }
 
+    pub fn hosts(&self) -> Vec<PublicKey> {
+        let hosts = self.inner.hosts.lock().unwrap();
+        let preferred_hosts = self.inner.preferred_hosts.lock().unwrap();
+        preferred_hosts
+            .iter()
+            .map(|(host, _)| *host)
+            .filter(|host| hosts.contains_key(host))
+            .collect()
+    }
+
+    pub fn update_hosts(&mut self, hosts: Vec<Host>) {
+        let mut hosts_map = self.inner.hosts.lock().unwrap();
+        let mut priority_queue = self.inner.preferred_hosts.lock().unwrap();
+        hosts_map.clear();
+        for host in hosts {
+            hosts_map.insert(host.public_key, host.addresses);
+            if !priority_queue.contains(&host.public_key) {
+                priority_queue.push(host.public_key, 1);
+            }
+        }
+    }
+
+    pub async fn host_prices(
+        &self,
+        host_key: PublicKey,
+        refresh: bool,
+    ) -> Result<HostPrices, Error> {
+        self.inner
+            .host_prices(host_key, refresh)
+            .await
+            .inspect(|_| {
+                self.inner
+                    .preferred_hosts
+                    .lock()
+                    .unwrap()
+                    .change_priority_by(&host_key, |successful_rpcs| {
+                        *successful_rpcs += 1;
+                    });
+            })
+            .inspect_err(|_| {
+                self.inner
+                    .preferred_hosts
+                    .lock()
+                    .unwrap()
+                    .change_priority_by(&host_key, |successful_rpcs| {
+                        *successful_rpcs -= 1;
+                    });
+            })
+    }
+
+    pub async fn write_sector(
+        &self,
+        host_key: PublicKey,
+        account_key: &PrivateKey,
+        sector: Bytes,
+    ) -> Result<Hash256, Error> {
+        self.inner
+            .write_sector(host_key, account_key, sector)
+            .await
+            .inspect(|_| {
+                self.inner
+                    .preferred_hosts
+                    .lock()
+                    .unwrap()
+                    .change_priority_by(&host_key, |successful_rpcs| {
+                        *successful_rpcs += 1;
+                    });
+            })
+            .inspect_err(|_| {
+                self.inner
+                    .preferred_hosts
+                    .lock()
+                    .unwrap()
+                    .change_priority_by(&host_key, |successful_rpcs| {
+                        *successful_rpcs -= 1;
+                    });
+            })
+    }
+
+    pub async fn read_sector(
+        &self,
+        host_key: PublicKey,
+        account_key: &PrivateKey,
+        root: Hash256,
+        offset: usize,
+        length: usize,
+    ) -> Result<Bytes, Error> {
+        self.inner
+            .read_sector(host_key, account_key, root, offset, length)
+            .await
+            .inspect(|_| {
+                self.inner
+                    .preferred_hosts
+                    .lock()
+                    .unwrap()
+                    .change_priority_by(&host_key, |successful_rpcs| {
+                        *successful_rpcs += 1;
+                    });
+            })
+            .inspect_err(|_| {
+                self.inner
+                    .preferred_hosts
+                    .lock()
+                    .unwrap()
+                    .change_priority_by(&host_key, |successful_rpcs| {
+                        *successful_rpcs -= 1;
+                    });
+            })
+    }
+}
+
+#[derive(Debug)]
+struct ClientInner {
+    /*
+        note: quinn's documentation (https://docs.rs/quinn/latest/quinn/struct.Endpoint.html#method.client) suggests
+        non-ideal fallback behavior when dual-stack is not supported. This effectively treats every platform as
+        single-stack instead since IPv4 is the preferred fallback.
+    */
+    endpoint_v4: Option<Endpoint>,
+    endpoint_v6: Option<Endpoint>,
+
+    hosts: Mutex<HashMap<PublicKey, Vec<NetAddress>>>,
+    preferred_hosts: Mutex<PriorityQueue<PublicKey, i64>>,
+    open_conns: Mutex<HashMap<PublicKey, Connection>>,
+    cached_prices: Mutex<HashMap<PublicKey, HostPrices>>,
+}
+
+impl ClientInner {
+    fn new(mut client_config: ClientConfig) -> Result<Self, Error> {
+        client_config.alpn_protocols = vec![b"sia/rhp4".to_vec()];
+
+        let client_config = QuicClientConfig::try_from(client_config).unwrap();
+        let client_config = quinn::ClientConfig::new(Arc::new(client_config));
+
+        let endpoint_v4 = match quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into()) {
+            Ok(mut endpoint) => {
+                endpoint.set_default_client_config(client_config.clone());
+                Some(endpoint)
+            }
+            Err(_) => None,
+        };
+        let endpoint_v6 = match quinn::Endpoint::client((Ipv6Addr::UNSPECIFIED, 0).into()) {
+            Ok(mut endpoint) => {
+                endpoint.set_default_client_config(client_config);
+                Some(endpoint)
+            }
+            Err(_) => None,
+        };
+
+        if endpoint_v4.is_none() && endpoint_v6.is_none() {
+            return Err(Error::NoEndpoint);
+        }
+
+        Ok(Self {
+            endpoint_v4,
+            endpoint_v6,
+            hosts: Mutex::new(HashMap::new()),
+            preferred_hosts: Mutex::new(PriorityQueue::new()),
+            open_conns: Mutex::new(HashMap::new()),
+            cached_prices: Mutex::new(HashMap::new()),
+        })
+    }
+
     fn get_cached_prices(&self, host_key: &PublicKey) -> Option<HostPrices> {
-        let mut cached_prices = self.inner.cached_prices.lock().unwrap();
+        let mut cached_prices = self.cached_prices.lock().unwrap();
         match cached_prices.get(host_key) {
             Some(prices) => {
                 if prices.valid_until < OffsetDateTime::now_utc() {
@@ -136,15 +300,11 @@ impl Client {
     }
 
     fn set_cached_prices(&self, host_key: &PublicKey, prices: HostPrices) {
-        self.inner
-            .cached_prices
-            .lock()
-            .unwrap()
-            .insert(*host_key, prices);
+        self.cached_prices.lock().unwrap().insert(*host_key, prices);
     }
 
     fn existing_conn(&self, host: PublicKey) -> Option<Connection> {
-        let mut open_conns = self.inner.open_conns.lock().unwrap();
+        let mut open_conns = self.open_conns.lock().unwrap();
         if let Some(conn) = open_conns.get(&host).cloned() {
             if conn.close_reason().is_none() {
                 return Some(conn);
@@ -156,7 +316,7 @@ impl Client {
 
     async fn new_conn(&self, host: PublicKey) -> Result<Connection, Error> {
         let addresses = {
-            let hosts = self.inner.hosts.lock().unwrap();
+            let hosts = self.hosts.lock().unwrap();
             hosts.get(&host).cloned().ok_or(Error::UnknownHost(host))?
         };
         for addr in addresses {
@@ -171,14 +331,14 @@ impl Client {
             let resolved_addrs = lookup_host((addr, port)).await?;
             for socket in resolved_addrs {
                 if socket.is_ipv6()
-                    && let Some(endpoint) = &self.inner.endpoint_v6
+                    && let Some(endpoint) = &self.endpoint_v6
                 {
                     let conn = endpoint.connect(socket, addr).unwrap().await.ok();
                     if let Some(conn) = conn {
                         return Ok(conn);
                     }
                 } else if socket.is_ipv4()
-                    && let Some(endpoint) = &self.inner.endpoint_v4
+                    && let Some(endpoint) = &self.endpoint_v4
                 {
                     let conn = endpoint.connect(socket, addr).unwrap().await.ok();
                     if let Some(conn) = conn {
@@ -197,7 +357,7 @@ impl Client {
         } else {
             debug!("establishing new connection to {host}");
             let new_conn = timeout(Duration::from_secs(30), self.new_conn(host)).await??;
-            let open_conns = &mut self.inner.open_conns.lock().unwrap();
+            let open_conns = &mut self.open_conns.lock().unwrap();
             open_conns.insert(host, new_conn.clone());
             debug!("established new connection to {host}");
             new_conn
@@ -275,69 +435,6 @@ impl Client {
             start.elapsed().as_millis()
         );
         Ok(resp.data)
-    }
-
-    pub fn hosts(&self) -> Vec<PublicKey> {
-        self.inner.hosts.lock().unwrap().keys().cloned().collect()
-    }
-
-    pub fn update_hosts(&mut self, hosts: Vec<Host>) {
-        let mut hosts_map = self.inner.hosts.lock().unwrap();
-        hosts_map.clear();
-        for host in hosts {
-            hosts_map.insert(host.public_key, host.addresses);
-        }
-    }
-}
-
-#[derive(Debug)]
-struct ClientInner {
-    /*
-        note: quinn's documentation (https://docs.rs/quinn/latest/quinn/struct.Endpoint.html#method.client) suggests
-        non-ideal fallback behavior when dual-stack is not supported. This effectively treats every platform as
-        single-stack instead since IPv4 is the preferred fallback.
-    */
-    endpoint_v4: Option<Endpoint>,
-    endpoint_v6: Option<Endpoint>,
-
-    hosts: Mutex<HashMap<PublicKey, Vec<NetAddress>>>,
-    open_conns: Mutex<HashMap<PublicKey, Connection>>,
-    cached_prices: Mutex<HashMap<PublicKey, HostPrices>>,
-}
-
-impl ClientInner {
-    fn new(mut client_config: ClientConfig) -> Result<Self, Error> {
-        client_config.alpn_protocols = vec![b"sia/rhp4".to_vec()];
-
-        let client_config = QuicClientConfig::try_from(client_config).unwrap();
-        let client_config = quinn::ClientConfig::new(Arc::new(client_config));
-
-        let endpoint_v4 = match quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into()) {
-            Ok(mut endpoint) => {
-                endpoint.set_default_client_config(client_config.clone());
-                Some(endpoint)
-            }
-            Err(_) => None,
-        };
-        let endpoint_v6 = match quinn::Endpoint::client((Ipv6Addr::UNSPECIFIED, 0).into()) {
-            Ok(mut endpoint) => {
-                endpoint.set_default_client_config(client_config);
-                Some(endpoint)
-            }
-            Err(_) => None,
-        };
-
-        if endpoint_v4.is_none() && endpoint_v6.is_none() {
-            return Err(Error::NoEndpoint);
-        }
-
-        Ok(Self {
-            endpoint_v4,
-            endpoint_v6,
-            hosts: Mutex::new(HashMap::new()),
-            open_conns: Mutex::new(HashMap::new()),
-            cached_prices: Mutex::new(HashMap::new()),
-        })
     }
 }
 

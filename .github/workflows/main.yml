@@ -24,11 +24,7 @@ jobs:
         run: cargo check --target wasm32-unknown-unknown --lib --package sia_sdk
       - name: Rustfmt
         run: cargo +nightly fmt --all -- --check
-      - name: Clippy - QUIC
-        run: cargo clippy --features=quic -- -D warnings
-      - name: Test - QUIC
-        run: cargo test --features=quic
-      # - name: Clippy - WebTransport
-      #   run: cargo clippy --features=webtransport -- -D warnings
-      # - name: Test - WebTransport
-      #   run: cargo test --features=webtransport
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+      - name: Test
+        run: cargo test

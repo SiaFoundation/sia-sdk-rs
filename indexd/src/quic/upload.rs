@@ -270,7 +270,7 @@ impl Uploader {
             debug!("uploaded slab {slab_index}");
             // ensure the slabs vector is large enough
             slabs.resize(
-                slab_index + 1,
+                slabs.len().max(slab_index + 1),
                 PinnedSlab {
                     id: Hash256::default(),
                     encryption_key: [0u8; 32],

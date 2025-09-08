@@ -1,9 +1,7 @@
 mod app_client;
 mod slabs;
 
-#[cfg(feature = "quic")]
 pub mod quic;
-#[cfg(feature = "quic")]
 use crate::quic::{DownloadError, Downloader, UploadError, Uploader};
 
 use crate::app_client::{Client, RegisterAppRequest};
@@ -37,10 +35,10 @@ pub enum Error {
     App(String),
 
     #[error("upload error: {0}")]
-    UploadError(#[from] UploadError),
+    Upload(#[from] UploadError),
 
     #[error("download error: {0}")]
-    DownloadError(#[from] DownloadError),
+    Download(#[from] DownloadError),
 
     #[error("TLS error: {0}")]
     Tls(String),
@@ -179,7 +177,6 @@ impl SDK<RegisteredState> {
     }
 }
 
-#[cfg(feature = "quic")]
 impl SDK<ConnectedState> {
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
@@ -217,36 +214,5 @@ impl SDK<ConnectedState> {
             .download_range(writer, slabs, offset, length)
             .await?;
         Ok(())
-    }
-}
-
-#[cfg(feature = "webtransport")]
-impl SDK<ConnectedState> {
-    pub async fn upload<R: AsyncReadExt + Unpin>(
-        &self,
-        reader: R,
-        encryption_key: [u8; 32],
-        data_shards: u8,
-        parity_shards: u8,
-    ) -> Result<Vec<PinnedSlab>, Error> {
-        todo!("webtransport upload not implemented yet")
-    }
-
-    pub async fn download<W: AsyncWriteExt + Unpin>(
-        &self,
-        writer: &mut W,
-        slabs: &[PinnedSlab],
-    ) -> Result<(), Error> {
-        todo!("webtransport download not implemented yet")
-    }
-
-    pub async fn download_range<W: AsyncWriteExt + Unpin>(
-        &self,
-        writer: &mut W,
-        slabs: &[PinnedSlab],
-        offset: usize,
-        length: usize,
-    ) -> Result<(), Error> {
-        todo!("webtransport download_range not implemented yet")
     }
 }

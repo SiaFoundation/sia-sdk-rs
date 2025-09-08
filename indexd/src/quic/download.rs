@@ -234,12 +234,12 @@ impl Downloader {
                 .await?;
             let data_shards = slab.min_shards as usize;
             let parity_shards = slab.sectors.len() - slab.min_shards as usize;
-            let shards = spawn_blocking(move || {
-                let rs = ErasureCoder::new(data_shards, parity_shards).unwrap();
-                rs.reconstruct_data_shards(&mut shards).unwrap();
-                shards
+            let shards = spawn_blocking(move || -> Result<Vec<Option<Vec<u8>>>, DownloadError> {
+                let rs = ErasureCoder::new(data_shards, parity_shards)?;
+                rs.reconstruct_data_shards(&mut shards)?;
+                Ok(shards)
             })
-            .await?;
+            .await??;
             ErasureCoder::write_data_shards(
                 &mut w,
                 &shards[..data_shards],
