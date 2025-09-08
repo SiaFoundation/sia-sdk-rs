@@ -1173,7 +1173,12 @@ name = "indexd"
 version = "0.0.1"
 dependencies = [
  "blake2b_simd",
+ "bytes",
+ "futures",
  "httptest",
+ "log",
+ "priority-queue",
+ "quinn",
  "rand",
  "reqwest",
  "rustls",
@@ -1184,6 +1189,7 @@ dependencies = [
  "thiserror 2.0.16",
  "time",
  "tokio",
+ "tokio-util",
  "url",
 ]
 
@@ -1372,9 +1378,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.27"
+version = "0.4.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
+checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
 
 [[package]]
 name = "lru"
@@ -1685,6 +1691,17 @@ checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
 dependencies = [
  "proc-macro2",
  "syn",
+]
+
+[[package]]
+name = "priority-queue"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5676d703dda103cbb035b653a9f11448c0a7216c7926bd35fcb5865475d0c970"
+dependencies = [
+ "autocfg",
+ "equivalent",
+ "indexmap",
 ]
 
 [[package]]
@@ -2265,11 +2282,9 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
- "quinn",
  "rand",
  "rayon",
  "reed-solomon-erasure",
- "rustls",
  "rustls-platform-verifier 0.6.1",
  "serde",
  "serde-big-array",
@@ -2593,6 +2608,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

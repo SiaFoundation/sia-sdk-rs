@@ -48,21 +48,20 @@ impl ErasureCoder {
         Ok(())
     }
 
-    /// write_shards writes up to 'n' bytes from the given reconstructed shards
+    /// write_data_shards writes up to 'n' bytes from the given reconstructed shards
     /// to the provided writer, skipping the first `skip` bytes.
-    pub async fn write_shards<W: AsyncWrite + Unpin>(
-        &self,
+    pub async fn write_data_shards<W: AsyncWrite + Unpin>(
         w: &mut W,
         shards: &[Option<Vec<u8>>],
         mut skip: usize,
         mut n: usize,
     ) -> Result<()> {
-        let row_bytes = self.data_shards * SEGMENT_SIZE;
+        let row_bytes = shards.len() * SEGMENT_SIZE;
         let rows = skip / row_bytes;
         let mut offset = rows * SEGMENT_SIZE;
         skip %= row_bytes;
         while n > 0 {
-            for shard in &shards[..self.data_shards] {
+            for shard in shards {
                 if n == 0 {
                     return Ok(());
                 } else if skip > SEGMENT_SIZE {
@@ -220,7 +219,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_striped_read_write() {
-        let coder = ErasureCoder::new(4, 1).unwrap();
+        const DATA_SHARDS: usize = 4;
+        const PARITY_SHARDS: usize = 1;
+        let coder = ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).unwrap();
 
         let mut data = vec![0u8; SECTOR_SIZE * 7 / 2]; // 3.5 shards of data
         data[..SECTOR_SIZE].fill(1);
@@ -272,32 +273,41 @@ mod tests {
         // joining the shards back together should result in the original data
         let shards: Vec<Option<Vec<u8>>> = shards.iter().cloned().map(Some).collect();
         let mut joined_data = Vec::new();
-        coder
-            .write_shards(&mut joined_data, &shards, 0, data.len())
+        ErasureCoder::write_data_shards(&mut joined_data, &shards[..DATA_SHARDS], 0, data.len())
             .await
             .unwrap();
         assert_eq!(joined_data, data);
 
         // join only the first half
         let mut joined_data = Vec::new();
-        coder
-            .write_shards(&mut joined_data, &shards, 0, data.len() / 2)
-            .await
-            .unwrap();
+        ErasureCoder::write_data_shards(
+            &mut joined_data,
+            &shards[..DATA_SHARDS],
+            0,
+            data.len() / 2,
+        )
+        .await
+        .unwrap();
         assert_eq!(joined_data, data[..data.len() / 2]);
 
         // join only the second half
         let mut joined_data = Vec::new();
-        coder
-            .write_shards(&mut joined_data, &shards, data.len() / 2, data.len() / 2)
-            .await
-            .unwrap();
+        ErasureCoder::write_data_shards(
+            &mut joined_data,
+            &shards[..DATA_SHARDS],
+            data.len() / 2,
+            data.len() / 2,
+        )
+        .await
+        .unwrap();
         assert_eq!(joined_data, data[data.len() / 2..]);
     }
 
     #[tokio::test]
     async fn test_read_encoded_write_reconstructed() {
-        let coder = ErasureCoder::new(4, 1).unwrap();
+        const DATA_SHARDS: usize = 4;
+        const PARITY_SHARDS: usize = 1;
+        let coder = ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).unwrap();
         let mut data = vec![0u8; SECTOR_SIZE * 7 / 2]; // 3.5 shards of data
         data[..SECTOR_SIZE].fill(1);
         data[SECTOR_SIZE..2 * SECTOR_SIZE].fill(2);
@@ -315,10 +325,14 @@ mod tests {
         // reconstruct the data shards
         let mut reconstructed_data: Vec<u8> = Vec::new();
         coder.reconstruct_data_shards(&mut encoded_shards).unwrap();
-        coder
-            .write_shards(&mut reconstructed_data, &mut encoded_shards, 0, data.len())
-            .await
-            .unwrap();
+        ErasureCoder::write_data_shards(
+            &mut reconstructed_data,
+            &encoded_shards[..DATA_SHARDS],
+            0,
+            data.len(),
+        )
+        .await
+        .unwrap();
         assert_eq!(data, reconstructed_data);
     }
 }

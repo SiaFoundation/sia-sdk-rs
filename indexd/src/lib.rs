@@ -1,15 +1,18 @@
 mod app_client;
+mod slabs;
+
+pub mod quic;
+use crate::quic::{DownloadError, Downloader, UploadError, Uploader};
 
 use crate::app_client::{Client, RegisterAppRequest};
-pub use reqwest::{IntoUrl, Url};
 use rustls_platform_verifier::ConfigVerifierExt;
-use sia::objects::slabs::Slab;
-use sia::objects::{Downloader, HostDialer, Uploader};
-use sia::rhp::quic::Dialer;
 use sia::signing::PrivateKey;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+pub use reqwest::{IntoUrl, Url};
+pub use slabs::*;
 
 pub struct DisconnectedState;
 
@@ -22,16 +25,21 @@ pub struct RegisteredState {
 }
 
 pub struct ConnectedState {
-    downloader: Downloader<Dialer>,
-    uploader: Uploader<Dialer>,
+    downloader: Downloader,
+    uploader: Uploader,
 }
 
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("app error: {0}")]
     App(String),
-    #[error("SDK error: {0}")]
-    SDK(String),
+
+    #[error("upload error: {0}")]
+    Upload(#[from] UploadError),
+
+    #[error("download error: {0}")]
+    Download(#[from] DownloadError),
+
     #[error("TLS error: {0}")]
     Tls(String),
 }
@@ -144,11 +152,21 @@ impl SDK<RegisteredState> {
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
-        let mut dialer = Dialer::new(tls_config).map_err(|e| Error::Tls(format!("{e:?}")))?;
+        let mut dialer = quic::Client::new(tls_config).map_err(|e| Error::Tls(format!("{e:?}")))?;
         dialer.update_hosts(hosts);
 
-        let downloader = Downloader::new(dialer.clone(), self.state.app_key.clone(), 12);
-        let uploader = Uploader::new(dialer.clone(), self.state.app_key.clone(), 12);
+        let downloader = Downloader::new(
+            self.state.app.clone(),
+            dialer.clone(),
+            self.state.app_key.clone(),
+            12,
+        );
+        let uploader = Uploader::new(
+            self.state.app,
+            dialer.clone(),
+            self.state.app_key.clone(),
+            12,
+        );
 
         Ok(SDK {
             state: ConnectedState {
@@ -166,23 +184,35 @@ impl SDK<ConnectedState> {
         encryption_key: [u8; 32],
         data_shards: u8,
         parity_shards: u8,
-    ) -> Result<Vec<Slab>, Error> {
-        self.state
+    ) -> Result<Vec<PinnedSlab>, Error> {
+        let slabs = self
+            .state
             .uploader
             .upload(reader, encryption_key, data_shards, parity_shards)
-            .await
-            .map_err(|e| Error::SDK(format!("{e:?}")))
+            .await?;
+        Ok(slabs)
     }
 
     pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
         writer: &mut W,
-        slabs: &[Slab],
+        slabs: &[PinnedSlab],
+    ) -> Result<(), Error> {
+        self.state.downloader.download(writer, slabs).await?;
+        Ok(())
+    }
+
+    pub async fn download_range<W: AsyncWriteExt + Unpin>(
+        &self,
+        writer: &mut W,
+        slabs: &[PinnedSlab],
+        offset: usize,
+        length: usize,
     ) -> Result<(), Error> {
         self.state
             .downloader
-            .download(writer, slabs)
-            .await
-            .map_err(|e| Error::SDK(format!("{e:?}")))
+            .download_range(writer, slabs, offset, length)
+            .await?;
+        Ok(())
     }
 }

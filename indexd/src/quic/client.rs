@@ -1,8 +1,9 @@
 use bytes::Bytes;
 use log::debug;
+use priority_queue::PriorityQueue;
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::ClientConfig;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::ParseIntError;
 use std::sync::Arc;
@@ -13,16 +14,15 @@ use tokio::net::lookup_host;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 
-use crate::encoding;
-use crate::encoding_async::AsyncDecoder;
-use crate::objects::{Error as UploadError, HostDialer};
-use crate::rhp::{
+use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use sia::encoding;
+use sia::encoding_async::AsyncDecoder;
+use sia::rhp::{
     self, AccountToken, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector, Transport,
 };
-use crate::signing::{PrivateKey, PublicKey};
-use crate::types::Hash256;
-use crate::types::v2::{NetAddress, Protocol};
-use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use sia::signing::{PrivateKey, PublicKey};
+use sia::types::Hash256;
+use sia::types::v2::{NetAddress, Protocol};
 use std::sync::Mutex;
 use time::OffsetDateTime;
 
@@ -62,9 +62,6 @@ pub enum Error {
 
     #[error("write error: {0}")]
     Write(#[from] quinn::WriteError),
-
-    #[error("upload error: {0}")]
-    Upload(#[from] UploadError),
 
     #[error("invalid prices")]
     InvalidPrices,
@@ -109,106 +106,41 @@ impl Transport for Stream {
     }
 }
 
-/// A Dialer manages QUIC connections to Sia hosts.
+/// A Client manages QUIC connections to Sia hosts.
 /// Connections will be cached for reuse whenever possible.
 #[derive(Debug, Clone)]
-pub struct Dialer {
-    inner: Arc<DialerInner>,
+pub struct Client {
+    inner: Arc<ClientInner>,
 }
 
-impl Dialer {
+impl Client {
     pub fn new(client_config: ClientConfig) -> Result<Self, Error> {
-        let inner = DialerInner::new(client_config)?;
-        Ok(Dialer {
+        let inner = ClientInner::new(client_config)?;
+        Ok(Client {
             inner: Arc::new(inner),
         })
     }
 
-    fn get_cached_prices(&self, host_key: &PublicKey) -> Option<HostPrices> {
-        let mut cached_prices = self.inner.cached_prices.lock().unwrap();
-        match cached_prices.get(host_key) {
-            Some(prices) => {
-                if prices.valid_until < OffsetDateTime::now_utc() {
-                    cached_prices.remove(host_key);
-                    None
-                } else {
-                    Some(prices.clone())
-                }
-            }
-            _ => None,
-        }
+    pub fn hosts(&self) -> Vec<PublicKey> {
+        let hosts = self.inner.hosts.lock().unwrap();
+        let preferred_hosts = self.inner.preferred_hosts.lock().unwrap();
+        preferred_hosts
+            .iter()
+            .map(|(host, _)| *host)
+            .filter(|host| hosts.contains_key(host))
+            .collect()
     }
 
-    fn set_cached_prices(&self, host_key: &PublicKey, prices: HostPrices) {
-        self.inner
-            .cached_prices
-            .lock()
-            .unwrap()
-            .insert(*host_key, prices);
-    }
-
-    fn existing_conn(&self, host: PublicKey) -> Option<Connection> {
-        let mut open_conns = self.inner.open_conns.lock().unwrap();
-        if let Some(conn) = open_conns.get(&host).cloned() {
-            if conn.close_reason().is_none() {
-                return Some(conn);
-            }
-            open_conns.remove(&host);
-        }
-        None
-    }
-
-    async fn new_conn(&self, host: PublicKey) -> Result<Connection, Error> {
-        let addresses = {
-            let hosts = self.inner.hosts.lock().unwrap();
-            hosts.get(&host).cloned().ok_or(Error::UnknownHost(host))?
-        };
-        for addr in addresses {
-            if addr.protocol != Protocol::QUIC {
-                continue;
-            }
-            let (addr, port_str) = addr
-                .address
-                .rsplit_once(':')
-                .ok_or(Error::InvalidAddress(addr.address.clone()))?;
-            let port: u16 = port_str.parse()?;
-            let resolved_addrs = lookup_host((addr, port)).await?;
-            for socket in resolved_addrs {
-                if socket.is_ipv6()
-                    && let Some(endpoint) = &self.inner.endpoint_v6
-                {
-                    let conn = endpoint.connect(socket, addr).unwrap().await.ok();
-                    if let Some(conn) = conn {
-                        return Ok(conn);
-                    }
-                } else if socket.is_ipv4()
-                    && let Some(endpoint) = &self.inner.endpoint_v4
-                {
-                    let conn = endpoint.connect(socket, addr).unwrap().await.ok();
-                    if let Some(conn) = conn {
-                        return Ok(conn);
-                    }
-                }
+    pub fn update_hosts(&mut self, hosts: Vec<Host>) {
+        let mut hosts_map = self.inner.hosts.lock().unwrap();
+        let mut priority_queue = self.inner.preferred_hosts.lock().unwrap();
+        hosts_map.clear();
+        for host in hosts {
+            hosts_map.insert(host.public_key, host.addresses);
+            if !priority_queue.contains(&host.public_key) {
+                priority_queue.push(host.public_key, 1);
             }
         }
-        Err(Error::FailedToConnect)
-    }
-
-    async fn host_stream(&self, host: PublicKey) -> Result<Stream, Error> {
-        let conn = if let Some(conn) = self.existing_conn(host) {
-            debug!("reusing existing connection to {host}");
-            conn
-        } else {
-            debug!("establishing new connection to {host}");
-            let new_conn = timeout(Duration::from_secs(30), self.new_conn(host)).await??;
-            let open_conns = &mut self.inner.open_conns.lock().unwrap();
-            open_conns.insert(host, new_conn.clone());
-            debug!("established new connection to {host}");
-            new_conn
-        };
-
-        let (send, recv) = conn.open_bi().await?;
-        Ok(Stream { send, recv })
     }
 
     pub async fn host_prices(
@@ -216,30 +148,92 @@ impl Dialer {
         host_key: PublicKey,
         refresh: bool,
     ) -> Result<HostPrices, Error> {
-        if !refresh && let Some(prices) = self.get_cached_prices(&host_key) {
-            return Ok(prices);
-        }
-        debug!("fetching prices for {host_key}");
-        let stream = self.host_stream(host_key).await?;
-        let start = Instant::now();
-        let resp = RPCSettings::send_request(stream).await?.complete().await?;
-        debug!(
-            "fetched prices for {host_key} in {}ms",
-            start.elapsed().as_millis()
-        );
-        let prices = resp.settings.prices;
-        if prices.valid_until < OffsetDateTime::now_utc() {
-            return Err(Error::InvalidPrices);
-        } else if !host_key.verify(prices.sig_hash().as_ref(), &prices.signature) {
-            return Err(Error::InvalidSignature);
-        }
-        self.set_cached_prices(&host_key, prices.clone());
-        Ok(prices)
+        self.inner
+            .host_prices(host_key, refresh)
+            .await
+            .inspect(|_| {
+                self.inner
+                    .preferred_hosts
+                    .lock()
+                    .unwrap()
+                    .change_priority_by(&host_key, |successful_rpcs| {
+                        *successful_rpcs += 1;
+                    });
+            })
+            .inspect_err(|_| {
+                self.inner
+                    .preferred_hosts
+                    .lock()
+                    .unwrap()
+                    .change_priority_by(&host_key, |successful_rpcs| {
+                        *successful_rpcs -= 1;
+                    });
+            })
+    }
+
+    pub async fn write_sector(
+        &self,
+        host_key: PublicKey,
+        account_key: &PrivateKey,
+        sector: Bytes,
+    ) -> Result<Hash256, Error> {
+        self.inner
+            .write_sector(host_key, account_key, sector)
+            .await
+            .inspect(|_| {
+                self.inner
+                    .preferred_hosts
+                    .lock()
+                    .unwrap()
+                    .change_priority_by(&host_key, |successful_rpcs| {
+                        *successful_rpcs += 1;
+                    });
+            })
+            .inspect_err(|_| {
+                self.inner
+                    .preferred_hosts
+                    .lock()
+                    .unwrap()
+                    .change_priority_by(&host_key, |successful_rpcs| {
+                        *successful_rpcs -= 1;
+                    });
+            })
+    }
+
+    pub async fn read_sector(
+        &self,
+        host_key: PublicKey,
+        account_key: &PrivateKey,
+        root: Hash256,
+        offset: usize,
+        length: usize,
+    ) -> Result<Bytes, Error> {
+        self.inner
+            .read_sector(host_key, account_key, root, offset, length)
+            .await
+            .inspect(|_| {
+                self.inner
+                    .preferred_hosts
+                    .lock()
+                    .unwrap()
+                    .change_priority_by(&host_key, |successful_rpcs| {
+                        *successful_rpcs += 1;
+                    });
+            })
+            .inspect_err(|_| {
+                self.inner
+                    .preferred_hosts
+                    .lock()
+                    .unwrap()
+                    .change_priority_by(&host_key, |successful_rpcs| {
+                        *successful_rpcs -= 1;
+                    });
+            })
     }
 }
 
 #[derive(Debug)]
-struct DialerInner {
+struct ClientInner {
     /*
         note: quinn's documentation (https://docs.rs/quinn/latest/quinn/struct.Endpoint.html#method.client) suggests
         non-ideal fallback behavior when dual-stack is not supported. This effectively treats every platform as
@@ -249,12 +243,14 @@ struct DialerInner {
     endpoint_v6: Option<Endpoint>,
 
     hosts: Mutex<HashMap<PublicKey, Vec<NetAddress>>>,
+    preferred_hosts: Mutex<PriorityQueue<PublicKey, i64>>,
     open_conns: Mutex<HashMap<PublicKey, Connection>>,
     cached_prices: Mutex<HashMap<PublicKey, HostPrices>>,
 }
 
-impl DialerInner {
+impl ClientInner {
     fn new(mut client_config: ClientConfig) -> Result<Self, Error> {
+        client_config.enable_early_data = true;
         client_config.alpn_protocols = vec![b"sia/rhp4".to_vec()];
 
         let client_config = QuicClientConfig::try_from(client_config).unwrap();
@@ -283,21 +279,126 @@ impl DialerInner {
             endpoint_v4,
             endpoint_v6,
             hosts: Mutex::new(HashMap::new()),
+            preferred_hosts: Mutex::new(PriorityQueue::new()),
             open_conns: Mutex::new(HashMap::new()),
             cached_prices: Mutex::new(HashMap::new()),
         })
     }
-}
 
-impl HostDialer for Dialer {
-    type Error = Error;
+    fn get_cached_prices(&self, host_key: &PublicKey) -> Option<HostPrices> {
+        let mut cached_prices = self.cached_prices.lock().unwrap();
+        match cached_prices.get(host_key) {
+            Some(prices) => {
+                if prices.valid_until < OffsetDateTime::now_utc() {
+                    cached_prices.remove(host_key);
+                    None
+                } else {
+                    Some(prices.clone())
+                }
+            }
+            _ => None,
+        }
+    }
 
-    async fn write_sector(
+    fn set_cached_prices(&self, host_key: &PublicKey, prices: HostPrices) {
+        self.cached_prices.lock().unwrap().insert(*host_key, prices);
+    }
+
+    fn existing_conn(&self, host: PublicKey) -> Option<Connection> {
+        let mut open_conns = self.open_conns.lock().unwrap();
+        if let Some(conn) = open_conns.get(&host).cloned() {
+            if conn.close_reason().is_none() {
+                return Some(conn);
+            }
+            open_conns.remove(&host);
+        }
+        None
+    }
+
+    async fn new_conn(&self, host: PublicKey) -> Result<Connection, Error> {
+        let addresses = {
+            let hosts = self.hosts.lock().unwrap();
+            hosts.get(&host).cloned().ok_or(Error::UnknownHost(host))?
+        };
+        for addr in addresses {
+            if addr.protocol != Protocol::QUIC {
+                continue;
+            }
+            let (addr, port_str) = addr
+                .address
+                .rsplit_once(':')
+                .ok_or(Error::InvalidAddress(addr.address.clone()))?;
+            let port: u16 = port_str.parse()?;
+            let resolved_addrs = lookup_host((addr, port)).await?;
+            for socket in resolved_addrs {
+                if socket.is_ipv6()
+                    && let Some(endpoint) = &self.endpoint_v6
+                {
+                    let conn = endpoint.connect(socket, addr).unwrap().await.ok();
+                    if let Some(conn) = conn {
+                        return Ok(conn);
+                    }
+                } else if socket.is_ipv4()
+                    && let Some(endpoint) = &self.endpoint_v4
+                {
+                    let conn = endpoint.connect(socket, addr).unwrap().await.ok();
+                    if let Some(conn) = conn {
+                        return Ok(conn);
+                    }
+                }
+            }
+        }
+        Err(Error::FailedToConnect)
+    }
+
+    async fn host_stream(&self, host: PublicKey) -> Result<Stream, Error> {
+        let conn = if let Some(conn) = self.existing_conn(host) {
+            debug!("reusing existing connection to {host}");
+            conn
+        } else {
+            let new_conn = timeout(Duration::from_secs(30), self.new_conn(host)).await??;
+            let open_conns = &mut self.open_conns.lock().unwrap();
+            open_conns.insert(host, new_conn.clone());
+            debug!("established new connection to {host}");
+            new_conn
+        };
+
+        let (send, recv) = conn.open_bi().await?;
+        Ok(Stream { send, recv })
+    }
+
+    pub async fn host_prices(
+        &self,
+        host_key: PublicKey,
+        refresh: bool,
+    ) -> Result<HostPrices, Error> {
+        if !refresh && let Some(prices) = self.get_cached_prices(&host_key) {
+            debug!("using cached prices for {host_key}");
+            return Ok(prices);
+        }
+        let stream = self.host_stream(host_key).await?;
+        let start = Instant::now();
+        let resp = RPCSettings::send_request(stream).await?.complete().await?;
+        debug!(
+            "fetched prices for {host_key} in {}ms",
+            start.elapsed().as_millis()
+        );
+        let prices = resp.settings.prices;
+        if prices.valid_until < OffsetDateTime::now_utc() {
+            return Err(Error::InvalidPrices);
+        } else if !host_key.verify(prices.sig_hash().as_ref(), &prices.signature) {
+            return Err(Error::InvalidSignature);
+        }
+        self.set_cached_prices(&host_key, prices.clone());
+        Ok(prices)
+    }
+
+    pub async fn write_sector(
         &self,
         host_key: PublicKey,
         account_key: &PrivateKey,
         sector: Bytes,
-    ) -> Result<Hash256, Self::Error> {
+    ) -> Result<Hash256, Error> {
         let prices = self.host_prices(host_key, false).await?;
         let token = AccountToken::new(account_key, host_key);
         let stream = self.host_stream(host_key).await?;
@@ -313,14 +414,14 @@ impl HostDialer for Dialer {
         Ok(resp.root)
     }
 
-    async fn read_sector(
+    pub async fn read_sector(
         &self,
         host_key: PublicKey,
         account_key: &PrivateKey,
         root: Hash256,
         offset: usize,
         length: usize,
-    ) -> Result<Bytes, Self::Error> {
+    ) -> Result<Bytes, Error> {
         let prices = self.host_prices(host_key, false).await?;
         let token = AccountToken::new(account_key, host_key);
         let stream = self.host_stream(host_key).await?;
@@ -335,17 +436,42 @@ impl HostDialer for Dialer {
         );
         Ok(resp.data)
     }
+}
 
-    fn hosts(&self) -> Vec<PublicKey> {
-        self.inner.hosts.lock().unwrap().keys().cloned().collect()
+#[derive(Debug, Error)]
+pub enum QueueError {
+    #[error("no more hosts available")]
+    NoMoreHosts,
+    #[error("client closed")]
+    Closed,
+
+    #[error("internal mutex error")]
+    MutexError,
+}
+
+/// A thread-safe queue of host public keys.
+#[derive(Debug, Clone)]
+pub struct HostQueue(Arc<Mutex<VecDeque<PublicKey>>>);
+
+impl HostQueue {
+    pub fn new(hosts: Vec<PublicKey>) -> Self {
+        Self(Arc::new(Mutex::new(VecDeque::from(hosts))))
     }
 
-    fn update_hosts(&mut self, hosts: Vec<Host>) {
-        let mut hosts_map = self.inner.hosts.lock().unwrap();
-        hosts_map.clear();
-        for host in hosts {
-            hosts_map.insert(host.public_key, host.addresses);
-        }
+    pub fn pop_front(&self) -> Result<PublicKey, QueueError> {
+        self.0
+            .lock()
+            .map_err(|_| QueueError::MutexError)?
+            .pop_front()
+            .ok_or(QueueError::NoMoreHosts)
+    }
+
+    pub fn retry(&self, host: PublicKey) -> Result<(), QueueError> {
+        self.0
+            .lock()
+            .map_err(|_| QueueError::MutexError)?
+            .push_back(host);
+        Ok(())
     }
 }
 
@@ -354,8 +480,8 @@ mod test {
     use std::time::Duration;
 
     use super::*;
-    use crate::public_key;
     use rustls_platform_verifier::ConfigVerifierExt;
+    use sia::public_key;
     use tokio::time::sleep;
 
     #[tokio::test]
@@ -372,7 +498,7 @@ mod test {
         let client_config =
             rustls::ClientConfig::with_platform_verifier().expect("Failed to create client config");
 
-        let mut dialer = Dialer::new(client_config).expect("Failed to create dialer");
+        let mut dialer = Client::new(client_config).expect("Failed to create dialer");
         dialer.update_hosts(vec![Host {
             public_key: host_key,
             addresses: vec![NetAddress {

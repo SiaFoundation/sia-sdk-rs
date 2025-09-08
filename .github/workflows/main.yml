@@ -25,6 +25,6 @@ jobs:
       - name: Rustfmt
         run: cargo +nightly fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-features -- -D warnings
+        run: cargo clippy -- -D warnings
       - name: Test
-        run: cargo test --all-features
+        run: cargo test
