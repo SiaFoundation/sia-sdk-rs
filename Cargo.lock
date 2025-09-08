@@ -1199,6 +1199,8 @@ version = "0.0.1"
 dependencies = [
  "blake2b_simd",
  "bytes",
+ "futures",
+ "httptest",
  "log",
  "priority-queue",
  "rand",

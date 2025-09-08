@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures::prelude::*;
 use log::debug;
 use sia::encryption::encrypt_shards;
 use sia::erasure_coding::{self, ErasureCoder};
@@ -10,6 +11,7 @@ use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, BufReader};
+use tokio::select;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::{JoinHandle, JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
@@ -117,8 +119,8 @@ impl Uploader {
 
         let semaphore = permit.semaphore().clone();
         let initial_timeout = Duration::from_secs(10);
-        let mut tasks = JoinSet::new();
-        tasks.spawn(Self::upload_shard(
+        let mut tasks = futures::stream::FuturesUnordered::new();
+        tasks.push(Self::upload_shard(
             permit,
             client.clone(),
             hosts.clone(),
@@ -130,8 +132,8 @@ impl Uploader {
         loop {
             let timeout = initial_timeout * BACKOFF_MULTIPLIER.pow(attempts);
             tokio::select! {
-                Some(res) = tasks.join_next() => {
-                    match res.unwrap() {
+                Some(res) = tasks.next() => {
+                    match res {
                         Ok(sector) => {
                             return Ok((shard_index, sector));
                         }
@@ -139,7 +141,7 @@ impl Uploader {
                             debug!("shard {shard_index} upload failed {e:?}");
                             if tasks.is_empty() {
                                 let permit = semaphore.clone().acquire_owned().await?;
-                                tasks.spawn(Self::upload_shard(permit, client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
+                                tasks.push(Self::upload_shard(permit, client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
                             }
                         }
                     }
@@ -147,7 +149,7 @@ impl Uploader {
                 _ = tokio::time::sleep(timeout / 2) => {
                     let permit = semaphore.clone().acquire_owned().await?;
                     debug!("racing slow host for shard {shard_index}");
-                    tasks.spawn(Self::upload_shard(permit, client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
+                    tasks.push(Self::upload_shard(permit, client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
                 }
             }
             attempts += 1;
@@ -168,11 +170,11 @@ impl Uploader {
         let semaphore = Arc::new(Semaphore::new(self.max_inflight));
         let host_client = self.client.clone();
         let account_key = self.account_key.clone();
-        let read_slab_res: JoinHandle<Result<(), UploadError>> = tokio::spawn(async move {
+        let read_slab_res = async move {
             // use a buffered reader since the erasure coder reads 64 bytes at a time.
             let mut r = BufReader::new(&mut r);
             let mut slab_index: usize = 0;
-            let slab_upload_tasks = TaskTracker::new();
+            let mut slab_upload_tasks = futures::stream::FuturesUnordered::new();
             loop {
                 let rs = ErasureCoder::new(data_shards as usize, parity_shards as usize).unwrap();
                 let (mut shards, length) = rs.read_shards(&mut r).await?;
@@ -180,7 +182,7 @@ impl Uploader {
                     break;
                 }
 
-                let mut shard_upload_tasks = JoinSet::new();
+                let mut shard_upload_tasks = futures::stream::FuturesUnordered::new();
                 // encrypt and start uploading data_shards immediately
                 let mut unencrypted_data_shards = shards[..data_shards as usize].to_vec();
                 let encrypted_data_shards = spawn_blocking(move || {
@@ -192,7 +194,7 @@ impl Uploader {
                 let hosts = HostQueue::new(host_client.hosts());
                 for (shard_index, shard) in encrypted_data_shards.into_iter().enumerate() {
                     let permit = semaphore.clone().acquire_owned().await?;
-                    shard_upload_tasks.spawn(Self::upload_slab_shard(
+                    shard_upload_tasks.push(Self::upload_slab_shard(
                         permit,
                         host_client.clone(),
                         hosts.clone(),
@@ -214,7 +216,7 @@ impl Uploader {
                 for (shard_index, shard) in encrypted_parity_shards.into_iter().enumerate() {
                     let permit = semaphore.clone().acquire_owned().await?;
                     let shard_index = shard_index + data_shards as usize; // offset by data shards
-                    shard_upload_tasks.spawn(Self::upload_slab_shard(
+                    shard_upload_tasks.push(Self::upload_slab_shard(
                         permit,
                         host_client.clone(),
                         hosts.clone(),
@@ -227,7 +229,7 @@ impl Uploader {
                 // wait for all shards to finish uploading
                 // this is done in a separate task to allow preparing the next slab
                 let slab_tx = slab_tx.clone();
-                slab_upload_tasks.spawn(async move {
+                slab_upload_tasks.push(async move {
                     let mut slab = Slab {
                         sectors: vec![
                             Sector {
@@ -242,15 +244,11 @@ impl Uploader {
                         min_shards: data_shards,
                     };
                     let mut remaining_shards = data_shards + parity_shards;
-                    while let Some(res) = shard_upload_tasks.join_next().await {
+                    while let Some(res) = shard_upload_tasks.next().await {
                         let (shard_index, sector) = match res {
-                            Ok(Ok(s)) => s,
-                            Ok(Err(e)) => {
-                                slab_tx.send(Err(e)).unwrap();
-                                return;
-                            }
+                            Ok(s) => s,
                             Err(e) => {
-                                slab_tx.send(Err(e.into())).unwrap();
+                                slab_tx.send(Err(e)).unwrap();
                                 return;
                             }
                         };
@@ -263,49 +261,55 @@ impl Uploader {
                 });
                 slab_index += 1;
             }
-            slab_upload_tasks.close();
-            slab_upload_tasks.wait().await;
+            while let Some(_) = slab_upload_tasks.next().await {}
             drop(slab_tx);
-            Ok(())
-        });
+            Ok::<(), UploadError>(())
+        };
 
+        tokio::pin!(read_slab_res);
         let mut slabs = Vec::new();
-        while let Some(res) = slab_rx.recv().await {
-            let (slab_index, slab) = res?;
-            debug!("uploaded slab {slab_index}");
-            // ensure the slabs vector is large enough
-            slabs.resize(
-                slabs.len().max(slab_index + 1),
-                PinnedSlab {
-                    id: Hash256::default(),
-                    encryption_key: [0u8; 32],
-                    min_shards: 0,
-                    offset: 0,
-                    length: 0,
+        loop {
+            select! {
+                res = &mut read_slab_res => {
+                    res?;
+                    return Ok(slabs);
                 },
-            );
-            let expected_slab_id = slab.digest();
-            let slab_id = self
-                .app_client
-                .pin_slab(SlabPinParams {
-                    encryption_key: slab.encryption_key,
-                    min_shards: slab.min_shards,
-                    sectors: slab.sectors,
-                })
-                .await?;
-            if slab_id != expected_slab_id {
-                return Err(UploadError::InvalidSlabId);
+                Some(res) = slab_rx.recv() => {
+                    let (slab_index, slab) = res?;
+                    debug!("uploaded slab {slab_index}");
+                    // ensure the slabs vector is large enough
+                    slabs.resize(
+                        slabs.len().max(slab_index + 1),
+                        PinnedSlab {
+                            id: Hash256::default(),
+                            encryption_key: [0u8; 32],
+                            min_shards: 0,
+                            offset: 0,
+                            length: 0,
+                        },
+                    );
+                    let expected_slab_id = slab.digest();
+                    let slab_id = self
+                        .app_client
+                        .pin_slab(SlabPinParams {
+                            encryption_key: slab.encryption_key,
+                            min_shards: slab.min_shards,
+                            sectors: slab.sectors,
+                        })
+                        .await?;
+                    if slab_id != expected_slab_id {
+                        return Err(UploadError::InvalidSlabId);
+                    }
+                    // overwrite the slab at the index
+                    slabs[slab_index] = PinnedSlab {
+                        id: slab_id,
+                        encryption_key: slab.encryption_key,
+                        min_shards: slab.min_shards,
+                        offset: slab.offset,
+                        length: slab.length,
+                    };
+                },
             }
-            // overwrite the slab at the index
-            slabs[slab_index] = PinnedSlab {
-                id: slab_id,
-                encryption_key: slab.encryption_key,
-                min_shards: slab.min_shards,
-                offset: slab.offset,
-                length: slab.length,
-            };
         }
-        read_slab_res.await??;
-        Ok(slabs)
     }
 }
