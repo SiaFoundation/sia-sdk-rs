@@ -79,6 +79,7 @@ impl Uploader {
     }
 
     async fn upload_shard(
+        _permit: OwnedSemaphorePermit,
         client: Client,
         hosts: HostQueue,
         account_key: PrivateKey,
@@ -104,7 +105,7 @@ impl Uploader {
     }
 
     async fn upload_slab_shard(
-        _permit: OwnedSemaphorePermit,
+        permit: OwnedSemaphorePermit,
         client: Client,
         hosts: HostQueue,
         account_key: PrivateKey,
@@ -113,9 +114,11 @@ impl Uploader {
     ) -> Result<(usize, Sector), UploadError> {
         const BACKOFF_MULTIPLIER: u32 = 2;
 
+        let semaphore = permit.semaphore().clone();
         let initial_timeout = Duration::from_secs(10);
         let mut tasks = JoinSet::new();
         tasks.spawn(Self::upload_shard(
+            permit,
             client.clone(),
             hosts.clone(),
             account_key.clone(),
@@ -129,20 +132,21 @@ impl Uploader {
                 Some(res) = tasks.join_next() => {
                     match res.unwrap() {
                         Ok(sector) => {
-                            debug!("shard {shard_index} uploaded");
                             return Ok((shard_index, sector));
                         }
                         Err(e) => {
                             debug!("shard {shard_index} upload failed {e:?}");
                             if tasks.is_empty() {
-                                tasks.spawn(Self::upload_shard(client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
+                                let permit = semaphore.clone().acquire_owned().await?;
+                                tasks.spawn(Self::upload_shard(permit, client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
                             }
                         }
                     }
                 },
                 _ = tokio::time::sleep(timeout / 2) => {
+                    let permit = semaphore.clone().acquire_owned().await?;
                     debug!("racing slow host for shard {shard_index}");
-                    tasks.spawn(Self::upload_shard(client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
+                    tasks.spawn(Self::upload_shard(permit, client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
                 }
             }
             attempts += 1;

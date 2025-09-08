@@ -250,6 +250,7 @@ struct ClientInner {
 
 impl ClientInner {
     fn new(mut client_config: ClientConfig) -> Result<Self, Error> {
+        client_config.enable_early_data = true;
         client_config.alpn_protocols = vec![b"sia/rhp4".to_vec()];
 
         let client_config = QuicClientConfig::try_from(client_config).unwrap();
@@ -355,7 +356,6 @@ impl ClientInner {
             debug!("reusing existing connection to {host}");
             conn
         } else {
-            debug!("establishing new connection to {host}");
             let new_conn = timeout(Duration::from_secs(30), self.new_conn(host)).await??;
             let open_conns = &mut self.open_conns.lock().unwrap();
             open_conns.insert(host, new_conn.clone());
@@ -373,9 +373,9 @@ impl ClientInner {
         refresh: bool,
     ) -> Result<HostPrices, Error> {
         if !refresh && let Some(prices) = self.get_cached_prices(&host_key) {
+            debug!("using cached prices for {host_key}");
             return Ok(prices);
         }
-        debug!("fetching prices for {host_key}");
         let stream = self.host_stream(host_key).await?;
         let start = Instant::now();
         let resp = RPCSettings::send_request(stream).await?.complete().await?;
