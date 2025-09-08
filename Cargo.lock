@@ -1203,7 +1203,6 @@ dependencies = [
  "priority-queue",
  "rand",
  "reqwest",
- "rustls",
  "serde",
  "serde_json",
  "sia_sdk",
