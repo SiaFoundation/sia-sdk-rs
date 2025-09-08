@@ -1,12 +1,13 @@
 use blake2b_simd::Params;
+use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
 use sia::rhp::Host;
 use thiserror::Error;
-use time::OffsetDateTime;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use crate::slabs::Sector;
 use sia::signing::PrivateKey;
@@ -103,7 +104,7 @@ impl Client {
     /// true if authenticated, false if not, and an error if the request fails.
     pub async fn check_app_authenticated(&self) -> Result<bool> {
         let url = self.url.join("auth/check")?;
-        let query_params = self.sign(&url, Method::GET, None, OffsetDateTime::now_utc());
+        let query_params = self.sign(&url, Method::GET, None, chrono::Utc::now());
         let resp = self.client.get(url).query(&query_params).send().await?;
         match resp.status() {
             StatusCode::UNAUTHORIZED => Ok(false),
@@ -115,7 +116,7 @@ impl Client {
     /// Checks if an auth request has been approved. If the auth request is
     /// still pending, it returns false.
     pub async fn check_request_status(&self, status_url: Url) -> Result<bool> {
-        let query_params = self.sign(&status_url, Method::GET, None, OffsetDateTime::now_utc());
+        let query_params = self.sign(&status_url, Method::GET, None, chrono::Utc::now());
         let resp = self
             .client
             .get(status_url)
@@ -173,7 +174,7 @@ impl Client {
     /// Helper to send a signed DELETE request.
     async fn delete(&self, path: &str) -> Result<()> {
         let url = self.url.join(path)?;
-        let query_params = self.sign(&url, Method::DELETE, None, OffsetDateTime::now_utc());
+        let query_params = self.sign(&url, Method::DELETE, None, chrono::Utc::now());
         Self::handle_empty_response(self.client.delete(url).query(&query_params).send().await?)
             .await
     }
@@ -186,7 +187,7 @@ impl Client {
         query_params: Option<&Q>,
     ) -> Result<D> {
         let url = self.url.join(path)?;
-        let params = self.sign(&url, Method::GET, None, OffsetDateTime::now_utc());
+        let params = self.sign(&url, Method::GET, None, chrono::Utc::now());
         let mut builder = self.client.get(url);
         if let Some(q) = query_params {
             builder = builder.query(q); // optional query params
@@ -222,7 +223,7 @@ impl Client {
     ) -> Result<D> {
         let body = to_vec(body)?;
         let url = self.url.join(path)?;
-        let query_params = self.sign(&url, Method::POST, Some(&body), OffsetDateTime::now_utc());
+        let query_params = self.sign(&url, Method::POST, Some(&body), chrono::Utc::now());
         Self::handle_response(
             self.client
                 .post(url)
@@ -238,13 +239,13 @@ impl Client {
         url: &Url,
         method: Method,
         body: Option<&[u8]>,
-        valid_until: time::OffsetDateTime,
+        valid_until: chrono::DateTime<Utc>,
     ) -> Hash256 {
         let mut state = Params::new().hash_length(32).to_state();
         state
             .update(method.as_str().as_bytes())
             .update(url.host_str().unwrap_or("").as_bytes())
-            .update(&valid_until.unix_timestamp().to_le_bytes());
+            .update(&valid_until.timestamp().to_le_bytes());
         if let Some(body) = body {
             state.update(body);
         }
@@ -256,15 +257,14 @@ impl Client {
         url: &Url,
         method: Method,
         body: Option<&[u8]>,
-        current_time: OffsetDateTime,
+        current_time: DateTime<Utc>,
     ) -> [(&'static str, String); 3] {
-        let valid_until = current_time + time::Duration::hours(1);
+        let valid_until = current_time
+            .checked_add_signed(chrono::TimeDelta::hours(1))
+            .unwrap();
         let hash = Self::request_hash(url, method, body, valid_until);
         [
-            (
-                "SiaIdx-ValidUntil",
-                valid_until.unix_timestamp().to_string(),
-            ),
+            ("SiaIdx-ValidUntil", valid_until.timestamp().to_string()),
             ("SiaIdx-Credential", self.app_key.public_key().to_string()),
             (
                 "SiaIdx-Signature",
@@ -287,7 +287,7 @@ mod tests {
     fn test_request_hash() {
         let method = Method::POST;
         let url = Url::parse("https://foo.bar").unwrap();
-        let valid_until = OffsetDateTime::from_unix_timestamp(123).unwrap();
+        let valid_until = DateTime::<Utc>::from_timestamp(123, 0).unwrap();
         let body = b"hello world!";
         let hash = Client::request_hash(&url, method, Some(body), valid_until);
         assert_eq!(
@@ -306,7 +306,7 @@ mod tests {
             &"https://foo.bar/baz.jpg".parse().unwrap(),
             Method::POST,
             Some("{}".as_bytes()),
-            OffsetDateTime::from_unix_timestamp(123).unwrap(),
+            DateTime::<Utc>::from_timestamp(123, 0).unwrap(),
         );
         assert_eq!(params[0], ("SiaIdx-ValidUntil", "3723".to_string()));
         assert_eq!(
@@ -331,7 +331,7 @@ mod tests {
             &"https://foo.bar/baz.jpg".parse().unwrap(),
             Method::GET,
             None,
-            OffsetDateTime::from_unix_timestamp(123).unwrap(),
+            DateTime::<Utc>::from_timestamp(123, 0).unwrap(),
         );
         assert_eq!(params[0], ("SiaIdx-ValidUntil", "3723".to_string()));
         assert_eq!(

@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["sia_sdk", "sia_derive", "indexd", "indexd-wasm"]
+members = ["sia_sdk", "sia_derive", "indexd", "indexd_wasm"]

@@ -5,8 +5,8 @@ pub mod webtransport;
 use crate::webtransport::{DownloadError, Downloader, UploadError, Uploader};
 
 use crate::app_client::{Client, RegisterAppRequest};
+use gloo_timers::future::TimeoutFuture;
 use sia::signing::PrivateKey;
-use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -125,9 +125,9 @@ impl SDK<RegisteredState> {
                 if ok {
                     break;
                 }
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                TimeoutFuture::new(5000).await;
             }
-            tokio::time::sleep(Duration::from_secs(30)).await; // wait for accounts to get funded
+            TimeoutFuture::new(5000).await; // wait for accounts to get funded
         }
 
         let hosts = self
