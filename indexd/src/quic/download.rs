@@ -1,8 +1,7 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
 use log::debug;
 use sia::encryption::encrypt_shard;
 use sia::erasure_coding::{self, ErasureCoder};
@@ -12,7 +11,7 @@ use sia::types::Hash256;
 use thiserror::Error;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
-use tokio::task::spawn_blocking;
+use tokio::task::{JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
 use tokio::time::sleep;
 
@@ -51,12 +50,37 @@ pub enum DownloadError {
     ApiError(#[from] app_client::Error),
 }
 
-pub struct Downloader {
+pub struct DownloaderInner {
     account_key: PrivateKey,
-
-    app_client: AppClient,
     host_client: Client,
-    semaphore: Semaphore,
+    app_client: AppClient,
+    max_inflight: usize,
+}
+
+impl DownloaderInner {
+    // helper to pair a sector with its erasure-coded index.
+    // Required because [FuturesUnordered.push] does not
+    // preserve ordering and doesn't play nice with closures.
+    async fn try_download_sector(
+        self: Arc<Self>,
+        semaphore: Arc<Semaphore>,
+        host_key: PublicKey,
+        root: Hash256,
+        offset: usize,
+        limit: usize,
+        index: usize,
+    ) -> Result<(usize, Vec<u8>), DownloadError> {
+        let _permit = semaphore.acquire().await?;
+        let data = self
+            .host_client
+            .read_sector(host_key, &self.account_key, root, offset, limit)
+            .await?;
+        Ok((index, data.to_vec()))
+    }
+}
+
+pub struct Downloader {
+    inner: Arc<DownloaderInner>,
 }
 
 impl Downloader {
@@ -66,32 +90,14 @@ impl Downloader {
         account_key: PrivateKey,
         max_inflight: usize,
     ) -> Self {
-        let semaphore = Semaphore::new(max_inflight);
         Self {
-            account_key,
-            app_client,
-            host_client,
-            semaphore,
+            inner: Arc::new(DownloaderInner {
+                account_key,
+                host_client,
+                app_client,
+                max_inflight,
+            }),
         }
-    }
-
-    // helper to pair a sector with its erasure-coded index.
-    // Required because [FuturesUnordered.push] does not
-    // preserve ordering and doesn't play nice with closures.
-    async fn try_download_sector(
-        &self,
-        host_key: PublicKey,
-        root: Hash256,
-        offset: usize,
-        limit: usize,
-        index: usize,
-    ) -> Result<(usize, Vec<u8>), DownloadError> {
-        let _permit = self.semaphore.acquire().await?;
-        let data = self
-            .host_client
-            .read_sector(host_key, &self.account_key, root, offset, limit)
-            .await?;
-        Ok((index, data.to_vec()))
     }
 
     /// Downloads the shards of an erasure-coded slab.
@@ -108,11 +114,14 @@ impl Downloader {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<Option<Vec<u8>>>, DownloadError> {
+        let semaphore = Arc::new(Semaphore::new(self.inner.max_inflight));
         let (data_shards, parity_shards) = sectors.split_at(min_shards as usize);
 
-        let mut download_tasks = FuturesUnordered::new();
+        let mut download_tasks = JoinSet::new();
         for (i, sector) in data_shards.iter().enumerate() {
-            download_tasks.push(self.try_download_sector(
+            let inner = self.inner.clone();
+            download_tasks.spawn(inner.try_download_sector(
+                semaphore.clone(),
                 sector.host_key,
                 sector.root,
                 offset,
@@ -132,9 +141,10 @@ impl Downloader {
         let mut shards = vec![None; sectors.len()];
         loop {
             tokio::select! {
-                Some(res) = download_tasks.next() => {
+                biased;
+                Some(res) = download_tasks.join_next() => {
                     match res {
-                        Ok((index, mut data)) => {
+                        Ok(Ok((index, mut data))) => {
                             let encryption_key = *encryption_key;
                             let data = spawn_blocking(move || {
                                 encrypt_shard(&encryption_key, index as u8, offset, &mut data);
@@ -146,6 +156,28 @@ impl Downloader {
                                return Ok(shards);
                             }
                         }
+                        Ok(Err(e)) => {
+                         debug!("sector download failed {:?}", e);
+                            let rem = min_shards.saturating_sub(successful);
+                            if rem == 0 {
+                                return Ok(shards); // sanity check
+                            } else if download_tasks.len() <= rem as usize && let Some((i, sector)) = parity_shards.pop_front() {
+                                // only spawn additional download tasks if there are not
+                                // enough to satisfy the required number of shards. The
+                                // sleep arm will handle slow hosts.
+                                let inner = self.inner.clone();
+                                download_tasks.spawn(inner.try_download_sector(
+                                    semaphore.clone(),
+                                    sector.host_key,
+                                    sector.root,
+                                    offset,
+                                    limit,
+                                    i,
+                                ));
+                            } else if download_tasks.is_empty() && successful < min_shards {
+                                return Err(DownloadError::NotEnoughShards(successful, min_shards));
+                            }
+                        }
                         Err(e) => {
                             debug!("sector download failed {:?}", e);
                             let rem = min_shards.saturating_sub(successful);
@@ -155,7 +187,9 @@ impl Downloader {
                                 // only spawn additional download tasks if there are not
                                 // enough to satisfy the required number of shards. The
                                 // sleep arm will handle slow hosts.
-                                download_tasks.push(self.try_download_sector(
+                                let inner = self.inner.clone();
+                                download_tasks.spawn(inner.try_download_sector(
+                                    semaphore.clone(),
                                     sector.host_key,
                                     sector.root,
                                     offset,
@@ -170,7 +204,9 @@ impl Downloader {
                 },
                 _ = sleep(Duration::from_secs(4)) => {
                     if let Some((i, sector)) = parity_shards.pop_front(){
-                        download_tasks.push(self.try_download_sector(
+                        let inner = self.inner.clone();
+                        download_tasks.spawn(inner.try_download_sector(
+                            semaphore.clone(),
                             sector.host_key,
                             sector.root,
                             offset,
@@ -222,7 +258,7 @@ impl Downloader {
             let (shard_offset, shard_length) =
                 Self::sector_region(pinned_slab.min_shards as usize, slab_offset, slab_length);
 
-            let slab = self.app_client.slab(&pinned_slab.id).await?;
+            let slab = self.inner.app_client.slab(&pinned_slab.id).await?;
             let mut shards = self
                 .download_slab_shards(
                     &slab.encryption_key,
