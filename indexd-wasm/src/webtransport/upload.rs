@@ -13,10 +13,9 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::select;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio::task::{JoinHandle, JoinSet, spawn_blocking};
+use tokio::task::spawn_blocking;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
-use tokio_util::task::TaskTracker;
 
 use crate::app_client::{Client as AppClient, SlabPinParams};
 use crate::webtransport::client::{Client, HostQueue};
@@ -261,7 +260,7 @@ impl Uploader {
                 });
                 slab_index += 1;
             }
-            while let Some(_) = slab_upload_tasks.next().await {}
+            while (slab_upload_tasks.next().await).is_some() {}
             drop(slab_tx);
             Ok::<(), UploadError>(())
         };

@@ -13,7 +13,7 @@ use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use thiserror::Error;
 use tokio::sync::Semaphore;
-use tokio::task::{JoinSet, spawn_blocking};
+use tokio::task::spawn_blocking;
 use tokio::time::error::Elapsed;
 use tokio::time::sleep;
 
