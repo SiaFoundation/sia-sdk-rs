@@ -5,7 +5,6 @@ pub mod quic;
 use crate::quic::{DownloadError, Downloader, UploadError, Uploader};
 
 use crate::app_client::{Client, RegisterAppRequest};
-use rustls_platform_verifier::ConfigVerifierExt;
 use sia::signing::PrivateKey;
 use std::time::Duration;
 use thiserror::Error;
@@ -116,7 +115,7 @@ impl SDK<RegisteredState> {
 
     pub async fn connected(
         self,
-        tls_config: Option<rustls::ClientConfig>,
+        tls_config: rustls::ClientConfig,
     ) -> Result<SDK<ConnectedState>, Error> {
         if self.state.connect_url.is_some() {
             loop {
@@ -139,11 +138,6 @@ impl SDK<RegisteredState> {
                 .install_default()
                 .map_err(|e| Error::Tls(format!("{e:?}")))?;
         }
-        let tls_config = match tls_config {
-            Some(c) => c,
-            None => rustls::ClientConfig::with_platform_verifier()
-                .map_err(|_| Error::Tls("with_platform_verifier() failed".into()))?,
-        };
 
         let hosts = self
             .state

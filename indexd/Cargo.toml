@@ -16,7 +16,6 @@ path = "src/lib.rs"
 [dependencies]
 reqwest = { version = "0.12.23", features = ["json"] }
 rustls = { version = "0.23.31", features = ["ring"] }
-rustls-platform-verifier = "0.6.1"
 serde = "1.0.219"
 serde_json = "1.0.143"
 thiserror = "2.0.16"
