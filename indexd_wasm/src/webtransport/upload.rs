@@ -146,7 +146,7 @@ impl Uploader {
                 },
                 _ = TimeoutFuture::new(timeout / 2) => {
                     let permit = semaphore.clone().acquire_owned().await?;
-                    debug!("racing slow host for shard {shard_index}");
+                    debug!(format!("racing slow host for shard {shard_index}"));
                     tasks.push(Self::upload_shard(permit, client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
                 }
             }
