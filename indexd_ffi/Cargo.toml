@@ -5,7 +5,6 @@ edition = "2024"
 
 [lib]
 crate-type = ["cdylib", "staticlib"]
-name = "indexd"
 
 [dependencies]
 indexd = { version = "0.0.1", path = "../indexd" }
