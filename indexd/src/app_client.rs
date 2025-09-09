@@ -1,7 +1,10 @@
 use blake2b_simd::Params;
 use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
+use serde_with::base64::Base64;
+use serde_with::serde_as;
 use sia::types::v2::NetAddress;
+
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -86,11 +89,28 @@ pub struct Host {
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct SlabSlice {
+    #[serde(rename = "slabID")]
+    pub slab_id: Hash256,
+    pub offset: usize,
+    pub length: usize,
+}
+
+#[serde_as]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct Object {
     pub key: Hash256,
-    pub slabs: Vec<Slab>,
+    pub slabs: Vec<SlabSlice>,
+
+    // base64-encoded arbitrary metadata
+    #[serde_as(as = "Base64")]
     pub meta: Vec<u8>,
+
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: time::OffsetDateTime,
+
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: time::OffsetDateTime,
 }
 
@@ -338,6 +358,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use sia::{hash_256, public_key};
+    use time::format_description::well_known::Rfc3339;
 
     use super::*;
     use httptest::http::Response;
@@ -725,5 +746,73 @@ mod tests {
                 expiration: OffsetDateTime::from_unix_timestamp(100).unwrap(),
             }
         )
+    }
+
+    #[tokio::test]
+    async fn test_object() {
+        let object = Object {
+            key: hash_256!("1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef"),
+            slabs: vec![
+                SlabSlice {
+                    slab_id: hash_256!(
+                        "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
+                    ),
+                    offset: 0,
+                    length: 256,
+                },
+                SlabSlice {
+                    slab_id: hash_256!(
+                        "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405"
+                    ),
+                    offset: 256,
+                    length: 512,
+                },
+            ],
+            meta: b"hello world!".to_vec(),
+            created_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
+                .unwrap(),
+            updated_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
+                .unwrap(),
+        };
+
+        const TEST_OBJECT_JSON: &str = r#"
+        {
+          "key": "1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef",
+          "slabs": [
+           {
+            "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
+            "offset": 0,
+            "length": 256
+           },
+           {
+            "slabID": "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405",
+            "offset": 256,
+            "length": 512
+           }
+          ],
+          "meta": "aGVsbG8gd29ybGQh",
+          "createdAt": "2025-09-09T16:10:46.898399-07:00",
+          "updatedAt": "2025-09-09T16:10:46.898399-07:00"
+         }
+        "#;
+
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                "/objects/1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef",
+            ))
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(TEST_OBJECT_JSON)
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        assert_eq!(client.object(&object.key).await.unwrap(), object);
     }
 }
