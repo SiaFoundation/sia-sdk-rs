@@ -29,7 +29,7 @@ async def main():
 
     download = await app.download(slabs)
     while True:
-        chunk = await download.read(512)
+        chunk = await download.read()
         print("Read chunk of size:", len(chunk))
         if chunk == b'':
             break
