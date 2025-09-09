@@ -7,8 +7,10 @@ use indexd::{ConnectedState, PinnedSlab, SDK};
 use log::debug;
 use sia::rhp::SECTOR_SIZE;
 use sia::signing::PrivateKey;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use thiserror::Error;
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -60,6 +62,19 @@ impl ChunkedBuffer {
         Ok(())
     }
 
+    pub async fn read_chunk(&self) -> Result<Vec<u8>, Error> {
+        let mut inner = self.inner.lock().map_err(|e| Error::Msg(e.to_string()))?;
+        if inner.buffer.is_empty() && !inner.closed {
+            return Err(Error::Msg("Buffer empty".into()));
+        } else if inner.buffer.is_empty() && inner.closed {
+            return Err(Error::Msg("Buffer closed".into()));
+        }
+        let to_read = std::cmp::min(SECTOR_SIZE, inner.buffer.len());
+        let chunk = inner.buffer.drain(..to_read).collect();
+        debug!("ChunkedBuffer read: {}", to_read);
+        Ok(chunk)
+    }
+
     pub async fn push_chunk(&self, chunk: Vec<u8>) -> Result<(), Error> {
         let mut inner = self.inner.lock().map_err(|e| Error::Msg(e.to_string()))?;
         if inner.closed {
@@ -79,10 +94,11 @@ impl AsyncRead for ChunkedBuffer {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let mut inner = self.inner.lock().map_err(
+            |e: std::sync::PoisonError<std::sync::MutexGuard<'_, ChunkedBufferInner>>| {
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+            },
+        )?;
         if inner.buffer.is_empty() && !inner.closed {
             inner.waker = Some(cx.waker().clone());
             return std::task::Poll::Pending;
@@ -94,6 +110,56 @@ impl AsyncRead for ChunkedBuffer {
         inner.buffer.drain(..to_read);
         debug!("ChunkedBuffer read: {}", to_read);
         std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for ChunkedBuffer {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, Error>> {
+        let mut inner = self.inner.lock().map_err(
+            |e: std::sync::PoisonError<std::sync::MutexGuard<'_, ChunkedBufferInner>>| {
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+            },
+        )?;
+
+        if inner.closed {
+            return Poll::Ready(Err(std::io::Error::Msg("buffer is closed".to_string())));
+        }
+
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        inner.buffer.extend_from_slice(buf);
+        if let Some(w) = inner.waker.take() {
+            w.wake();
+        }
+
+        debug!("ChunkedBuffer write: {}", buf.len());
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        let mut inner = self.inner.lock().map_err(
+            |e: std::sync::PoisonError<std::sync::MutexGuard<'_, ChunkedBufferInner>>| {
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+            },
+        )?;
+
+        inner.closed = true;
+        if let Some(w) = inner.waker.take() {
+            w.wake();
+        }
+
+        debug!("ChunkedBuffer shutdown");
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -122,6 +188,14 @@ impl App {
             .map_err(|_| Error::Msg("App seed must be 32 bytes".into()))?;
         let app_seed = PrivateKey::from_seed(&app_seed);
         debug!("app seed inited");
+
+        if rustls::crypto::CryptoProvider::get_default().is_none() {
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .unwrap();
+            debug!("crypto provider installed");
+        }
+
         Ok(Self {
             url,
             name,
@@ -152,6 +226,34 @@ impl App {
         let mut sdk = self.sdk.lock().map_err(|e| Error::Msg(e.to_string()))?;
         *sdk = Some(Arc::new(connected_sdk));
         Ok(())
+    }
+
+    pub async fn download(&self, slabs: Vec<Slab>) -> Result<Download, Error> {
+        // grab SDK
+        let sdk = {
+            let sdk_lock = self.sdk.lock().map_err(|e| Error::Msg(e.to_string()))?;
+            sdk_lock
+                .as_ref()
+                .ok_or_else(|| Error::Msg("SDK not connected".into()))?
+                .clone()
+        };
+
+        debug!("starting download");
+        let buf = ChunkedBuffer::new();
+        let inner_buf = buf.clone();
+
+        let result = tokio::spawn(async move {
+            debug!("task started");
+            sdk.download(inner_buf, slabs)
+                .await
+                .map_err(|e| Error::Msg(e.to_string()));
+        });
+
+        debug!("spawned download task");
+        Ok(Download {
+            writer: buf.clone(),
+            result,
+        })
     }
 
     pub async fn upload(
@@ -192,11 +294,37 @@ impl App {
     }
 }
 
-#[derive(uniffi::Object)]
+#[derive(uniffi::Record, Debug, Clone)]
 pub struct Slab {
     pub id: String,
-    pub offset: usize,
-    pub length: usize,
+    pub encryption_key: Vec<u8>,
+    pub min_shards: u8,
+    pub offset: u64,
+    pub length: u64,
+}
+
+impl From<Slab> for PinnedSlab {
+    fn from(s: Slab) -> Self {
+        PinnedSlab {
+            id: s.id.parse().unwrap(),
+            encryption_key: s.encryption_key.try_into().unwrap(),
+            min_shards: s.min_shards,
+            offset: s.offset as usize,
+            length: s.length as usize,
+        }
+    }
+}
+
+impl From<PinnedSlab> for Slab {
+    fn from(p: PinnedSlab) -> Self {
+        Slab {
+            id: p.id.to_string(),
+            encryption_key: p.encryption_key.to_vec(),
+            min_shards: p.min_shards,
+            offset: p.offset as u64,
+            length: p.length as u64,
+        }
+    }
 }
 
 #[derive(uniffi::Object)]
@@ -217,13 +345,32 @@ impl Upload {
         Ok(())
     }
 
-    pub async fn finish(&self) -> Result<(), Error> {
+    pub async fn finish(&self) -> Result<Vec<Slab>, Error> {
         debug!("finishing upload");
         self.reader.close()?;
         let rx = self.rx.lock().await.take().unwrap();
-        let slabs = rx.await.map_err(|e| Error::Msg(e.to_string()))??;
-        debug!("file uploaded {}", slabs[0].id);
-        Ok(())
+        let pinned = rx.await.map_err(|e| Error::Msg(e.to_string()))??;
+        debug!("file uploaded {}", pinned[0].id);
+        let slabs: Vec<Slab> = pinned.into_iter().map(Slab::from).collect();
+        Ok(slabs)
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct Download {
+    writer: ChunkedBuffer,
+    result: JoinHandle<()>,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl Download {
+    pub async fn read(&self) -> Result<Vec<u8>, Error> {
+        if self.result.is_finished() {
+            return Err(Error::Msg("Download already completed".into()));
+        }
+        let chunk = self.writer.read_chunk().await?;
+        debug!("read chunk");
+        Ok(chunk)
     }
 }
 
