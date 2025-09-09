@@ -13,13 +13,12 @@ pub trait Logger: Send + Sync {
     fn error(&self, msg: String);
 }
 
-
 #[uniffi::export]
 pub fn set_log_callback(callback: Arc<dyn Logger>) {
     let log = callback.clone();
     let mut cb = LOG_CALLBACK.lock().unwrap();
     *cb = Some(callback);
-    
+
     INIT.call_once(|| {
         log.debug("log initialized".into());
         init_logger();

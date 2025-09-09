@@ -106,7 +106,13 @@ impl Client {
     pub async fn check_app_authenticated(&self) -> Result<bool> {
         let url = self.url.join("auth/check")?;
         let query_params = self.sign(&url, Method::GET, None, OffsetDateTime::now_utc());
-        let resp = self.client.get(url).timeout(Duration::from_secs(15)).query(&query_params).send().await?;
+        let resp = self
+            .client
+            .get(url)
+            .timeout(Duration::from_secs(15))
+            .query(&query_params)
+            .send()
+            .await?;
         match resp.status() {
             StatusCode::UNAUTHORIZED => Ok(false),
             StatusCode::NO_CONTENT => Ok(true),
@@ -177,8 +183,15 @@ impl Client {
     async fn delete(&self, path: &str) -> Result<()> {
         let url = self.url.join(path)?;
         let query_params = self.sign(&url, Method::DELETE, None, OffsetDateTime::now_utc());
-        Self::handle_empty_response(self.client.delete(url).timeout(Duration::from_secs(15)).query(&query_params).send().await?)
-            .await
+        Self::handle_empty_response(
+            self.client
+                .delete(url)
+                .timeout(Duration::from_secs(15))
+                .query(&query_params)
+                .send()
+                .await?,
+        )
+        .await
     }
 
     /// Helper to send a signed GET request and parse the JSON

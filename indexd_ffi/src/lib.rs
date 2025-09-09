@@ -1,12 +1,16 @@
 uniffi::setup_scaffolding!();
 
-use std::{sync::{Arc, Mutex}, task::Waker};
+use std::sync::{Arc, Mutex};
+use std::task::Waker;
 
 use indexd::{ConnectedState, PinnedSlab, SDK};
 use log::debug;
-use sia::{rhp::SECTOR_SIZE, signing::PrivateKey};
+use sia::rhp::SECTOR_SIZE;
+use sia::signing::PrivateKey;
 use thiserror::Error;
-use tokio::{io::AsyncRead, sync::oneshot, task::JoinHandle};
+use tokio::io::AsyncRead;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 mod logging;
 pub use logging::*;
@@ -20,7 +24,7 @@ pub enum Error {
 #[derive(Debug, Error, uniffi::Error)]
 pub enum BufferError {
     #[error("buffer closed")]
-    Closed
+    Closed,
 }
 
 struct ChunkedBufferInner {
@@ -75,7 +79,10 @@ impl AsyncRead for ChunkedBuffer {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        let mut inner = self.inner.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         if inner.buffer.is_empty() && !inner.closed {
             inner.waker = Some(cx.waker().clone());
             return std::task::Poll::Pending;
@@ -103,9 +110,16 @@ pub struct App {
 #[uniffi::export(async_runtime = "tokio")]
 impl App {
     #[uniffi::constructor]
-    pub fn new(url: String, name: String, app_seed: Vec<u8>, description: String) -> Result<Self, Error> {
+    pub fn new(
+        url: String,
+        name: String,
+        app_seed: Vec<u8>,
+        description: String,
+    ) -> Result<Self, Error> {
         debug!("app called");
-        let app_seed: [u8;32] = app_seed.try_into().map_err(|_| Error::Msg("App seed must be 32 bytes".into()))?;
+        let app_seed: [u8; 32] = app_seed
+            .try_into()
+            .map_err(|_| Error::Msg("App seed must be 32 bytes".into()))?;
         let app_seed = PrivateKey::from_seed(&app_seed);
         debug!("app seed inited");
         Ok(Self {
@@ -119,33 +133,43 @@ impl App {
     }
 
     pub async fn connect(&self) -> Result<(), Error> {
-        if rustls::crypto::CryptoProvider::get_default().is_none() {
-            rustls::crypto::ring::default_provider()
-                .install_default().unwrap();
-    }
         let client_crypto = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(SkipServerVerification::new())
-        .with_no_client_auth();
+            .dangerous()
+            .with_custom_certificate_verifier(SkipServerVerification::new())
+            .with_no_client_auth();
         let connected_sdk = SDK::connect(
             &self.url,
             self.app_key.clone(),
             self.name.clone(),
             self.description.clone(),
             self.url.parse().unwrap(),
-        ).await.map_err(|e| Error::Msg(e.to_string()))?
-        .connected(client_crypto).await.map_err(|e| Error::Msg(e.to_string()))?;
+        )
+        .await
+        .map_err(|e| Error::Msg(e.to_string()))?
+        .connected(client_crypto)
+        .await
+        .map_err(|e| Error::Msg(e.to_string()))?;
         let mut sdk = self.sdk.lock().map_err(|e| Error::Msg(e.to_string()))?;
         *sdk = Some(Arc::new(connected_sdk));
         Ok(())
     }
 
-    pub async fn upload(&self, encryption_key: Vec<u8>, data_shards: u8, parity_shards: u8) -> Result<Upload, Error> {
-        let encryption_key: [u8;32] = encryption_key.try_into().map_err(|_| Error::Msg("Encryption key must be 32 bytes".into()))?;
+    pub async fn upload(
+        &self,
+        encryption_key: Vec<u8>,
+        data_shards: u8,
+        parity_shards: u8,
+    ) -> Result<Upload, Error> {
+        let encryption_key: [u8; 32] = encryption_key
+            .try_into()
+            .map_err(|_| Error::Msg("Encryption key must be 32 bytes".into()))?;
         let buf = ChunkedBuffer::new();
         let sdk = {
             let sdk_lock = self.sdk.lock().map_err(|e| Error::Msg(e.to_string()))?;
-            sdk_lock.as_ref().ok_or_else(|| Error::Msg("SDK not connected".into()))?.clone()
+            sdk_lock
+                .as_ref()
+                .ok_or_else(|| Error::Msg("SDK not connected".into()))?
+                .clone()
         };
         debug!("starting upload");
         let inner_buf = buf.clone();
@@ -153,7 +177,10 @@ impl App {
         debug!("inited buf");
         let result = tokio::spawn(async move {
             debug!("task started");
-            let res = sdk.upload(inner_buf, encryption_key, data_shards, parity_shards).await.map_err(|e| Error::Msg(e.to_string()));
+            let res = sdk
+                .upload(inner_buf, encryption_key, data_shards, parity_shards)
+                .await
+                .map_err(|e| Error::Msg(e.to_string()));
             let _ = tx.send(res);
         });
         debug!("spawned upload task");
