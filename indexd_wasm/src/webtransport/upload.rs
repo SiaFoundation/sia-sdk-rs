@@ -128,10 +128,15 @@ impl Uploader {
                 Some(res) = tasks.next() => {
                     match res {
                         Ok(sector) => {
+                            debug!(format!("shard {shard_index} upload succeeded"));
                             return Ok((shard_index, sector));
                         }
                         Err(e) => {
                             debug!(format!("shard {shard_index} upload failed {e:?}"));
+                            if let UploadError::QueueError(QueueError::NoMoreHosts) = e {
+                                log!(format!("all hosts exhausted for shard {shard_index}"));
+                                return Err(e);
+                            }
                             if tasks.is_empty() {
                                 let permit = semaphore.clone().acquire_owned().await?;
                                 tasks.push(Self::upload_shard(permit, client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));

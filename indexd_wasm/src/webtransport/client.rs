@@ -122,11 +122,18 @@ impl Client {
     }
 
     pub fn update_hosts(&mut self, hosts: Vec<Host>) {
+        log!(format!("updating hosts from {} hosts", hosts.len()));
         let mut hosts_map = self.inner.hosts.lock().unwrap();
         let mut priority_queue = self.inner.preferred_hosts.lock().unwrap();
         hosts_map.clear();
         for host in hosts {
-            hosts_map.insert(host.public_key, host.addresses);
+            let mut addresses = host.addresses;
+            for addr in addresses.iter_mut() {
+                if !addr.address.starts_with("https://") {
+                    addr.address = format!("https://{}", addr.address);
+                }
+            }
+            hosts_map.insert(host.public_key, addresses);
             if !priority_queue.contains(&host.public_key) {
                 priority_queue.push(host.public_key, 1);
             }

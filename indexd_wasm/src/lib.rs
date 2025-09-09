@@ -5,6 +5,7 @@ pub mod webtransport;
 use crate::webtransport::{DownloadError, Downloader, UploadError, Uploader};
 
 use crate::app_client::{Client, RegisterAppRequest};
+use gloo_console::log;
 use gloo_timers::future::TimeoutFuture;
 use sia::signing::PrivateKey;
 use thiserror::Error;
