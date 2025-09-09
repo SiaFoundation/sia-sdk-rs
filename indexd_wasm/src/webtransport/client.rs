@@ -1,7 +1,11 @@
 use bytes::Bytes;
+use chrono::DateTime;
+use gloo_console::log;
+use gloo_timers::future::TimeoutFuture;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::select;
 
 use gloo_console::debug;
 use priority_queue::PriorityQueue;
@@ -15,8 +19,6 @@ use sia::types::Hash256;
 use sia::types::v2::{NetAddress, Protocol};
 use thiserror::Error;
 use time::OffsetDateTime;
-use tokio::time::error::Elapsed;
-use tokio::time::timeout;
 use web_transport::{ClientBuilder, RecvStream, SendStream, Session};
 
 const DEFAULT_BUFFER_SIZE: usize = 8 * 1024;
@@ -49,8 +51,8 @@ pub enum Error {
     #[error("stream was closed")]
     StreamClosed,
 
-    #[error("timeout error: {0}")]
-    Timeout(#[from] Elapsed),
+    #[error("timeout error")]
+    Timeout,
 
     #[error("unknown host: {0}")]
     UnknownHost(PublicKey),
@@ -283,7 +285,11 @@ impl ClientInner {
             debug!("reusing existing connection to {host}");
             conn
         } else {
-            let new_conn = timeout(Duration::from_secs(30), self.new_session(host)).await??;
+            let new_conn = select! {
+                conn = self.new_session(host) => conn,
+                _ = TimeoutFuture::new(30000) =>  Err(Error::Timeout),
+
+            }?;
             let open_conns = &mut self.open_conns.lock().unwrap();
             open_conns.insert(host, new_conn.clone());
             debug!("established new connection to {host}");
@@ -304,11 +310,11 @@ impl ClientInner {
             return Ok(prices);
         }
         let stream = self.host_stream(host_key).await?;
-        let start = Instant::now();
+        let start = chrono::Utc::now();
         let resp = RPCSettings::send_request(stream).await?.complete().await?;
         debug!(
             "fetched prices for {host_key} in {}ms",
-            start.elapsed().as_millis()
+            (chrono::Utc::now() - start).num_milliseconds()
         );
         let prices = resp.settings.prices;
         if prices.valid_until < OffsetDateTime::now_utc() {
@@ -329,15 +335,15 @@ impl ClientInner {
         let prices = self.host_prices(host_key, false).await?;
         let token = AccountToken::new(account_key, host_key);
         let stream = self.host_stream(host_key).await?;
-        let start = Instant::now();
+        let start = chrono::Utc::now();
         let resp = RPCWriteSector::send_request(stream, prices, token, sector)
             .await?
             .complete()
             .await?;
-        debug!(
+        debug!(format!(
             "wrote sector to {host_key} in {}ms",
-            start.elapsed().as_millis()
-        );
+            (chrono::Utc::now() - start).num_milliseconds()
+        ));
         Ok(resp.root)
     }
 
@@ -352,14 +358,14 @@ impl ClientInner {
         let prices = self.host_prices(host_key, false).await?;
         let token = AccountToken::new(account_key, host_key);
         let stream = self.host_stream(host_key).await?;
-        let start = Instant::now();
+        let start = chrono::Utc::now();
         let resp = RPCReadSector::send_request(stream, prices, token, root, offset, length)
             .await?
             .complete()
             .await?;
         debug!(
             "read {length} bytes from {host_key} in {}ms",
-            start.elapsed().as_millis()
+            (chrono::Utc::now() - start).num_milliseconds()
         );
         Ok(resp.data)
     }

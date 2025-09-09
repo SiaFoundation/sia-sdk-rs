@@ -131,7 +131,7 @@ impl Uploader {
                             return Ok((shard_index, sector));
                         }
                         Err(e) => {
-                            debug!("shard {shard_index} upload failed {e:?}");
+                            debug!(format!("shard {shard_index} upload failed {e:?}"));
                             if tasks.is_empty() {
                                 let permit = semaphore.clone().acquire_owned().await?;
                                 tasks.push(Self::upload_shard(permit, client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
@@ -245,7 +245,7 @@ impl Uploader {
                         };
                         slab.sectors[shard_index] = sector;
                         remaining_shards -= 1;
-                        debug!("slab {slab_index} shard {shard_index} uploaded ({remaining_shards} remaining)");
+                        debug!(format!("slab {slab_index} shard {shard_index} uploaded (remaining: {remaining_shards}"));
                     }
                     // send the completed slab to the channel
                     slab_tx.send(Ok((slab_index, slab))).unwrap();
@@ -267,7 +267,7 @@ impl Uploader {
                 },
                 Some(res) = slab_rx.recv() => {
                     let (slab_index, slab) = res?;
-                    debug!("uploaded slab {slab_index}");
+                    debug!(format!("uploaded slab {slab_index}"));
                     // ensure the slabs vector is large enough
                     slabs.resize(
                         slabs.len().max(slab_index + 1),
