@@ -1,9 +1,9 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::Bytes;
 use futures::prelude::*;
-use log::debug;
+use gloo_console::{debug, log};
+use gloo_timers::future::TimeoutFuture;
 use sia::encryption::encrypt_shards;
 use sia::erasure_coding::{self, ErasureCoder};
 use sia::rhp;
@@ -13,9 +13,6 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::select;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio::task::spawn_blocking;
-use tokio::time::error::Elapsed;
-use tokio::time::timeout;
 
 use crate::app_client::{Client as AppClient, SlabPinParams};
 use crate::webtransport::client::{Client, HostQueue};
@@ -35,8 +32,8 @@ pub enum UploadError {
     #[error("invalid range: {0}-{1}")]
     OutOfRange(usize, usize),
 
-    #[error("timeout error: {0}")]
-    Timeout(#[from] Elapsed),
+    #[error("timeout error")]
+    Timeout,
 
     #[error("queue error: {0}")]
     QueueError(#[from] QueueError),
@@ -86,22 +83,19 @@ impl Uploader {
         hosts: HostQueue,
         account_key: PrivateKey,
         data: Bytes,
-        write_timeout: Duration,
+        write_timeout_ms: u32,
     ) -> Result<Sector, UploadError> {
         let host_key = hosts.pop_front()?;
-        let root = timeout(
-            write_timeout,
-            client.write_sector(host_key, &account_key, data),
-        )
-        .await
-        .inspect_err(|_| {
-            debug!("upload to {host_key} timed out, retrying");
-            let _ = hosts.retry(host_key);
-        })?
-        .inspect_err(|_| {
-            debug!("upload to {host_key} failed, retrying");
-            let _ = hosts.retry(host_key);
-        })?;
+        let root = select! {
+            _ = TimeoutFuture::new(write_timeout_ms) => {
+                Err(UploadError::Timeout)
+            },
+            res = client.write_sector(host_key, &account_key, data) => {
+                res.map_err(UploadError::from)
+            }
+        }?;
+
+        // TODO: retry host upon timeout
 
         Ok(Sector { root, host_key })
     }
@@ -117,7 +111,7 @@ impl Uploader {
         const BACKOFF_MULTIPLIER: u32 = 2;
 
         let semaphore = permit.semaphore().clone();
-        let initial_timeout = Duration::from_secs(10);
+        let initial_timeout = 10000; // 10 seconds
         let mut tasks = futures::stream::FuturesUnordered::new();
         tasks.push(Self::upload_shard(
             permit,
@@ -145,7 +139,7 @@ impl Uploader {
                         }
                     }
                 },
-                _ = tokio::time::sleep(timeout / 2) => {
+                _ = TimeoutFuture::new(timeout / 2) => {
                     let permit = semaphore.clone().acquire_owned().await?;
                     debug!("racing slow host for shard {shard_index}");
                     tasks.push(Self::upload_shard(permit, client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
@@ -166,7 +160,7 @@ impl Uploader {
         parity_shards: u8,
     ) -> Result<Vec<PinnedSlab>, UploadError> {
         let (slab_tx, mut slab_rx) = mpsc::unbounded_channel();
-        let semaphore = Arc::new(Semaphore::new(self.max_inflight));
+        let semaphore = Arc::new(Semaphore::new(10000)); // TODO: figure out whether to remove this or not
         let host_client = self.client.clone();
         let account_key = self.account_key.clone();
         let read_slab_res = async move {
@@ -184,11 +178,10 @@ impl Uploader {
                 let mut shard_upload_tasks = futures::stream::FuturesUnordered::new();
                 // encrypt and start uploading data_shards immediately
                 let mut unencrypted_data_shards = shards[..data_shards as usize].to_vec();
-                let encrypted_data_shards = spawn_blocking(move || {
+                let encrypted_data_shards = {
                     encrypt_shards(&encryption_key, 0, 0, &mut unencrypted_data_shards);
                     unencrypted_data_shards
-                })
-                .await?;
+                };
 
                 let hosts = HostQueue::new(host_client.hosts());
                 for (shard_index, shard) in encrypted_data_shards.into_iter().enumerate() {
@@ -204,13 +197,12 @@ impl Uploader {
                 }
 
                 // calculate the parity shards, encrypt, then upload them
-                let encrypted_parity_shards = spawn_blocking(move || -> Vec<Vec<u8>> {
+                let encrypted_parity_shards = {
                     rs.encode_shards(&mut shards).unwrap();
                     let mut parity_shards = shards[data_shards as usize..].to_vec();
                     encrypt_shards(&encryption_key, data_shards, 0, &mut parity_shards);
                     parity_shards
-                })
-                .await?;
+                };
 
                 for (shard_index, shard) in encrypted_parity_shards.into_iter().enumerate() {
                     let permit = semaphore.clone().acquire_owned().await?;

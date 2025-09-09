@@ -5,7 +5,7 @@ use std::time::Duration;
 use ::tokio::io::{AsyncWriteExt, BufWriter};
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
-use log::debug;
+use gloo_console::debug;
 use sia::encryption::encrypt_shard;
 use sia::erasure_coding::{self, ErasureCoder};
 use sia::rhp::SEGMENT_SIZE;
@@ -159,7 +159,7 @@ impl Downloader {
                             }
                         }
                         Err(e) => {
-                         debug!("sector download failed {:?}", e);
+                            debug!("sector download failed:", e.to_string());
                             let rem = min_shards.saturating_sub(successful);
                             if rem == 0 {
                                 return Ok(shards); // sanity check

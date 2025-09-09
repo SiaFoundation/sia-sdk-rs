@@ -3,7 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use log::debug;
+use gloo_console::debug;
 use priority_queue::PriorityQueue;
 use sia::encoding;
 use sia::encoding_async::AsyncDecoder;
