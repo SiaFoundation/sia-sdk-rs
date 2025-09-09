@@ -104,14 +104,6 @@ pub struct App {
 impl App {
     #[uniffi::constructor]
     pub fn new(url: String, name: String, app_seed: Vec<u8>, description: String) -> Result<Self, Error> {
-        debug!("setup rustls");
-        if rustls::crypto::CryptoProvider::get_default().is_none() {
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .map_err(|e| Error::Msg(format!("{e:?}")))?;
-        }
-        debug!("rustls setup complete");
-
         debug!("app called");
         let app_seed: [u8;32] = app_seed.try_into().map_err(|_| Error::Msg("App seed must be 32 bytes".into()))?;
         let app_seed = PrivateKey::from_seed(&app_seed);
