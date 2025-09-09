@@ -104,6 +104,14 @@ pub struct App {
 impl App {
     #[uniffi::constructor]
     pub fn new(url: String, name: String, app_seed: Vec<u8>, description: String) -> Result<Self, Error> {
+        debug!("setup rustls");
+        if rustls::crypto::CryptoProvider::get_default().is_none() {
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .map_err(|e| Error::Msg(format!("{e:?}")))?;
+        }
+        debug!("rustls setup complete");
+
         debug!("app called");
         let app_seed: [u8;32] = app_seed.try_into().map_err(|_| Error::Msg("App seed must be 32 bytes".into()))?;
         let app_seed = PrivateKey::from_seed(&app_seed);
@@ -135,7 +143,7 @@ impl App {
             self.url.parse().unwrap(),
         ).await.map_err(|e| Error::Msg(e.to_string()))?
         .connected(client_crypto).await.map_err(|e| Error::Msg(e.to_string()))?;
-        let mut sdk = self.sdk.lock().unwrap();
+        let mut sdk = self.sdk.lock().map_err(|e| Error::Msg(e.to_string()))?;
         *sdk = Some(Arc::new(connected_sdk));
         Ok(())
     }
@@ -144,7 +152,7 @@ impl App {
         let encryption_key: [u8;32] = encryption_key.try_into().map_err(|_| Error::Msg("Encryption key must be 32 bytes".into()))?;
         let buf = ChunkedBuffer::new();
         let sdk = {
-            let sdk_lock = self.sdk.lock().unwrap();
+            let sdk_lock = self.sdk.lock().map_err(|e| Error::Msg(e.to_string()))?;
             sdk_lock.as_ref().ok_or_else(|| Error::Msg("SDK not connected".into()))?.clone()
         };
         debug!("starting upload");

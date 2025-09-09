@@ -142,14 +142,6 @@ impl SDK<RegisteredState> {
             tokio::time::sleep(Duration::from_secs(30)).await; // wait for accounts to get funded
         }
 
-        debug!("setup rustls");
-        if rustls::crypto::CryptoProvider::get_default().is_none() {
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .map_err(|e| Error::Tls(format!("{e:?}")))?;
-        }
-        debug!("rustls setup complete");
-
         let hosts = self
             .state
             .app
