@@ -5,6 +5,7 @@ pub mod quic;
 use crate::quic::{DownloadError, Downloader, UploadError, Uploader};
 
 use crate::app_client::{Client, RegisterAppRequest};
+use log::debug;
 use sia::signing::PrivateKey;
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,6 +66,7 @@ impl SDK<DisconnectedState> {
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
         if authenticated {
+            debug!("app connected and authenticated");
             return Ok(SDK {
                 state: RegisteredState {
                     app: client,
@@ -75,6 +77,7 @@ impl SDK<DisconnectedState> {
             });
         }
 
+        debug!("requesting app connection");
         let res = client
             .request_app_connection(&RegisterAppRequest {
                 name: app_name,
@@ -86,6 +89,7 @@ impl SDK<DisconnectedState> {
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
+        debug!("app connected, awaiting approval");
         Ok(SDK {
             state: RegisteredState {
                 app: client,
@@ -120,6 +124,7 @@ impl SDK<RegisteredState> {
     ) -> Result<SDK<ConnectedState>, Error> {
         if self.state.connect_url.is_some() {
             loop {
+                debug!("polling connect state");
                 let ok = self
                     .state
                     .app
@@ -131,6 +136,7 @@ impl SDK<RegisteredState> {
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
+            debug!("waiting for hosts");
             tokio::time::sleep(Duration::from_secs(30)).await; // wait for accounts to get funded
         }
 
@@ -146,7 +152,7 @@ impl SDK<RegisteredState> {
             .hosts()
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
-
+        debug!("updated hosts {}", hosts.len());
         let mut dialer = quic::Client::new(tls_config).map_err(|e| Error::Tls(format!("{e:?}")))?;
         dialer.update_hosts(hosts);
 
@@ -163,6 +169,7 @@ impl SDK<RegisteredState> {
             12,
         );
 
+        debug!("app setup complete");
         Ok(SDK {
             state: ConnectedState {
                 downloader: Arc::new(downloader),
