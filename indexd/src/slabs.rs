@@ -12,9 +12,9 @@ pub struct Sector {
     pub host_key: PublicKey,
 }
 
-#[derive(Debug, Clone, PartialEq)]
 /// A Slab is an erasure-coded collection of sectors. The sectors can be downloaded and
 /// used to recover the original data.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Slab {
     pub encryption_key: [u8; 32],
     pub min_shards: u8,

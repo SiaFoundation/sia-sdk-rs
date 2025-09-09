@@ -4,8 +4,9 @@ mod slabs;
 pub mod quic;
 use crate::quic::{DownloadError, Downloader, UploadError, Uploader};
 
-use crate::app_client::{Client, RegisterAppRequest};
+use crate::app_client::{Client, Host, Object, ObjectsCursor, RegisterAppRequest};
 use sia::signing::PrivateKey;
+use sia::types::Hash256;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,6 +25,7 @@ pub struct RegisteredState {
 }
 
 pub struct ConnectedState {
+    app: Client,
     downloader: Downloader,
     uploader: Uploader,
 }
@@ -43,6 +45,8 @@ pub enum Error {
     Tls(String),
 }
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 pub struct SDK<S> {
     state: S,
 }
@@ -54,7 +58,7 @@ impl SDK<DisconnectedState> {
         app_name: String,
         app_description: String,
         app_service_url: Url,
-    ) -> Result<SDK<RegisteredState>, Error> {
+    ) -> Result<SDK<RegisteredState>> {
         let client =
             Client::new(app_url, app_key.clone()).map_err(|e| Error::App(format!("{e:?}")))?;
 
@@ -113,10 +117,7 @@ impl SDK<RegisteredState> {
         self.state.connect_url.as_ref()
     }
 
-    pub async fn connected(
-        self,
-        tls_config: rustls::ClientConfig,
-    ) -> Result<SDK<ConnectedState>, Error> {
+    pub async fn connected(self, tls_config: rustls::ClientConfig) -> Result<SDK<ConnectedState>> {
         if self.state.connect_url.is_some() {
             loop {
                 let ok = self
@@ -156,7 +157,7 @@ impl SDK<RegisteredState> {
             12,
         );
         let uploader = Uploader::new(
-            self.state.app,
+            self.state.app.clone(),
             dialer.clone(),
             self.state.app_key.clone(),
             12,
@@ -164,6 +165,7 @@ impl SDK<RegisteredState> {
 
         Ok(SDK {
             state: ConnectedState {
+                app: self.state.app,
                 downloader,
                 uploader,
             },
@@ -178,7 +180,7 @@ impl SDK<ConnectedState> {
         encryption_key: [u8; 32],
         data_shards: u8,
         parity_shards: u8,
-    ) -> Result<Vec<PinnedSlab>, Error> {
+    ) -> Result<Vec<PinnedSlab>> {
         let slabs = self
             .state
             .uploader
@@ -191,7 +193,7 @@ impl SDK<ConnectedState> {
         &self,
         writer: &mut W,
         slabs: &[PinnedSlab],
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         self.state.downloader.download(writer, slabs).await?;
         Ok(())
     }
@@ -202,11 +204,71 @@ impl SDK<ConnectedState> {
         slabs: &[PinnedSlab],
         offset: usize,
         length: usize,
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         self.state
             .downloader
             .download_range(writer, slabs, offset, length)
             .await?;
         Ok(())
+    }
+
+    pub async fn hosts(&self) -> Result<Vec<Host>> {
+        self.state
+            .app
+            .hosts()
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
+    pub async fn slab(&self, slab_id: &Hash256) -> Result<app_client::Slab> {
+        self.state
+            .app
+            .slab(slab_id)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
+    pub async fn slab_ids(&self, offset: Option<u64>, limit: Option<u64>) -> Result<Vec<Hash256>> {
+        self.state
+            .app
+            .slab_ids(offset, limit)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
+    pub async fn object(&self, key: &Hash256) -> Result<Object> {
+        self.state
+            .app
+            .object(key)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
+    pub async fn objects(
+        &self,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Object>> {
+        self.state
+            .app
+            .objects(cursor, limit)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
+    pub async fn save_object(&self, object: &Object) -> Result<()> {
+        self.state
+            .app
+            .save_object(object)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
+    pub async fn delete_object(&self, key: &Hash256) -> Result<()> {
+        self.state
+            .app
+            .delete_object(key)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
     }
 }

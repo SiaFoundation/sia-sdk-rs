@@ -18,13 +18,15 @@ use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use sia::encoding;
 use sia::encoding_async::AsyncDecoder;
 use sia::rhp::{
-    self, AccountToken, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector, Transport,
+    self, AccountToken, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector, Transport,
 };
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use sia::types::v2::{NetAddress, Protocol};
 use std::sync::Mutex;
 use time::OffsetDateTime;
+
+use crate::app_client::Host;
 
 struct Stream {
     send: SendStream,
@@ -506,6 +508,9 @@ mod test {
                 address: "6r4b0vj1ai55fobdvauvpg3to5bpeijl045b2q268fcj7q1vkuog.sia.host:9984"
                     .into(),
             }],
+            country_code: "".to_string(),
+            longitude: 0.0,
+            latitude: 0.0,
         }]);
 
         let prices = dialer

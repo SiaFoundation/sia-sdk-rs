@@ -1,7 +1,7 @@
 use blake2b_simd::Params;
 use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
-use sia::rhp::Host;
+use sia::types::v2::NetAddress;
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -9,7 +9,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::slabs::Sector;
-use sia::signing::PrivateKey;
+use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 
 pub use reqwest::{IntoUrl, Url};
@@ -73,12 +73,38 @@ pub struct Slab {
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
 }
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Host {
+    pub public_key: PublicKey,
+    pub addresses: Vec<NetAddress>,
+    pub country_code: String,
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Object {
+    pub key: Hash256,
+    pub slabs: Vec<Slab>,
+    pub meta: Vec<u8>,
+    pub created_at: time::OffsetDateTime,
+    pub updated_at: time::OffsetDateTime,
+}
+
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SlabPinParams {
     pub encryption_key: [u8; 32],
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
+}
+
+pub struct ObjectsCursor {
+    after: OffsetDateTime,
+    key: Hash256,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -132,6 +158,41 @@ impl Client {
     /// Returns all usable hosts.
     pub async fn hosts(&self) -> Result<Vec<Host>> {
         self.get_json::<_, ()>("hosts", None).await
+    }
+
+    /// Retrieves an object from the indexer by its key.
+    pub async fn object(&self, key: &Hash256) -> Result<Object> {
+        self.get_json::<_, ()>(&format!("objects/{key}"), None)
+            .await
+    }
+
+    /// Fetches a list of objects from the indexer. Can be paginated using the
+    /// cursor and limit arguments.
+    pub async fn objects(
+        &self,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Object>> {
+        let mut query_params = Vec::new();
+        if let Some(limit) = limit {
+            query_params.push(("limit", limit.to_string()));
+        }
+        if let Some(ObjectsCursor { after, key }) = cursor {
+            query_params.push(("after", after.to_string()));
+            query_params.push(("key", key.to_string()));
+        }
+        self.get_json::<_, _>(&format!("objects"), Some(&query_params))
+            .await
+    }
+
+    /// Saves an object to the indexer.
+    pub async fn save_object(&self, object: &Object) -> Result<()> {
+        self.post_json("objects", object).await
+    }
+
+    /// Deletes an object from the indexer by its key.
+    pub async fn delete_object(&self, key: &Hash256) -> Result<()> {
+        self.delete(&format!("objects/{key}")).await
     }
 
     /// Requests an application connection to the indexer.
