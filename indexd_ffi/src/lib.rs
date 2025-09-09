@@ -104,8 +104,10 @@ pub struct App {
 impl App {
     #[uniffi::constructor]
     pub fn new(url: String, name: String, app_seed: Vec<u8>, description: String) -> Result<Self, Error> {
+        debug!("app called");
         let app_seed: [u8;32] = app_seed.try_into().map_err(|_| Error::Msg("App seed must be 32 bytes".into()))?;
         let app_seed = PrivateKey::from_seed(&app_seed);
+        debug!("app seed inited");
         Ok(Self {
             url,
             name,
