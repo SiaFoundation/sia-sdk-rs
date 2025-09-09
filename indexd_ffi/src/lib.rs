@@ -118,7 +118,7 @@ impl AsyncWrite for ChunkedBuffer {
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> Poll<Result<usize, Error>> {
+    ) -> Poll<Result<usize, std::io::Error>> {
         let mut inner = self.inner.lock().map_err(
             |e: std::sync::PoisonError<std::sync::MutexGuard<'_, ChunkedBufferInner>>| {
                 std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
@@ -126,7 +126,10 @@ impl AsyncWrite for ChunkedBuffer {
         )?;
 
         if inner.closed {
-            return Poll::Ready(Err(std::io::Error::Msg("buffer is closed".to_string())));
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "buffer is closed",
+            )));
         }
 
         if buf.is_empty() {
@@ -142,11 +145,14 @@ impl AsyncWrite for ChunkedBuffer {
         Poll::Ready(Ok(buf.len()))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
         let mut inner = self.inner.lock().map_err(
             |e: std::sync::PoisonError<std::sync::MutexGuard<'_, ChunkedBufferInner>>| {
                 std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
@@ -240,13 +246,14 @@ impl App {
 
         debug!("starting download");
         let buf = ChunkedBuffer::new();
-        let inner_buf = buf.clone();
+        let mut inner_buf = buf.clone();
 
+        let pinned: Vec<PinnedSlab> = slabs.into_iter().map(PinnedSlab::from).collect();
         let result = tokio::spawn(async move {
             debug!("task started");
-            sdk.download(inner_buf, slabs)
+            sdk.download(&mut inner_buf, &pinned)
                 .await
-                .map_err(|e| Error::Msg(e.to_string()));
+                .map_err(|e| Error::Msg(e.to_string()))
         });
 
         debug!("spawned download task");
@@ -359,7 +366,7 @@ impl Upload {
 #[derive(uniffi::Object)]
 pub struct Download {
     writer: ChunkedBuffer,
-    result: JoinHandle<()>,
+    result: JoinHandle<Result<(), Error>>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
