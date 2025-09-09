@@ -1,4 +1,5 @@
 import asyncio
+import time
 from indexd_ffi import App, Logger, set_log_callback
 
 class PrintLogger(Logger):
@@ -28,11 +29,8 @@ async def main():
         print("Slab ID:", slab.id)
 
     download = await app.download(slabs)
-    while True:
-        chunk = await download.read()
-        print("Read chunk of size:", len(chunk))
-        if chunk == b'':
-            break
-    print("Download finished")
+    time.sleep(5)
+    chunk = await download.read()
+    print("Download finished", len(chunk))
 
 asyncio.run(main())

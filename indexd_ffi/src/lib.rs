@@ -249,7 +249,7 @@ impl App {
         let mut inner_buf = buf.clone();
 
         let pinned: Vec<PinnedSlab> = slabs.into_iter().map(PinnedSlab::from).collect();
-        let result = tokio::spawn(async move {
+        tokio::spawn(async move {
             debug!("task started");
             sdk.download(&mut inner_buf, &pinned)
                 .await
@@ -258,8 +258,8 @@ impl App {
 
         debug!("spawned download task");
         Ok(Download {
-            writer: buf.clone(),
-            result,
+            buffer: buf.clone(),
+            // result,
         })
     }
 
@@ -365,17 +365,14 @@ impl Upload {
 
 #[derive(uniffi::Object)]
 pub struct Download {
-    writer: ChunkedBuffer,
-    result: JoinHandle<Result<(), Error>>,
+    buffer: ChunkedBuffer,
+    // result: JoinHandle<Result<(), Error>>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Download {
     pub async fn read(&self) -> Result<Vec<u8>, Error> {
-        if self.result.is_finished() {
-            return Err(Error::Msg("Download already completed".into()));
-        }
-        let chunk = self.writer.read_chunk().await?;
+        let chunk = self.buffer.read_chunk().await?;
         debug!("read chunk");
         Ok(chunk)
     }
