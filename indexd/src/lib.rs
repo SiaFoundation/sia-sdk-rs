@@ -1,10 +1,11 @@
-mod app_client;
+pub mod app_client;
 mod slabs;
 
 pub mod quic;
 use crate::quic::{DownloadError, Downloader, UploadError, Uploader};
 
 use crate::app_client::{Client, RegisterAppRequest};
+use log::debug;
 use sia::signing::PrivateKey;
 use std::time::Duration;
 use thiserror::Error;
@@ -64,6 +65,7 @@ impl SDK<DisconnectedState> {
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
         if authenticated {
+            debug!("app connected and authenticated");
             return Ok(SDK {
                 state: RegisteredState {
                     app: client,
@@ -74,6 +76,7 @@ impl SDK<DisconnectedState> {
             });
         }
 
+        debug!("requesting app connection");
         let res = client
             .request_app_connection(&RegisterAppRequest {
                 name: app_name,
@@ -85,6 +88,7 @@ impl SDK<DisconnectedState> {
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
+        debug!("app connected, awaiting approval");
         Ok(SDK {
             state: RegisteredState {
                 app: client,
@@ -117,8 +121,11 @@ impl SDK<RegisteredState> {
         self,
         tls_config: rustls::ClientConfig,
     ) -> Result<SDK<ConnectedState>, Error> {
+        debug!("connected called");
         if self.state.connect_url.is_some() {
+            debug!("waiting for connection approval");
             loop {
+                debug!("polling connect state");
                 let ok = self
                     .state
                     .app
@@ -130,13 +137,8 @@ impl SDK<RegisteredState> {
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
+            debug!("waiting for hosts");
             tokio::time::sleep(Duration::from_secs(30)).await; // wait for accounts to get funded
-        }
-
-        if rustls::crypto::CryptoProvider::get_default().is_none() {
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .map_err(|e| Error::Tls(format!("{e:?}")))?;
         }
 
         let hosts = self
@@ -145,8 +147,8 @@ impl SDK<RegisteredState> {
             .hosts()
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
-
-        let mut dialer = quic::Client::new(tls_config).map_err(|e| Error::Tls(format!("{e:?}")))?;
+        debug!("updated hosts {}", hosts.len());
+        let dialer = quic::Client::new(tls_config).map_err(|e| Error::Tls(format!("{e:?}")))?;
         dialer.update_hosts(hosts);
 
         let downloader = Downloader::new(
@@ -162,6 +164,7 @@ impl SDK<RegisteredState> {
             12,
         );
 
+        debug!("app setup complete");
         Ok(SDK {
             state: ConnectedState {
                 downloader,

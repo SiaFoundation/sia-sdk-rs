@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use blake2b_simd::Params;
 use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
@@ -73,6 +75,7 @@ pub struct Slab {
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
 }
+
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SlabPinParams {
@@ -104,7 +107,13 @@ impl Client {
     pub async fn check_app_authenticated(&self) -> Result<bool> {
         let url = self.url.join("auth/check")?;
         let query_params = self.sign(&url, Method::GET, None, OffsetDateTime::now_utc());
-        let resp = self.client.get(url).query(&query_params).send().await?;
+        let resp = self
+            .client
+            .get(url)
+            .timeout(Duration::from_secs(15))
+            .query(&query_params)
+            .send()
+            .await?;
         match resp.status() {
             StatusCode::UNAUTHORIZED => Ok(false),
             StatusCode::NO_CONTENT => Ok(true),
@@ -119,6 +128,7 @@ impl Client {
         let resp = self
             .client
             .get(status_url)
+            .timeout(Duration::from_secs(15))
             .query(&query_params)
             .send()
             .await?;
@@ -174,8 +184,15 @@ impl Client {
     async fn delete(&self, path: &str) -> Result<()> {
         let url = self.url.join(path)?;
         let query_params = self.sign(&url, Method::DELETE, None, OffsetDateTime::now_utc());
-        Self::handle_empty_response(self.client.delete(url).query(&query_params).send().await?)
-            .await
+        Self::handle_empty_response(
+            self.client
+                .delete(url)
+                .timeout(Duration::from_secs(15))
+                .query(&query_params)
+                .send()
+                .await?,
+        )
+        .await
     }
 
     /// Helper to send a signed GET request and parse the JSON
@@ -187,7 +204,7 @@ impl Client {
     ) -> Result<D> {
         let url = self.url.join(path)?;
         let params = self.sign(&url, Method::GET, None, OffsetDateTime::now_utc());
-        let mut builder = self.client.get(url);
+        let mut builder = self.client.get(url).timeout(Duration::from_secs(15));
         if let Some(q) = query_params {
             builder = builder.query(q); // optional query params
         }
@@ -227,6 +244,7 @@ impl Client {
             self.client
                 .post(url)
                 .query(&query_params)
+                .timeout(Duration::from_secs(15))
                 .body(body)
                 .send()
                 .await?,
