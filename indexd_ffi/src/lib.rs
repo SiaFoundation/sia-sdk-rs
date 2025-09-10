@@ -4,9 +4,9 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use indexd::Url;
 use indexd::app_client::{Client as AppClient, RegisterAppRequest};
 use indexd::quic::{Client as HostClient, Downloader, Uploader};
-use indexd::{SlabSlice, Url};
 use log::debug;
 use rustls::{ClientConfig, RootCertStore};
 use sia::rhp::SECTOR_SIZE;
@@ -181,10 +181,42 @@ pub struct NetAddress {
     pub address: String,
 }
 
+#[derive(Clone, uniffi::Record)]
+pub struct SlabSector {
+    pub host_key: String,
+    pub root: String,
+}
+
+impl From<indexd::Sector> for SlabSector {
+    fn from(s: indexd::Sector) -> Self {
+        Self {
+            host_key: s.host_key.to_string(),
+            root: s.root.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct PinnedSlab {
+    pub id: String,
+    pub sectors: Vec<SlabSector>,
+    pub encryption_key: Vec<u8>,
+}
+
+impl From<indexd::app_client::Slab> for PinnedSlab {
+    fn from(s: indexd::app_client::Slab) -> Self {
+        Self {
+            id: s.id.to_string(),
+            sectors: s.sectors.into_iter().map(|s| s.into()).collect(),
+            encryption_key: s.encryption_key.to_vec(),
+        }
+    }
+}
+
 #[derive(uniffi::Record)]
 pub struct Object {
     pub key: String,
-    pub slabs: Vec<Slab>,
+    pub slabs: Vec<SlabSlice>,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
 }
@@ -210,7 +242,7 @@ impl TryInto<indexd::Object> for Object {
                 .slabs
                 .into_iter()
                 .map(|s| s.try_into())
-                .collect::<Result<Vec<SlabSlice>, HexParseError>>()?,
+                .collect::<Result<Vec<indexd::SlabSlice>, HexParseError>>()?,
             meta: Vec::with_capacity(0), // TODO: handle encryption
             created_at: self.created_at.into(),
             updated_at: self.updated_at.into(),
@@ -279,28 +311,28 @@ impl TryInto<sia::rhp::Host> for Host {
 
 /// A Slab represents a contiguous erasure-coded segment of a file stored on the Sia network.
 #[derive(uniffi::Record)]
-pub struct Slab {
-    pub id: String,
+pub struct SlabSlice {
+    pub slab_id: String,
     pub offset: u32,
     pub length: u32,
 }
 
-impl From<SlabSlice> for Slab {
-    fn from(s: SlabSlice) -> Self {
+impl From<indexd::SlabSlice> for SlabSlice {
+    fn from(s: indexd::SlabSlice) -> Self {
         Self {
-            id: s.slab_id.to_string(),
+            slab_id: s.slab_id.to_string(),
             offset: s.offset as u32,
             length: s.length as u32,
         }
     }
 }
 
-impl TryInto<SlabSlice> for Slab {
+impl TryInto<indexd::SlabSlice> for SlabSlice {
     type Error = HexParseError;
 
-    fn try_into(self) -> Result<SlabSlice, Self::Error> {
-        Ok(SlabSlice {
-            slab_id: Hash256::from_str(self.id.as_str())?,
+    fn try_into(self) -> Result<indexd::SlabSlice, Self::Error> {
+        Ok(indexd::SlabSlice {
+            slab_id: Hash256::from_str(self.slab_id.as_str())?,
             offset: self.offset as usize,
             length: self.length as usize,
         })
@@ -519,7 +551,7 @@ impl SDK {
     }
 
     /// Initiates a download of all the data specified in the slabs.
-    pub async fn download(&self, slabs: &[Slab]) -> Result<Download, DownloadError> {
+    pub async fn download(&self, slabs: &[SlabSlice]) -> Result<Download, DownloadError> {
         let length = slabs.iter().fold(0_u64, |v, s| v + s.length as u64);
         self.download_range(slabs, 0, length).await
     }
@@ -527,7 +559,7 @@ impl SDK {
     /// Initiates a download of the data specified in the slabs.
     pub async fn download_range(
         &self,
-        slabs: &[Slab],
+        slabs: &[SlabSlice],
         offset: u64,
         length: u64,
     ) -> Result<Download, DownloadError> {
@@ -538,13 +570,13 @@ impl SDK {
         let slabs = slabs
             .iter()
             .map(|s| {
-                Ok(SlabSlice {
-                    slab_id: Hash256::from_str(s.id.as_str())?,
+                Ok(indexd::SlabSlice {
+                    slab_id: Hash256::from_str(s.slab_id.as_str())?,
                     offset: s.offset as usize,
                     length: s.length as usize,
                 })
             })
-            .collect::<Result<Vec<SlabSlice>, HexParseError>>()?;
+            .collect::<Result<Vec<indexd::SlabSlice>, HexParseError>>()?;
         Ok(Download {
             slabs,
             state: Arc::new(Mutex::new(DownloadState { offset, length })),
@@ -632,9 +664,18 @@ impl SDK {
                 .object_share_url(&object_key, encryption_key, valid_until.into())?;
         Ok(u.to_string())
     }
+
+    /// Returns metadata about a slab stored in the indexer. Including the
+    /// hosts storing the slab's sectors.
+    pub async fn slab(&self, slab_id: String) -> Result<PinnedSlab, Error> {
+        let slab_id = Hash256::from_str(slab_id.as_str())?;
+        let slab = self.app_client.slab(&slab_id).await?;
+        Ok(slab.into())
+    }
 }
 
-pub type UploadReceiver = Mutex<Option<oneshot::Receiver<Result<Vec<SlabSlice>, UploadError>>>>;
+pub type UploadReceiver =
+    Mutex<Option<oneshot::Receiver<Result<Vec<indexd::SlabSlice>, UploadError>>>>;
 
 /// Uploads data to the Sia network. It does so in chunks to support large files in
 /// arbitrary languages.
@@ -667,7 +708,7 @@ impl Upload {
     ///
     /// The caller must store the metadata locally in order to download
     /// it in the future.
-    pub async fn finalize(&self) -> Result<Vec<Slab>, UploadError> {
+    pub async fn finalize(&self) -> Result<Vec<SlabSlice>, UploadError> {
         self.reader.close()?;
         let rx = self
             .rx
@@ -697,7 +738,7 @@ struct DownloadState {
 /// Language bindings should provide a higher-level implementation that wraps a stream.
 #[derive(uniffi::Object)]
 pub struct Download {
-    slabs: Vec<SlabSlice>,
+    slabs: Vec<indexd::SlabSlice>,
     state: Arc<Mutex<DownloadState>>,
     downloader: Arc<Downloader>,
 }
