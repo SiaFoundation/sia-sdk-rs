@@ -91,7 +91,7 @@ pin_project! {
     }
 }
 
-impl<'w, W: AsyncWrite> CipherWriter<W> {
+impl<W: AsyncWrite> CipherWriter<W> {
     pub fn new(inner: W, key: &[u8; 32], offset: usize) -> Result<Self> {
         let nonce: [u8; 24] = [0u8; 24];
         let mut cipher = XChaCha20::new(key.into(), &nonce.into());
@@ -104,7 +104,7 @@ impl<'w, W: AsyncWrite> CipherWriter<W> {
     }
 }
 
-impl<'w, W: AsyncWrite> AsyncWrite for CipherWriter<W> {
+impl<W: AsyncWrite> AsyncWrite for CipherWriter<W> {
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -114,7 +114,7 @@ impl<'w, W: AsyncWrite> AsyncWrite for CipherWriter<W> {
         this.buf.resize(buf.len(), 0);
         this.buf.copy_from_slice(buf);
         this.cipher.apply_keystream(this.buf);
-        this.inner.poll_write(cx, &this.buf)
+        this.inner.poll_write(cx, this.buf)
     }
 
     fn poll_flush(
