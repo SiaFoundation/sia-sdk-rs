@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use log::debug;
-use sia::encryption::{self, CipherReader, encrypt_shards};
+use sia::encryption::{CipherReader, encrypt_shards};
 use sia::erasure_coding::{self, ErasureCoder};
 use sia::rhp;
 use sia::signing::{PrivateKey, PublicKey};
@@ -53,9 +53,6 @@ pub enum UploadError {
 
     #[error("slab id mismatch")]
     InvalidSlabId,
-
-    #[error("encryption error: {0}")]
-    EncryptionError(#[from] encryption::Error),
 }
 
 pub struct Uploader {

@@ -9,18 +9,6 @@ use sha2::digest::typenum::{UInt, UTerm};
 use tokio::io::{AsyncRead, AsyncWrite};
 use zeroize::ZeroizeOnDrop;
 
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error("StreamCipherError: {0}")]
-    StreamCipherError(StreamCipherError),
-}
-
-impl From<StreamCipherError> for Error {
-    fn from(err: StreamCipherError) -> Self {
-        Error::StreamCipherError(err)
-    }
-}
-
 /// encrypts the provided shards using XChaCha20. To decrypt the shards, call
 /// this function again with the same key.
 /// NOTE: don't reuse the same key for the same set of shards as it will
