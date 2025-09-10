@@ -815,4 +815,91 @@ mod tests {
         let client = Client::new(server.url("/").to_string(), app_key).unwrap();
         assert_eq!(client.object(&object.key).await.unwrap(), object);
     }
+
+    #[tokio::test]
+    async fn test_objects() {
+        let object = Object {
+            key: hash_256!("1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef"),
+            slabs: vec![
+                SlabSlice {
+                    slab_id: hash_256!(
+                        "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
+                    ),
+                    offset: 0,
+                    length: 256,
+                },
+                SlabSlice {
+                    slab_id: hash_256!(
+                        "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405"
+                    ),
+                    offset: 256,
+                    length: 512,
+                },
+            ],
+            meta: b"hello world!".to_vec(),
+            created_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
+                .unwrap(),
+            updated_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
+                .unwrap(),
+        };
+
+        const TEST_OBJECTS_JSON: &str = r#"
+        [{
+          "key": "1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef",
+          "slabs": [
+           {
+            "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
+            "offset": 0,
+            "length": 256
+           },
+           {
+            "slabID": "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405",
+            "offset": 256,
+            "length": 512
+           }
+          ],
+          "meta": "aGVsbG8gd29ybGQh",
+          "createdAt": "2025-09-09T16:10:46.898399-07:00",
+          "updatedAt": "2025-09-09T16:10:46.898399-07:00"
+         }]
+        "#;
+
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/objects"),
+                request::query(url_decoded(all_of![
+                    contains(("after", "2025-09-09 16:10:46.898399 -07:00:00")),
+                    contains((
+                        "key",
+                        "1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef"
+                    )),
+                    contains(("limit", "1")),
+                ]))
+            ])
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(TEST_OBJECTS_JSON)
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        assert_eq!(
+            client
+                .objects(
+                    Some(ObjectsCursor {
+                        after: object.updated_at,
+                        key: object.key,
+                    }),
+                    Some(1)
+                )
+                .await
+                .unwrap(),
+            vec![object]
+        );
+    }
 }
