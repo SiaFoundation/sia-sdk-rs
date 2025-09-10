@@ -20,6 +20,7 @@ async fn main() {
     writer.write(data.as_ref()).await.expect("data written");
     info!("chunk written");
     let slabs = writer.finalize().await.expect("upload to complete");
+    assert_eq!(slabs[0].length as usize, data.len(), "length mismatch");
     info!("upload complete, got {} slabs", slabs.len());
 
     let reader = sdk.download(slabs.as_ref()).await.expect("reader init");
@@ -33,6 +34,10 @@ async fn main() {
         read_data.extend_from_slice(&chunk);
     }
 
-    assert_eq!(read_data, data);
+    if data != read_data {
+        println!("{:?} ({})", &data[..100], data.len());
+        println!("{:?} ({})", &read_data[..100], read_data.len());
+        panic!("data mismatch"); // not using assert_eq to avoid printing huge data
+    }
     info!("done");
 }

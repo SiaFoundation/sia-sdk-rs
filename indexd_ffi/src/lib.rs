@@ -2,7 +2,6 @@ uniffi::setup_scaffolding!();
 
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::task::Waker;
 
 use indexd::app_client::{Client as AppClient, RegisterAppRequest};
 use indexd::quic::{Client as HostClient, Downloader, Uploader};
@@ -15,7 +14,8 @@ use sia::types::v2::Protocol;
 use sia::types::{Hash256, HexParseError};
 use thiserror::Error;
 use tokio::io::AsyncRead;
-use tokio::sync::{Notify, OnceCell, oneshot};
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::{OnceCell, oneshot};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Error, uniffi::Error)]
@@ -71,14 +71,13 @@ pub enum DownloadError {
 
 struct ChunkedWriterInner {
     buffer: Vec<u8>,
-    closed: bool,
-    waker: Option<Waker>,
+    rx: Receiver<Vec<u8>>,
+    tx: Option<Sender<Vec<u8>>>,
 }
 
 #[derive(Clone)]
 struct ChunkedWriter {
     inner: Arc<Mutex<ChunkedWriterInner>>,
-    notify_empty: Arc<Notify>,
 }
 
 impl ChunkedWriter {
@@ -87,44 +86,36 @@ impl ChunkedWriter {
             .inner
             .lock()
             .map_err(|e| UploadError::Custom(e.to_string()))?;
-        inner.closed = true;
-        if let Some(waker) = inner.waker.take() {
-            waker.wake();
-        }
-        self.notify_empty.notify_waiters();
+        inner.tx.take();
         Ok(())
     }
 
     pub async fn push_chunk(&self, chunk: Vec<u8>) -> Result<(), UploadError> {
-        self.notify_empty.notified().await;
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| UploadError::Custom(e.to_string()))?;
-        if inner.closed {
-            return Err(UploadError::Closed);
-        }
-        if !inner.buffer.is_empty() {
-            // NOTE: this should not happen due to the notify/wait above
-            panic!("buffer not empty");
-        }
-        inner.buffer = chunk;
-        if let Some(waker) = inner.waker.take() {
-            waker.wake();
-        }
-        Ok(())
+        let tx = {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|e| UploadError::Custom(e.to_string()))?;
+            match inner.tx.clone() {
+                Some(tx) => tx,
+                None => return Err(UploadError::Closed),
+            }
+        };
+        tx.send(chunk).await.map_err(|e| {
+            UploadError::Custom(format!("failed to send chunk to reader: {}", e.to_string()))
+        })
     }
 }
 
 impl Default for ChunkedWriter {
     fn default() -> Self {
+        let (tx, rx) = mpsc::channel(1);
         Self {
             inner: Arc::new(Mutex::new(ChunkedWriterInner {
                 buffer: Vec::with_capacity(SECTOR_SIZE),
-                closed: false,
-                waker: None,
+                rx,
+                tx: Some(tx),
             })),
-            notify_empty: Arc::new(Notify::new()),
         }
     }
 }
@@ -139,18 +130,27 @@ impl AsyncRead for ChunkedWriter {
             .inner
             .lock()
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        if inner.buffer.is_empty() && !inner.closed {
-            inner.waker = Some(cx.waker().clone());
-            self.notify_empty.notify_one();
-            return std::task::Poll::Pending;
-        } else if inner.buffer.is_empty() && inner.closed {
+
+        if !inner.buffer.is_empty() {
+            let to_read = buf.remaining().min(inner.buffer.len());
+            buf.put_slice(&inner.buffer[..to_read]);
+            inner.buffer.drain(..to_read); // remove the read bytes
             return std::task::Poll::Ready(Ok(()));
         }
-        let to_read = std::cmp::min(buf.remaining(), inner.buffer.len());
-        buf.put_slice(&inner.buffer[..to_read]);
-        inner.buffer.drain(..to_read);
-        debug!("ChunkedWriter read: {}", to_read);
-        std::task::Poll::Ready(Ok(()))
+
+        match inner.rx.poll_recv(cx) {
+            std::task::Poll::Ready(Some(chunk)) => {
+                let to_read = buf.remaining().min(chunk.len());
+                buf.put_slice(&chunk[..to_read]);
+                if to_read < chunk.len() {
+                    // save the rest for the next call
+                    inner.buffer.extend_from_slice(&chunk[to_read..]);
+                }
+                std::task::Poll::Ready(Ok(()))
+            }
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(Ok(())), // channel closed
+            std::task::Poll::Pending => std::task::Poll::Pending, // no data available yet
+        }
     }
 }
 
