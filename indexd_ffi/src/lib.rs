@@ -8,6 +8,7 @@ use indexd::quic::{Client as HostClient, Downloader, Uploader};
 use indexd::{PinnedSlab, Url};
 use log::debug;
 use rustls::{ClientConfig, RootCertStore};
+use sia::encryption::EncryptionKey;
 use sia::rhp::SECTOR_SIZE;
 use sia::signing::PrivateKey;
 use sia::types::v2::Protocol;
@@ -67,6 +68,9 @@ pub enum DownloadError {
 
     #[error("not connected")]
     NotConnected,
+
+    #[error("custom error: {0}")]
+    Custom(String),
 }
 
 struct ChunkedWriterInner {
@@ -363,12 +367,11 @@ impl SDK {
             Some(uploader) => uploader.clone(),
             None => return Err(UploadError::NotConnected),
         };
-        let encryption_key: [u8; 32] = encryption_key
-            .try_into()
-            .map_err(|_| UploadError::Crypto("encryption key must be 32 bytes".into()))?;
         let buf = ChunkedWriter::default();
         let (tx, rx) = oneshot::channel();
         let inner_buf = buf.clone();
+        let encryption_key = EncryptionKey::try_from(encryption_key.as_ref())
+            .map_err(|err| UploadError::Custom(err.to_string()))?;
         let result = tokio::spawn(async move {
             let res = uploader
                 .upload(inner_buf, encryption_key, data_shards, parity_shards)
@@ -384,14 +387,19 @@ impl SDK {
     }
 
     /// Initiates a download of all the data specified in the slabs.
-    pub async fn download(&self, slabs: &[Slab]) -> Result<Download, DownloadError> {
+    pub async fn download(
+        &self,
+        slabs: &[Slab],
+        encryption_key: Vec<u8>,
+    ) -> Result<Download, DownloadError> {
         let length = slabs.iter().fold(0_u64, |v, s| v + s.length as u64);
-        self.download_range(slabs, 0, length).await
+        self.download_range(encryption_key, slabs, 0, length).await
     }
 
     /// Initiates a download of the data specified in the slabs.
     pub async fn download_range(
         &self,
+        encryption_key: Vec<u8>,
         slabs: &[Slab],
         offset: u64,
         length: u64,
@@ -410,7 +418,10 @@ impl SDK {
                 })
             })
             .collect::<Result<Vec<PinnedSlab>, HexParseError>>()?;
+        let encryption_key = EncryptionKey::try_from(encryption_key.as_ref())
+            .map_err(|err| DownloadError::Custom(err.to_string()))?;
         Ok(Download {
+            encryption_key,
             slabs,
             state: Arc::new(Mutex::new(DownloadState { offset, length })),
             downloader,
@@ -509,6 +520,7 @@ struct DownloadState {
 /// Language bindings should provide a higher-level implementation that wraps a stream.
 #[derive(uniffi::Object)]
 pub struct Download {
+    encryption_key: EncryptionKey,
     slabs: Vec<PinnedSlab>,
     state: Arc<Mutex<DownloadState>>,
     downloader: Arc<Downloader>,
@@ -547,7 +559,13 @@ impl Download {
         }
         let mut buf = Vec::with_capacity(rem as usize);
         self.downloader
-            .download_range(&mut buf, &self.slabs, state.offset as usize, rem as usize)
+            .download_range(
+                &mut buf,
+                self.encryption_key.clone(),
+                &self.slabs,
+                state.offset as usize,
+                rem as usize,
+            )
             .await?;
         self.update(buf.len() as u64);
         Ok(buf)

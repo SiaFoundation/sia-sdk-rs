@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use serde_with::base64::Base64;
+use serde_with::serde_as;
 use sia::encoding::SiaEncodable;
+use sia::encryption::EncryptionKey;
 use sia::signing::PublicKey;
 use sia::types::Hash256;
 
@@ -12,11 +15,11 @@ pub struct Sector {
     pub host_key: PublicKey,
 }
 
-#[derive(Debug, Clone, PartialEq)]
 /// A Slab is an erasure-coded collection of sectors. The sectors can be downloaded and
 /// used to recover the original data.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Slab {
-    pub encryption_key: [u8; 32],
+    pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
     pub offset: usize,
@@ -46,6 +49,33 @@ impl Slab {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SlabSlice {
+    #[serde(rename = "slabID")]
+    pub slab_id: Hash256,
+    pub offset: usize,
+    pub length: usize,
+}
+
+#[serde_as]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Object {
+    pub key: Hash256,
+    pub slabs: Vec<SlabSlice>,
+
+    // base64-encoded arbitrary metadata
+    #[serde_as(as = "Base64")]
+    pub meta: Vec<u8>,
+
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: time::OffsetDateTime,
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -59,7 +89,8 @@ mod test {
             encryption_key: [
                 152, 138, 169, 77, 22, 195, 154, 192, 91, 139, 241, 61, 75, 225, 38, 124, 225, 31,
                 187, 165, 80, 215, 75, 121, 115, 204, 235, 9, 90, 248, 68, 92,
-            ],
+            ]
+            .into(),
             sectors: vec![
                 Sector {
                     root: hash_256!(

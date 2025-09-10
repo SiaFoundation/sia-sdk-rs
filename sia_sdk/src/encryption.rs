@@ -1,20 +1,56 @@
+use crate::encoding::{SiaDecodable, SiaEncodable};
 use chacha20::cipher::{
     KeyIvInit, StreamCipher, StreamCipherCoreWrapper, StreamCipherError, StreamCipherSeek,
 };
 use chacha20::{XChaCha20, XChaChaCore};
 use pin_project_lite::pin_project;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use sha2::digest::consts::{B0, B1};
 use sha2::digest::typenum::{UInt, UTerm};
+use sia_derive::{SiaDecode, SiaEncode};
 use tokio::io::{AsyncRead, AsyncWrite};
 use zeroize::ZeroizeOnDrop;
+
+#[derive(Serialize, Deserialize, SiaEncode, SiaDecode, Clone, Debug, ZeroizeOnDrop, PartialEq)]
+pub struct EncryptionKey([u8; 32]);
+
+impl From<[u8; 32]> for EncryptionKey {
+    fn from(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+}
+
+impl TryFrom<&[u8]> for EncryptionKey {
+    type Error = &'static str;
+
+    fn try_from(value: &[u8]) -> std::result::Result<Self, Self::Error> {
+        if value.len() != 32 {
+            return Err("invalid key length");
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(value);
+        Ok(Self(key))
+    }
+}
+
+impl AsRef<[u8; 32]> for EncryptionKey {
+    fn as_ref(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
 
 /// encrypts the provided shards using XChaCha20. To decrypt the shards, call
 /// this function again with the same key.
 /// NOTE: don't reuse the same key for the same set of shards as it will
 /// compromise the security of the encryption. Always use a freshly generated
 /// key.
-pub fn encrypt_shards(key: &[u8; 32], shard_start: u8, offset: usize, shards: &mut Vec<Vec<u8>>) {
+pub fn encrypt_shards(
+    key: &EncryptionKey,
+    shard_start: u8,
+    offset: usize,
+    shards: &mut Vec<Vec<u8>>,
+) {
     shards.par_iter_mut().enumerate().for_each(|(i, shard)| {
         encrypt_shard(key, shard_start + i as u8, offset, shard);
     });
@@ -27,10 +63,10 @@ pub fn encrypt_shards(key: &[u8; 32], shard_start: u8, offset: usize, shards: &m
 ///
 /// For performance reasons, prefer using `encrypt_shards` when encrypting
 /// multiple shards.
-pub fn encrypt_shard(key: &[u8; 32], index: u8, offset: usize, shard: &mut [u8]) {
+pub fn encrypt_shard(key: &EncryptionKey, index: u8, offset: usize, shard: &mut [u8]) {
     let mut nonce: [u8; 24] = [0u8; 24]; // XChaCha20 nonce size
     nonce[0] = index;
-    let mut cipher = XChaCha20::new(key.into(), &nonce.into());
+    let mut cipher = XChaCha20::new(key.as_ref().into(), &nonce.into());
     cipher.seek(offset);
     cipher.apply_keystream(shard);
 }
@@ -44,7 +80,7 @@ pin_project! {
 }
 
 impl<R: AsyncRead> CipherReader<R> {
-    pub fn new(inner: R, key: [u8; 32], offset: usize) -> Self {
+    pub fn new(inner: R, key: EncryptionKey, offset: usize) -> Self {
         Self {
             inner,
             cipher: Chacha20Cipher::new(key, offset as u64),
@@ -79,7 +115,7 @@ pin_project! {
 }
 
 impl<W: AsyncWrite> CipherWriter<W> {
-    pub fn new(inner: W, key: [u8; 32], offset: usize) -> Self {
+    pub fn new(inner: W, key: EncryptionKey, offset: usize) -> Self {
         Self {
             inner,
             cipher: Chacha20Cipher::new(key, offset as u64),
@@ -118,12 +154,10 @@ impl<W: AsyncWrite> AsyncWrite for CipherWriter<W> {
     }
 }
 
-#[derive(ZeroizeOnDrop)]
 struct Chacha20Cipher {
-    #[zeroize(skip)]
     #[allow(clippy::type_complexity)]
     inner: StreamCipherCoreWrapper<XChaChaCore<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B1>, B0>>>,
-    key: [u8; 32],
+    key: EncryptionKey,
     nonce: [u8; 24],
     offset: u64,
 }
@@ -137,9 +171,9 @@ impl Chacha20Cipher {
         nonce
     }
 
-    pub fn new(key: [u8; 32], offset: u64) -> Self {
+    pub fn new(key: EncryptionKey, offset: u64) -> Self {
         let nonce = Self::nonce_for_offset(offset);
-        let mut cipher = XChaCha20::new(&key.into(), &nonce.into());
+        let mut cipher = XChaCha20::new(key.as_ref().into(), &nonce.into());
         cipher.seek(offset % Self::MAX_BYTES_PER_NONCE);
         Self {
             inner: cipher,
@@ -173,7 +207,7 @@ impl StreamCipher for Chacha20Cipher {
 
         // update nonce and reinitialize cipher
         self.nonce = Self::nonce_for_offset(self.offset);
-        self.inner = XChaCha20::new(&self.key.into(), &self.nonce.into());
+        self.inner = XChaCha20::new(self.key.as_ref().into(), &self.nonce.into());
 
         // encrypt the second part
         self.offset += second.len() as u64;
@@ -192,7 +226,7 @@ mod test {
 
     #[test]
     fn test_encrypt_sector_roundtrip() {
-        let key = [1u8; 32];
+        let key = EncryptionKey::from([1u8; 32]);
 
         let mut sector = vec![0u8; SECTOR_SIZE];
         rand::rng().fill_bytes(&mut sector);
@@ -206,7 +240,7 @@ mod test {
 
     #[test]
     fn test_encrypt_shards() {
-        let key = [1u8; 32];
+        let key = EncryptionKey::from([1u8; 32]);
         let mut shards = vec![vec![1, 2, 3], vec![4, 5, 6]];
 
         // encrypt
@@ -232,7 +266,7 @@ mod test {
 
     #[tokio::test]
     async fn test_cipher_reader_writer() {
-        let key = [1u8; 32];
+        let key = EncryptionKey::from([1u8; 32]);
         let data = b"lorem ipsum dolor sit amet, consectetur adipiscing elit";
 
         for offset in [0, 10, u32::MAX as usize * 64 - 10, u32::MAX as usize * 64] {
@@ -241,7 +275,7 @@ mod test {
             reader.read_exact(&mut cipher_text).await.unwrap();
             assert_ne!(cipher_text, data);
 
-            let mut writer = CipherWriter::new(Vec::new(), key, offset);
+            let mut writer = CipherWriter::new(Vec::new(), key.clone(), offset);
             writer.write_all(&cipher_text).await.unwrap();
             let plaintext = writer.inner;
             assert_eq!(plaintext, data);

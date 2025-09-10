@@ -3,13 +3,16 @@ use std::time::Duration;
 use blake2b_simd::Params;
 use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
+use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
+
 use thiserror::Error;
 use time::OffsetDateTime;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::Object;
 use crate::slabs::Sector;
 use sia::signing::PrivateKey;
 use sia::types::Hash256;
@@ -71,7 +74,7 @@ pub struct RegisterAppResponse {
 #[serde(rename_all = "camelCase")]
 pub struct Slab {
     pub id: Hash256,
-    pub encryption_key: [u8; 32],
+    pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
 }
@@ -79,9 +82,14 @@ pub struct Slab {
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SlabPinParams {
-    pub encryption_key: [u8; 32],
+    pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
+}
+
+pub struct ObjectsCursor {
+    pub after: OffsetDateTime,
+    pub key: Hash256,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -91,6 +99,19 @@ pub struct Client {
     client: reqwest::Client,
     url: Url,
     app_key: PrivateKey,
+}
+
+/// A placeholder type that implements serde::Deserialize for endpoints that
+/// return no content.
+struct EmptyResponse;
+
+impl<'de> serde::Deserialize<'de> for EmptyResponse {
+    fn deserialize<D>(_: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(EmptyResponse)
+    }
 }
 
 impl Client {
@@ -144,6 +165,42 @@ impl Client {
         self.get_json::<_, ()>("hosts", None).await
     }
 
+    /// Retrieves an object from the indexer by its key.
+    pub async fn object(&self, key: &Hash256) -> Result<Object> {
+        self.get_json::<_, ()>(&format!("objects/{key}"), None)
+            .await
+    }
+
+    /// Fetches a list of objects from the indexer. Can be paginated using the
+    /// cursor and limit arguments.
+    pub async fn objects(
+        &self,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Object>> {
+        let mut query_params = Vec::new();
+        if let Some(limit) = limit {
+            query_params.push(("limit", limit.to_string()));
+        }
+        if let Some(ObjectsCursor { after, key }) = cursor {
+            query_params.push(("after", after.to_string()));
+            query_params.push(("key", key.to_string()));
+        }
+        self.get_json::<_, _>("objects", Some(&query_params)).await
+    }
+
+    /// Saves an object to the indexer.
+    pub async fn save_object(&self, object: &Object) -> Result<()> {
+        self.post_json::<_, EmptyResponse>("objects", object)
+            .await
+            .map(|_| ())
+    }
+
+    /// Deletes an object from the indexer by its key.
+    pub async fn delete_object(&self, key: &Hash256) -> Result<()> {
+        self.delete(&format!("objects/{key}")).await
+    }
+
     /// Requests an application connection to the indexer.
     pub async fn request_app_connection(
         &self,
@@ -184,7 +241,7 @@ impl Client {
     async fn delete(&self, path: &str) -> Result<()> {
         let url = self.url.join(path)?;
         let query_params = self.sign(&url, Method::DELETE, None, OffsetDateTime::now_utc());
-        Self::handle_empty_response(
+        Self::handle_response::<EmptyResponse>(
             self.client
                 .delete(url)
                 .timeout(Duration::from_secs(15))
@@ -193,6 +250,7 @@ impl Client {
                 .await?,
         )
         .await
+        .map(|_| ())
     }
 
     /// Helper to send a signed GET request and parse the JSON
@@ -216,15 +274,6 @@ impl Client {
     async fn handle_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
         if resp.status().is_success() {
             Ok(resp.json::<T>().await?)
-        } else {
-            Err(Error::Api(resp.text().await?))
-        }
-    }
-
-    /// Same as handle_response but for empty responses.
-    async fn handle_empty_response(resp: reqwest::Response) -> Result<()> {
-        if resp.status().is_success() {
-            Ok(())
         } else {
             Err(Error::Api(resp.text().await?))
         }
@@ -295,6 +344,9 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use sia::{hash_256, public_key};
+    use time::format_description::well_known::Rfc3339;
+
+    use crate::{Object, SlabSlice};
 
     use super::*;
     use httptest::http::Response;
@@ -406,7 +458,8 @@ mod tests {
             encryption_key: [
                 186, 153, 179, 170, 159, 95, 101, 177, 15, 130, 58, 19, 138, 144, 9, 91, 181, 119,
                 38, 225, 209, 47, 149, 22, 157, 210, 16, 232, 10, 151, 186, 160,
-            ],
+            ]
+            .into(),
             min_shards: 1,
             sectors: vec![Sector {
                 root: hash_256!("826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6"),
@@ -486,7 +539,8 @@ mod tests {
             encryption_key: [
                 186, 153, 179, 170, 159, 95, 101, 177, 15, 130, 58, 19, 138, 144, 9, 91, 181, 119,
                 38, 225, 209, 47, 149, 22, 157, 210, 16, 232, 10, 151, 186, 160,
-            ],
+            ]
+            .into(),
             min_shards: 1,
             sectors: vec![Sector {
                 root: hash_256!("826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6"),
@@ -682,5 +736,221 @@ mod tests {
                 expiration: OffsetDateTime::from_unix_timestamp(100).unwrap(),
             }
         )
+    }
+
+    #[tokio::test]
+    async fn test_object() {
+        let object = Object {
+            key: hash_256!("1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef"),
+            slabs: vec![
+                SlabSlice {
+                    slab_id: hash_256!(
+                        "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
+                    ),
+                    offset: 0,
+                    length: 256,
+                },
+                SlabSlice {
+                    slab_id: hash_256!(
+                        "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405"
+                    ),
+                    offset: 256,
+                    length: 512,
+                },
+            ],
+            meta: b"hello world!".to_vec(),
+            created_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
+                .unwrap(),
+            updated_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
+                .unwrap(),
+        };
+
+        const TEST_OBJECT_JSON: &str = r#"
+        {
+          "key": "1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef",
+          "slabs": [
+           {
+            "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
+            "offset": 0,
+            "length": 256
+           },
+           {
+            "slabID": "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405",
+            "offset": 256,
+            "length": 512
+           }
+          ],
+          "meta": "aGVsbG8gd29ybGQh",
+          "createdAt": "2025-09-09T16:10:46.898399-07:00",
+          "updatedAt": "2025-09-09T16:10:46.898399-07:00"
+         }
+        "#;
+
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                "/objects/1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef",
+            ))
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(TEST_OBJECT_JSON)
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        assert_eq!(client.object(&object.key).await.unwrap(), object);
+    }
+
+    #[tokio::test]
+    async fn test_objects() {
+        let object = Object {
+            key: hash_256!("1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef"),
+            slabs: vec![
+                SlabSlice {
+                    slab_id: hash_256!(
+                        "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
+                    ),
+                    offset: 0,
+                    length: 256,
+                },
+                SlabSlice {
+                    slab_id: hash_256!(
+                        "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405"
+                    ),
+                    offset: 256,
+                    length: 512,
+                },
+            ],
+            meta: b"hello world!".to_vec(),
+            created_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
+                .unwrap(),
+            updated_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
+                .unwrap(),
+        };
+
+        const TEST_OBJECTS_JSON: &str = r#"
+        [{
+          "key": "1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef",
+          "slabs": [
+           {
+            "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
+            "offset": 0,
+            "length": 256
+           },
+           {
+            "slabID": "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405",
+            "offset": 256,
+            "length": 512
+           }
+          ],
+          "meta": "aGVsbG8gd29ybGQh",
+          "createdAt": "2025-09-09T16:10:46.898399-07:00",
+          "updatedAt": "2025-09-09T16:10:46.898399-07:00"
+         }]
+        "#;
+
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/objects"),
+                request::query(url_decoded(all_of![
+                    contains(("after", "2025-09-09 16:10:46.898399 -07:00:00")),
+                    contains((
+                        "key",
+                        "1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef"
+                    )),
+                    contains(("limit", "1")),
+                ]))
+            ])
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(TEST_OBJECTS_JSON)
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        assert_eq!(
+            client
+                .objects(
+                    Some(ObjectsCursor {
+                        after: object.updated_at,
+                        key: object.key,
+                    }),
+                    Some(1)
+                )
+                .await
+                .unwrap(),
+            vec![object]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_object() {
+        let object_key =
+            hash_256!("1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef");
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(request::method_path(
+                "DELETE",
+                "/objects/1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef",
+            ))
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        client.delete_object(&object_key).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn save_object() {
+        let object = Object {
+            key: hash_256!("1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef"),
+            slabs: vec![
+                SlabSlice {
+                    slab_id: hash_256!(
+                        "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
+                    ),
+                    offset: 0,
+                    length: 256,
+                },
+                SlabSlice {
+                    slab_id: hash_256!(
+                        "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405"
+                    ),
+                    offset: 256,
+                    length: 512,
+                },
+            ],
+            meta: b"hello world!".to_vec(),
+            created_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
+                .unwrap(),
+            updated_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
+                .unwrap(),
+        };
+
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/objects"),
+                request::body(serde_json::to_string(&object).unwrap())
+            ])
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        client.save_object(&object).await.unwrap();
     }
 }

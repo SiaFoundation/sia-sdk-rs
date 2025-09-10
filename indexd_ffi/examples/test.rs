@@ -43,7 +43,11 @@ async fn main() {
     assert_eq!(slabs[0].length as usize, data.len(), "length mismatch");
     info!("upload complete, got {} slabs", slabs.len());
 
-    let reader = sdk.download(slabs.as_ref()).await.expect("reader init");
+    let encryption_key: [u8; 32] = rand::random();
+    let reader = sdk
+        .download(slabs.as_ref(), encryption_key.to_vec())
+        .await
+        .expect("reader init");
 
     let mut read_data = Vec::with_capacity(data.len());
     loop {

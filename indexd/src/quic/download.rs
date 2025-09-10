@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use log::debug;
-use sia::encryption::{CipherWriter, encrypt_shard};
+use sia::encryption::{CipherWriter, EncryptionKey, encrypt_shard};
 use sia::erasure_coding::{self, ErasureCoder};
 use sia::rhp::SEGMENT_SIZE;
 use sia::signing::{PrivateKey, PublicKey};
@@ -108,7 +108,7 @@ impl Downloader {
     /// from each sector.
     pub async fn download_slab_shards(
         &self,
-        encryption_key: &[u8; 32],
+        encryption_key: &EncryptionKey,
         sectors: &[Sector],
         min_shards: u8,
         offset: usize,
@@ -145,7 +145,7 @@ impl Downloader {
                 Some(res) = download_tasks.join_next() => {
                     match res {
                         Ok(Ok((index, mut data))) => {
-                            let encryption_key = *encryption_key;
+                            let encryption_key = encryption_key.clone();
                             let data = spawn_blocking(move || {
                                 encrypt_shard(&encryption_key, index as u8, offset, &mut data);
                                 data
@@ -231,7 +231,7 @@ impl Downloader {
     pub async fn download_range<W: AsyncWriteExt + Unpin>(
         &self,
         w: &mut W,
-        encryption_key: [u8; 32],
+        encryption_key: EncryptionKey,
         slabs: &[PinnedSlab],
         mut offset: usize,
         mut length: usize,
@@ -302,7 +302,7 @@ impl Downloader {
     pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
         w: &mut W,
-        encryption_key: [u8; 32],
+        encryption_key: EncryptionKey,
         slabs: &[PinnedSlab],
     ) -> Result<(), DownloadError> {
         let total_length = slabs.iter().fold(0, |sum, slab| sum + slab.length);
