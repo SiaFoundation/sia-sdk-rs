@@ -246,7 +246,7 @@ impl Downloader {
             return Ok(());
         }
         let mut bw = BufWriter::new(w);
-        let mut w = CipherWriter::new(&mut bw, &encryption_key, offset)?;
+        let mut w = CipherWriter::new(&mut bw, encryption_key, offset);
         for pinned_slab in slabs {
             if length == 0 {
                 break;

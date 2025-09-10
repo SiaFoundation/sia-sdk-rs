@@ -7,6 +7,7 @@ use rayon::prelude::*;
 use sha2::digest::consts::{B0, B1};
 use sha2::digest::typenum::{UInt, UTerm};
 use tokio::io::{AsyncRead, AsyncWrite};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -52,16 +53,16 @@ pin_project! {
     pub struct CipherReader<R: AsyncRead> {
         #[pin]
         inner: R,
-        cipher: StreamCipherCoreWrapper<XChaChaCore<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B1>, B0>>>,
+        cipher: Chacha20Cipher,
     }
 }
 
 impl<R: AsyncRead> CipherReader<R> {
-    pub fn new(inner: R, key: &[u8; 32], offset: usize) -> Result<Self> {
-        let nonce: [u8; 24] = [0u8; 24];
-        let mut cipher = XChaCha20::new(key.into(), &nonce.into());
-        cipher.try_seek(offset)?;
-        Ok(Self { inner, cipher })
+    pub fn new(inner: R, key: [u8; 32], offset: usize) -> Self {
+        Self {
+            inner,
+            cipher: Chacha20Cipher::new(key, offset),
+        }
     }
 }
 
@@ -86,21 +87,18 @@ pin_project! {
     pub struct CipherWriter<W: AsyncWrite> {
         #[pin]
         inner: W,
-        cipher: StreamCipherCoreWrapper<XChaChaCore<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B1>, B0>>>,
+        cipher: Chacha20Cipher,
         buf: Vec<u8>
     }
 }
 
 impl<W: AsyncWrite> CipherWriter<W> {
-    pub fn new(inner: W, key: &[u8; 32], offset: usize) -> Result<Self> {
-        let nonce: [u8; 24] = [0u8; 24];
-        let mut cipher = XChaCha20::new(key.into(), &nonce.into());
-        cipher.try_seek(offset)?;
-        Ok(Self {
+    pub fn new(inner: W, key: [u8; 32], offset: usize) -> Self {
+        Self {
             inner,
-            cipher,
+            cipher: Chacha20Cipher::new(key, offset),
             buf: Vec::new(),
-        })
+        }
     }
 }
 
@@ -131,6 +129,67 @@ impl<W: AsyncWrite> AsyncWrite for CipherWriter<W> {
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.project();
         this.inner.poll_shutdown(cx)
+    }
+}
+
+#[derive(ZeroizeOnDrop)]
+struct Chacha20Cipher {
+    #[zeroize(skip)]
+    inner: StreamCipherCoreWrapper<XChaChaCore<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B1>, B0>>>,
+    key: [u8; 32],
+    nonce: [u8; 24],
+    offset: usize,
+}
+
+impl Chacha20Cipher {
+    const MAX_BYTES_PER_NONCE: usize = u32::MAX as usize * 64;
+
+    fn nonce_for_offset(offset: usize) -> [u8; 24] {
+        let mut nonce: [u8; 24] = [0u8; 24];
+        nonce[16..24].copy_from_slice(&(offset / Self::MAX_BYTES_PER_NONCE).to_le_bytes());
+        nonce
+    }
+
+    pub fn new(key: [u8; 32], offset: usize) -> Self {
+        let nonce = Self::nonce_for_offset(offset);
+        let mut cipher = XChaCha20::new(&key.into(), &nonce.into());
+        cipher.seek(offset % Self::MAX_BYTES_PER_NONCE);
+        Self {
+            inner: cipher,
+            key,
+            nonce,
+            offset,
+        }
+    }
+}
+
+impl StreamCipher for Chacha20Cipher {
+    fn try_apply_keystream_inout(
+        &mut self,
+        buf: chacha20::cipher::inout::InOutBuf<'_, '_, u8>,
+    ) -> std::result::Result<(), StreamCipherError> {
+        let remaining_keystream =
+            Self::MAX_BYTES_PER_NONCE - (self.offset % Self::MAX_BYTES_PER_NONCE);
+
+        if buf.len() <= remaining_keystream {
+            self.offset += buf.len();
+            return self.inner.try_apply_keystream_inout(buf);
+        }
+
+        // we can't process the entire buffer with the current nonce, so we need
+        // to split it
+        let (first, second) = buf.split_at(remaining_keystream);
+
+        // the first part can be processed with the current nonce
+        self.inner.try_apply_keystream_inout(first)?;
+        self.offset += remaining_keystream;
+
+        // update nonce and reinitialize cipher
+        self.nonce = Self::nonce_for_offset(self.offset);
+        self.inner = XChaCha20::new(&self.key.into(), &self.nonce.into());
+
+        // encrypt the second part
+        self.inner.try_apply_keystream_inout(second)
     }
 }
 
@@ -188,13 +247,13 @@ mod test {
         let key = [1u8; 32];
         let data = b"lorem ipsum dolor sit amet, consectetur adipiscing elit";
 
-        for offset in [0, 10, 20, 30] {
-            let mut reader = CipherReader::new(data.as_ref(), &key, offset).unwrap();
+        for offset in [0, 10, u32::MAX as usize * 64 - 10, u32::MAX as usize * 64] {
+            let mut reader = CipherReader::new(data.as_ref(), key.clone(), offset);
             let mut cipher_text = vec![0u8; data.len()];
             reader.read_exact(&mut cipher_text).await.unwrap();
             assert_ne!(cipher_text, data);
 
-            let mut writer = CipherWriter::new(Vec::new(), &key, offset).unwrap();
+            let mut writer = CipherWriter::new(Vec::new(), key, offset);
             writer.write_all(&cipher_text).await.unwrap();
             let plaintext = writer.inner;
             assert_eq!(plaintext, data);
