@@ -123,8 +123,8 @@ pub struct SlabPinParams {
 }
 
 pub struct ObjectsCursor {
-    after: OffsetDateTime,
-    key: Hash256,
+    pub after: OffsetDateTime,
+    pub key: Hash256,
 }
 
 type Result<T> = std::result::Result<T, Error>;
