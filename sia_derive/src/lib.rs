@@ -40,7 +40,7 @@ pub fn derive_sia_encode(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl SiaEncodable for #name {
-            fn encode<W: std::io::Write>(&self, w: &mut W) -> crate::encoding::Result<()> {
+            fn encode<W: std::io::Write>(&self, w: &mut W) -> sia::encoding::Result<()> {
                 #encode_impl
             }
         }
@@ -88,7 +88,7 @@ pub fn derive_sia_decode(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl SiaDecodable for #name {
-            fn decode<R: std::io::Read>(r: &mut R) -> crate::encoding::Result<Self> {
+            fn decode<R: std::io::Read>(r: &mut R) -> sia::encoding::Result<Self> {
                 #decode_impl
             }
         }

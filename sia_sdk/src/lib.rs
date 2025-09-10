@@ -10,3 +10,5 @@ pub mod types;
 
 pub mod macros;
 pub(crate) mod merkle;
+
+extern crate self as sia;
