@@ -237,7 +237,7 @@ impl Client {
         url: &Url,
         method: Method,
         body: Option<&[u8]>,
-        valid_until: chrono::DateTime<Utc>,
+        valid_until: DateTime<Utc>,
     ) -> Hash256 {
         let mut state = Params::new().hash_length(32).to_state();
         state

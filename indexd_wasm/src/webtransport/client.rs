@@ -253,7 +253,7 @@ impl ClientInner {
         let mut cached_prices = self.cached_prices.lock().unwrap();
         match cached_prices.get(host_key) {
             Some(prices) => {
-                if prices.valid_until < OffsetDateTime::now_utc() {
+                if prices.valid_until.unix_timestamp() < chrono::Utc::now().timestamp() {
                     cached_prices.remove(host_key);
                     None
                 } else {
@@ -324,7 +324,7 @@ impl ClientInner {
             (chrono::Utc::now() - start).num_milliseconds()
         );
         let prices = resp.settings.prices;
-        if prices.valid_until < OffsetDateTime::now_utc() {
+        if prices.valid_until.unix_timestamp() < chrono::Utc::now().timestamp() {
             return Err(Error::InvalidPrices);
         } else if !host_key.verify(prices.sig_hash().as_ref(), &prices.signature) {
             return Err(Error::InvalidSignature);
