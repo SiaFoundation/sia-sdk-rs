@@ -7,7 +7,6 @@ use thiserror::Error;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
 
 use crate::slabs::Sector;
 use sia::signing::PrivateKey;
@@ -62,8 +61,7 @@ pub struct RegisterAppResponse {
     pub response_url: String,
     #[serde(rename = "statusURL")]
     pub status_url: String,
-    #[serde(with = "time::serde::rfc3339")]
-    pub expiration: OffsetDateTime,
+    pub expiration: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -661,7 +659,7 @@ mod tests {
             RegisterAppResponse {
                 response_url: "https://response.com".to_string(),
                 status_url: "https://status.com".to_string(),
-                expiration: OffsetDateTime::from_unix_timestamp(100).unwrap(),
+                expiration: DateTime::<Utc>::from_timestamp(100, 0).unwrap(),
             }
         )
     }
