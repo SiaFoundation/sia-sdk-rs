@@ -101,9 +101,9 @@ impl ChunkedWriter {
                 None => return Err(UploadError::Closed),
             }
         };
-        tx.send(chunk).await.map_err(|e| {
-            UploadError::Custom(format!("failed to send chunk to reader: {}", e))
-        })
+        tx.send(chunk)
+            .await
+            .map_err(|e| UploadError::Custom(format!("failed to send chunk to reader: {}", e)))
     }
 }
 

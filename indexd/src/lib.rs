@@ -7,7 +7,6 @@ use crate::quic::{DownloadError, Downloader, UploadError, Uploader};
 use crate::app_client::{Client, RegisterAppRequest};
 use log::debug;
 use sia::signing::PrivateKey;
-use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,8 +25,8 @@ pub struct RegisteredState {
 }
 
 pub struct ConnectedState {
-    downloader: Arc<Downloader>,
-    uploader: Arc<Uploader>,
+    downloader: Downloader,
+    uploader: Uploader,
 }
 
 #[derive(Error, Debug)]
@@ -168,22 +167,14 @@ impl SDK<RegisteredState> {
         debug!("app setup complete");
         Ok(SDK {
             state: ConnectedState {
-                downloader: Arc::new(downloader),
-                uploader: Arc::new(uploader),
+                downloader,
+                uploader,
             },
         })
     }
 }
 
 impl SDK<ConnectedState> {
-    pub fn uploader(&self) -> Arc<Uploader> {
-        self.state.uploader.clone()
-    }
-
-    pub fn downloader(&self) -> Arc<Downloader> {
-        self.state.downloader.clone()
-    }
-
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
         reader: R,
