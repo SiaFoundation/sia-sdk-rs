@@ -27,8 +27,6 @@ pub struct Slab {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PinnedSlab {
     pub id: Hash256,
-    pub encryption_key: [u8; 32],
-    pub min_shards: u8,
     pub offset: usize,
     pub length: usize,
 }

@@ -1,0 +1,548 @@
+uniffi::setup_scaffolding!();
+
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+use std::task::Waker;
+
+use indexd::app_client::{Client as AppClient, RegisterAppRequest};
+use indexd::quic::{Client as HostClient, Downloader, Uploader};
+use indexd::{PinnedSlab, Url};
+use log::debug;
+use rustls::{ClientConfig, RootCertStore};
+use sia::rhp::SECTOR_SIZE;
+use sia::signing::PrivateKey;
+use sia::types::v2::Protocol;
+use sia::types::{Hash256, HexParseError};
+use thiserror::Error;
+use tokio::io::AsyncRead;
+use tokio::sync::{Notify, OnceCell, oneshot};
+use tokio::task::JoinHandle;
+
+#[derive(Debug, Error, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum Error {
+    #[error("crypto error: {0}")]
+    Crypto(String),
+
+    #[error("app error: {0}")]
+    AppClient(#[from] indexd::app_client::Error),
+
+    #[error("quic error: {0}")]
+    Quic(#[from] indexd::quic::Error),
+
+    #[error("not connected")]
+    NotConnected,
+
+    #[error("error: {0}")]
+    Custom(String),
+}
+
+#[derive(Debug, Error, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum UploadError {
+    #[error("buffer closed")]
+    Closed,
+
+    #[error("upload error: {0}")]
+    Upload(#[from] indexd::quic::UploadError),
+
+    #[error("crypto error: {0}")]
+    Crypto(String),
+
+    #[error("not connected")]
+    NotConnected,
+
+    #[error("custom error: {0}")]
+    Custom(String),
+}
+
+#[derive(Debug, Error, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum DownloadError {
+    #[error("download error: {0}")]
+    Download(#[from] indexd::quic::DownloadError),
+
+    #[error("hex error: {0}")]
+    HexParseError(#[from] sia::types::HexParseError),
+
+    #[error("not connected")]
+    NotConnected,
+}
+
+struct ChunkedWriterInner {
+    buffer: Vec<u8>,
+    closed: bool,
+    waker: Option<Waker>,
+}
+
+#[derive(Clone)]
+struct ChunkedWriter {
+    inner: Arc<Mutex<ChunkedWriterInner>>,
+    notify_empty: Arc<Notify>,
+}
+
+impl ChunkedWriter {
+    pub fn close(&self) -> Result<(), UploadError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| UploadError::Custom(e.to_string()))?;
+        inner.closed = true;
+        if let Some(waker) = inner.waker.take() {
+            waker.wake();
+        }
+        self.notify_empty.notify_waiters();
+        Ok(())
+    }
+
+    pub async fn push_chunk(&self, chunk: Vec<u8>) -> Result<(), UploadError> {
+        self.notify_empty.notified().await;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| UploadError::Custom(e.to_string()))?;
+        if inner.closed {
+            return Err(UploadError::Closed);
+        }
+        if !inner.buffer.is_empty() {
+            // NOTE: this should not happen due to the notify/wait above
+            panic!("buffer not empty");
+        }
+        inner.buffer = chunk;
+        if let Some(waker) = inner.waker.take() {
+            waker.wake();
+        }
+        Ok(())
+    }
+}
+
+impl Default for ChunkedWriter {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(ChunkedWriterInner {
+                buffer: Vec::with_capacity(SECTOR_SIZE),
+                closed: false,
+                waker: None,
+            })),
+            notify_empty: Arc::new(Notify::new()),
+        }
+    }
+}
+
+impl AsyncRead for ChunkedWriter {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        if inner.buffer.is_empty() && !inner.closed {
+            inner.waker = Some(cx.waker().clone());
+            self.notify_empty.notify_one();
+            return std::task::Poll::Pending;
+        } else if inner.buffer.is_empty() && inner.closed {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        let to_read = std::cmp::min(buf.remaining(), inner.buffer.len());
+        buf.put_slice(&inner.buffer[..to_read]);
+        inner.buffer.drain(..to_read);
+        debug!("ChunkedWriter read: {}", to_read);
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+/// Metadata about an application connecting to the indexer.
+#[derive(uniffi::Record)]
+pub struct AppMeta {
+    pub name: String,
+    pub description: String,
+    pub service_url: String,
+    pub logo_url: Option<String>,
+    pub callback_url: Option<String>,
+}
+
+/// The protocol used in a network address.
+#[derive(uniffi::Enum)]
+pub enum AddressProtocol {
+    SiaMux,
+    Quic,
+}
+
+/// A network address of a storage provider on the Sia network.
+#[derive(uniffi::Record)]
+pub struct NetAddress {
+    pub protocol: AddressProtocol,
+    pub address: String,
+}
+
+/// Information about a storage provider on the
+/// Sia network.
+#[derive(uniffi::Record)]
+pub struct Host {
+    pub public_key: String,
+    pub addresses: Vec<NetAddress>,
+    pub country_code: String,
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+/// A Slab represents a contiguous erasure-coded segment of a file stored on the Sia network.
+#[derive(uniffi::Record)]
+pub struct Slab {
+    pub id: String,
+    pub offset: u32,
+    pub length: u32,
+}
+
+#[derive(uniffi::Record)]
+pub struct RequestAuthResponse {
+    pub response_url: String,
+    pub status_url: String,
+}
+
+/// An SDK enables interaction with an indexer and
+/// storage providers on the Sia network.
+#[derive(uniffi::Object)]
+pub struct SDK {
+    app_key: PrivateKey,
+    app_client: AppClient,
+    downloader: OnceCell<Arc<Downloader>>,
+    uploader: OnceCell<Arc<Uploader>>,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl SDK {
+    /// Creates a new SDK instance.
+    ///
+    /// # Arguments
+    /// * `indexer_url` - The URL of the indexer to connect to.
+    /// * `app_seed` - A 32-byte seed used to derive the app's private key.
+    ///
+    /// # Returns
+    /// A new SDK instance.
+    #[uniffi::constructor]
+    pub fn new(indexer_url: String, app_seed: Vec<u8>) -> Result<Self, Error> {
+        let app_seed: [u8; 32] = app_seed
+            .try_into()
+            .map_err(|_| Error::Custom("App seed must be 32 bytes".into()))?;
+        let app_key = PrivateKey::from_seed(&app_seed);
+        let app_client = AppClient::new(indexer_url, app_key.clone())?;
+
+        Ok(Self {
+            app_key,
+            app_client: app_client.clone(),
+            downloader: OnceCell::new(),
+            uploader: OnceCell::new(),
+        })
+    }
+
+    /// Returns true if the app key is authorized, returns false otherwise
+    pub async fn connect(&self) -> Result<bool, Error> {
+        let connected = self.app_client.check_app_authenticated().await?;
+        if self.downloader.initialized() {
+            return Ok(connected);
+        }
+
+        // install crypto provider
+        if rustls::crypto::CryptoProvider::get_default().is_none() {
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .map_err(|e| Error::Crypto(format!("{:?}", e)))?;
+        }
+
+        // load root certs
+        let mut roots = RootCertStore::empty();
+        for cert in rustls_native_certs::load_native_certs().certs {
+            // Ignore any certs that fail to parse
+            let _ = roots.add(cert);
+        }
+
+        let client_crypto = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+        let host_client = HostClient::new(client_crypto)?;
+
+        self.uploader
+            .get_or_init(|| async {
+                Arc::new(Uploader::new(
+                    self.app_client.clone(),
+                    host_client.clone(),
+                    self.app_key.clone(),
+                    12,
+                ))
+            })
+            .await;
+
+        self.downloader
+            .get_or_init(|| async {
+                Arc::new(Downloader::new(
+                    self.app_client.clone(),
+                    host_client.clone(),
+                    self.app_key.clone(),
+                    12,
+                ))
+            })
+            .await;
+
+        Ok(connected)
+    }
+
+    /// Requests permission for the app to connect to the indexer.
+    ///
+    /// # Returns
+    /// A URL the user should visit to authorize the app.
+    pub async fn request_app_connection(
+        &self,
+        meta: AppMeta,
+    ) -> Result<RequestAuthResponse, Error> {
+        let resp = self
+            .app_client
+            .request_app_connection(&RegisterAppRequest {
+                name: meta.name,
+                description: meta.description,
+                service_url: meta
+                    .service_url
+                    .parse()
+                    .map_err(|_| Error::Custom("invalid service URL".into()))?,
+                logo_url: meta
+                    .logo_url
+                    .map(|u| u.parse())
+                    .transpose()
+                    .map_err(|_| Error::Custom("invalid logo URL".into()))?,
+                callback_url: meta
+                    .callback_url
+                    .map(|u| u.parse())
+                    .transpose()
+                    .map_err(|_| Error::Custom("invalid callback URL".into()))?,
+            })
+            .await?;
+
+        Ok(RequestAuthResponse {
+            response_url: resp.response_url,
+            status_url: resp.status_url,
+        })
+    }
+
+    /// Waits for the user to authorize or reject the app.
+    ///
+    /// # Returns
+    /// True if the app was authorized, false if it was rejected.
+    pub async fn wait_for_connect(&self, resp: &RequestAuthResponse) -> Result<bool, Error> {
+        let status_url: Url = resp
+            .status_url
+            .parse()
+            .map_err(|_| Error::Custom("invalid status URL".into()))?;
+        for _ in 0..100 {
+            // wait up to 5 minutes
+            self.app_client
+                .check_request_status(status_url.clone())
+                .await?;
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            debug!("waiting for user to authorize app");
+        }
+        let resp = self.app_client.check_app_authenticated().await?;
+        Ok(resp)
+    }
+
+    pub async fn upload(
+        &self,
+        encryption_key: Vec<u8>,
+        data_shards: u8,
+        parity_shards: u8,
+    ) -> Result<Upload, UploadError> {
+        let uploader = match self.uploader.get() {
+            Some(uploader) => uploader.clone(),
+            None => return Err(UploadError::NotConnected),
+        };
+        let encryption_key: [u8; 32] = encryption_key
+            .try_into()
+            .map_err(|_| UploadError::Crypto("encryption key must be 32 bytes".into()))?;
+        let buf = ChunkedWriter::default();
+        let (tx, rx) = oneshot::channel();
+        let inner_buf = buf.clone();
+        let result = tokio::spawn(async move {
+            let res = uploader
+                .upload(inner_buf, encryption_key, data_shards, parity_shards)
+                .await
+                .map_err(|e| e.into());
+            let _ = tx.send(res);
+        });
+        Ok(Upload {
+            reader: buf.clone(),
+            result,
+            rx: Mutex::new(Some(rx)),
+        })
+    }
+
+    /// Initiates a download of all the data specified in the slabs.
+    pub async fn download(&self, slabs: &[Slab]) -> Result<Download, DownloadError> {
+        let length = slabs.iter().fold(0 as u64, |v, s| v + s.length as u64);
+        self.download_range(slabs, 0, length).await
+    }
+
+    /// Initiates a download of the data specified in the slabs.
+    pub async fn download_range(
+        &self,
+        slabs: &[Slab],
+        offset: u64,
+        length: u64,
+    ) -> Result<Download, DownloadError> {
+        let downloader = match self.downloader.get() {
+            Some(downloader) => downloader.clone(),
+            None => return Err(DownloadError::NotConnected),
+        };
+        let slabs = slabs
+            .iter()
+            .map(|s| {
+                Ok(PinnedSlab {
+                    id: Hash256::from_str(s.id.as_str())?,
+                    offset: s.offset as usize,
+                    length: s.length as usize,
+                })
+            })
+            .collect::<Result<Vec<PinnedSlab>, HexParseError>>()?;
+        Ok(Download {
+            slabs,
+            state: Arc::new(Mutex::new(DownloadState { offset, length })),
+            downloader,
+        })
+    }
+
+    pub async fn hosts(&self) -> Result<Vec<Host>, Error> {
+        let hosts = self.app_client.hosts().await?;
+        Ok(hosts
+            .iter()
+            .map(|h| Host {
+                public_key: h.public_key.to_string(),
+                addresses: h
+                    .addresses
+                    .iter()
+                    .map(|a| NetAddress {
+                        protocol: match a.protocol {
+                            Protocol::SiaMux => AddressProtocol::SiaMux,
+                            Protocol::QUIC => AddressProtocol::Quic,
+                        },
+                        address: a.address.clone(),
+                    })
+                    .collect(),
+                country_code: h.country_code.clone(),
+                latitude: h.latitude,
+                longitude: h.longitude,
+            })
+            .collect())
+    }
+}
+
+pub type UploadReceiver = Mutex<Option<oneshot::Receiver<Result<Vec<PinnedSlab>, UploadError>>>>;
+
+/// Uploads data to the Sia network. It does so in chunks to support large files in
+/// arbitrary languages.
+///
+/// Language bindings should provide a higher-level implementation that wraps a stream.
+#[derive(uniffi::Object)]
+pub struct Upload {
+    reader: ChunkedWriter,
+    result: JoinHandle<()>,
+    rx: UploadReceiver,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl Upload {
+    /// Writes a chunk of data to the Sia network. The data will be
+    /// erasure-coded and encrypted before upload.
+    ///
+    /// Chunks should be written until EoF, then call [`finalize`].
+    pub async fn write(&self, buf: &[u8]) -> Result<(), UploadError> {
+        if self.result.is_finished() {
+            return Err(UploadError::Closed);
+        }
+        self.reader.push_chunk(buf.to_vec()).await?;
+        Ok(())
+    }
+
+    /// Waits for all chunks of data to be pinned to the indexer and
+    /// returns the metadata. Data can no longer be written after
+    /// calling finalize.
+    ///
+    /// The caller must store the metadata locally in order to download
+    /// it in the future.
+    pub async fn finalize(&self) -> Result<Vec<Slab>, UploadError> {
+        self.reader.close()?;
+        let rx = self
+            .rx
+            .lock()
+            .map_err(|e| UploadError::Custom(e.to_string()))?
+            .take()
+            .ok_or(UploadError::Closed)?;
+        let slabs = rx
+            .await
+            .map_err(|e| UploadError::Custom(e.to_string()))??
+            .iter()
+            .map(|s| Slab {
+                id: s.id.to_string(),
+                offset: s.offset as u32,
+                length: s.length as u32,
+            })
+            .collect();
+        Ok(slabs)
+    }
+}
+
+#[derive(uniffi::Object)]
+struct DownloadState {
+    offset: u64,
+    length: u64,
+}
+
+#[derive(uniffi::Object)]
+pub struct Download {
+    slabs: Vec<PinnedSlab>,
+    state: Arc<Mutex<DownloadState>>,
+    downloader: Arc<Downloader>,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl Download {
+    fn rem(&self) -> u64 {
+        let state = self.state.lock().unwrap();
+        state.length.saturating_sub(state.offset)
+    }
+
+    fn update(&self, n: u64) {
+        let mut state = self.state.lock().unwrap();
+        state.offset += n;
+    }
+
+    fn params(&self) -> DownloadState {
+        const DOWNLOAD_CHUNK_SIZE: u64 = 1 << 19; // 512 KiB
+
+        let state = self.state.lock().unwrap();
+        DownloadState {
+            offset: state.offset,
+            length: DOWNLOAD_CHUNK_SIZE.min(state.length),
+        }
+    }
+
+    pub async fn read_chunk(&self) -> Result<Vec<u8>, DownloadError> {
+        let state = self.params();
+        let rem = state.length.saturating_sub(state.offset);
+        if rem == 0 {
+            return Ok(Vec::with_capacity(0));
+        }
+        let mut buf = Vec::with_capacity(rem as usize);
+        self.downloader
+            .download_range(
+                &mut buf,
+                &self.slabs,
+                state.offset as usize,
+                state.length as usize,
+            )
+            .await?;
+        self.update(buf.len() as u64);
+        Ok(buf)
+    }
+}
