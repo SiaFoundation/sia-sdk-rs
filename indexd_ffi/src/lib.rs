@@ -211,7 +211,7 @@ impl TryInto<indexd::Object> for Object {
                 .into_iter()
                 .map(|s| s.try_into())
                 .collect::<Result<Vec<SlabSlice>, HexParseError>>()?,
-            meta: Vec::with_capacity(0),
+            meta: Vec::with_capacity(0), // TODO: handle encryption
             created_at: self.created_at.into(),
             updated_at: self.updated_at.into(),
         })
@@ -608,8 +608,10 @@ impl SDK {
     }
 
     pub async fn shared_object(&self, share_url: String) -> Result<Object, Error> {
+        let share_url: Url = share_url
+            .parse()
+            .map_err(|e| Error::Custom(format!("{e}")))?;
         let (object, _) = self.app_client.shared_object(share_url).await?;
-
         Ok(object.into())
     }
 
@@ -628,7 +630,7 @@ impl SDK {
         let u =
             self.app_client
                 .object_share_url(&object_key, encryption_key, valid_until.into())?;
-        Ok(u)
+        Ok(u.to_string())
     }
 }
 
