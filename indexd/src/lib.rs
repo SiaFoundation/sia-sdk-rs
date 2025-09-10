@@ -178,7 +178,7 @@ impl SDK<ConnectedState> {
         encryption_key: [u8; 32],
         data_shards: u8,
         parity_shards: u8,
-    ) -> Result<Vec<PinnedSlab>> {
+    ) -> Result<Vec<SlabSlice>> {
         let slabs = self
             .state
             .uploader
@@ -190,7 +190,7 @@ impl SDK<ConnectedState> {
     pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
         writer: &mut W,
-        slabs: &[PinnedSlab],
+        slabs: &[SlabSlice],
     ) -> Result<()> {
         self.state.downloader.download(writer, slabs).await?;
         Ok(())
@@ -199,7 +199,7 @@ impl SDK<ConnectedState> {
     pub async fn download_range<W: AsyncWriteExt + Unpin>(
         &self,
         writer: &mut W,
-        slabs: &[PinnedSlab],
+        slabs: &[SlabSlice],
         offset: usize,
         length: usize,
     ) -> Result<()> {
