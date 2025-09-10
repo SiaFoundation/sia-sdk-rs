@@ -168,14 +168,15 @@ impl StreamCipher for Chacha20Cipher {
         let (first, second) = buf.split_at(remaining_keystream as usize);
 
         // the first part can be processed with the current nonce
+        self.offset += first.len() as u64;
         self.inner.try_apply_keystream_inout(first)?;
-        self.offset += remaining_keystream;
 
         // update nonce and reinitialize cipher
         self.nonce = Self::nonce_for_offset(self.offset);
         self.inner = XChaCha20::new(&self.key.into(), &self.nonce.into());
 
         // encrypt the second part
+        self.offset += second.len() as u64;
         self.inner.try_apply_keystream_inout(second)
     }
 }
