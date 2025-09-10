@@ -1,4 +1,3 @@
-use std::str::FromStr;
 use std::time::Duration;
 
 use blake2b_simd::Params;
@@ -359,7 +358,7 @@ impl Client {
         object_key: &Hash256,
         encryption_key: [u8; 32],
         valid_until: OffsetDateTime,
-    ) -> Result<String> {
+    ) -> Result<Url> {
         let mut url = self.url.join(format!("objects/{}", object_key).as_str())?;
 
         let params = self.sign(&url, Method::GET, None, valid_until);
@@ -373,7 +372,7 @@ impl Client {
             pairs.append_pair(key, value.as_str());
         }
 
-        Ok(pairs.finish().to_string())
+        Ok(pairs.finish().to_owned())
     }
 
     /// Retrieves the object metadata using a pre-signed url
@@ -384,8 +383,7 @@ impl Client {
     /// # Returns
     /// A tuple with the object metadata and encryption key to decrypt
     /// the user metadata.
-    pub async fn shared_object(&self, share_url: String) -> Result<(Object, [u8; 32])> {
-        let share_url = Url::from_str(&share_url)?;
+    pub async fn shared_object(&self, mut share_url: Url) -> Result<(Object, [u8; 32])> {
         let encryption_key = match share_url.fragment() {
             Some(fragment) => {
                 let fragment = match fragment.strip_prefix("encryption_key=") {
@@ -400,6 +398,7 @@ impl Client {
             }
             None => Err(Error::Format("missing encryption_key".into())),
         }?;
+        share_url.set_fragment(None);
         let obj: Object = Self::handle_response(
             self.client
                 .get(share_url)
@@ -471,7 +470,7 @@ mod tests {
             Some("{}".as_bytes()),
             OffsetDateTime::from_unix_timestamp(123).unwrap() + Duration::from_secs(60),
         );
-        assert_eq!(params[0], ("SiaIdx-ValidUntil", "3723".to_string()));
+        assert_eq!(params[0], ("SiaIdx-ValidUntil", "183".to_string()));
         assert_eq!(
             params[1],
             (
@@ -484,7 +483,7 @@ mod tests {
             params[2],
             (
                 "SiaIdx-Signature",
-                "8046d35eb80ea9cf8a4b1f3478bb1508bfc6aa1c4617e2841f32684c3f39b59fff02f9283e37976da2f5e5b4e2f3c9f1640228a451c29be3024a9a3271af4e0a"
+                "1642aef3c9df1e588d0b21c7084d75040701bac3a8d25c56ccdb8e34e8635977cdfa698efa52d428565f38c310929d4a17434967937e9f5241e03e0c8436380a"
                     .to_string()
             )
         );
@@ -496,7 +495,7 @@ mod tests {
             None,
             OffsetDateTime::from_unix_timestamp(123).unwrap() + Duration::from_secs(60),
         );
-        assert_eq!(params[0], ("SiaIdx-ValidUntil", "3723".to_string()));
+        assert_eq!(params[0], ("SiaIdx-ValidUntil", "183".to_string()));
         assert_eq!(
             params[1],
             (
@@ -509,7 +508,7 @@ mod tests {
             params[2],
             (
                 "SiaIdx-Signature",
-                "40b37ae7db469c351797bc69e01277a8818d75b6cbcef922f0cffedd4229bcecdbdcf038010badda0eb35c38171bcc41aca5e4fab2f639bcd93e54aec3ef8005"
+                "b3c53d2314fffeb67b21d0b0b5c62440d506ce2e93652ea921e4da5c7be0e5e6e1e78c10a48ac639c2f7c3174e9b700a34793e30322488463bac706a50149c01"
                     .to_string()
             )
         );
