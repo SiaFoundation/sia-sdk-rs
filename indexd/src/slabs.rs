@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use serde_with::base64::Base64;
+use serde_with::serde_as;
 use sia::encoding::SiaEncodable;
 use sia::signing::PublicKey;
 use sia::types::Hash256;
@@ -12,9 +14,9 @@ pub struct Sector {
     pub host_key: PublicKey,
 }
 
-#[derive(Debug, Clone, PartialEq)]
 /// A Slab is an erasure-coded collection of sectors. The sectors can be downloaded and
 /// used to recover the original data.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Slab {
     pub encryption_key: [u8; 32],
     pub min_shards: u8,
@@ -44,6 +46,33 @@ impl Slab {
         });
         state.finalize().into()
     }
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SlabSlice {
+    #[serde(rename = "slabID")]
+    pub slab_id: Hash256,
+    pub offset: usize,
+    pub length: usize,
+}
+
+#[serde_as]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Object {
+    pub key: Hash256,
+    pub slabs: Vec<SlabSlice>,
+
+    // base64-encoded arbitrary metadata
+    #[serde_as(as = "Base64")]
+    pub meta: Vec<u8>,
+
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: time::OffsetDateTime,
 }
 
 #[cfg(test)]
