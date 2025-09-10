@@ -1434,6 +1434,7 @@ dependencies = [
  "blake2b_simd",
  "bytes",
  "futures",
+ "hex",
  "httptest",
  "log",
  "priority-queue",
