@@ -102,7 +102,7 @@ impl ChunkedWriter {
             }
         };
         tx.send(chunk).await.map_err(|e| {
-            UploadError::Custom(format!("failed to send chunk to reader: {}", e.to_string()))
+            UploadError::Custom(format!("failed to send chunk to reader: {}", e))
         })
     }
 }
@@ -149,7 +149,7 @@ impl AsyncRead for ChunkedWriter {
                 std::task::Poll::Ready(Ok(()))
             }
             std::task::Poll::Ready(None) => std::task::Poll::Ready(Ok(())), // channel closed
-            std::task::Poll::Pending => std::task::Poll::Pending, // no data available yet
+            std::task::Poll::Pending => std::task::Poll::Pending,           // no data available yet
         }
     }
 }
@@ -336,11 +336,16 @@ impl SDK {
             .status_url
             .parse()
             .map_err(|_| Error::Custom("invalid status URL".into()))?;
+
         for _ in 0..100 {
             // wait up to 5 minutes
-            self.app_client
+            if self
+                .app_client
                 .check_request_status(status_url.clone())
-                .await?;
+                .await?
+            {
+                break;
+            }
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             debug!("waiting for user to authorize app");
         }

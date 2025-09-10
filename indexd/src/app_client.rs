@@ -75,6 +75,7 @@ pub struct Slab {
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
 }
+
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SlabPinParams {

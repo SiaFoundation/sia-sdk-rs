@@ -1,15 +1,25 @@
-use indexd_ffi::SDK;
+use indexd_ffi::{AppMeta, SDK};
 use log::info;
 
 #[tokio::main]
 async fn main() {
     pretty_env_logger::init();
 
-    let sdk = SDK::new("https://app.indexd.zeus.sia.dev".into(), [1u8; 32].to_vec())
+    let sdk = SDK::new("https://app.indexd.zeus.sia.dev".into(), [26u8; 32].to_vec())
         .expect("expected sdk init");
 
     if !sdk.connect().await.expect("sdk connected") {
-        panic!("oops")
+        let req = sdk.request_app_connection(AppMeta{
+            name: "Test App".into(),
+            description: "An example app using indexd-ffi".into(),
+            service_url: "https://example.com".into(),
+            logo_url: None,
+            callback_url: None,
+        }).await.expect("requested connection");
+        info!("please approve the app by visiting: {}", req.response_url);
+        if !sdk.wait_for_connect(&req).await.expect("waited for connect") {
+            panic!("app not approved");
+        }
     }
 
     info!("connected");
