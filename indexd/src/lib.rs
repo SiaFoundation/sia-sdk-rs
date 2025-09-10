@@ -179,7 +179,7 @@ impl SDK<ConnectedState> {
         encryption_key: EncryptionKey,
         data_shards: u8,
         parity_shards: u8,
-    ) -> Result<Vec<PinnedSlab>> {
+    ) -> Result<Vec<SlabSlice>> {
         let slabs = self
             .state
             .uploader
@@ -192,7 +192,7 @@ impl SDK<ConnectedState> {
         &self,
         writer: &mut W,
         encryption_key: EncryptionKey,
-        slabs: &[PinnedSlab],
+        slabs: &[SlabSlice],
     ) -> Result<()> {
         self.state
             .downloader
@@ -205,7 +205,7 @@ impl SDK<ConnectedState> {
         &self,
         writer: &mut W,
         encryption_key: EncryptionKey,
-        slabs: &[PinnedSlab],
+        slabs: &[SlabSlice],
         offset: usize,
         length: usize,
     ) -> Result<()> {
