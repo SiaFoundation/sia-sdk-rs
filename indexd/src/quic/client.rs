@@ -131,7 +131,7 @@ impl Client {
             .collect()
     }
 
-    pub fn update_hosts(&mut self, hosts: Vec<Host>) {
+    pub fn update_hosts(&self, hosts: Vec<Host>) {
         let mut hosts_map = self.inner.hosts.lock().unwrap();
         let mut priority_queue = self.inner.preferred_hosts.lock().unwrap();
         hosts_map.clear();
@@ -261,14 +261,20 @@ impl ClientInner {
                 endpoint.set_default_client_config(client_config.clone());
                 Some(endpoint)
             }
-            Err(_) => None,
+            Err(e) => {
+                debug!("error opening IPv4 endpoint {:?}", e);
+                None
+            }
         };
         let endpoint_v6 = match quinn::Endpoint::client((Ipv6Addr::UNSPECIFIED, 0).into()) {
             Ok(mut endpoint) => {
                 endpoint.set_default_client_config(client_config);
                 Some(endpoint)
             }
-            Err(_) => None,
+            Err(e) => {
+                debug!("error opening IPv6 endpoint {:?}", e);
+                None
+            }
         };
 
         if endpoint_v4.is_none() && endpoint_v6.is_none() {
@@ -498,7 +504,7 @@ mod test {
         let client_config =
             rustls::ClientConfig::with_platform_verifier().expect("Failed to create client config");
 
-        let mut dialer = Client::new(client_config).expect("Failed to create dialer");
+        let dialer = Client::new(client_config).expect("Failed to create dialer");
         dialer.update_hosts(vec![Host {
             public_key: host_key,
             addresses: vec![NetAddress {
@@ -506,6 +512,9 @@ mod test {
                 address: "6r4b0vj1ai55fobdvauvpg3to5bpeijl045b2q268fcj7q1vkuog.sia.host:9984"
                     .into(),
             }],
+            country_code: "US".into(),
+            latitude: 0.0,
+            longitude: 0.0,
         }]);
 
         let prices = dialer
