@@ -380,7 +380,7 @@ impl SDK {
 
     /// Initiates a download of all the data specified in the slabs.
     pub async fn download(&self, slabs: &[Slab]) -> Result<Download, DownloadError> {
-        let length = slabs.iter().fold(0 as u64, |v, s| v + s.length as u64);
+        let length = slabs.iter().fold(0_u64, |v, s| v + s.length as u64);
         self.download_range(slabs, 0, length).await
     }
 
@@ -498,7 +498,6 @@ struct DownloadState {
     length: u64,
 }
 
-
 /// Downloads data from the Sia network. It does so in chunks to support large files in
 /// arbitrary languages.
 ///
@@ -527,7 +526,7 @@ impl Download {
     }
 
     /// Reads a chunk of data from the Sia network.
-    /// 
+    ///
     /// # Returns
     /// A vector containing the chunk of data read. If the vector is empty, the end of the download has been reached.
     pub async fn read_chunk(&self) -> Result<Vec<u8>, DownloadError> {
