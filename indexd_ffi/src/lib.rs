@@ -492,12 +492,17 @@ impl Upload {
     }
 }
 
-#[derive(uniffi::Object)]
+#[derive(Clone, uniffi::Object)]
 struct DownloadState {
     offset: u64,
     length: u64,
 }
 
+
+/// Downloads data from the Sia network. It does so in chunks to support large files in
+/// arbitrary languages.
+///
+/// Language bindings should provide a higher-level implementation that wraps a stream.
 #[derive(uniffi::Object)]
 pub struct Download {
     slabs: Vec<PinnedSlab>,
@@ -518,29 +523,27 @@ impl Download {
     }
 
     fn params(&self) -> DownloadState {
-        const DOWNLOAD_CHUNK_SIZE: u64 = 1 << 19; // 512 KiB
-
-        let state = self.state.lock().unwrap();
-        DownloadState {
-            offset: state.offset,
-            length: DOWNLOAD_CHUNK_SIZE.min(state.length),
-        }
+        self.state.lock().unwrap().clone()
     }
 
+    /// Reads a chunk of data from the Sia network.
+    /// 
+    /// # Returns
+    /// A vector containing the chunk of data read. If the vector is empty, the end of the download has been reached.
     pub async fn read_chunk(&self) -> Result<Vec<u8>, DownloadError> {
+        const DOWNLOAD_CHUNK_SIZE: u64 = 1 << 19; // 512 KiB
+
         let state = self.params();
-        let rem = state.length.saturating_sub(state.offset);
+        let rem = state
+            .length
+            .saturating_sub(state.offset)
+            .min(DOWNLOAD_CHUNK_SIZE);
         if rem == 0 {
             return Ok(Vec::with_capacity(0));
         }
         let mut buf = Vec::with_capacity(rem as usize);
         self.downloader
-            .download_range(
-                &mut buf,
-                &self.slabs,
-                state.offset as usize,
-                state.length as usize,
-            )
+            .download_range(&mut buf, &self.slabs, state.offset as usize, rem as usize)
             .await?;
         self.update(buf.len() as u64);
         Ok(buf)

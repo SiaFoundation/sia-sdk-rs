@@ -12,14 +12,26 @@ async fn main() {
         panic!("oops")
     }
 
+    info!("connected");
+
     let writer = sdk.upload([1u8; 32].to_vec(), 1, 3).await.expect("writer");
-    let data = vec![1u8; 1024];
+    let data = vec![1u8; 1 << 22];
+
     writer.write(data.as_ref()).await.expect("data written");
+    info!("chunk written");
     let slabs = writer.finalize().await.expect("upload to complete");
+    info!("upload complete, got {} slabs", slabs.len());
 
     let reader = sdk.download(slabs.as_ref()).await.expect("reader init");
 
-    let read_data = reader.read_chunk().await.expect("read chunk");
+    let mut read_data = Vec::with_capacity(data.len());
+    loop {
+        let chunk = reader.read_chunk().await.expect("read chunk");
+        if chunk.is_empty() {
+            break;
+        }
+        read_data.extend_from_slice(&chunk);
+    }
 
     assert_eq!(read_data, data);
     info!("done");

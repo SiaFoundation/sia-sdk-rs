@@ -261,14 +261,20 @@ impl ClientInner {
                 endpoint.set_default_client_config(client_config.clone());
                 Some(endpoint)
             }
-            Err(e) => panic!("{:?}", e),
+            Err(e) => {
+                debug!("error opening IPv4 endpoint {:?}", e);
+                None
+            }
         };
         let endpoint_v6 = match quinn::Endpoint::client((Ipv6Addr::UNSPECIFIED, 0).into()) {
             Ok(mut endpoint) => {
                 endpoint.set_default_client_config(client_config);
                 Some(endpoint)
             }
-            Err(e) => panic!("{:?}", e),
+            Err(e) => {
+                debug!("error opening IPv6 endpoint {:?}", e);
+                None
+            }
         };
 
         if endpoint_v4.is_none() && endpoint_v6.is_none() {
