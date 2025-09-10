@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 use sia::encoding::SiaEncodable;
+use sia::encoding::SiaEncode;
 use sia::encryption::EncryptionKey;
 use sia::signing::PublicKey;
 use sia::types::Hash256;
@@ -41,7 +42,7 @@ impl Slab {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, SiaEncode)]
 #[serde(rename_all = "camelCase")]
 pub struct SlabSlice {
     #[serde(rename = "slabID")]

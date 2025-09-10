@@ -1433,6 +1433,7 @@ version = "0.0.1"
 dependencies = [
  "blake2b_simd",
  "bytes",
+ "chacha20",
  "futures",
  "httptest",
  "log",
