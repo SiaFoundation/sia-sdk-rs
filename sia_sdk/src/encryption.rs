@@ -1,10 +1,26 @@
-use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherCoreWrapper, StreamCipherSeek};
+use chacha20::cipher::{
+    KeyIvInit, StreamCipher, StreamCipherCoreWrapper, StreamCipherError, StreamCipherSeek,
+};
 use chacha20::{XChaCha20, XChaChaCore};
 use pin_project_lite::pin_project;
 use rayon::prelude::*;
 use sha2::digest::consts::{B0, B1};
 use sha2::digest::typenum::{UInt, UTerm};
 use tokio::io::{AsyncRead, AsyncWrite};
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("StreamCipherError: {0}")]
+    StreamCipherError(StreamCipherError),
+}
+
+impl From<StreamCipherError> for Error {
+    fn from(err: StreamCipherError) -> Self {
+        Error::StreamCipherError(err)
+    }
+}
+
+type Result<T> = std::result::Result<T, Error>;
 
 /// encrypts the provided shards using XChaCha20. To decrypt the shards, call
 /// this function again with the same key.
@@ -41,10 +57,11 @@ pin_project! {
 }
 
 impl<R: AsyncRead> CipherReader<R> {
-    pub fn new(inner: R, key: &[u8; 32]) -> Self {
+    pub fn new(inner: R, key: &[u8; 32], offset: usize) -> Result<Self> {
         let nonce: [u8; 24] = [0u8; 24];
-        let cipher = XChaCha20::new(key.into(), &nonce.into());
-        Self { inner, cipher }
+        let mut cipher = XChaCha20::new(key.into(), &nonce.into());
+        cipher.try_seek(offset)?;
+        Ok(Self { inner, cipher })
     }
 }
 
@@ -75,14 +92,15 @@ pin_project! {
 }
 
 impl<'w, W: AsyncWrite> CipherWriter<W> {
-    pub fn new(inner: W, key: &[u8; 32]) -> Self {
+    pub fn new(inner: W, key: &[u8; 32], offset: usize) -> Result<Self> {
         let nonce: [u8; 24] = [0u8; 24];
-        let cipher = XChaCha20::new(key.into(), &nonce.into());
-        Self {
+        let mut cipher = XChaCha20::new(key.into(), &nonce.into());
+        cipher.try_seek(offset)?;
+        Ok(Self {
             inner,
             cipher,
             buf: Vec::new(),
-        }
+        })
     }
 }
 
@@ -170,14 +188,16 @@ mod test {
         let key = [1u8; 32];
         let data = b"lorem ipsum dolor sit amet, consectetur adipiscing elit";
 
-        let mut reader = CipherReader::new(data.as_ref(), &key);
-        let mut cipher_text = vec![0u8; data.len()];
-        reader.read_exact(&mut cipher_text).await.unwrap();
-        assert_ne!(cipher_text, data);
+        for offset in [0, 10, 20, 30] {
+            let mut reader = CipherReader::new(data.as_ref(), &key, offset).unwrap();
+            let mut cipher_text = vec![0u8; data.len()];
+            reader.read_exact(&mut cipher_text).await.unwrap();
+            assert_ne!(cipher_text, data);
 
-        let mut writer = CipherWriter::new(Vec::new(), &key);
-        writer.write_all(&cipher_text).await.unwrap();
-        let plaintext = writer.inner;
-        assert_eq!(plaintext, data);
+            let mut writer = CipherWriter::new(Vec::new(), &key, offset).unwrap();
+            writer.write_all(&cipher_text).await.unwrap();
+            let plaintext = writer.inner;
+            assert_eq!(plaintext, data);
+        }
     }
 }

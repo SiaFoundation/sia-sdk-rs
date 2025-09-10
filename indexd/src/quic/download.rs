@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use log::debug;
-use sia::encryption::{CipherWriter, encrypt_shard};
+use sia::encryption::{self, CipherWriter, encrypt_shard};
 use sia::erasure_coding::{self, ErasureCoder};
 use sia::rhp::SEGMENT_SIZE;
 use sia::signing::{PrivateKey, PublicKey};
@@ -48,6 +48,9 @@ pub enum DownloadError {
 
     #[error("api error: {0}")]
     ApiError(#[from] app_client::Error),
+
+    #[error("encryption error: {0}")]
+    EncryptionError(#[from] encryption::Error),
 }
 
 pub struct DownloaderInner {
@@ -243,7 +246,7 @@ impl Downloader {
             return Ok(());
         }
         let mut bw = BufWriter::new(w);
-        let mut w = CipherWriter::new(&mut bw, &encryption_key);
+        let mut w = CipherWriter::new(&mut bw, &encryption_key, offset)?;
         for pinned_slab in slabs {
             if length == 0 {
                 break;
