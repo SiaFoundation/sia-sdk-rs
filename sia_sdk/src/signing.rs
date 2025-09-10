@@ -6,7 +6,7 @@ use crate::types::{Hash256, HexParseError};
 use ed25519_dalek::{Signature as ED25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::de::Error;
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::ZeroizeOnDrop;
 
 /// An ed25519 public key that can be used to verify a signature
 #[derive(

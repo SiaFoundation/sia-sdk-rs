@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use sha2::digest::consts::{B0, B1};
 use sha2::digest::typenum::{UInt, UTerm};
 use tokio::io::{AsyncRead, AsyncWrite};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::ZeroizeOnDrop;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -20,8 +20,6 @@ impl From<StreamCipherError> for Error {
         Error::StreamCipherError(err)
     }
 }
-
-type Result<T> = std::result::Result<T, Error>;
 
 /// encrypts the provided shards using XChaCha20. To decrypt the shards, call
 /// this function again with the same key.
@@ -135,6 +133,7 @@ impl<W: AsyncWrite> AsyncWrite for CipherWriter<W> {
 #[derive(ZeroizeOnDrop)]
 struct Chacha20Cipher {
     #[zeroize(skip)]
+    #[allow(clippy::type_complexity)]
     inner: StreamCipherCoreWrapper<XChaChaCore<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B1>, B0>>>,
     key: [u8; 32],
     nonce: [u8; 24],
