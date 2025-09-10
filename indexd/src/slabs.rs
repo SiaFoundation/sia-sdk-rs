@@ -25,14 +25,6 @@ pub struct Slab {
     pub length: usize,
 }
 
-// A PinnedSlab is a reference to a Slab that has been pinned to an indexd service.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PinnedSlab {
-    pub id: Hash256,
-    pub offset: usize,
-    pub length: usize,
-}
-
 impl Slab {
     /// creates a unique identifier for the resulting slab to be referenced by hashing
     /// its contents, excluding the host key, length, and offset.
@@ -48,7 +40,7 @@ impl Slab {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SlabSlice {
     #[serde(rename = "slabID")]

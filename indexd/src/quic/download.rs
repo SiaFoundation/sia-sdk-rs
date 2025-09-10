@@ -18,7 +18,7 @@ use tokio::time::sleep;
 use crate::app_client::{self, Client as AppClient};
 use crate::quic::client::Client;
 use crate::quic::{self};
-use crate::{PinnedSlab, Sector};
+use crate::{Sector, SlabSlice};
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
@@ -231,7 +231,7 @@ impl Downloader {
     pub async fn download_range<W: AsyncWriteExt + Unpin>(
         &self,
         w: &mut W,
-        slabs: &[PinnedSlab],
+        slabs: &[SlabSlice],
         mut offset: usize,
         mut length: usize,
     ) -> Result<(), DownloadError> {
@@ -260,7 +260,7 @@ impl Downloader {
             let slab_offset = pinned_slab.offset + offset;
             offset = 0;
             let slab_length = (pinned_slab.length - slab_offset).min(length);
-            let slab = self.inner.app_client.slab(&pinned_slab.id).await?;
+            let slab = self.inner.app_client.slab(&pinned_slab.slab_id).await?;
             let (shard_offset, shard_length) =
                 Self::sector_region(slab.min_shards as usize, slab_offset, slab_length);
 
@@ -299,7 +299,7 @@ impl Downloader {
     pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
         w: &mut W,
-        slabs: &[PinnedSlab],
+        slabs: &[SlabSlice],
     ) -> Result<(), DownloadError> {
         let total_length = slabs.iter().fold(0, |sum, slab| sum + slab.length);
         self.download_range(w, slabs, 0, total_length).await

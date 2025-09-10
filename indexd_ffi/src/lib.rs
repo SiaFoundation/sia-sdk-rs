@@ -2,16 +2,16 @@ uniffi::setup_scaffolding!();
 
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use indexd::app_client::{Client as AppClient, RegisterAppRequest};
 use indexd::quic::{Client as HostClient, Downloader, Uploader};
-use indexd::{PinnedSlab, Url};
+use indexd::{SlabSlice, Url};
 use log::debug;
 use rustls::{ClientConfig, RootCertStore};
 use sia::rhp::SECTOR_SIZE;
-use sia::signing::PrivateKey;
-use sia::types::v2::Protocol;
-use sia::types::{Hash256, HexParseError};
+use sia::signing::{PrivateKey, PublicKey};
+use sia::types::{self, Hash256, HexParseError};
 use thiserror::Error;
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -29,6 +29,9 @@ pub enum Error {
 
     #[error("quic error: {0}")]
     Quic(#[from] indexd::quic::Error),
+
+    #[error("hex error: {0}")]
+    HexParseError(#[from] sia::types::HexParseError),
 
     #[error("not connected")]
     NotConnected,
@@ -178,6 +181,45 @@ pub struct NetAddress {
     pub address: String,
 }
 
+#[derive(uniffi::Record)]
+pub struct Object {
+    pub key: String,
+    pub slabs: Vec<Slab>,
+    pub meta: Vec<u8>,
+    pub created_at: SystemTime,
+    pub updated_at: SystemTime,
+}
+
+impl From<indexd::Object> for Object {
+    fn from(o: indexd::Object) -> Self {
+        Self {
+            key: o.key.to_string(),
+            slabs: o.slabs.into_iter().map(|s| s.into()).collect(),
+            meta: o.meta,
+            created_at: o.created_at.into(),
+            updated_at: o.updated_at.into(),
+        }
+    }
+}
+
+impl TryInto<indexd::Object> for Object {
+    type Error = HexParseError;
+
+    fn try_into(self) -> Result<indexd::Object, Self::Error> {
+        Ok(indexd::Object {
+            key: Hash256::from_str(self.key.as_str())?,
+            slabs: self
+                .slabs
+                .into_iter()
+                .map(|s| s.try_into())
+                .collect::<Result<Vec<SlabSlice>, HexParseError>>()?,
+            meta: self.meta,
+            created_at: self.created_at.into(),
+            updated_at: self.updated_at.into(),
+        })
+    }
+}
+
 /// Information about a storage provider on the
 /// Sia network.
 #[derive(uniffi::Record)]
@@ -189,6 +231,54 @@ pub struct Host {
     pub longitude: f64,
 }
 
+impl From<sia::rhp::Host> for Host {
+    fn from(h: sia::rhp::Host) -> Self {
+        Self {
+            public_key: h.public_key.to_string(),
+            addresses: h
+                .addresses
+                .iter()
+                .map(|a| NetAddress {
+                    protocol: match a.protocol {
+                        types::v2::Protocol::SiaMux => AddressProtocol::SiaMux,
+                        types::v2::Protocol::QUIC => AddressProtocol::Quic,
+                    },
+                    address: a.address.clone(),
+                })
+                .collect(),
+            country_code: h.country_code,
+            latitude: h.latitude,
+            longitude: h.longitude,
+        }
+    }
+}
+
+impl TryInto<sia::rhp::Host> for Host {
+    type Error = HexParseError;
+
+    fn try_into(self) -> Result<sia::rhp::Host, Self::Error> {
+        Ok(sia::rhp::Host {
+            public_key: PublicKey::from_str(self.public_key.as_str())?,
+            addresses: self
+                .addresses
+                .into_iter()
+                .map(|a| {
+                    Ok(types::v2::NetAddress {
+                        protocol: match a.protocol {
+                            AddressProtocol::SiaMux => types::v2::Protocol::SiaMux,
+                            AddressProtocol::Quic => types::v2::Protocol::QUIC,
+                        },
+                        address: a.address,
+                    })
+                })
+                .collect::<Result<Vec<types::v2::NetAddress>, HexParseError>>()?,
+            country_code: self.country_code,
+            latitude: self.latitude,
+            longitude: self.longitude,
+        })
+    }
+}
+
 /// A Slab represents a contiguous erasure-coded segment of a file stored on the Sia network.
 #[derive(uniffi::Record)]
 pub struct Slab {
@@ -197,10 +287,57 @@ pub struct Slab {
     pub length: u32,
 }
 
+impl From<SlabSlice> for Slab {
+    fn from(s: SlabSlice) -> Self {
+        Self {
+            id: s.slab_id.to_string(),
+            offset: s.offset as u32,
+            length: s.length as u32,
+        }
+    }
+}
+
+impl TryInto<SlabSlice> for Slab {
+    type Error = HexParseError;
+
+    fn try_into(self) -> Result<SlabSlice, Self::Error> {
+        Ok(SlabSlice {
+            slab_id: Hash256::from_str(self.id.as_str())?,
+            offset: self.offset as usize,
+            length: self.length as usize,
+        })
+    }
+}
+
+/// The response from requesting app authorization.
+///
+/// The `response_url` is the URL the user should visit to authorize the app.
+/// The `status_url` is the URL the app should poll to check if the user has
+/// authorized the app.
 #[derive(uniffi::Record)]
 pub struct RequestAuthResponse {
     pub response_url: String,
     pub status_url: String,
+}
+
+/// Used to paginate through objects stored in the indexer.
+///
+/// When syncing changes from an indexer, `after` should be set to the
+/// last `updated_at` timestamp seen, and `key` should be set to the
+/// last object's key seen.
+#[derive(uniffi::Record)]
+pub struct ObjectsCursor {
+    pub after: SystemTime,
+    pub key: String,
+}
+
+impl From<indexd::app_client::ObjectsCursor> for ObjectsCursor {
+    fn from(c: indexd::app_client::ObjectsCursor) -> Self {
+        Self {
+            after: c.after.into(),
+            key: c.key.to_string(),
+        }
+    }
 }
 
 /// An SDK enables interaction with an indexer and
@@ -403,13 +540,13 @@ impl SDK {
         let slabs = slabs
             .iter()
             .map(|s| {
-                Ok(PinnedSlab {
-                    id: Hash256::from_str(s.id.as_str())?,
+                Ok(SlabSlice {
+                    slab_id: Hash256::from_str(s.id.as_str())?,
                     offset: s.offset as usize,
                     length: s.length as usize,
                 })
             })
-            .collect::<Result<Vec<PinnedSlab>, HexParseError>>()?;
+            .collect::<Result<Vec<SlabSlice>, HexParseError>>()?;
         Ok(Download {
             slabs,
             state: Arc::new(Mutex::new(DownloadState { offset, length })),
@@ -417,32 +554,63 @@ impl SDK {
         })
     }
 
+    /// Returns a list of all usable hosts.
     pub async fn hosts(&self) -> Result<Vec<Host>, Error> {
         let hosts = self.app_client.hosts().await?;
-        Ok(hosts
-            .iter()
-            .map(|h| Host {
-                public_key: h.public_key.to_string(),
-                addresses: h
-                    .addresses
-                    .iter()
-                    .map(|a| NetAddress {
-                        protocol: match a.protocol {
-                            Protocol::SiaMux => AddressProtocol::SiaMux,
-                            Protocol::QUIC => AddressProtocol::Quic,
-                        },
-                        address: a.address.clone(),
-                    })
-                    .collect(),
-                country_code: h.country_code.clone(),
-                latitude: h.latitude,
-                longitude: h.longitude,
-            })
-            .collect())
+        Ok(hosts.into_iter().map(|h| h.into()).collect())
+    }
+
+    /// Returns objects stored in the indexer. When syncing, the caller should
+    /// provide the last `updated_at` timestamp and `key` seen in the `cursor
+    /// parameter to avoid missing or duplicating objects.
+    ///
+    /// # Arguments
+    /// `cursor` can be used to paginate through the results.
+    /// If `cursor` is `None`, the first page of results will be returned.
+    ///
+    /// `limit` specifies the maximum number of objects to return.
+    pub async fn objects(
+        &self,
+        cursor: Option<ObjectsCursor>,
+        limit: u32,
+    ) -> Result<Vec<Object>, Error> {
+        let cursor = match cursor {
+            Some(c) => Some(indexd::app_client::ObjectsCursor {
+                after: c.after.into(),
+                key: Hash256::from_str(c.key.as_str())?,
+            }),
+            None => None,
+        };
+        let objects = self
+            .app_client
+            .objects(cursor, Some(limit as usize))
+            .await?;
+        Ok(objects.into_iter().map(|o| o.into()).collect())
+    }
+
+    /// Saves an object to the indexer.
+    pub async fn save_object(&self, object: Object) -> Result<(), Error> {
+        let object = object.try_into()?;
+        self.app_client.save_object(&object).await?;
+        Ok(())
+    }
+
+    /// Deletes an object from the indexer.
+    pub async fn delete_object(&self, key: String) -> Result<(), Error> {
+        let key = Hash256::from_str(key.as_str())?;
+        self.app_client.delete_object(&key).await?;
+        Ok(())
+    }
+
+    /// Returns metadata about a specific object stored in the indexer.
+    pub async fn object(&self, key: String) -> Result<Object, Error> {
+        let key = Hash256::from_str(key.as_str())?;
+        let obj = self.app_client.object(&key).await?;
+        Ok(obj.into())
     }
 }
 
-pub type UploadReceiver = Mutex<Option<oneshot::Receiver<Result<Vec<PinnedSlab>, UploadError>>>>;
+pub type UploadReceiver = Mutex<Option<oneshot::Receiver<Result<Vec<SlabSlice>, UploadError>>>>;
 
 /// Uploads data to the Sia network. It does so in chunks to support large files in
 /// arbitrary languages.
@@ -486,12 +654,8 @@ impl Upload {
         let slabs = rx
             .await
             .map_err(|e| UploadError::Custom(e.to_string()))??
-            .iter()
-            .map(|s| Slab {
-                id: s.id.to_string(),
-                offset: s.offset as u32,
-                length: s.length as u32,
-            })
+            .into_iter()
+            .map(|s| s.into())
             .collect();
         Ok(slabs)
     }
@@ -509,7 +673,7 @@ struct DownloadState {
 /// Language bindings should provide a higher-level implementation that wraps a stream.
 #[derive(uniffi::Object)]
 pub struct Download {
-    slabs: Vec<PinnedSlab>,
+    slabs: Vec<SlabSlice>,
     state: Arc<Mutex<DownloadState>>,
     downloader: Arc<Downloader>,
 }

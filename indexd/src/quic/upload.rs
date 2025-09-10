@@ -19,7 +19,7 @@ use tokio_util::task::TaskTracker;
 use crate::app_client::{Client as AppClient, SlabPinParams};
 use crate::quic::client::{Client, HostQueue};
 use crate::quic::{self, QueueError};
-use crate::{PinnedSlab, Sector, Slab};
+use crate::{Sector, Slab, SlabSlice};
 
 #[derive(Debug, Error)]
 pub enum UploadError {
@@ -162,7 +162,7 @@ impl Uploader {
         encryption_key: [u8; 32],
         data_shards: u8,
         parity_shards: u8,
-    ) -> Result<Vec<PinnedSlab>, UploadError> {
+    ) -> Result<Vec<SlabSlice>, UploadError> {
         if self.client.hosts().is_empty() {
             let hosts = self.app_client.hosts().await?;
             self.client.update_hosts(hosts);
@@ -279,8 +279,8 @@ impl Uploader {
             // ensure the slabs vector is large enough
             slabs.resize(
                 slabs.len().max(slab_index + 1),
-                PinnedSlab {
-                    id: Hash256::default(),
+                SlabSlice {
+                    slab_id: Hash256::default(),
                     offset: 0,
                     length: 0,
                 },
@@ -298,8 +298,8 @@ impl Uploader {
                 return Err(UploadError::InvalidSlabId);
             }
             // overwrite the slab at the index
-            slabs[slab_index] = PinnedSlab {
-                id: slab_id,
+            slabs[slab_index] = SlabSlice {
+                slab_id,
                 offset: slab.offset,
                 length: slab.length,
             };
