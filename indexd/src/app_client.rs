@@ -136,6 +136,19 @@ pub struct Client {
     app_key: PrivateKey,
 }
 
+/// A placeholder type that implements serde::Deserialize for endpoints that
+/// return no content.
+struct EmptyResponse;
+
+impl<'de> serde::Deserialize<'de> for EmptyResponse {
+    fn deserialize<D>(_: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(EmptyResponse)
+    }
+}
+
 impl Client {
     pub fn new<U: IntoUrl>(url: U, app_key: PrivateKey) -> Result<Self> {
         Ok(Self {
@@ -201,13 +214,14 @@ impl Client {
             query_params.push(("after", after.to_string()));
             query_params.push(("key", key.to_string()));
         }
-        self.get_json::<_, _>(&format!("objects"), Some(&query_params))
-            .await
+        self.get_json::<_, _>("objects", Some(&query_params)).await
     }
 
     /// Saves an object to the indexer.
     pub async fn save_object(&self, object: &Object) -> Result<()> {
-        self.post_json("objects", object).await
+        self.post_json::<_, EmptyResponse>("objects", object)
+            .await
+            .map(|_| ())
     }
 
     /// Deletes an object from the indexer by its key.
@@ -255,8 +269,11 @@ impl Client {
     async fn delete(&self, path: &str) -> Result<()> {
         let url = self.url.join(path)?;
         let query_params = self.sign(&url, Method::DELETE, None, OffsetDateTime::now_utc());
-        Self::handle_empty_response(self.client.delete(url).query(&query_params).send().await?)
-            .await
+        Self::handle_response::<EmptyResponse>(
+            self.client.delete(url).query(&query_params).send().await?,
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Helper to send a signed GET request and parse the JSON
@@ -280,15 +297,6 @@ impl Client {
     async fn handle_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
         if resp.status().is_success() {
             Ok(resp.json::<T>().await?)
-        } else {
-            Err(Error::Api(resp.text().await?))
-        }
-    }
-
-    /// Same as handle_response but for empty responses.
-    async fn handle_empty_response(resp: reqwest::Response) -> Result<()> {
-        if resp.status().is_success() {
-            Ok(())
         } else {
             Err(Error::Api(resp.text().await?))
         }
@@ -901,5 +909,66 @@ mod tests {
                 .unwrap(),
             vec![object]
         );
+    }
+
+    #[tokio::test]
+    async fn delete_object() {
+        let object_key =
+            hash_256!("1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef");
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(request::method_path(
+                "DELETE",
+                "/objects/1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef",
+            ))
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        client.delete_object(&object_key).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn save_object() {
+        let object = Object {
+            key: hash_256!("1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef"),
+            slabs: vec![
+                SlabSlice {
+                    slab_id: hash_256!(
+                        "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
+                    ),
+                    offset: 0,
+                    length: 256,
+                },
+                SlabSlice {
+                    slab_id: hash_256!(
+                        "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405"
+                    ),
+                    offset: 256,
+                    length: 512,
+                },
+            ],
+            meta: b"hello world!".to_vec(),
+            created_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
+                .unwrap(),
+            updated_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
+                .unwrap(),
+        };
+
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/objects"),
+                request::body(serde_json::to_string(&object).unwrap())
+            ])
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        client.save_object(&object).await.unwrap();
     }
 }
