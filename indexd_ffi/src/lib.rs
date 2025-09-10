@@ -185,7 +185,6 @@ pub struct NetAddress {
 pub struct Object {
     pub key: String,
     pub slabs: Vec<Slab>,
-    pub meta: Vec<u8>,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
 }
@@ -195,7 +194,6 @@ impl From<indexd::Object> for Object {
         Self {
             key: o.key.to_string(),
             slabs: o.slabs.into_iter().map(|s| s.into()).collect(),
-            meta: o.meta,
             created_at: o.created_at.into(),
             updated_at: o.updated_at.into(),
         }
@@ -213,7 +211,7 @@ impl TryInto<indexd::Object> for Object {
                 .into_iter()
                 .map(|s| s.try_into())
                 .collect::<Result<Vec<SlabSlice>, HexParseError>>()?,
-            meta: self.meta,
+            meta: Vec::with_capacity(0),
             created_at: self.created_at.into(),
             updated_at: self.updated_at.into(),
         })
@@ -607,6 +605,30 @@ impl SDK {
         let key = Hash256::from_str(key.as_str())?;
         let obj = self.app_client.object(&key).await?;
         Ok(obj.into())
+    }
+
+    pub async fn shared_object(&self, share_url: String) -> Result<Object, Error> {
+        let (object, _) = self.app_client.shared_object(share_url).await?;
+
+        Ok(object.into())
+    }
+
+    /// Creates a signed URL that can be used to share object metadata
+    /// with other people using an indexer.
+    pub fn object_share_url(
+        &self,
+        object_key: String,
+        encryption_key: Vec<u8>,
+        valid_until: SystemTime,
+    ) -> Result<String, Error> {
+        let object_key = Hash256::from_str(&object_key)?;
+        let encryption_key: [u8; 32] = encryption_key
+            .try_into()
+            .map_err(|_| Error::Custom("encryption key must be 32 bytes".into()))?;
+        let u =
+            self.app_client
+                .object_share_url(&object_key, encryption_key, valid_until.into())?;
+        Ok(u)
     }
 }
 
