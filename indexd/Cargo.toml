@@ -31,6 +31,7 @@ bytes = "1.10.1"
 futures = "0.3.31"
 tokio-util = { version = "0.7.16", features = ["rt"] }
 priority-queue = "2.5.0"
+chrono = { version = "0.4.42", features = ["serde"] }
 
 [dev-dependencies]
 httptest = "0.16.3"
