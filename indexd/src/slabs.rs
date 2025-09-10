@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use serde_with::base64::Base64;
+use serde_with::serde_as;
 use sia::encoding::SiaEncodable;
 use sia::signing::PublicKey;
 use sia::types::Hash256;
@@ -27,8 +29,6 @@ pub struct Slab {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PinnedSlab {
     pub id: Hash256,
-    pub encryption_key: [u8; 32],
-    pub min_shards: u8,
     pub offset: usize,
     pub length: usize,
 }
@@ -46,6 +46,33 @@ impl Slab {
         });
         state.finalize().into()
     }
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SlabSlice {
+    #[serde(rename = "slabID")]
+    pub slab_id: Hash256,
+    pub offset: usize,
+    pub length: usize,
+}
+
+#[serde_as]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Object {
+    pub key: Hash256,
+    pub slabs: Vec<SlabSlice>,
+
+    // base64-encoded arbitrary metadata
+    #[serde_as(as = "Base64")]
+    pub meta: Vec<u8>,
+
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: time::OffsetDateTime,
 }
 
 #[cfg(test)]

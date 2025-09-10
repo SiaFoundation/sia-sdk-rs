@@ -1,10 +1,12 @@
-mod app_client;
+pub mod app_client;
 mod slabs;
 
 pub mod quic;
 use crate::quic::{DownloadError, Downloader, UploadError, Uploader};
 
-use crate::app_client::{Client, Host, Object, ObjectsCursor, RegisterAppRequest};
+use crate::app_client::{Client, ObjectsCursor, RegisterAppRequest};
+use log::debug;
+use sia::rhp::Host;
 use sia::signing::PrivateKey;
 use sia::types::Hash256;
 use std::time::Duration;
@@ -68,6 +70,7 @@ impl SDK<DisconnectedState> {
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
         if authenticated {
+            debug!("app connected and authenticated");
             return Ok(SDK {
                 state: RegisteredState {
                     app: client,
@@ -78,6 +81,7 @@ impl SDK<DisconnectedState> {
             });
         }
 
+        debug!("requesting app connection");
         let res = client
             .request_app_connection(&RegisterAppRequest {
                 name: app_name,
@@ -89,6 +93,7 @@ impl SDK<DisconnectedState> {
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
+        debug!("app connected, awaiting approval");
         Ok(SDK {
             state: RegisteredState {
                 app: client,
@@ -134,20 +139,13 @@ impl SDK<RegisteredState> {
             tokio::time::sleep(Duration::from_secs(30)).await; // wait for accounts to get funded
         }
 
-        if rustls::crypto::CryptoProvider::get_default().is_none() {
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .map_err(|e| Error::Tls(format!("{e:?}")))?;
-        }
-
         let hosts = self
             .state
             .app
             .hosts()
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
-
-        let mut dialer = quic::Client::new(tls_config).map_err(|e| Error::Tls(format!("{e:?}")))?;
+        let dialer = quic::Client::new(tls_config).map_err(|e| Error::Tls(format!("{e:?}")))?;
         dialer.update_hosts(hosts);
 
         let downloader = Downloader::new(

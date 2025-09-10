@@ -163,6 +163,10 @@ impl Uploader {
         data_shards: u8,
         parity_shards: u8,
     ) -> Result<Vec<PinnedSlab>, UploadError> {
+        if self.client.hosts().is_empty() {
+            let hosts = self.app_client.hosts().await?;
+            self.client.update_hosts(hosts);
+        }
         let (slab_tx, mut slab_rx) = mpsc::unbounded_channel();
         let semaphore = Arc::new(Semaphore::new(self.max_inflight));
         let host_client = self.client.clone();
@@ -277,8 +281,6 @@ impl Uploader {
                 slabs.len().max(slab_index + 1),
                 PinnedSlab {
                     id: Hash256::default(),
-                    encryption_key: [0u8; 32],
-                    min_shards: 0,
                     offset: 0,
                     length: 0,
                 },
@@ -298,8 +300,6 @@ impl Uploader {
             // overwrite the slab at the index
             slabs[slab_index] = PinnedSlab {
                 id: slab_id,
-                encryption_key: slab.encryption_key,
-                min_shards: slab.min_shards,
                 offset: slab.offset,
                 length: slab.length,
             };

@@ -1,9 +1,9 @@
+use std::time::Duration;
+
 use blake2b_simd::Params;
 use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
-use serde_with::base64::Base64;
-use serde_with::serde_as;
-use sia::types::v2::NetAddress;
+use sia::rhp::Host;
 
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -11,8 +11,9 @@ use time::OffsetDateTime;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::Object;
 use crate::slabs::Sector;
-use sia::signing::{PrivateKey, PublicKey};
+use sia::signing::PrivateKey;
 use sia::types::Hash256;
 
 pub use reqwest::{IntoUrl, Url};
@@ -77,43 +78,6 @@ pub struct Slab {
     pub sectors: Vec<Sector>,
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Host {
-    pub public_key: PublicKey,
-    pub addresses: Vec<NetAddress>,
-    pub country_code: String,
-    pub latitude: f64,
-    pub longitude: f64,
-}
-
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SlabSlice {
-    #[serde(rename = "slabID")]
-    pub slab_id: Hash256,
-    pub offset: usize,
-    pub length: usize,
-}
-
-#[serde_as]
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Object {
-    pub key: Hash256,
-    pub slabs: Vec<SlabSlice>,
-
-    // base64-encoded arbitrary metadata
-    #[serde_as(as = "Base64")]
-    pub meta: Vec<u8>,
-
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: time::OffsetDateTime,
-
-    #[serde(with = "time::serde::rfc3339")]
-    pub updated_at: time::OffsetDateTime,
-}
-
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SlabPinParams {
@@ -163,7 +127,13 @@ impl Client {
     pub async fn check_app_authenticated(&self) -> Result<bool> {
         let url = self.url.join("auth/check")?;
         let query_params = self.sign(&url, Method::GET, None, OffsetDateTime::now_utc());
-        let resp = self.client.get(url).query(&query_params).send().await?;
+        let resp = self
+            .client
+            .get(url)
+            .timeout(Duration::from_secs(15))
+            .query(&query_params)
+            .send()
+            .await?;
         match resp.status() {
             StatusCode::UNAUTHORIZED => Ok(false),
             StatusCode::NO_CONTENT => Ok(true),
@@ -178,6 +148,7 @@ impl Client {
         let resp = self
             .client
             .get(status_url)
+            .timeout(Duration::from_secs(15))
             .query(&query_params)
             .send()
             .await?;
@@ -270,7 +241,12 @@ impl Client {
         let url = self.url.join(path)?;
         let query_params = self.sign(&url, Method::DELETE, None, OffsetDateTime::now_utc());
         Self::handle_response::<EmptyResponse>(
-            self.client.delete(url).query(&query_params).send().await?,
+            self.client
+                .delete(url)
+                .timeout(Duration::from_secs(15))
+                .query(&query_params)
+                .send()
+                .await?,
         )
         .await
         .map(|_| ())
@@ -285,7 +261,7 @@ impl Client {
     ) -> Result<D> {
         let url = self.url.join(path)?;
         let params = self.sign(&url, Method::GET, None, OffsetDateTime::now_utc());
-        let mut builder = self.client.get(url);
+        let mut builder = self.client.get(url).timeout(Duration::from_secs(15));
         if let Some(q) = query_params {
             builder = builder.query(q); // optional query params
         }
@@ -316,6 +292,7 @@ impl Client {
             self.client
                 .post(url)
                 .query(&query_params)
+                .timeout(Duration::from_secs(15))
                 .body(body)
                 .send()
                 .await?,
@@ -367,6 +344,8 @@ impl Client {
 mod tests {
     use sia::{hash_256, public_key};
     use time::format_description::well_known::Rfc3339;
+
+    use crate::{Object, SlabSlice};
 
     use super::*;
     use httptest::http::Response;

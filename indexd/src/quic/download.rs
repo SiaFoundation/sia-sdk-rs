@@ -235,6 +235,11 @@ impl Downloader {
         mut offset: usize,
         mut length: usize,
     ) -> Result<(), DownloadError> {
+        if self.inner.host_client.hosts().is_empty() {
+            let hosts = self.inner.app_client.hosts().await?;
+            self.inner.host_client.update_hosts(hosts);
+        }
+
         let max_length = slabs.iter().fold(0, |sum, slab| sum + slab.length);
         if offset + length > max_length {
             return Err(DownloadError::OutOfRange(offset, length));
@@ -255,10 +260,10 @@ impl Downloader {
             let slab_offset = pinned_slab.offset + offset;
             offset = 0;
             let slab_length = (pinned_slab.length - slab_offset).min(length);
-            let (shard_offset, shard_length) =
-                Self::sector_region(pinned_slab.min_shards as usize, slab_offset, slab_length);
-
             let slab = self.inner.app_client.slab(&pinned_slab.id).await?;
+            let (shard_offset, shard_length) =
+                Self::sector_region(slab.min_shards as usize, slab_offset, slab_length);
+
             let mut shards = self
                 .download_slab_shards(
                     &slab.encryption_key,

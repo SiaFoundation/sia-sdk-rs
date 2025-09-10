@@ -19,6 +19,9 @@ pub const LEAVES_PER_SECTOR: usize = SECTOR_SIZE / SEGMENT_SIZE;
 pub struct Host {
     pub public_key: PublicKey,
     pub addresses: Vec<NetAddress>,
+    pub country_code: String,
+    pub latitude: f64,
+    pub longitude: f64,
 }
 
 /// Contains the prices and parameters of a host.
