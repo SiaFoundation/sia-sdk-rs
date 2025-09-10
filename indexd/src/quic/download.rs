@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use log::debug;
-use sia::encryption::encrypt_shard;
+use sia::encryption::{CipherWriter, encrypt_shard};
 use sia::erasure_coding::{self, ErasureCoder};
 use sia::rhp::SEGMENT_SIZE;
 use sia::signing::{PrivateKey, PublicKey};
@@ -231,6 +231,7 @@ impl Downloader {
     pub async fn download_range<W: AsyncWriteExt + Unpin>(
         &self,
         w: &mut W,
+        encryption_key: [u8; 32],
         slabs: &[PinnedSlab],
         mut offset: usize,
         mut length: usize,
@@ -241,7 +242,8 @@ impl Downloader {
         } else if length == 0 {
             return Ok(());
         }
-        let mut w = BufWriter::new(w);
+        let mut bw = BufWriter::new(w);
+        let mut w = CipherWriter::new(&mut bw, &encryption_key);
         for pinned_slab in slabs {
             if length == 0 {
                 break;
@@ -286,6 +288,7 @@ impl Downloader {
             length -= slab_length;
         }
         w.flush().await?;
+        bw.flush().await?;
         Ok(())
     }
 
@@ -294,9 +297,11 @@ impl Downloader {
     pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
         w: &mut W,
+        encryption_key: [u8; 32],
         slabs: &[PinnedSlab],
     ) -> Result<(), DownloadError> {
         let total_length = slabs.iter().fold(0, |sum, slab| sum + slab.length);
-        self.download_range(w, slabs, 0, total_length).await
+        self.download_range(w, encryption_key, slabs, 0, total_length)
+            .await
     }
 }

@@ -190,22 +190,27 @@ impl SDK<ConnectedState> {
     pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
         writer: &mut W,
+        encryption_key: [u8; 32],
         slabs: &[PinnedSlab],
     ) -> Result<(), Error> {
-        self.state.downloader.download(writer, slabs).await?;
+        self.state
+            .downloader
+            .download(writer, encryption_key, slabs)
+            .await?;
         Ok(())
     }
 
     pub async fn download_range<W: AsyncWriteExt + Unpin>(
         &self,
         writer: &mut W,
+        encryption_key: [u8; 32],
         slabs: &[PinnedSlab],
         offset: usize,
         length: usize,
     ) -> Result<(), Error> {
         self.state
             .downloader
-            .download_range(writer, slabs, offset, length)
+            .download_range(writer, encryption_key, slabs, offset, length)
             .await?;
         Ok(())
     }

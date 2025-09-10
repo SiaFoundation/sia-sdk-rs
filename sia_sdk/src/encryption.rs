@@ -1,6 +1,10 @@
-use chacha20::XChaCha20;
-use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
+use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherCoreWrapper, StreamCipherSeek};
+use chacha20::{XChaCha20, XChaChaCore};
+use pin_project_lite::pin_project;
 use rayon::prelude::*;
+use sha2::digest::consts::{B0, B1};
+use sha2::digest::typenum::{UInt, UTerm};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 /// encrypts the provided shards using XChaCha20. To decrypt the shards, call
 /// this function again with the same key.
@@ -28,9 +32,94 @@ pub fn encrypt_shard(key: &[u8; 32], index: u8, offset: usize, shard: &mut [u8])
     cipher.apply_keystream(shard);
 }
 
+pin_project! {
+    pub struct CipherReader<R: AsyncRead> {
+        #[pin]
+        inner: R,
+        cipher: StreamCipherCoreWrapper<XChaChaCore<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B1>, B0>>>,
+    }
+}
+
+impl<R: AsyncRead> CipherReader<R> {
+    pub fn new(inner: R, key: &[u8; 32]) -> Self {
+        let nonce: [u8; 24] = [0u8; 24];
+        let cipher = XChaCha20::new(key.into(), &nonce.into());
+        Self { inner, cipher }
+    }
+}
+
+impl<R: AsyncRead> AsyncRead for CipherReader<R> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.project();
+        let initial_filled = buf.filled().len();
+        let poll = this.inner.poll_read(cx, buf);
+
+        // apply the cipher to the newly read bytes
+        this.cipher
+            .apply_keystream(&mut buf.filled_mut()[initial_filled..]);
+        poll
+    }
+}
+
+pin_project! {
+    pub struct CipherWriter<W: AsyncWrite> {
+        #[pin]
+        inner: W,
+        cipher: StreamCipherCoreWrapper<XChaChaCore<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B1>, B0>>>,
+        buf: Vec<u8>
+    }
+}
+
+impl<'w, W: AsyncWrite> CipherWriter<W> {
+    pub fn new(inner: W, key: &[u8; 32]) -> Self {
+        let nonce: [u8; 24] = [0u8; 24];
+        let cipher = XChaCha20::new(key.into(), &nonce.into());
+        Self {
+            inner,
+            cipher,
+            buf: Vec::new(),
+        }
+    }
+}
+
+impl<'w, W: AsyncWrite> AsyncWrite for CipherWriter<W> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.project();
+        this.buf.resize(buf.len(), 0);
+        this.buf.copy_from_slice(buf);
+        this.cipher.apply_keystream(this.buf);
+        this.inner.poll_write(cx, &this.buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.project();
+        this.inner.poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.project();
+        this.inner.poll_shutdown(cx)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use rand::RngCore;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::rhp::SECTOR_SIZE;
 
@@ -74,5 +163,21 @@ mod test {
         encrypt_shards(&key, 0, 100, &mut shards);
         assert_eq!(shards[0], vec![1, 2, 3]);
         assert_eq!(shards[1], vec![4, 5, 6]);
+    }
+
+    #[tokio::test]
+    async fn test_cipher_reader_writer() {
+        let key = [1u8; 32];
+        let data = b"lorem ipsum dolor sit amet, consectetur adipiscing elit";
+
+        let mut reader = CipherReader::new(data.as_ref(), &key);
+        let mut cipher_text = vec![0u8; data.len()];
+        reader.read_exact(&mut cipher_text).await.unwrap();
+        assert_ne!(cipher_text, data);
+
+        let mut writer = CipherWriter::new(Vec::new(), &key);
+        writer.write_all(&cipher_text).await.unwrap();
+        let plaintext = writer.inner;
+        assert_eq!(plaintext, data);
     }
 }

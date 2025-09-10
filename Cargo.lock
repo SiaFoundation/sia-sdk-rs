@@ -2282,6 +2282,7 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
+ "pin-project-lite",
  "rand",
  "rayon",
  "reed-solomon-erasure",
