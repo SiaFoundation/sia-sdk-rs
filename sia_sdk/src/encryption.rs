@@ -59,7 +59,7 @@ impl<R: AsyncRead> CipherReader<R> {
     pub fn new(inner: R, key: [u8; 32], offset: usize) -> Self {
         Self {
             inner,
-            cipher: Chacha20Cipher::new(key, offset),
+            cipher: Chacha20Cipher::new(key, offset as u64),
         }
     }
 }
@@ -94,7 +94,7 @@ impl<W: AsyncWrite> CipherWriter<W> {
     pub fn new(inner: W, key: [u8; 32], offset: usize) -> Self {
         Self {
             inner,
-            cipher: Chacha20Cipher::new(key, offset),
+            cipher: Chacha20Cipher::new(key, offset as u64),
             buf: Vec::new(),
         }
     }
@@ -137,19 +137,19 @@ struct Chacha20Cipher {
     inner: StreamCipherCoreWrapper<XChaChaCore<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B1>, B0>>>,
     key: [u8; 32],
     nonce: [u8; 24],
-    offset: usize,
+    offset: u64,
 }
 
 impl Chacha20Cipher {
-    const MAX_BYTES_PER_NONCE: usize = u32::MAX as usize * 64;
+    const MAX_BYTES_PER_NONCE: u64 = u32::MAX as u64 * 64;
 
-    fn nonce_for_offset(offset: usize) -> [u8; 24] {
+    fn nonce_for_offset(offset: u64) -> [u8; 24] {
         let mut nonce: [u8; 24] = [0u8; 24];
         nonce[16..24].copy_from_slice(&(offset / Self::MAX_BYTES_PER_NONCE).to_le_bytes());
         nonce
     }
 
-    pub fn new(key: [u8; 32], offset: usize) -> Self {
+    pub fn new(key: [u8; 32], offset: u64) -> Self {
         let nonce = Self::nonce_for_offset(offset);
         let mut cipher = XChaCha20::new(&key.into(), &nonce.into());
         cipher.seek(offset % Self::MAX_BYTES_PER_NONCE);
@@ -170,14 +170,14 @@ impl StreamCipher for Chacha20Cipher {
         let remaining_keystream =
             Self::MAX_BYTES_PER_NONCE - (self.offset % Self::MAX_BYTES_PER_NONCE);
 
-        if buf.len() <= remaining_keystream {
-            self.offset += buf.len();
+        if buf.len() as u64 <= remaining_keystream {
+            self.offset += buf.len() as u64;
             return self.inner.try_apply_keystream_inout(buf);
         }
 
         // we can't process the entire buffer with the current nonce, so we need
         // to split it
-        let (first, second) = buf.split_at(remaining_keystream);
+        let (first, second) = buf.split_at(remaining_keystream as usize);
 
         // the first part can be processed with the current nonce
         self.inner.try_apply_keystream_inout(first)?;
