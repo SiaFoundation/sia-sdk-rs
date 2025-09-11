@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use chacha20poly1305::{
+    XChaCha20Poly1305, XNonce,
+    aead::{Aead, AeadCore, AeadInPlace, KeyInit, OsRng},
+};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 use sia::encoding::{SiaEncodable, SiaEncode};
@@ -59,6 +63,51 @@ pub struct PinnedSlab {
     pub sectors: Vec<Sector>,
 }
 
+#[derive(Debug, Serialize, PartialEq)]
+pub struct EncryptedMetadata(Vec<u8>);
+
+impl Default for EncryptedMetadata {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl From<Vec<u8>> for EncryptedMetadata {
+    fn from(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+}
+
+impl AsRef<[u8]> for EncryptedMetadata {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+pub type DecryptionError = chacha20poly1305::aead::Error;
+pub type DecryptionResult<T> = std::result::Result<T, DecryptionError>;
+
+impl EncryptedMetadata {
+    pub fn encrypt(meta: &[u8], key: &EncryptionKey) -> Self {
+        let cipher = chacha20poly1305::XChaCha20Poly1305::new(key.as_ref().into());
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let encrypted = cipher
+            .encrypt(&nonce, meta)
+            .expect("encryption never fails");
+        Self(encrypted)
+    }
+
+    pub fn decrypt(&self, key: &EncryptionKey) -> DecryptionResult<Vec<u8>> {
+        if self.0.len() < 24 {
+            return Err(chacha20poly1305::aead::Error);
+        }
+        let (nonce_bytes, ciphertext) = self.0.split_at(24);
+        let nonce = XNonce::from_slice(nonce_bytes);
+        let cipher = XChaCha20Poly1305::new(key.as_ref().into());
+        cipher.decrypt(nonce, ciphertext)
+    }
+}
+
 #[serde_as]
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -68,7 +117,7 @@ pub struct Object {
 
     // base64-encoded arbitrary metadata
     #[serde_as(as = "Base64")]
-    pub meta: Vec<u8>,
+    pub meta: EncryptedMetadata,
 
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: time::OffsetDateTime,
@@ -78,7 +127,7 @@ pub struct Object {
 }
 
 impl Object {
-    pub fn new(slabs: Vec<SlabSlice>, meta: Option<Vec<u8>>) -> Self {
+    pub fn new(slabs: Vec<SlabSlice>, meta: Option<EncryptedMetadata>) -> Self {
         Self {
             key: Self::object_key_from_slabs(&slabs),
             slabs,
