@@ -128,6 +128,14 @@ pub struct SharedObject {
     pub meta: Option<Vec<u8>>,
 }
 
+impl SharedObject {
+    pub fn size(&self) -> u64 {
+        self.slabs
+            .iter()
+            .fold(0_u64, |v, s| v + (s.length as u64 - s.offset as u64))
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

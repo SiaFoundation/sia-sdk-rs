@@ -198,6 +198,15 @@ pub struct PinnedObject {
     pub updated_at: SystemTime,
 }
 
+impl PinnedObject {
+    /// Calculates the total size of the object by summing the lengths of its slabs.
+    pub fn size(&self) -> u64 {
+        self.slabs
+            .iter()
+            .fold(0_u64, |v, s| v + (s.length as u64 - s.offset as u64))
+    }
+}
+
 impl From<indexd::Object> for PinnedObject {
     fn from(o: indexd::Object) -> Self {
         Self {
@@ -601,8 +610,8 @@ impl SDK {
         object: &PinnedObject,
         encryption_key: Vec<u8>,
     ) -> Result<Download, DownloadError> {
-        let length = object.slabs.iter().fold(0_u64, |v, s| v + s.length as u64);
-        self.download_range(encryption_key, object, 0, length).await
+        self.download_range(encryption_key, object, 0, object.size())
+            .await
     }
 
     /// Initiates a download of the data referenced by the object, starting at `offset` and reading `length` bytes.
@@ -694,10 +703,7 @@ impl SDK {
             .parse()
             .map_err(|e| DownloadError::Custom(format!("{e}")))?;
         let (object, encryption_key) = self.app_client.shared_object(share_url).await?;
-        let total_length = object
-            .slabs
-            .iter()
-            .fold(0, |sum, slab| sum + slab.length as u64);
+        let total_length = object.size();
         Ok(DownloadShared {
             encryption_key: EncryptionKey::from(encryption_key),
             slabs: object
