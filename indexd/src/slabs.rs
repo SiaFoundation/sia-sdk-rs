@@ -92,7 +92,7 @@ impl EncryptedMetadata {
             .expect("encryption never fails");
         nonce
             .into_iter()
-            .chain(encrypted.into_iter())
+            .chain(encrypted)
             .collect::<Vec<u8>>()
             .into()
     }
