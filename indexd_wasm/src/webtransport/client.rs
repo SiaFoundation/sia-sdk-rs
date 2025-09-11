@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use chrono::DateTime;
-use gloo_console::log;
+use gloo_console::{info, log};
 use gloo_timers::future::TimeoutFuture;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -282,7 +282,8 @@ impl ClientInner {
                 continue;
             }
 
-            return Ok(self.client.connect(addr.address.parse()?).await?);
+            let addr = format!("{}/sia/rhp/v4", addr.address);
+            return Ok(self.client.connect(addr.parse()?).await?);
         }
         Err(Error::FailedToConnect)
     }

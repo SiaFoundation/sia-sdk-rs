@@ -240,12 +240,13 @@ impl Client {
         url: &Url,
         method: Method,
         body: Option<&[u8]>,
-        valid_until: chrono::DateTime<Utc>,
+        valid_until: DateTime<Utc>,
     ) -> Hash256 {
         let mut state = Params::new().hash_length(32).to_state();
         state
             .update(method.as_str().as_bytes())
             .update(url.host_str().unwrap_or("").as_bytes())
+            .update(url.path().as_bytes())
             .update(&valid_until.timestamp().to_le_bytes());
         if let Some(body) = body {
             state.update(body);
