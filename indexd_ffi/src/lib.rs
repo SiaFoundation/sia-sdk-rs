@@ -534,7 +534,7 @@ impl SDK {
                 .upload(inner_buf, encryption_key, data_shards, parity_shards)
                 .await
                 .map_err(|e| e.into())
-                .and_then(|slabs| Ok(indexd::Object::new(slabs, metadata)));
+                .map(|slabs| indexd::Object::new(slabs, metadata));
             let _ = tx.send(res);
         });
         Ok(Upload {
