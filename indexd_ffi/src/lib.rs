@@ -242,7 +242,7 @@ impl TryInto<AppSlabPinParams> for SlabPinParams {
                 .encryption_key
                 .try_into()
                 .map_err(|v| Error::Crypto(format!("failed to convert encryption key: {:?}", v)))?,
-            min_shards: self.min_shards.into(),
+            min_shards: self.min_shards,
             sectors: self
                 .sectors
                 .into_iter()
@@ -724,8 +724,8 @@ impl SDK {
     // UnpinSlab unpins a slab from the indexer.
     pub async fn unpin_slab(&self, slab_id: String) -> Result<(), Error> {
         let slab_id = Hash256::from_str(slab_id.as_str())?;
-        let slab = self.app_client.unpin_slab(&slab_id).await?;
-        Ok(slab.into())
+        self.app_client.unpin_slab(&slab_id).await?;
+        Ok(())
     }
 }
 
