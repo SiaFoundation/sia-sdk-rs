@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::prelude::*;
 use gloo_console::{debug, log};
 use gloo_timers::future::TimeoutFuture;
-use sia::encryption::encrypt_shards;
+use sia::encryption::{EncryptionKey, encrypt_shards};
 use sia::erasure_coding::{self, ErasureCoder};
 use sia::rhp;
 use sia::signing::{PrivateKey, PublicKey};
@@ -160,7 +160,7 @@ impl Uploader {
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
         mut r: R,
-        encryption_key: [u8; 32],
+        encryption_key: EncryptionKey,
         data_shards: u8,
         parity_shards: u8,
     ) -> Result<Vec<PinnedSlab>, UploadError> {
@@ -225,7 +225,9 @@ impl Uploader {
                 // wait for all shards to finish uploading
                 // this is done in a separate task to allow preparing the next slab
                 let slab_tx = slab_tx.clone();
-                slab_upload_tasks.push(async move {
+                slab_upload_tasks.push({
+                    let encryption_key = encryption_key.clone();
+                    async move {
                     let mut slab = Slab {
                         sectors: vec![
                             Sector {
@@ -254,7 +256,7 @@ impl Uploader {
                     }
                     // send the completed slab to the channel
                     slab_tx.send(Ok((slab_index, slab))).unwrap();
-                });
+                }});
                 slab_index += 1;
             }
             while (slab_upload_tasks.next().await).is_some() {}
@@ -278,7 +280,7 @@ impl Uploader {
                         slabs.len().max(slab_index + 1),
                         PinnedSlab {
                             id: Hash256::default(),
-                            encryption_key: [0u8; 32],
+                            encryption_key: [0u8; 32].into(),
                             min_shards: 0,
                             offset: 0,
                             length: 0,
@@ -288,7 +290,7 @@ impl Uploader {
                     let slab_id = self
                         .app_client
                         .pin_slab(SlabPinParams {
-                            encryption_key: slab.encryption_key,
+                            encryption_key: slab.encryption_key.clone(),
                             min_shards: slab.min_shards,
                             sectors: slab.sectors,
                         })

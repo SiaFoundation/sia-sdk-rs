@@ -2,6 +2,7 @@ use blake2b_simd::Params;
 use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
+use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
 use thiserror::Error;
 
@@ -70,14 +71,14 @@ pub struct RegisterAppResponse {
 #[serde(rename_all = "camelCase")]
 pub struct Slab {
     pub id: Hash256,
-    pub encryption_key: [u8; 32],
+    pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
 }
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SlabPinParams {
-    pub encryption_key: [u8; 32],
+    pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
 }

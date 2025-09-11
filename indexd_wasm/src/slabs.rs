@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use sia::encoding::SiaEncodable;
+use sia::encryption::EncryptionKey;
 use sia::signing::PublicKey;
 use sia::types::Hash256;
 
@@ -16,7 +17,7 @@ pub struct Sector {
 /// A Slab is an erasure-coded collection of sectors. The sectors can be downloaded and
 /// used to recover the original data.
 pub struct Slab {
-    pub encryption_key: [u8; 32],
+    pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
     pub offset: usize,
@@ -27,7 +28,7 @@ pub struct Slab {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PinnedSlab {
     pub id: Hash256,
-    pub encryption_key: [u8; 32],
+    pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub offset: usize,
     pub length: usize,

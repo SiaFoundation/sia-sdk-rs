@@ -6,7 +6,7 @@ use crate::types::{Hash256, HexParseError};
 use ed25519_dalek::{Signature as ED25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::de::Error;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use zeroize::ZeroizeOnDrop;
 
 /// An ed25519 public key that can be used to verify a signature
 #[derive(
@@ -80,7 +80,7 @@ impl AsRef<[u8]> for PublicKey {
 }
 
 /// An ed25519 private key that can be used to sign a hash
-#[derive(Debug, PartialEq, Clone, Zeroize)]
+#[derive(Debug, PartialEq, Clone, ZeroizeOnDrop)]
 pub struct PrivateKey([u8; 64]);
 
 impl PrivateKey {
@@ -114,13 +114,6 @@ impl From<[u8; 64]> for PrivateKey {
 impl From<Hash256> for PrivateKey {
     fn from(hash: Hash256) -> Self {
         PrivateKey::from_seed(hash.as_ref())
-    }
-}
-
-impl Drop for PrivateKey {
-    fn drop(&mut self) {
-        // Zero out the private key
-        self.0.zeroize();
     }
 }
 

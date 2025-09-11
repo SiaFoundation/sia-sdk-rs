@@ -7,6 +7,7 @@ use crate::webtransport::{DownloadError, Downloader, UploadError, Uploader};
 use crate::app_client::{Client, RegisterAppRequest};
 use gloo_console::log;
 use gloo_timers::future::TimeoutFuture;
+use sia::encryption::EncryptionKey;
 use sia::signing::PrivateKey;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -167,7 +168,7 @@ impl SDK<ConnectedState> {
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
         reader: R,
-        encryption_key: [u8; 32],
+        encryption_key: EncryptionKey,
         data_shards: u8,
         parity_shards: u8,
     ) -> Result<Vec<PinnedSlab>, Error> {
