@@ -208,7 +208,7 @@ impl PinnedObject {
             EncryptionKey::try_from(key.as_ref()).map_err(|err| Error::Custom(err.to_string()))?;
         let encrypted_meta = indexd::EncryptedMetadata::from(self.encrypted_metadata.clone());
         let decrypted = encrypted_meta.decrypt(&encryption_key).map_err(|err| {
-            Error::Custom(format!("failed to decrypt metadata: {}", err.to_string()))
+            Error::Custom(format!("failed to decrypt metadata: {}", err))
         })?;
         Ok(Some(decrypted))
     }
@@ -602,7 +602,7 @@ impl SDK {
                     encryption_key,
                     data_shards,
                     parity_shards,
-                    metadata.into(),
+                    metadata,
                 )
                 .await
                 .map_err(|e| e.into());

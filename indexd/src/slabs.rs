@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
-    aead::{Aead, AeadCore, AeadInPlace, KeyInit, OsRng},
+    aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 use serde_with::base64::Base64;
 use serde_with::serde_as;
@@ -64,13 +64,9 @@ pub struct PinnedSlab {
 }
 
 #[derive(Debug, Serialize, PartialEq)]
+#[derive(Default)]
 pub struct EncryptedMetadata(Vec<u8>);
 
-impl Default for EncryptedMetadata {
-    fn default() -> Self {
-        Self(Vec::new())
-    }
-}
 
 impl From<Vec<u8>> for EncryptedMetadata {
     fn from(value: Vec<u8>) -> Self {
