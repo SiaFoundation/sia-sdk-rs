@@ -70,7 +70,7 @@ async fn main() {
     let slab = sdk
         .slab(slab_id.clone())
         .await
-        .expect("faileod to get slab");
+        .expect("failed to get slab");
     if slab.id != slab_id.clone() {
         panic!("slab id mismatch");
     }
