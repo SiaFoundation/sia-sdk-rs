@@ -200,6 +200,13 @@ pub struct PinnedObject {
 }
 
 impl PinnedObject {
+    /// Decrypts the metadata of an object and returns it.
+    ///
+    /// # Arguments
+    /// * `key` - The 32-byte encryption key used when uploading the object.
+    ///
+    /// # Returns
+    /// The decrypted metadata, or None if no metadata was provided.
     pub fn decrypt_metadata(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
         if self.encrypted_metadata.is_empty() {
             return Ok(None);
@@ -207,9 +214,9 @@ impl PinnedObject {
         let encryption_key =
             EncryptionKey::try_from(key.as_ref()).map_err(|err| Error::Custom(err.to_string()))?;
         let encrypted_meta = indexd::EncryptedMetadata::from(self.encrypted_metadata.clone());
-        let decrypted = encrypted_meta.decrypt(&encryption_key).map_err(|err| {
-            Error::Custom(format!("failed to decrypt metadata: {}", err))
-        })?;
+        let decrypted = encrypted_meta
+            .decrypt(&encryption_key)
+            .map_err(|err| Error::Custom(format!("failed to decrypt metadata: {}", err)))?;
         Ok(Some(decrypted))
     }
 
