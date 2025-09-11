@@ -65,18 +65,20 @@ async fn main() {
         .pin_slab(slab_pin_params)
         .await
         .expect("failed to pin slab");
-    info!("Pinned slab");
+    info!("Pinned slab: {}", slab_id.clone());
 
     let slab = sdk
         .slab(slab_id.clone())
         .await
         .expect("faileod to get slab");
-    if slab.id != slab_id {
+    if slab.id != slab_id.clone() {
         panic!("slab id mismatch");
     }
 
-    sdk.unpin_slab(slab_id).await.expect("failed to unpin slab");
-    info!("Unpinned slab");
+    sdk.unpin_slab(slab_id.clone())
+        .await
+        .expect("failed to unpin slab");
+    info!("Unpinned slab: {}", slab_id);
 
     let encryption_key: [u8; 32] = rand::random();
     let writer = sdk
