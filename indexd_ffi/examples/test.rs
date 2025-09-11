@@ -36,19 +36,23 @@ async fn main() {
 
     let encryption_key: [u8; 32] = rand::random();
     let writer = sdk
-        .upload(encryption_key.to_vec(), 1, 3)
+        .upload(encryption_key.to_vec(), 1, 3, None)
         .await
         .expect("writer");
     let data = vec![1u8; 1 << 22];
 
     writer.write(data.as_ref()).await.expect("data written");
     info!("chunk written");
-    let slabs = writer.finalize().await.expect("upload to complete");
-    assert_eq!(slabs[0].length as usize, data.len(), "length mismatch");
-    info!("upload complete, got {} slabs", slabs.len());
+    let object = writer.finalize().await.expect("upload to complete");
+    assert_eq!(
+        object.slabs[0].length as usize,
+        data.len(),
+        "length mismatch"
+    );
+    info!("upload complete, got {} slabs", object.slabs.len());
 
     let reader = sdk
-        .download(slabs.as_ref(), encryption_key.to_vec())
+        .download(&object, encryption_key.to_vec())
         .await
         .expect("reader init");
 
