@@ -5,10 +5,7 @@ pub mod quic;
 use crate::quic::{DownloadError, Downloader, UploadError, Uploader};
 
 use crate::app_client::{Client, ObjectsCursor, RegisterAppRequest};
-use chacha20::XChaCha20;
-use chacha20::cipher::{KeyIvInit, StreamCipher};
 use log::debug;
-use sia::encoding::SiaEncodable;
 use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
 use sia::signing::PrivateKey;
@@ -46,9 +43,6 @@ pub enum Error {
 
     #[error("download error: {0}")]
     Download(#[from] DownloadError),
-
-    #[error("encoding error: {0}")]
-    SiaEncoding(#[from] sia::encoding::Error),
 
     #[error("TLS error: {0}")]
     Tls(String),
@@ -252,6 +246,11 @@ impl SDK<ConnectedState> {
             .object(key)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
+            .and_then(|obj| {
+                obj.validate_object()
+                    .map(|_| obj)
+                    .map_err(|err| Error::App(err.to_string()))
+            })
     }
 
     pub async fn objects(
@@ -264,49 +263,24 @@ impl SDK<ConnectedState> {
             .objects(cursor, limit)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
+            .and_then(|objs| {
+                objs.into_iter()
+                    .map(|obj| {
+                        obj.validate_object()
+                            .map(|_| obj)
+                            .map_err(|err| Error::App(err.to_string()))
+                    })
+                    .collect()
+            })
     }
 
-    pub async fn save_object(
-        &self,
-        slabs: Vec<SlabSlice>,
-        meta: Option<(EncryptionKey, Vec<u8>)>,
-    ) -> Result<Object> {
-        let mut state = blake2b_simd::Params::new().hash_length(32).to_state();
-
-        // hash all slabs for the object key
-        for slab in &slabs {
-            slab.encode(&mut state)?;
-        }
-
-        // encrypt metadata if provided and include it in the object key as well
-        let mut encrypted_meta = None;
-        if let Some((encryption_key, mut meta)) = meta {
-            // if meta was provided, include it in the object key hash
-            meta.encode(&mut state)?;
-
-            // encrypt the metadata
-            let nonce: [u8; 24] = rand::random();
-            let mut cipher = XChaCha20::new(encryption_key.as_ref().into(), &nonce.into());
-            cipher.apply_keystream(&mut meta);
-            encrypted_meta = Some([nonce.to_vec(), meta].concat());
-        }
-
-        let object = Object {
-            key: state.finalize().into(),
-            slabs,
-            meta: encrypted_meta.unwrap_or_default(),
-
-            // NOTE: set by server
-            created_at: time::OffsetDateTime::UNIX_EPOCH,
-            updated_at: time::OffsetDateTime::UNIX_EPOCH,
-        };
-
+    pub async fn save_object(&self, object: &Object) -> Result<()> {
         self.state
             .app
-            .save_object(&object)
+            .save_object(object)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
-        Ok(object)
+        Ok(())
     }
 
     pub async fn delete_object(&self, key: &Hash256) -> Result<()> {

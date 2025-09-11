@@ -1,3 +1,4 @@
+
 use serde::{Deserialize, Serialize};
 
 use serde_with::base64::Base64;
@@ -68,6 +69,38 @@ pub struct Object {
     pub updated_at: time::OffsetDateTime,
 }
 
+impl Object {
+    pub fn new(slabs: Vec<SlabSlice>, meta: Option<Vec<u8>>) -> Self {
+        Self {
+            key: Self::object_key_from_slabs(&slabs),
+            slabs,
+            meta: meta.unwrap_or_default(),
+
+            created_at: time::OffsetDateTime::now_utc(),
+            updated_at: time::OffsetDateTime::now_utc(),
+        }
+    }
+
+    /// creates a unique identifier for the object by hashing the list of slabs
+    /// its made up of.
+    fn object_key_from_slabs(slabs: &[SlabSlice]) -> Hash256 {
+        let mut state = blake2b_simd::Params::new().hash_length(32).to_state();
+        for slab in slabs {
+            slab.encode(&mut state)
+                .expect("encoding slabs shouldn't fail");
+        }
+        state.finalize().into()
+    }
+
+    /// validate_object checks that the integrity of the object is intact.
+    pub fn validate_object(&self) -> Result<(), &'static str> {
+        if self.key != Self::object_key_from_slabs(&self.slabs) {
+            return Err("object key does not match slabs");
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -112,5 +145,42 @@ mod test {
             s.digest().to_string(),
             "d1aea84f8682d7ae17b6c1f14dc344eb70b9328ee913a76fc241559657b06284"
         )
+    }
+
+    #[test]
+    fn test_object_validation() {
+        let slabs = vec![
+            SlabSlice {
+                slab_id: hash_256!(
+                    "d1aea84f8682d7ae17b6c1f14dc344eb70b9328ee913a76fc241559657b06284"
+                ),
+                offset: 0,
+                length: 100,
+            },
+            SlabSlice {
+                slab_id: hash_256!(
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                ),
+                offset: 0,
+                length: 100,
+            },
+        ];
+        let meta = b"hello world".to_vec();
+
+        let mut obj = Object::new(slabs.clone(), Some(meta));
+        obj.validate_object().expect("object should be valid");
+        assert_eq!(
+            obj.key,
+            hash_256!("369cbab41f56f89ddc5adb417a5b9600137c7533adf91ab203cba96bcbce5b89")
+        );
+
+        // without the metadata the key should be the same
+        let obj2 = Object::new(slabs.clone(), None);
+        obj2.validate_object().expect("object should be valid");
+        assert_eq!(obj.key, obj2.key);
+
+        // tamper with obj to break validation
+        obj.slabs = vec![];
+        assert!(obj.validate_object().is_err());
     }
 }
