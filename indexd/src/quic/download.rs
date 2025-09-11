@@ -197,11 +197,7 @@ pub struct Downloader {
 }
 
 impl Downloader {
-    pub fn new(
-        app_client: AppClient,
-        host_client: Client,
-        account_key: PrivateKey,
-    ) -> Self {
+    pub fn new(app_client: AppClient, host_client: Client, account_key: PrivateKey) -> Self {
         Self {
             inner: Arc::new(DownloaderInner {
                 account_key,
@@ -354,7 +350,9 @@ impl Downloader {
 
         let max_length = slabs.max_length();
         let mut offset = options.offset;
-        let mut length = options.length.unwrap_or_else(|| slabs.max_length() - offset);
+        let mut length = options
+            .length
+            .unwrap_or_else(|| slabs.max_length() - offset);
         if offset + length > max_length {
             return Err(DownloadError::OutOfRange(offset, length));
         } else if length == 0 {

@@ -83,11 +83,7 @@ impl Default for UploadOptions {
 }
 
 impl Uploader {
-    pub fn new(
-        app_client: AppClient,
-        host_client: Client,
-        account_key: PrivateKey,
-    ) -> Self {
+    pub fn new(app_client: AppClient, host_client: Client, account_key: PrivateKey) -> Self {
         Uploader {
             app_client,
             account_key,
@@ -248,7 +244,7 @@ impl Uploader {
 
                 for (shard_index, shard) in encrypted_parity_shards.into_iter().enumerate() {
                     let permit = semaphore.clone().acquire_owned().await?;
-                    let shard_index = shard_index + data_shards as usize; // offset by data shards
+                    let shard_index = shard_index + data_shards; // offset by data shards
                     shard_upload_tasks.spawn(Self::upload_slab_shard(
                         permit,
                         host_client.clone(),
@@ -270,7 +266,7 @@ impl Uploader {
                                 root: Hash256::default(),
                                 host_key: PublicKey::new([0u8; 32])
                             };
-                            (data_shards + parity_shards) as usize
+                            data_shards + parity_shards
                         ],
                         encryption_key: slab_key,
                         offset: 0,

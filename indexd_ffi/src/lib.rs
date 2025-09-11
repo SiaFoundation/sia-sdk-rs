@@ -425,12 +425,21 @@ impl SharedObject {
     }
 }
 
+/// Provides options for an upload operation.
 #[derive(uniffi::Record)]
 pub struct UploadOptions {
     pub max_inflight: u8,
     pub data_shards: u8,
     pub parity_shards: u8,
     pub progress_callback: Option<Arc<dyn UploadProgressCallback>>,
+}
+
+/// Provides options for a download operation.
+#[derive(uniffi::Record)]
+pub struct DownloadOptions {
+    pub max_inflight: u8,
+    pub offset: u64,
+    pub length: Option<u64>,
 }
 
 /// An SDK enables interaction with an indexer and
@@ -608,10 +617,11 @@ impl SDK {
             let (tx, mut rx) = mpsc::unbounded_channel();
             tokio::spawn(async move {
                 let mut sectors: u64 = 0;
-                while let Some(_) = rx.recv().await {
+                while rx.recv().await.is_some() {
                     sectors += 1;
                     let size = sectors * SECTOR_SIZE as u64;
-                    let slabs_size = sectors.div_ceil(slab_shards) * total_shards * SECTOR_SIZE as u64;
+                    let slabs_size =
+                        sectors.div_ceil(slab_shards) * total_shards * SECTOR_SIZE as u64;
                     callback.progress(size, slabs_size);
                 }
             });
@@ -642,29 +652,15 @@ impl SDK {
         })
     }
 
-    /// Initiates a download of the data referenced by the object
+    /// Initiates a download of the data referenced by the object, starting at `offset` and reading `length` bytes.
     ///
     /// # Returns
     /// A [`Download`] object that can be used to read the data in chunks
     pub async fn download(
         &self,
-        object: &PinnedObject,
-        encryption_key: Vec<u8>,
-    ) -> Result<Download, DownloadError> {
-        self.download_range(encryption_key, object, 0, object.size())
-            .await
-    }
-
-    /// Initiates a download of the data referenced by the object, starting at `offset` and reading `length` bytes.
-    ///
-    /// # Returns
-    /// A [`Download`] object that can be used to read the data in chunks
-    pub async fn download_range(
-        &self,
         encryption_key: Vec<u8>,
         object: &PinnedObject,
-        offset: u64,
-        length: u64,
+        options: DownloadOptions,
     ) -> Result<Download, DownloadError> {
         let downloader = match self.downloader.get() {
             Some(downloader) => downloader.clone(),
@@ -681,6 +677,8 @@ impl SDK {
                 })
             })
             .collect::<Result<Vec<SlabSlice>, HexParseError>>()?;
+        let offset = options.offset;
+        let length = options.length.unwrap_or(object.size() - offset);
         let encryption_key = EncryptionKey::try_from(encryption_key.as_ref())
             .map_err(|err| DownloadError::Custom(err.to_string()))?;
         let slabs = SlabFetcher::new(self.app_client.clone(), slabs.clone());
@@ -732,10 +730,7 @@ impl SDK {
     ///
     /// # Returns
     /// A [`DownloadShared`] object that can be used to read the data in chunks
-    pub async fn download_shared(
-        &self,
-        share_url: &String,
-    ) -> Result<DownloadShared, DownloadError> {
+    pub async fn download_shared(&self, share_url: &str) -> Result<DownloadShared, DownloadError> {
         let downloader = match self.downloader.get() {
             Some(downloader) => downloader.clone(),
             None => return Err(DownloadError::NotConnected),
@@ -767,7 +762,7 @@ impl SDK {
     }
 
     /// Fetches the metadata for a shared object via a share URL.
-    pub async fn shared_object(&self, share_url: &String) -> Result<SharedObject, DownloadError> {
+    pub async fn shared_object(&self, share_url: &str) -> Result<SharedObject, DownloadError> {
         let share_url: Url = share_url
             .parse()
             .map_err(|e| DownloadError::Custom(format!("{e}")))?;
@@ -979,7 +974,7 @@ impl Download {
                 &mut buf,
                 self.encryption_key.clone(),
                 self.slabs.clone(),
-                quic::DownloadOptions{
+                quic::DownloadOptions {
                     offset: state.offset as usize,
                     length: Some(rem as usize),
                     ..Default::default()
@@ -1049,7 +1044,7 @@ impl DownloadShared {
                 &mut buf,
                 self.encryption_key.clone(),
                 self.slabs.clone(),
-                quic::DownloadOptions{
+                quic::DownloadOptions {
                     offset: state.offset as usize,
                     length: Some(rem as usize),
                     ..Default::default()

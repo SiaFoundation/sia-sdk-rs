@@ -2,7 +2,9 @@ pub mod app_client;
 mod slabs;
 
 pub mod quic;
-use crate::quic::{DownloadError, DownloadOptions, Downloader, SlabFetcher, UploadError, UploadOptions, Uploader};
+use crate::quic::{
+    DownloadError, DownloadOptions, Downloader, SlabFetcher, UploadError, UploadOptions, Uploader,
+};
 
 use crate::app_client::{Client, ObjectsCursor, RegisterAppRequest};
 use log::debug;

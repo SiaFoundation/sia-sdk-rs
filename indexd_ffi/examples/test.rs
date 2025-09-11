@@ -1,6 +1,7 @@
-use std::{sync::Arc, time::{Duration, SystemTime}};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
-use indexd_ffi::{AppMeta, UploadOptions, UploadProgressCallback, SDK};
+use indexd_ffi::{AppMeta, DownloadOptions, SDK, UploadOptions, UploadProgressCallback};
 use log::info;
 
 pub struct ProgressLogger;
@@ -46,12 +47,16 @@ async fn main() {
 
     let encryption_key: [u8; 32] = rand::random();
     let writer = sdk
-        .upload(encryption_key.to_vec(), None, UploadOptions{
-            data_shards: 1,
-            parity_shards: 3,
-            max_inflight: 12,
-            progress_callback: Some(Arc::new(ProgressLogger)),
-        })
+        .upload(
+            encryption_key.to_vec(),
+            None,
+            UploadOptions {
+                data_shards: 1,
+                parity_shards: 3,
+                max_inflight: 12,
+                progress_callback: Some(Arc::new(ProgressLogger)),
+            },
+        )
         .await
         .expect("writer");
     let data = vec![1u8; 2 << 22];
@@ -63,7 +68,15 @@ async fn main() {
     info!("upload complete, got {} slabs", object.slabs.len());
 
     let reader = sdk
-        .download(&object, encryption_key.to_vec())
+        .download(
+            encryption_key.to_vec(),
+            &object,
+            DownloadOptions {
+                max_inflight: 12,
+                offset: 0,
+                length: None,
+            },
+        )
         .await
         .expect("reader init");
 
