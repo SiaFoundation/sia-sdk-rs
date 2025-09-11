@@ -848,7 +848,7 @@ mod tests {
                     length: 512,
                 },
             ],
-            meta: b"hello world!".to_vec(),
+            meta: b"hello world!".to_vec().into(),
             created_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
                 .unwrap(),
             updated_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
@@ -916,7 +916,7 @@ mod tests {
                     length: 512,
                 },
             ],
-            meta: b"hello world!".to_vec(),
+            meta: b"hello world!".to_vec().into(),
             created_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
                 .unwrap(),
             updated_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
@@ -1022,7 +1022,7 @@ mod tests {
                     length: 512,
                 },
             ],
-            meta: b"hello world!".to_vec(),
+            meta: b"hello world!".to_vec().into(),
             created_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
                 .unwrap(),
             updated_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)

@@ -63,10 +63,8 @@ pub struct PinnedSlab {
     pub sectors: Vec<Sector>,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Serialize, PartialEq, Default)]
 pub struct EncryptedMetadata(Vec<u8>);
-
 
 impl From<Vec<u8>> for EncryptedMetadata {
     fn from(value: Vec<u8>) -> Self {
@@ -84,13 +82,21 @@ pub type DecryptionError = chacha20poly1305::aead::Error;
 pub type DecryptionResult<T> = std::result::Result<T, DecryptionError>;
 
 impl EncryptedMetadata {
+    /// Encrypts the provided metadata using the given key. The cipher used is
+    /// XChaCha20Poly1305 with uses XChaCha20 for encryption and Poly1305 for
+    /// authentication. The resulting encrypted data is prefixed with a 24-byte
+    /// nonce.
     pub fn encrypt(meta: &[u8], key: &EncryptionKey) -> Self {
         let cipher = chacha20poly1305::XChaCha20Poly1305::new(key.as_ref().into());
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
         let encrypted = cipher
             .encrypt(&nonce, meta)
             .expect("encryption never fails");
-        Self(encrypted)
+        nonce
+            .into_iter()
+            .chain(encrypted.into_iter())
+            .collect::<Vec<u8>>()
+            .into()
     }
 
     pub fn decrypt(&self, key: &EncryptionKey) -> DecryptionResult<Vec<u8>> {
@@ -245,7 +251,7 @@ mod test {
                 length: 100,
             },
         ];
-        let meta = b"hello world".to_vec();
+        let meta = b"hello world".to_vec().into();
 
         let mut obj = Object::new(slabs.clone(), Some(meta));
         obj.validate_object().expect("object should be valid");
@@ -262,5 +268,25 @@ mod test {
         // tamper with obj to break validation
         obj.slabs = vec![];
         assert!(obj.validate_object().is_err());
+    }
+
+    #[test]
+    fn test_metadata_encryption() {
+        let key: EncryptionKey = [1u8; 32].into();
+        let meta = b"this is some metadata".to_vec();
+
+        let encrypted = EncryptedMetadata::encrypt(&meta, &key);
+        assert_ne!(encrypted.as_ref(), &meta);
+
+        let decrypted = encrypted.decrypt(&key).expect("decryption should work");
+        assert_eq!(decrypted, meta);
+
+        // decryption with wrong key should fail
+        let wrong_key: EncryptionKey = [2u8; 32].into();
+        assert!(encrypted.decrypt(&wrong_key).is_err());
+
+        // decryption of invalid data should fail
+        let invalid_encrypted = EncryptedMetadata::from(vec![0u8; 100]);
+        assert!(invalid_encrypted.decrypt(&key).is_err());
     }
 }
