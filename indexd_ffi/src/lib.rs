@@ -734,7 +734,7 @@ impl SDK {
         Ok(slab_id.to_string())
     }
 
-    // UnpinSlab unpins a slab from the indexer.
+    /// UnpinSlab unpins a slab from the indexer.
     pub async fn unpin_slab(&self, slab_id: String) -> Result<(), Error> {
         let slab_id = Hash256::from_str(slab_id.as_str())?;
         self.app_client.unpin_slab(&slab_id).await?;
