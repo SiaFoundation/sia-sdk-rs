@@ -552,6 +552,10 @@ impl SDK {
         Ok(resp)
     }
 
+    /// Uploads data to the Sia network and pins it to the indexer
+    ///
+    /// # Returns
+    /// An object representing the uploaded data.
     pub async fn upload(
         &self,
         encryption_key: Vec<u8>,
@@ -588,7 +592,10 @@ impl SDK {
         })
     }
 
-    /// Initiates a download of all the data specified in the slabs.
+    /// Initiates a download of the data referenced by the object
+    ///
+    /// # Returns
+    /// A [`Download`] object that can be used to read the data in chunks
     pub async fn download(
         &self,
         object: &PinnedObject,
@@ -598,7 +605,10 @@ impl SDK {
         self.download_range(encryption_key, object, 0, length).await
     }
 
-    /// Initiates a download of the data specified in the slabs.
+    /// Initiates a download of the data referenced by the object, starting at `offset` and reading `length` bytes.
+    ///
+    /// # Returns
+    /// A [`Download`] object that can be used to read the data in chunks
     pub async fn download_range(
         &self,
         encryption_key: Vec<u8>,
@@ -633,6 +643,9 @@ impl SDK {
     }
 
     /// Initiates a download of a contiguous range of the shared object.
+    ///
+    /// # Returns
+    /// A [`DownloadShared`] object that can be used to read the data in chunks
     pub async fn download_shared_range(
         &self,
         share_url: String,
@@ -666,6 +679,9 @@ impl SDK {
     }
 
     /// Initiates a download of all data in the shared object.
+    ///
+    /// # Returns
+    /// A [`DownloadShared`] object that can be used to read the data in chunks
     pub async fn download_shared(
         &self,
         share_url: String,
@@ -747,10 +763,8 @@ impl SDK {
     /// parameter to avoid missing or duplicating objects.
     ///
     /// # Arguments
-    /// `cursor` can be used to paginate through the results.
-    /// If `cursor` is `None`, the first page of results will be returned.
-    ///
-    /// `limit` specifies the maximum number of objects to return.
+    /// * `cursor` can be used to paginate through the results. If `cursor` is `None`, the first page of results will be returned.
+    /// * `limit` specifies the maximum number of objects to return.
     pub async fn objects(
         &self,
         cursor: Option<ObjectsCursor>,
