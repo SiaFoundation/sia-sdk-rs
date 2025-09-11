@@ -339,6 +339,7 @@ impl Client {
         state
             .update(method.as_str().as_bytes())
             .update(url.host_str().unwrap_or("").as_bytes())
+            .update(url.path().as_bytes())
             .update(&valid_until.unix_timestamp().to_le_bytes());
         if let Some(body) = body {
             state.update(body);
@@ -449,13 +450,13 @@ mod tests {
     #[test]
     fn test_request_hash() {
         let method = Method::POST;
-        let url = Url::parse("https://foo.bar").unwrap();
+        let url = Url::parse("https://foo.bar/foo").unwrap();
         let valid_until = OffsetDateTime::from_unix_timestamp(123).unwrap();
         let body = b"hello world!";
         let hash = Client::request_hash(&url, method, Some(body), valid_until);
         assert_eq!(
             hash,
-            hash_256!("b94c04c0a6ffbac6bfa9ce847d2a5de34db3bc33ac4824412acf2597ba043bce")
+            hash_256!("a9f0bda1b97b7d44ae6369ac830851a115311bb59aa2d848beda6ae95d10ad18")
         )
     }
 
@@ -484,7 +485,7 @@ mod tests {
             params[2],
             (
                 "SiaIdx-Signature",
-                "1642aef3c9df1e588d0b21c7084d75040701bac3a8d25c56ccdb8e34e8635977cdfa698efa52d428565f38c310929d4a17434967937e9f5241e03e0c8436380a"
+                "458283fd707c9d170d5e1814944f35893c53c9445fd46c74a6b285bf3029bf404c9af509ea271d811726bd20d8c7d8fe4b9efdc4bebb445f18059eca886ece03"
                     .to_string()
             )
         );
@@ -509,7 +510,7 @@ mod tests {
             params[2],
             (
                 "SiaIdx-Signature",
-                "b3c53d2314fffeb67b21d0b0b5c62440d506ce2e93652ea921e4da5c7be0e5e6e1e78c10a48ac639c2f7c3174e9b700a34793e30322488463bac706a50149c01"
+                "7411fc80f920cb098690498133be075cd43bf6385fc8348fe1946e29d909891680d45651dfb0a6fd9f7196a971816c21441852362680f2fe4cb935de8f90380b"
                     .to_string()
             )
         );
