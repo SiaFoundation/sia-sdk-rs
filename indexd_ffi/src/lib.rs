@@ -281,6 +281,27 @@ impl TryInto<sia::rhp::Host> for Host {
     }
 }
 
+#[derive(uniffi::Record)]
+pub struct Object {
+    pub key: String,
+    pub slabs: Vec<Slab>,
+    pub meta: Vec<u8>,
+    pub created_at: SystemTime,
+    pub updated_at: SystemTime,
+}
+
+impl From<indexd::Object> for Object {
+    fn from(o: indexd::Object) -> Self {
+        Self {
+            key: o.key.to_string(),
+            slabs: o.slabs.into_iter().map(|s| s.into()).collect(),
+            meta: o.meta,
+            created_at: o.created_at.into(),
+            updated_at: o.updated_at.into(),
+        }
+    }
+}
+
 /// A Slab represents a contiguous erasure-coded segment of a file stored on the Sia network.
 #[derive(uniffi::Record)]
 pub struct Slab {
@@ -497,6 +518,7 @@ impl SDK {
         encryption_key: Vec<u8>,
         data_shards: u8,
         parity_shards: u8,
+        metadata: Option<Vec<u8>>,
     ) -> Result<Upload, UploadError> {
         let uploader = match self.uploader.get() {
             Some(uploader) => uploader.clone(),
@@ -509,7 +531,13 @@ impl SDK {
             .map_err(|err| UploadError::Custom(err.to_string()))?;
         let result = tokio::spawn(async move {
             let res = uploader
-                .upload(inner_buf, encryption_key, data_shards, parity_shards)
+                .upload(
+                    inner_buf,
+                    encryption_key,
+                    data_shards,
+                    parity_shards,
+                    metadata,
+                )
                 .await
                 .map_err(|e| e.into());
             let _ = tx.send(res);
@@ -524,18 +552,18 @@ impl SDK {
     /// Initiates a download of all the data specified in the slabs.
     pub async fn download(
         &self,
-        slabs: &[Slab],
+        object: &Object,
         encryption_key: Vec<u8>,
     ) -> Result<Download, DownloadError> {
-        let length = slabs.iter().fold(0_u64, |v, s| v + s.length as u64);
-        self.download_range(encryption_key, slabs, 0, length).await
+        let length = object.slabs.iter().fold(0_u64, |v, s| v + s.length as u64);
+        self.download_range(encryption_key, object, 0, length).await
     }
 
     /// Initiates a download of the data specified in the slabs.
     pub async fn download_range(
         &self,
         encryption_key: Vec<u8>,
-        slabs: &[Slab],
+        object: &Object,
         offset: u64,
         length: u64,
     ) -> Result<Download, DownloadError> {
@@ -543,7 +571,8 @@ impl SDK {
             Some(downloader) => downloader.clone(),
             None => return Err(DownloadError::NotConnected),
         };
-        let slabs = slabs
+        let slabs = object
+            .slabs
             .iter()
             .map(|s| {
                 Ok(SlabSlice {
@@ -645,7 +674,7 @@ impl SDK {
     }
 }
 
-pub type UploadReceiver = Mutex<Option<oneshot::Receiver<Result<Vec<SlabSlice>, UploadError>>>>;
+pub type UploadReceiver = Mutex<Option<oneshot::Receiver<Result<indexd::Object, UploadError>>>>;
 
 /// Uploads data to the Sia network. It does so in chunks to support large files in
 /// arbitrary languages.
@@ -678,7 +707,7 @@ impl Upload {
     ///
     /// The caller must store the metadata locally in order to download
     /// it in the future.
-    pub async fn finalize(&self) -> Result<Vec<Slab>, UploadError> {
+    pub async fn finalize(&self) -> Result<Object, UploadError> {
         self.reader.close()?;
         let rx = self
             .rx
@@ -686,13 +715,8 @@ impl Upload {
             .map_err(|e| UploadError::Custom(e.to_string()))?
             .take()
             .ok_or(UploadError::Closed)?;
-        let slabs = rx
-            .await
-            .map_err(|e| UploadError::Custom(e.to_string()))??
-            .into_iter()
-            .map(|s| s.into())
-            .collect();
-        Ok(slabs)
+        let object = rx.await.map_err(|e| UploadError::Custom(e.to_string()))??;
+        Ok(object.into())
     }
 }
 

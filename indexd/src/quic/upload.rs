@@ -19,7 +19,7 @@ use tokio_util::task::TaskTracker;
 use crate::app_client::{Client as AppClient, SlabPinParams};
 use crate::quic::client::{Client, HostQueue};
 use crate::quic::{self, QueueError};
-use crate::{Sector, Slab, SlabSlice};
+use crate::{Object, Sector, Slab, SlabSlice};
 
 #[derive(Debug, Error)]
 pub enum UploadError {
@@ -162,7 +162,8 @@ impl Uploader {
         encryption_key: EncryptionKey,
         data_shards: u8,
         parity_shards: u8,
-    ) -> Result<Vec<SlabSlice>, UploadError> {
+        meta: Option<Vec<u8>>,
+    ) -> Result<Object, UploadError> {
         if self.client.hosts().is_empty() {
             let hosts = self.app_client.hosts().await?;
             self.client.update_hosts(hosts);
@@ -318,6 +319,9 @@ impl Uploader {
             };
         }
         read_slab_res.await??;
-        Ok(slabs)
+
+        let object = Object::new(slabs, meta);
+        self.app_client.save_object(&object).await?;
+        Ok(object)
     }
 }

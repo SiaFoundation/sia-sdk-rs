@@ -179,24 +179,25 @@ impl SDK<ConnectedState> {
         encryption_key: EncryptionKey,
         data_shards: u8,
         parity_shards: u8,
-    ) -> Result<Vec<SlabSlice>> {
-        let slabs = self
+        metadata: Option<Vec<u8>>,
+    ) -> Result<Object> {
+        let object = self
             .state
             .uploader
-            .upload(reader, encryption_key, data_shards, parity_shards)
+            .upload(reader, encryption_key, data_shards, parity_shards, metadata)
             .await?;
-        Ok(slabs)
+        Ok(object)
     }
 
     pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
         writer: &mut W,
         encryption_key: EncryptionKey,
-        slabs: &[SlabSlice],
+        object: &Object,
     ) -> Result<()> {
         self.state
             .downloader
-            .download(writer, encryption_key, slabs)
+            .download(writer, encryption_key, &object.slabs)
             .await?;
         Ok(())
     }
@@ -205,13 +206,13 @@ impl SDK<ConnectedState> {
         &self,
         writer: &mut W,
         encryption_key: EncryptionKey,
-        slabs: &[SlabSlice],
+        object: &Object,
         offset: usize,
         length: usize,
     ) -> Result<()> {
         self.state
             .downloader
-            .download_range(writer, encryption_key, slabs, offset, length)
+            .download_range(writer, encryption_key, &object.slabs, offset, length)
             .await?;
         Ok(())
     }
@@ -246,6 +247,11 @@ impl SDK<ConnectedState> {
             .object(key)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
+            .and_then(|obj| {
+                obj.validate_object()
+                    .map(|_| obj)
+                    .map_err(|err| Error::App(err.to_string()))
+            })
     }
 
     pub async fn objects(
@@ -258,6 +264,15 @@ impl SDK<ConnectedState> {
             .objects(cursor, limit)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
+            .and_then(|objs| {
+                objs.into_iter()
+                    .map(|obj| {
+                        obj.validate_object()
+                            .map(|_| obj)
+                            .map_err(|err| Error::App(err.to_string()))
+                    })
+                    .collect()
+            })
     }
 
     pub async fn save_object(&self, object: &Object) -> Result<()> {
@@ -265,7 +280,8 @@ impl SDK<ConnectedState> {
             .app
             .save_object(object)
             .await
-            .map_err(|e| Error::App(format!("{e:?}")))
+            .map_err(|e| Error::App(format!("{e:?}")))?;
+        Ok(())
     }
 
     pub async fn delete_object(&self, key: &Hash256) -> Result<()> {
