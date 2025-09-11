@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use indexd::Url;
-use indexd::app_client::{Client as AppClient, RegisterAppRequest};
+use indexd::app_client::{Client as AppClient, RegisterAppRequest, SlabPinParams};
 use indexd::quic::{Client as HostClient, Downloader, Uploader};
 use log::debug;
 use rustls::{ClientConfig, RootCertStore};
@@ -196,6 +196,17 @@ impl From<indexd::Sector> for SlabSector {
     }
 }
 
+impl TryInto<indexd::Sector> for SlabSector {
+    type Error = HexParseError;
+
+    fn try_into(self) -> Result<indexd::Sector, Self::Error> {
+        Ok(indexd::Sector {
+            host_key: PublicKey::from_str(self.host_key.as_str())?,
+            root: Hash256::from_str(self.root.as_str())?,
+        })
+    }
+}
+
 #[derive(Clone, uniffi::Record)]
 pub struct PinnedSlab {
     pub id: String,
@@ -210,6 +221,28 @@ impl From<indexd::app_client::Slab> for PinnedSlab {
             sectors: s.sectors.into_iter().map(|s| s.into()).collect(),
             encryption_key: s.encryption_key.to_vec(),
         }
+    }
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct PinParams {
+    pub encryption_key: Vec<u8>,
+    pub min_shards: u8,
+    pub sectors: Vec<SlabSector>,
+}
+
+impl TryInto<SlabPinParams> for PinParams {
+    type Error = HexParseError;
+
+    fn try_into(self) -> Result<SlabPinParams, Self::Error> {
+        Ok(SlabPinParams {
+            encryption_key: self.encryption_key.try_into().expect("SD"),
+            min_shards: self.min_shards.into(),
+            sectors: self.sectors
+                .into_iter()
+                .map(|s| s.try_into())
+                .collect::<Result<Vec<_>, _>>()?, // <-- collect into Result
+        })
     }
 }
 
@@ -671,6 +704,12 @@ impl SDK {
         let slab_id = Hash256::from_str(slab_id.as_str())?;
         let slab = self.app_client.slab(&slab_id).await?;
         Ok(slab.into())
+    }
+
+    /// Pins a slab to the indexer.
+    pub async fn pin_slab(&self, slab_pin_params: PinParams)-> Result<String, Error> {
+        let slab_id = self.app_client.pin_slab(slab_pin_params.try_into()?).await?;
+        Ok(slab_id.to_string())
     }
 }
 
