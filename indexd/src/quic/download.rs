@@ -21,6 +21,10 @@ use crate::quic::client::Client;
 use crate::quic::{self};
 use crate::{Sector, Slab, SlabSlice};
 
+/// A SlabIterator can be used to iterate over slabs to be downloaded.
+/// This is used to abstract over different sources of slabs, such as
+/// a pre-fetched list of slabs, or fetching slabs on-demand from the
+/// indexer.
 pub trait SlabIterator {
     type Error: Debug;
 
@@ -73,6 +77,9 @@ impl SlabFetchCache {
     }
 }
 
+/// A SlabFetcher fetches slabs on-demand from the indexer.
+/// It internally caches fetched slabs to avoid redundant
+/// network requests.
 #[derive(Clone)]
 pub struct SlabFetcher {
     cache: Arc<SlabFetchCache>,
