@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use chacha20poly1305::{
-    XChaCha20Poly1305, XNonce,
-    aead::{Aead, AeadCore, KeyInit, OsRng},
-};
+use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 use sia::encoding::{SiaEncodable, SiaEncode};
