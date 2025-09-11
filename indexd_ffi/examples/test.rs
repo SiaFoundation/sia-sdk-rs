@@ -113,7 +113,14 @@ async fn main() {
     info!("downloading shared object");
 
     let reader = sdk
-        .download_shared(&share_url)
+        .download_shared(
+            &share_url,
+            DownloadOptions {
+                max_inflight: 12,
+                offset: 0,
+                length: None,
+            },
+        )
         .await
         .expect("download shared");
     let mut read_data = Vec::with_capacity(data.len());

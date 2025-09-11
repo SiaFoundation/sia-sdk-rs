@@ -206,9 +206,7 @@ pub struct PinnedObject {
 impl PinnedObject {
     /// Calculates the total size of the object by summing the lengths of its slabs.
     pub fn size(&self) -> u64 {
-        self.slabs
-            .iter()
-            .fold(0_u64, |v, s| v + s.length as u64)
+        self.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
     }
 }
 
@@ -419,9 +417,7 @@ pub struct SharedObject {
 impl SharedObject {
     /// Calculates the total size of the object by summing the lengths of its slabs.
     pub fn size(&self) -> u64 {
-        self.slabs
-            .iter()
-            .fold(0_u64, |v, s| v + s.length as u64)
+        self.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
     }
 }
 
@@ -613,15 +609,14 @@ impl SDK {
         let mut progress_tx: Option<UnboundedSender<()>> = None;
         if let Some(callback) = options.progress_callback {
             let total_shards = options.data_shards as u64 + options.parity_shards as u64;
-            let slab_shards = total_shards;
+            let slab_size = total_shards * SECTOR_SIZE as u64;
             let (tx, mut rx) = mpsc::unbounded_channel();
             tokio::spawn(async move {
                 let mut sectors: u64 = 0;
                 while rx.recv().await.is_some() {
                     sectors += 1;
                     let size = sectors * SECTOR_SIZE as u64;
-                    let slabs_size =
-                        sectors.div_ceil(slab_shards) * total_shards * SECTOR_SIZE as u64;
+                    let slabs_size = sectors.div_ceil(total_shards) * slab_size;
                     callback.progress(size, slabs_size);
                 }
             });
@@ -677,28 +672,29 @@ impl SDK {
                 })
             })
             .collect::<Result<Vec<SlabSlice>, HexParseError>>()?;
-        let offset = options.offset;
-        let length = options.length.unwrap_or(object.size() - offset);
         let encryption_key = EncryptionKey::try_from(encryption_key.as_ref())
             .map_err(|err| DownloadError::Custom(err.to_string()))?;
         let slabs = SlabFetcher::new(self.app_client.clone(), slabs.clone());
         Ok(Download {
             encryption_key,
             slabs,
-            state: Arc::new(Mutex::new(DownloadState { offset, length })),
+            state: Arc::new(Mutex::new(DownloadState {
+                offset: options.offset,
+                length: options.length.unwrap_or(object.size()),
+                max_inflight: options.max_inflight,
+            })),
             downloader,
         })
     }
 
-    /// Initiates a download of a contiguous range of the shared object.
+    /// Initiates a download of all data in the shared object.
     ///
     /// # Returns
     /// A [`DownloadShared`] object that can be used to read the data in chunks
-    pub async fn download_shared_range(
+    pub async fn download_shared(
         &self,
-        share_url: String,
-        offset: u64,
-        length: u64,
+        share_url: &str,
+        options: DownloadOptions,
     ) -> Result<DownloadShared, DownloadError> {
         let downloader = match self.downloader.get() {
             Some(downloader) => downloader.clone(),
@@ -721,41 +717,10 @@ impl SDK {
                     sectors: s.sectors.clone(),
                 })
                 .collect(),
-            state: Arc::new(Mutex::new(DownloadState { offset, length })),
-            downloader,
-        })
-    }
-
-    /// Initiates a download of all data in the shared object.
-    ///
-    /// # Returns
-    /// A [`DownloadShared`] object that can be used to read the data in chunks
-    pub async fn download_shared(&self, share_url: &str) -> Result<DownloadShared, DownloadError> {
-        let downloader = match self.downloader.get() {
-            Some(downloader) => downloader.clone(),
-            None => return Err(DownloadError::NotConnected),
-        };
-        let share_url: Url = share_url
-            .parse()
-            .map_err(|e| DownloadError::Custom(format!("{e}")))?;
-        let (object, encryption_key) = self.app_client.shared_object(share_url).await?;
-        let total_length = object.size();
-        Ok(DownloadShared {
-            encryption_key: EncryptionKey::from(encryption_key),
-            slabs: object
-                .slabs
-                .iter()
-                .map(|s| indexd::Slab {
-                    encryption_key: s.encryption_key.clone(),
-                    min_shards: s.min_shards,
-                    offset: s.offset,
-                    length: s.length,
-                    sectors: s.sectors.clone(),
-                })
-                .collect(),
             state: Arc::new(Mutex::new(DownloadState {
-                offset: 0,
-                length: total_length,
+                offset: options.offset,
+                length: options.length.unwrap_or(object.size()),
+                max_inflight: options.max_inflight,
             })),
             downloader,
         })
@@ -923,6 +888,7 @@ impl Upload {
 struct DownloadState {
     offset: u64,
     length: u64,
+    max_inflight: u8,
 }
 
 /// Downloads data from the Sia network. It does so in chunks to support large files in
@@ -977,7 +943,7 @@ impl Download {
                 quic::DownloadOptions {
                     offset: state.offset as usize,
                     length: Some(rem as usize),
-                    ..Default::default()
+                    max_inflight: state.max_inflight as usize,
                 },
             )
             .await?;
