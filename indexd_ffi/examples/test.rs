@@ -67,10 +67,7 @@ async fn main() {
         .expect("failed to pin slab");
     info!("Pinned slab: {}", slab_id.clone());
 
-    let slab = sdk
-        .slab(slab_id.clone())
-        .await
-        .expect("failed to get slab");
+    let slab = sdk.slab(slab_id.clone()).await.expect("failed to get slab");
     if slab.id != slab_id.clone() {
         panic!("slab id mismatch");
     }
