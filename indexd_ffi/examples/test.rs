@@ -1,3 +1,5 @@
+use std::time::{Duration, SystemTime};
+
 use indexd_ffi::{AppMeta, SDK};
 use log::info;
 
@@ -70,5 +72,28 @@ async fn main() {
         println!("{:?} ({})", &read_data[..100], read_data.len());
         panic!("data mismatch"); // not using assert_eq to avoid printing huge data
     }
-    info!("done");
+    info!("download complete, data matches original");
+
+    info!("sharing object");
+
+    let share_url = sdk.object_share_url(object.key, encryption_key.to_vec(), SystemTime::now() + Duration::from_secs(600)).expect("share url");
+    info!("share url: {}", share_url);
+
+    info!("downloading shared object");
+
+    let reader = sdk.download_shared(share_url).await.expect("download shared");
+    let mut read_data = Vec::with_capacity(data.len());
+    loop {
+        let chunk = reader.read_chunk().await.expect("read chunk");
+        if chunk.is_empty() {
+            break;
+        }
+        read_data.extend_from_slice(&chunk);
+    }
+    if data != read_data {
+        println!("{:?} ({})", &data[..100], data.len());
+        println!("{:?} ({})", &read_data[..100], read_data.len());
+        panic!("data mismatch"); // not using assert_eq to avoid printing huge data
+    }
+    info!("download complete, data matches original");
 }

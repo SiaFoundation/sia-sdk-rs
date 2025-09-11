@@ -1,11 +1,12 @@
 uniffi::setup_scaffolding!();
 
+use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use indexd::app_client::{Client as AppClient, RegisterAppRequest};
-use indexd::quic::{Client as HostClient, Downloader, Uploader};
+use indexd::quic::{Client as HostClient, Downloader, SlabFetcher, Uploader};
 use indexd::{SlabSlice, Url};
 use log::debug;
 use rustls::{ClientConfig, RootCertStore};
@@ -65,6 +66,9 @@ pub enum UploadError {
 pub enum DownloadError {
     #[error("download error: {0}")]
     Download(#[from] indexd::quic::DownloadError),
+
+    #[error("app error: {0}")]
+    AppClient(#[from] indexd::app_client::Error),
 
     #[error("hex error: {0}")]
     HexParseError(#[from] sia::types::HexParseError),
@@ -299,8 +303,8 @@ pub struct PinnedSlab {
     pub sectors: Vec<PinnedSector>,
 }
 
-impl From<indexd::app_client::Slab> for PinnedSlab {
-    fn from(s: indexd::app_client::Slab) -> Self {
+impl From<indexd::PinnedSlab> for PinnedSlab {
+    fn from(s: indexd::PinnedSlab) -> Self {
         Self {
             id: s.id.to_string(),
             encryption_key: s.encryption_key.as_ref().to_vec(),
@@ -376,6 +380,26 @@ impl From<indexd::app_client::ObjectsCursor> for ObjectsCursor {
             key: c.key.to_string(),
         }
     }
+}
+
+/// A slab that has been shared via a share URL.
+#[derive(uniffi::Record)]
+pub struct SharedSlab {
+    pub slab_id: String,
+    pub encryption_key: Vec<u8>,
+    pub min_shards: u8,
+    pub sectors: Vec<PinnedSector>,
+    pub offset: u32,
+    pub length: u32,
+}
+
+/// An object that has been shared via a share URL.
+#[derive(uniffi::Record)]
+pub struct SharedObject {
+    pub key: String,
+    pub slabs: Vec<SharedSlab>,
+    pub meta: Option<Vec<u8>>,
+    pub encryption_key: Vec<u8>,
 }
 
 /// An SDK enables interaction with an indexer and
@@ -599,11 +623,116 @@ impl SDK {
             .collect::<Result<Vec<SlabSlice>, HexParseError>>()?;
         let encryption_key = EncryptionKey::try_from(encryption_key.as_ref())
             .map_err(|err| DownloadError::Custom(err.to_string()))?;
+        let slabs = SlabFetcher::new(self.app_client.clone(), slabs.clone());
         Ok(Download {
             encryption_key,
             slabs,
             state: Arc::new(Mutex::new(DownloadState { offset, length })),
             downloader,
+        })
+    }
+
+    /// Initiates a download of a contiguous range of the shared object.
+    pub async fn download_shared_range(
+        &self,
+        share_url: String,
+        offset: u64,
+        length: u64,
+    ) -> Result<DownloadShared, DownloadError> {
+        let downloader = match self.downloader.get() {
+            Some(downloader) => downloader.clone(),
+            None => return Err(DownloadError::NotConnected),
+        };
+        let share_url: Url = share_url
+            .parse()
+            .map_err(|e| DownloadError::Custom(format!("{e}")))?;
+        let (object, encryption_key) = self.app_client.shared_object(share_url).await?;
+        Ok(DownloadShared {
+            encryption_key: EncryptionKey::from(encryption_key),
+            slabs: object
+                .slabs
+                .iter()
+                .map(|s| indexd::Slab {
+                    encryption_key: s.encryption_key.clone(),
+                    min_shards: s.min_shards,
+                    offset: s.offset,
+                    length: s.length,
+                    sectors: s.sectors.clone(),
+                })
+                .collect(),
+            state: Arc::new(Mutex::new(DownloadState { offset, length })),
+            downloader,
+        })
+    }
+
+    /// Initiates a download of all data in the shared object.
+    pub async fn download_shared(
+        &self,
+        share_url: String,
+    ) -> Result<DownloadShared, DownloadError> {
+        let downloader = match self.downloader.get() {
+            Some(downloader) => downloader.clone(),
+            None => return Err(DownloadError::NotConnected),
+        };
+        let share_url: Url = share_url
+            .parse()
+            .map_err(|e| DownloadError::Custom(format!("{e}")))?;
+        let (object, encryption_key) = self.app_client.shared_object(share_url).await?;
+        let total_length = object
+            .slabs
+            .iter()
+            .fold(0, |sum, slab| sum + slab.length as u64);
+        Ok(DownloadShared {
+            encryption_key: EncryptionKey::from(encryption_key),
+            slabs: object
+                .slabs
+                .iter()
+                .map(|s| indexd::Slab {
+                    encryption_key: s.encryption_key.clone(),
+                    min_shards: s.min_shards,
+                    offset: s.offset,
+                    length: s.length,
+                    sectors: s.sectors.clone(),
+                })
+                .collect(),
+            state: Arc::new(Mutex::new(DownloadState {
+                offset: 0,
+                length: total_length,
+            })),
+            downloader,
+        })
+    }
+
+    /// Fetches the metadata for a shared object via a share URL.
+    pub async fn shared_object(&self, share_url: String) -> Result<SharedObject, DownloadError> {
+        let share_url: Url = share_url
+            .parse()
+            .map_err(|e| DownloadError::Custom(format!("{e}")))?;
+        let (object, encryption_key) = self.app_client.shared_object(share_url).await?;
+
+        Ok(SharedObject {
+            key: object.key,
+            slabs: object
+                .slabs
+                .into_iter()
+                .map(|s| SharedSlab {
+                    slab_id: s.id.to_string(),
+                    encryption_key: s.encryption_key.as_ref().to_vec(),
+                    min_shards: s.min_shards,
+                    offset: s.offset as u32,
+                    length: s.length as u32,
+                    sectors: s
+                        .sectors
+                        .into_iter()
+                        .map(|sec| PinnedSector {
+                            root: sec.root.to_string(),
+                            host_key: sec.host_key.to_string(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            meta: object.meta,
+            encryption_key: encryption_key.to_vec(),
         })
     }
 
@@ -667,14 +796,6 @@ impl SDK {
         let slab_id = Hash256::from_str(slab_id.as_str())?;
         let slab = self.app_client.slab(&slab_id).await?;
         Ok(slab.into())
-    }
-
-    pub async fn shared_object(&self, share_url: String) -> Result<PinnedObject, Error> {
-        let share_url: Url = share_url
-            .parse()
-            .map_err(|e| Error::Custom(format!("{e}")))?;
-        let (object, _) = self.app_client.shared_object(share_url).await?;
-        Ok(object.into())
     }
 
     /// Creates a signed URL that can be used to share object metadata
@@ -755,7 +876,7 @@ struct DownloadState {
 #[derive(uniffi::Object)]
 pub struct Download {
     encryption_key: EncryptionKey,
-    slabs: Vec<SlabSlice>,
+    slabs: SlabFetcher,
     state: Arc<Mutex<DownloadState>>,
     downloader: Arc<Downloader>,
 }
@@ -796,7 +917,65 @@ impl Download {
             .download_range(
                 &mut buf,
                 self.encryption_key.clone(),
-                &self.slabs,
+                self.slabs.clone(),
+                state.offset as usize,
+                rem as usize,
+            )
+            .await?;
+        self.update(buf.len() as u64);
+        Ok(buf)
+    }
+}
+
+/// Downloads data from the Sia network. It does so in chunks to support large files in
+/// arbitrary languages.
+///
+/// Language bindings should provide a higher-level implementation that wraps a stream.
+#[derive(uniffi::Object)]
+pub struct DownloadShared {
+    encryption_key: EncryptionKey,
+    slabs: VecDeque<indexd::Slab>,
+    state: Arc<Mutex<DownloadState>>,
+    downloader: Arc<Downloader>,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl DownloadShared {
+    fn rem(&self) -> u64 {
+        let state = self.state.lock().unwrap();
+        state.length.saturating_sub(state.offset)
+    }
+
+    fn update(&self, n: u64) {
+        let mut state = self.state.lock().unwrap();
+        state.offset += n;
+    }
+
+    fn params(&self) -> DownloadState {
+        self.state.lock().unwrap().clone()
+    }
+
+    /// Reads a chunk of data from the Sia network.
+    ///
+    /// # Returns
+    /// A vector containing the chunk of data read. If the vector is empty, the end of the download has been reached.
+    pub async fn read_chunk(&self) -> Result<Vec<u8>, DownloadError> {
+        const DOWNLOAD_CHUNK_SIZE: u64 = 1 << 19; // 512 KiB
+
+        let state = self.params();
+        let rem = state
+            .length
+            .saturating_sub(state.offset)
+            .min(DOWNLOAD_CHUNK_SIZE);
+        if rem == 0 {
+            return Ok(Vec::with_capacity(0));
+        }
+        let mut buf = Vec::with_capacity(rem as usize);
+        self.downloader
+            .download_range(
+                &mut buf,
+                self.encryption_key.clone(),
+                self.slabs.clone(),
                 state.offset as usize,
                 rem as usize,
             )
