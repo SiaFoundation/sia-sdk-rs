@@ -181,12 +181,12 @@ impl SDK<ConnectedState> {
         parity_shards: u8,
         metadata: Option<Vec<u8>>,
     ) -> Result<Object> {
-        let slabs = self
+        let object = self
             .state
             .uploader
-            .upload(reader, encryption_key, data_shards, parity_shards)
+            .upload(reader, encryption_key, data_shards, parity_shards, metadata)
             .await?;
-        Ok(Object::new(slabs, metadata))
+        Ok(object)
     }
 
     pub async fn download<W: AsyncWriteExt + Unpin>(

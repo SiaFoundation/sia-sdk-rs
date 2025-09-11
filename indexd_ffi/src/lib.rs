@@ -531,10 +531,15 @@ impl SDK {
             .map_err(|err| UploadError::Custom(err.to_string()))?;
         let result = tokio::spawn(async move {
             let res = uploader
-                .upload(inner_buf, encryption_key, data_shards, parity_shards)
+                .upload(
+                    inner_buf,
+                    encryption_key,
+                    data_shards,
+                    parity_shards,
+                    metadata,
+                )
                 .await
-                .map_err(|e| e.into())
-                .map(|slabs| indexd::Object::new(slabs, metadata));
+                .map_err(|e| e.into());
             let _ = tx.send(res);
         });
         Ok(Upload {
