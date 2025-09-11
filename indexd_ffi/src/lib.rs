@@ -191,6 +191,7 @@ pub struct NetAddress {
 pub struct PinnedObject {
     pub key: String,
     pub slabs: Vec<Slab>,
+    pub metadata: Vec<u8>,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
 }
@@ -200,6 +201,7 @@ impl From<indexd::Object> for PinnedObject {
         Self {
             key: o.key.to_string(),
             slabs: o.slabs.into_iter().map(|s| s.into()).collect(),
+            metadata: o.meta,
             created_at: o.created_at.into(),
             updated_at: o.updated_at.into(),
         }
@@ -280,27 +282,6 @@ impl TryInto<sia::rhp::Host> for Host {
             latitude: self.latitude,
             longitude: self.longitude,
         })
-    }
-}
-
-#[derive(uniffi::Record)]
-pub struct Object {
-    pub key: String,
-    pub slabs: Vec<Slab>,
-    pub meta: Vec<u8>,
-    pub created_at: SystemTime,
-    pub updated_at: SystemTime,
-}
-
-impl From<indexd::Object> for Object {
-    fn from(o: indexd::Object) -> Self {
-        Self {
-            key: o.key.to_string(),
-            slabs: o.slabs.into_iter().map(|s| s.into()).collect(),
-            meta: o.meta,
-            created_at: o.created_at.into(),
-            updated_at: o.updated_at.into(),
-        }
     }
 }
 
@@ -623,7 +604,7 @@ impl SDK {
     /// Initiates a download of all the data specified in the slabs.
     pub async fn download(
         &self,
-        object: &Object,
+        object: &PinnedObject,
         encryption_key: Vec<u8>,
     ) -> Result<Download, DownloadError> {
         let length = object.slabs.iter().fold(0_u64, |v, s| v + s.length as u64);
@@ -634,7 +615,7 @@ impl SDK {
     pub async fn download_range(
         &self,
         encryption_key: Vec<u8>,
-        object: &Object,
+        object: &PinnedObject,
         offset: u64,
         length: u64,
     ) -> Result<Download, DownloadError> {
@@ -801,7 +782,7 @@ impl Upload {
     ///
     /// The caller must store the metadata locally in order to download
     /// it in the future.
-    pub async fn finalize(&self) -> Result<Object, UploadError> {
+    pub async fn finalize(&self) -> Result<PinnedObject, UploadError> {
         self.reader.close()?;
         let rx = self
             .rx
