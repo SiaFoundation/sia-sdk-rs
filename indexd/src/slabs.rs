@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 use sia::encoding::SiaEncodable;
+use sia::encryption::EncryptionKey;
 use sia::signing::PublicKey;
 use sia::types::Hash256;
 
@@ -18,7 +19,7 @@ pub struct Sector {
 /// used to recover the original data.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Slab {
-    pub encryption_key: [u8; 32],
+    pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
     pub offset: usize,
@@ -80,7 +81,8 @@ mod test {
             encryption_key: [
                 152, 138, 169, 77, 22, 195, 154, 192, 91, 139, 241, 61, 75, 225, 38, 124, 225, 31,
                 187, 165, 80, 215, 75, 121, 115, 204, 235, 9, 90, 248, 68, 92,
-            ],
+            ]
+            .into(),
             sectors: vec![
                 Sector {
                     root: hash_256!(

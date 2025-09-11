@@ -6,6 +6,7 @@ use crate::quic::{DownloadError, Downloader, UploadError, Uploader};
 
 use crate::app_client::{Client, ObjectsCursor, RegisterAppRequest};
 use log::debug;
+use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
 use sia::signing::PrivateKey;
 use sia::types::Hash256;
@@ -175,7 +176,7 @@ impl SDK<ConnectedState> {
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
         reader: R,
-        encryption_key: [u8; 32],
+        encryption_key: EncryptionKey,
         data_shards: u8,
         parity_shards: u8,
     ) -> Result<Vec<SlabSlice>> {
@@ -190,22 +191,27 @@ impl SDK<ConnectedState> {
     pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
         writer: &mut W,
+        encryption_key: EncryptionKey,
         slabs: &[SlabSlice],
     ) -> Result<()> {
-        self.state.downloader.download(writer, slabs).await?;
+        self.state
+            .downloader
+            .download(writer, encryption_key, slabs)
+            .await?;
         Ok(())
     }
 
     pub async fn download_range<W: AsyncWriteExt + Unpin>(
         &self,
         writer: &mut W,
+        encryption_key: EncryptionKey,
         slabs: &[SlabSlice],
         offset: usize,
         length: usize,
     ) -> Result<()> {
         self.state
             .downloader
-            .download_range(writer, slabs, offset, length)
+            .download_range(writer, encryption_key, slabs, offset, length)
             .await?;
         Ok(())
     }

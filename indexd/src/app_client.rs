@@ -3,6 +3,7 @@ use std::time::Duration;
 use blake2b_simd::Params;
 use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
+use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
 
 use thiserror::Error;
@@ -76,7 +77,7 @@ pub struct RegisterAppResponse {
 #[serde(rename_all = "camelCase")]
 pub struct Slab {
     pub id: Hash256,
-    pub encryption_key: [u8; 32],
+    pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
 }
@@ -84,7 +85,7 @@ pub struct Slab {
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SlabPinParams {
-    pub encryption_key: [u8; 32],
+    pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
 }
@@ -550,7 +551,8 @@ mod tests {
             encryption_key: [
                 186, 153, 179, 170, 159, 95, 101, 177, 15, 130, 58, 19, 138, 144, 9, 91, 181, 119,
                 38, 225, 209, 47, 149, 22, 157, 210, 16, 232, 10, 151, 186, 160,
-            ],
+            ]
+            .into(),
             min_shards: 1,
             sectors: vec![Sector {
                 root: hash_256!("826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6"),
@@ -630,7 +632,8 @@ mod tests {
             encryption_key: [
                 186, 153, 179, 170, 159, 95, 101, 177, 15, 130, 58, 19, 138, 144, 9, 91, 181, 119,
                 38, 225, 209, 47, 149, 22, 157, 210, 16, 232, 10, 151, 186, 160,
-            ],
+            ]
+            .into(),
             min_shards: 1,
             sectors: vec![Sector {
                 root: hash_256!("826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6"),

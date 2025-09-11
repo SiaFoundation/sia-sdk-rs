@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use log::debug;
-use sia::encryption::encrypt_shards;
+use sia::encryption::{CipherReader, EncryptionKey, encrypt_shards};
 use sia::erasure_coding::{self, ErasureCoder};
 use sia::rhp;
 use sia::signing::{PrivateKey, PublicKey};
@@ -159,7 +159,7 @@ impl Uploader {
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
         mut r: R,
-        encryption_key: [u8; 32],
+        encryption_key: EncryptionKey,
         data_shards: u8,
         parity_shards: u8,
     ) -> Result<Vec<SlabSlice>, UploadError> {
@@ -173,7 +173,11 @@ impl Uploader {
         let account_key = self.account_key.clone();
         let read_slab_res: JoinHandle<Result<(), UploadError>> = tokio::spawn(async move {
             // use a buffered reader since the erasure coder reads 64 bytes at a time.
-            let mut r = BufReader::new(&mut r);
+            let r = BufReader::new(&mut r);
+
+            // encrypt the stream
+            let mut r = CipherReader::new(r, encryption_key, 0);
+
             let mut slab_index: usize = 0;
             let slab_upload_tasks = TaskTracker::new();
             loop {
@@ -183,12 +187,18 @@ impl Uploader {
                     break;
                 }
 
+                // unique encryption key for the slab
+                let slab_key = EncryptionKey::from(rand::random::<[u8; 32]>());
+
                 let mut shard_upload_tasks = JoinSet::new();
                 // encrypt and start uploading data_shards immediately
                 let mut unencrypted_data_shards = shards[..data_shards as usize].to_vec();
-                let encrypted_data_shards = spawn_blocking(move || {
-                    encrypt_shards(&encryption_key, 0, 0, &mut unencrypted_data_shards);
-                    unencrypted_data_shards
+                let encrypted_data_shards = spawn_blocking({
+                    let slab_key = slab_key.clone();
+                    move || {
+                        encrypt_shards(&slab_key, 0, 0, &mut unencrypted_data_shards);
+                        unencrypted_data_shards
+                    }
                 })
                 .await?;
 
@@ -206,11 +216,14 @@ impl Uploader {
                 }
 
                 // calculate the parity shards, encrypt, then upload them
-                let encrypted_parity_shards = spawn_blocking(move || -> Vec<Vec<u8>> {
-                    rs.encode_shards(&mut shards).unwrap();
-                    let mut parity_shards = shards[data_shards as usize..].to_vec();
-                    encrypt_shards(&encryption_key, data_shards, 0, &mut parity_shards);
-                    parity_shards
+                let encrypted_parity_shards = spawn_blocking({
+                    let slab_key = slab_key.clone();
+                    move || -> Vec<Vec<u8>> {
+                        rs.encode_shards(&mut shards).unwrap();
+                        let mut parity_shards = shards[data_shards as usize..].to_vec();
+                        encrypt_shards(&slab_key, data_shards, 0, &mut parity_shards);
+                        parity_shards
+                    }
                 })
                 .await?;
 
@@ -239,7 +252,7 @@ impl Uploader {
                             };
                             (data_shards + parity_shards) as usize
                         ],
-                        encryption_key,
+                        encryption_key: slab_key,
                         offset: 0,
                         length,
                         min_shards: data_shards,
