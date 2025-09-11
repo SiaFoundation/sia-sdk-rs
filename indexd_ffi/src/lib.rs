@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use indexd::Url;
-use indexd::app_client::{Client as AppClient, RegisterAppRequest, SlabPinParams};
+use indexd::app_client::{Client as AppClient, RegisterAppRequest, SlabPinParams as AppSlabPinParams};
 use indexd::quic::{Client as HostClient, Downloader, Uploader};
 use log::debug;
 use rustls::{ClientConfig, RootCertStore};
@@ -225,17 +225,17 @@ impl From<indexd::app_client::Slab> for PinnedSlab {
 }
 
 #[derive(Clone, uniffi::Record)]
-pub struct PinParams {
+pub struct SlabPinParams {
     pub encryption_key: Vec<u8>,
     pub min_shards: u8,
     pub sectors: Vec<SlabSector>,
 }
 
-impl TryInto<SlabPinParams> for PinParams {
+impl TryInto<AppSlabPinParams> for SlabPinParams {
     type Error = HexParseError;
 
-    fn try_into(self) -> Result<SlabPinParams, Self::Error> {
-        Ok(SlabPinParams {
+    fn try_into(self) -> Result<AppSlabPinParams, Self::Error> {
+        Ok(AppSlabPinParams {
             encryption_key: self.encryption_key.try_into().expect("SD"),
             min_shards: self.min_shards.into(),
             sectors: self.sectors
@@ -707,7 +707,7 @@ impl SDK {
     }
 
     /// Pins a slab to the indexer.
-    pub async fn pin_slab(&self, slab_pin_params: PinParams)-> Result<String, Error> {
+    pub async fn pin_slab(&self, slab_pin_params: SlabPinParams)-> Result<String, Error> {
         let slab_id = self.app_client.pin_slab(slab_pin_params.try_into()?).await?;
         Ok(slab_id.to_string())
     }
