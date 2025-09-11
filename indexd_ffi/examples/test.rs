@@ -41,16 +41,12 @@ async fn main() {
         .upload(encryption_key.to_vec(), 1, 3, None)
         .await
         .expect("writer");
-    let data = vec![1u8; 1 << 22];
+    let data = vec![1u8; 2 << 22];
 
     writer.write(data.as_ref()).await.expect("data written");
     info!("chunk written");
     let object = writer.finalize().await.expect("upload to complete");
-    assert_eq!(
-        object.slabs[0].length as usize,
-        data.len(),
-        "length mismatch"
-    );
+    assert_eq!(object.size(), data.len() as u64, "length mismatch");
     info!("upload complete, got {} slabs", object.slabs.len());
 
     let reader = sdk
