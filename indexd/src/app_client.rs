@@ -361,7 +361,9 @@ impl Client {
         encryption_key: [u8; 32],
         valid_until: OffsetDateTime,
     ) -> Result<Url> {
-        let mut url = self.url.join(format!("objects/{}", object_key).as_str())?;
+        let mut url = self
+            .url
+            .join(format!("objects/{}/shared", object_key).as_str())?;
 
         let params = self.sign(&url, Method::GET, None, valid_until);
 
