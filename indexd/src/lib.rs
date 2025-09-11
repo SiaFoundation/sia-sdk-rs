@@ -179,24 +179,25 @@ impl SDK<ConnectedState> {
         encryption_key: EncryptionKey,
         data_shards: u8,
         parity_shards: u8,
-    ) -> Result<Vec<SlabSlice>> {
+        metadata: Option<Vec<u8>>,
+    ) -> Result<Object> {
         let slabs = self
             .state
             .uploader
             .upload(reader, encryption_key, data_shards, parity_shards)
             .await?;
-        Ok(slabs)
+        Ok(Object::new(slabs, metadata))
     }
 
     pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
         writer: &mut W,
         encryption_key: EncryptionKey,
-        slabs: &[SlabSlice],
+        object: &Object,
     ) -> Result<()> {
         self.state
             .downloader
-            .download(writer, encryption_key, slabs)
+            .download(writer, encryption_key, &object.slabs)
             .await?;
         Ok(())
     }
@@ -205,13 +206,13 @@ impl SDK<ConnectedState> {
         &self,
         writer: &mut W,
         encryption_key: EncryptionKey,
-        slabs: &[SlabSlice],
+        object: &Object,
         offset: usize,
         length: usize,
     ) -> Result<()> {
         self.state
             .downloader
-            .download_range(writer, encryption_key, slabs, offset, length)
+            .download_range(writer, encryption_key, &object.slabs, offset, length)
             .await?;
         Ok(())
     }
