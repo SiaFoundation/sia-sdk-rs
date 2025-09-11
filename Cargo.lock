@@ -1435,6 +1435,7 @@ dependencies = [
  "bytes",
  "chacha20",
  "futures",
+ "hex",
  "httptest",
  "log",
  "priority-queue",

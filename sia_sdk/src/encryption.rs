@@ -3,7 +3,6 @@ use chacha20::cipher::{
     KeyIvInit, StreamCipher, StreamCipherCoreWrapper, StreamCipherError, StreamCipherSeek,
 };
 use chacha20::{XChaCha20, XChaChaCore};
-use pin_project_lite::pin_project;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::digest::consts::{B0, B1};
@@ -71,12 +70,9 @@ pub fn encrypt_shard(key: &EncryptionKey, index: u8, offset: usize, shard: &mut 
     cipher.apply_keystream(shard);
 }
 
-pin_project! {
-    pub struct CipherReader<R: AsyncRead> {
-        #[pin]
-        inner: R,
-        cipher: Chacha20Cipher,
-    }
+pub struct CipherReader<R: AsyncRead> {
+    inner: R,
+    cipher: Chacha20Cipher,
 }
 
 impl<R: AsyncRead> CipherReader<R> {
@@ -88,30 +84,26 @@ impl<R: AsyncRead> CipherReader<R> {
     }
 }
 
-impl<R: AsyncRead> AsyncRead for CipherReader<R> {
+impl<R: AsyncRead + Unpin> AsyncRead for CipherReader<R> {
     fn poll_read(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        let this = self.project();
         let initial_filled = buf.filled().len();
-        let poll = this.inner.poll_read(cx, buf);
+        let poll = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
 
         // apply the cipher to the newly read bytes
-        this.cipher
+        self.cipher
             .apply_keystream(&mut buf.filled_mut()[initial_filled..]);
         poll
     }
 }
 
-pin_project! {
-    pub struct CipherWriter<W: AsyncWrite> {
-        #[pin]
-        inner: W,
-        cipher: Chacha20Cipher,
-        buf: Vec<u8>
-    }
+pub struct CipherWriter<W: AsyncWrite> {
+    inner: W,
+    cipher: Chacha20Cipher,
+    buf: Vec<u8>,
 }
 
 impl<W: AsyncWrite> CipherWriter<W> {
@@ -124,33 +116,31 @@ impl<W: AsyncWrite> CipherWriter<W> {
     }
 }
 
-impl<W: AsyncWrite> AsyncWrite for CipherWriter<W> {
+impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        let this = self.project();
+        let this = self.get_mut();
         this.buf.resize(buf.len(), 0);
         this.buf.copy_from_slice(buf);
-        this.cipher.apply_keystream(this.buf);
-        this.inner.poll_write(cx, this.buf)
+        this.cipher.apply_keystream(&mut this.buf);
+        std::pin::Pin::new(&mut this.inner).poll_write(cx, &this.buf)
     }
 
     fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        let this = self.project();
-        this.inner.poll_flush(cx)
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        let this = self.project();
-        this.inner.poll_shutdown(cx)
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 

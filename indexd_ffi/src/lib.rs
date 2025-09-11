@@ -186,27 +186,25 @@ pub struct NetAddress {
 }
 
 #[derive(uniffi::Record)]
-pub struct Object {
+pub struct PinnedObject {
     pub key: String,
     pub slabs: Vec<Slab>,
-    pub meta: Vec<u8>,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
 }
 
-impl From<indexd::Object> for Object {
+impl From<indexd::Object> for PinnedObject {
     fn from(o: indexd::Object) -> Self {
         Self {
             key: o.key.to_string(),
             slabs: o.slabs.into_iter().map(|s| s.into()).collect(),
-            meta: o.meta,
             created_at: o.created_at.into(),
             updated_at: o.updated_at.into(),
         }
     }
 }
 
-impl TryInto<indexd::Object> for Object {
+impl TryInto<indexd::Object> for PinnedObject {
     type Error = HexParseError;
 
     fn try_into(self) -> Result<indexd::Object, Self::Error> {
@@ -217,7 +215,7 @@ impl TryInto<indexd::Object> for Object {
                 .into_iter()
                 .map(|s| s.try_into())
                 .collect::<Result<Vec<SlabSlice>, HexParseError>>()?,
-            meta: self.meta,
+            meta: Vec::with_capacity(0), // TODO: handle encryption
             created_at: self.created_at.into(),
             updated_at: self.updated_at.into(),
         })
@@ -584,7 +582,7 @@ impl SDK {
         &self,
         cursor: Option<ObjectsCursor>,
         limit: u32,
-    ) -> Result<Vec<Object>, Error> {
+    ) -> Result<Vec<PinnedObject>, Error> {
         let cursor = match cursor {
             Some(c) => Some(indexd::app_client::ObjectsCursor {
                 after: c.after.into(),
@@ -600,7 +598,7 @@ impl SDK {
     }
 
     /// Saves an object to the indexer.
-    pub async fn save_object(&self, object: Object) -> Result<(), Error> {
+    pub async fn save_object(&self, object: PinnedObject) -> Result<(), Error> {
         let object = object.try_into()?;
         self.app_client.save_object(&object).await?;
         Ok(())
@@ -614,10 +612,36 @@ impl SDK {
     }
 
     /// Returns metadata about a specific object stored in the indexer.
-    pub async fn object(&self, key: String) -> Result<Object, Error> {
+    pub async fn object(&self, key: String) -> Result<PinnedObject, Error> {
         let key = Hash256::from_str(key.as_str())?;
         let obj = self.app_client.object(&key).await?;
         Ok(obj.into())
+    }
+
+    pub async fn shared_object(&self, share_url: String) -> Result<PinnedObject, Error> {
+        let share_url: Url = share_url
+            .parse()
+            .map_err(|e| Error::Custom(format!("{e}")))?;
+        let (object, _) = self.app_client.shared_object(share_url).await?;
+        Ok(object.into())
+    }
+
+    /// Creates a signed URL that can be used to share object metadata
+    /// with other people using an indexer.
+    pub fn object_share_url(
+        &self,
+        object_key: String,
+        encryption_key: Vec<u8>,
+        valid_until: SystemTime,
+    ) -> Result<String, Error> {
+        let object_key = Hash256::from_str(&object_key)?;
+        let encryption_key: [u8; 32] = encryption_key
+            .try_into()
+            .map_err(|_| Error::Custom("encryption key must be 32 bytes".into()))?;
+        let u =
+            self.app_client
+                .object_share_url(&object_key, encryption_key, valid_until.into())?;
+        Ok(u.to_string())
     }
 }
 

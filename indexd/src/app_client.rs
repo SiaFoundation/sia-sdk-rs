@@ -38,6 +38,9 @@ pub enum Error {
 
     #[error("user rejected connection request")]
     UserRejected,
+
+    #[error("format error: {0}")]
+    Format(String),
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -127,7 +130,12 @@ impl Client {
     /// true if authenticated, false if not, and an error if the request fails.
     pub async fn check_app_authenticated(&self) -> Result<bool> {
         let url = self.url.join("auth/check")?;
-        let query_params = self.sign(&url, Method::GET, None, OffsetDateTime::now_utc());
+        let query_params = self.sign(
+            &url,
+            Method::GET,
+            None,
+            OffsetDateTime::now_utc() + Duration::from_secs(60),
+        );
         let resp = self
             .client
             .get(url)
@@ -145,7 +153,12 @@ impl Client {
     /// Checks if an auth request has been approved. If the auth request is
     /// still pending, it returns false.
     pub async fn check_request_status(&self, status_url: Url) -> Result<bool> {
-        let query_params = self.sign(&status_url, Method::GET, None, OffsetDateTime::now_utc());
+        let query_params = self.sign(
+            &status_url,
+            Method::GET,
+            None,
+            OffsetDateTime::now_utc() + Duration::from_secs(60),
+        );
         let resp = self
             .client
             .get(status_url)
@@ -240,7 +253,12 @@ impl Client {
     /// Helper to send a signed DELETE request.
     async fn delete(&self, path: &str) -> Result<()> {
         let url = self.url.join(path)?;
-        let query_params = self.sign(&url, Method::DELETE, None, OffsetDateTime::now_utc());
+        let query_params = self.sign(
+            &url,
+            Method::DELETE,
+            None,
+            OffsetDateTime::now_utc() + Duration::from_secs(60),
+        );
         Self::handle_response::<EmptyResponse>(
             self.client
                 .delete(url)
@@ -261,7 +279,12 @@ impl Client {
         query_params: Option<&Q>,
     ) -> Result<D> {
         let url = self.url.join(path)?;
-        let params = self.sign(&url, Method::GET, None, OffsetDateTime::now_utc());
+        let params = self.sign(
+            &url,
+            Method::GET,
+            None,
+            OffsetDateTime::now_utc() + Duration::from_secs(60),
+        );
         let mut builder = self.client.get(url).timeout(Duration::from_secs(15));
         if let Some(q) = query_params {
             builder = builder.query(q); // optional query params
@@ -288,7 +311,12 @@ impl Client {
     ) -> Result<D> {
         let body = to_vec(body)?;
         let url = self.url.join(path)?;
-        let query_params = self.sign(&url, Method::POST, Some(&body), OffsetDateTime::now_utc());
+        let query_params = self.sign(
+            &url,
+            Method::POST,
+            Some(&body),
+            OffsetDateTime::now_utc() + Duration::from_secs(60),
+        );
         Self::handle_response(
             self.client
                 .post(url)
@@ -318,14 +346,79 @@ impl Client {
         state.finalize().into()
     }
 
+    /// Creates a signed url that can be shared with others
+    /// to give read access to a single object. An expired
+    /// link does not necessarily remove access to an object.
+    ///
+    /// # Arguments
+    /// - `object_key` the key of the object
+    /// - `encryption_key` the key used to encrypt the metadata
+    /// - `valid_until` the time the link expires
+    pub fn object_share_url(
+        &self,
+        object_key: &Hash256,
+        encryption_key: [u8; 32],
+        valid_until: OffsetDateTime,
+    ) -> Result<Url> {
+        let mut url = self.url.join(format!("objects/{}", object_key).as_str())?;
+
+        let params = self.sign(&url, Method::GET, None, valid_until);
+
+        url.set_fragment(Some(
+            format!("encryption_key={}", hex::encode(encryption_key)).as_str(),
+        ));
+
+        let mut pairs = url.query_pairs_mut();
+        for (key, value) in params {
+            pairs.append_pair(key, value.as_str());
+        }
+
+        Ok(pairs.finish().to_owned())
+    }
+
+    /// Retrieves the object metadata using a pre-signed url
+    ///
+    /// # Arguments
+    /// `share_url` a pre-signed url for the App objects API
+    ///
+    /// # Returns
+    /// A tuple with the object metadata and encryption key to decrypt
+    /// the user metadata.
+    pub async fn shared_object(&self, mut share_url: Url) -> Result<(Object, [u8; 32])> {
+        let encryption_key = match share_url.fragment() {
+            Some(fragment) => {
+                let fragment = match fragment.strip_prefix("encryption_key=") {
+                    Some(fragment) => Ok(fragment),
+                    None => Err(Error::Format("missing encryption_key".into())),
+                }?;
+                let mut out = [0u8; 32];
+                hex::decode_to_slice(fragment, &mut out).map_err(|_| {
+                    Error::Format("encryption key must be 32 hex-encoded bytes".into())
+                })?;
+                Ok(out)
+            }
+            None => Err(Error::Format("missing encryption_key".into())),
+        }?;
+        share_url.set_fragment(None);
+        let obj: Object = Self::handle_response(
+            self.client
+                .get(share_url)
+                .timeout(Duration::from_secs(15))
+                .send()
+                .await?,
+        )
+        .await?;
+
+        Ok((obj, encryption_key))
+    }
+
     fn sign(
         &self,
         url: &Url,
         method: Method,
         body: Option<&[u8]>,
-        current_time: OffsetDateTime,
+        valid_until: OffsetDateTime,
     ) -> [(&'static str, String); 3] {
-        let valid_until = current_time + time::Duration::hours(1);
         let hash = Self::request_hash(url, method, body, valid_until);
         [
             (
@@ -376,9 +469,9 @@ mod tests {
             &"https://foo.bar/baz.jpg".parse().unwrap(),
             Method::POST,
             Some("{}".as_bytes()),
-            OffsetDateTime::from_unix_timestamp(123).unwrap(),
+            OffsetDateTime::from_unix_timestamp(123).unwrap() + Duration::from_secs(60),
         );
-        assert_eq!(params[0], ("SiaIdx-ValidUntil", "3723".to_string()));
+        assert_eq!(params[0], ("SiaIdx-ValidUntil", "183".to_string()));
         assert_eq!(
             params[1],
             (
@@ -391,7 +484,7 @@ mod tests {
             params[2],
             (
                 "SiaIdx-Signature",
-                "8046d35eb80ea9cf8a4b1f3478bb1508bfc6aa1c4617e2841f32684c3f39b59fff02f9283e37976da2f5e5b4e2f3c9f1640228a451c29be3024a9a3271af4e0a"
+                "1642aef3c9df1e588d0b21c7084d75040701bac3a8d25c56ccdb8e34e8635977cdfa698efa52d428565f38c310929d4a17434967937e9f5241e03e0c8436380a"
                     .to_string()
             )
         );
@@ -401,9 +494,9 @@ mod tests {
             &"https://foo.bar/baz.jpg".parse().unwrap(),
             Method::GET,
             None,
-            OffsetDateTime::from_unix_timestamp(123).unwrap(),
+            OffsetDateTime::from_unix_timestamp(123).unwrap() + Duration::from_secs(60),
         );
-        assert_eq!(params[0], ("SiaIdx-ValidUntil", "3723".to_string()));
+        assert_eq!(params[0], ("SiaIdx-ValidUntil", "183".to_string()));
         assert_eq!(
             params[1],
             (
@@ -416,7 +509,7 @@ mod tests {
             params[2],
             (
                 "SiaIdx-Signature",
-                "40b37ae7db469c351797bc69e01277a8818d75b6cbcef922f0cffedd4229bcecdbdcf038010badda0eb35c38171bcc41aca5e4fab2f639bcd93e54aec3ef8005"
+                "b3c53d2314fffeb67b21d0b0b5c62440d506ce2e93652ea921e4da5c7be0e5e6e1e78c10a48ac639c2f7c3174e9b700a34793e30322488463bac706a50149c01"
                     .to_string()
             )
         );
