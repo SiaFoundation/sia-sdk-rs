@@ -1,4 +1,4 @@
-use indexd_ffi::{AppMeta, SDK};
+use indexd_ffi::{AppMeta, PinnedSector, SDK, SlabPinParams};
 use log::info;
 
 #[tokio::main]
@@ -33,6 +33,50 @@ async fn main() {
     }
 
     info!("connected");
+
+    let slab_pin_params = SlabPinParams {
+        encryption_key: vec![255; 32],
+        min_shards: 1,
+        sectors: vec![
+            PinnedSector {
+                host_key:
+                    "ed25519:eb5172fb6e1644d9308ca55caf1ffcafccd4ff1542918daeb69b024ed602409e"
+                        .to_string(),
+                root: "afd1e5b79601efcbfb7283fc7a79bad6964607e373942856c2521b0218aab6e9"
+                    .to_string(),
+            },
+            PinnedSector {
+                host_key:
+                    "ed25519:bb362c9c3b0dfbff5375b61d7bac949d063bf796e7c3a7ea1d3f68184b445033"
+                        .to_string(),
+                root: "bfd1e5b79601efcbfb7283fc7a79bad6964607e373942856c2521b0218aab6e9"
+                    .to_string(),
+            },
+            PinnedSector {
+                host_key:
+                    "ed25519:f54367610e7917b51e9a731bba11f68a4570415e3518901d6e89c6912e1b2278"
+                        .to_string(),
+                root: "cfd1e5b79601efcbfb7283fc7a79bad6964607e373942856c2521b0218aab6e9"
+                    .to_string(),
+            },
+        ],
+    };
+    let slab_id = sdk
+        .pin_slab(slab_pin_params)
+        .await
+        .expect("failed to pin slab");
+    info!("Pinned slab");
+
+    let slab = sdk
+        .slab(slab_id.clone())
+        .await
+        .expect("faileod to get slab");
+    if slab.id != slab_id {
+        panic!("slab id mismatch");
+    }
+
+    sdk.unpin_slab(slab_id).await.expect("failed to unpin slab");
+    info!("Unpinned slab");
 
     let encryption_key: [u8; 32] = rand::random();
     let writer = sdk
