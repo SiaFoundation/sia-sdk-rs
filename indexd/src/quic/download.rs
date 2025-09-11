@@ -1,5 +1,6 @@
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::fmt::Debug;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use log::debug;
@@ -18,7 +19,100 @@ use tokio::time::sleep;
 use crate::app_client::{self, Client as AppClient};
 use crate::quic::client::Client;
 use crate::quic::{self};
-use crate::{Sector, SlabSlice};
+use crate::{Sector, Slab, SlabSlice};
+
+/// A SlabIterator can be used to iterate over slabs to be downloaded.
+/// This is used to abstract over different sources of slabs, such as
+/// a pre-fetched list of slabs, or fetching slabs on-demand from the
+/// indexer.
+pub trait SlabIterator {
+    type Error: Debug;
+
+    fn next(&mut self) -> impl Future<Output = Result<Option<Slab>, Self::Error>>;
+    fn max_length(&self) -> usize;
+}
+
+impl SlabIterator for VecDeque<Slab> {
+    type Error = ();
+
+    async fn next(&mut self) -> Result<Option<Slab>, Self::Error> {
+        Ok(self.pop_front())
+    }
+
+    fn max_length(&self) -> usize {
+        self.iter().fold(0, |sum, slab| sum + slab.length)
+    }
+}
+
+struct SlabFetchCache {
+    cache: Mutex<HashMap<Hash256, Slab>>,
+    app_client: AppClient,
+}
+
+impl SlabFetchCache {
+    async fn slab(&self, slab_slice: &SlabSlice) -> Result<Option<Slab>, app_client::Error> {
+        if let Some(slab) = {
+            let cache = self
+                .cache
+                .lock()
+                .map_err(|_| app_client::Error::Custom("failed to lock mutex".into()))?;
+            cache.get(&slab_slice.slab_id).cloned()
+        } {
+            return Ok(Some(slab));
+        }
+
+        let slab = self.app_client.slab(&slab_slice.slab_id).await?;
+        let slab = Slab {
+            encryption_key: slab.encryption_key,
+            min_shards: slab.min_shards,
+            sectors: slab.sectors,
+            offset: slab_slice.offset,
+            length: slab_slice.length,
+        };
+        self.cache
+            .lock()
+            .map_err(|_| app_client::Error::Custom("failed to lock mutex".into()))?
+            .insert(slab_slice.slab_id, slab.clone());
+        Ok(Some(slab))
+    }
+}
+
+/// A SlabFetcher fetches slabs on-demand from the indexer.
+/// It internally caches fetched slabs to avoid redundant
+/// network requests.
+#[derive(Clone)]
+pub struct SlabFetcher {
+    cache: Arc<SlabFetchCache>,
+    slabs: VecDeque<SlabSlice>,
+}
+
+impl SlabFetcher {
+    pub fn new(app_client: AppClient, slabs: Vec<SlabSlice>) -> Self {
+        Self {
+            cache: Arc::new(SlabFetchCache {
+                cache: Mutex::new(HashMap::new()),
+                app_client,
+            }),
+            slabs: VecDeque::from(slabs),
+        }
+    }
+}
+
+impl SlabIterator for SlabFetcher {
+    type Error = app_client::Error;
+
+    async fn next(&mut self) -> Result<Option<Slab>, Self::Error> {
+        let slab = self.slabs.pop_front();
+        match slab {
+            Some(slab_slice) => self.cache.slab(&slab_slice).await,
+            None => Ok(None),
+        }
+    }
+
+    fn max_length(&self) -> usize {
+        self.slabs.iter().fold(0, |sum, slab| sum + slab.length)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
@@ -48,6 +142,9 @@ pub enum DownloadError {
 
     #[error("api error: {0}")]
     ApiError(#[from] app_client::Error),
+
+    #[error("custom error: {0}")]
+    Custom(String),
 }
 
 pub struct DownloaderInner {
@@ -228,11 +325,11 @@ impl Downloader {
         (start, end - start)
     }
 
-    pub async fn download_range<W: AsyncWriteExt + Unpin>(
+    pub async fn download_range<W: AsyncWriteExt + Unpin, S: SlabIterator>(
         &self,
         w: &mut W,
         encryption_key: EncryptionKey,
-        slabs: &[SlabSlice],
+        mut slabs: S,
         mut offset: usize,
         mut length: usize,
     ) -> Result<(), DownloadError> {
@@ -241,7 +338,7 @@ impl Downloader {
             self.inner.host_client.update_hosts(hosts);
         }
 
-        let max_length = slabs.iter().fold(0, |sum, slab| sum + slab.length);
+        let max_length = slabs.max_length();
         if offset + length > max_length {
             return Err(DownloadError::OutOfRange(offset, length));
         } else if length == 0 {
@@ -249,20 +346,27 @@ impl Downloader {
         }
         let mut bw = BufWriter::new(w);
         let mut w = CipherWriter::new(&mut bw, encryption_key, offset);
-        for pinned_slab in slabs {
+        loop {
             if length == 0 {
                 break;
             }
-            let n = pinned_slab.length - pinned_slab.offset;
+            let slab = match slabs
+                .next()
+                .await
+                .map_err(|e| DownloadError::Custom(format!("{:?}", e)))?
+            {
+                Some(s) => s,
+                None => break,
+            };
+            let n = slab.length - slab.offset;
             if offset >= n {
                 offset -= n;
                 continue;
             }
 
-            let slab_offset = pinned_slab.offset + offset;
+            let slab_offset = slab.offset + offset;
             offset = 0;
-            let slab_length = (pinned_slab.length - slab_offset).min(length);
-            let slab = self.inner.app_client.slab(&pinned_slab.slab_id).await?;
+            let slab_length = (slab.length - slab_offset).min(length);
             let (shard_offset, shard_length) =
                 Self::sector_region(slab.min_shards as usize, slab_offset, slab_length);
 
@@ -299,13 +403,13 @@ impl Downloader {
 
     /// downloads data from the provided slabs and writes it
     /// to the writer.
-    pub async fn download<W: AsyncWriteExt + Unpin>(
+    pub async fn download<W: AsyncWriteExt + Unpin, S: SlabIterator>(
         &self,
         w: &mut W,
         encryption_key: EncryptionKey,
-        slabs: &[SlabSlice],
+        slabs: S,
     ) -> Result<(), DownloadError> {
-        let total_length = slabs.iter().fold(0, |sum, slab| sum + slab.length);
+        let total_length = slabs.max_length();
         self.download_range(w, encryption_key, slabs, 0, total_length)
             .await
     }

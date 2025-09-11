@@ -2,7 +2,7 @@ pub mod app_client;
 mod slabs;
 
 pub mod quic;
-use crate::quic::{DownloadError, Downloader, UploadError, Uploader};
+use crate::quic::{DownloadError, Downloader, SlabFetcher, UploadError, Uploader};
 
 use crate::app_client::{Client, ObjectsCursor, RegisterAppRequest};
 use log::debug;
@@ -195,9 +195,10 @@ impl SDK<ConnectedState> {
         encryption_key: EncryptionKey,
         object: &Object,
     ) -> Result<()> {
+        let slab_iterator = SlabFetcher::new(self.state.app.clone(), object.slabs.clone());
         self.state
             .downloader
-            .download(writer, encryption_key, &object.slabs)
+            .download(writer, encryption_key, slab_iterator)
             .await?;
         Ok(())
     }
@@ -210,9 +211,10 @@ impl SDK<ConnectedState> {
         offset: usize,
         length: usize,
     ) -> Result<()> {
+        let slab_iterator = SlabFetcher::new(self.state.app.clone(), object.slabs.clone());
         self.state
             .downloader
-            .download_range(writer, encryption_key, &object.slabs, offset, length)
+            .download_range(writer, encryption_key, slab_iterator, offset, length)
             .await?;
         Ok(())
     }
@@ -225,7 +227,7 @@ impl SDK<ConnectedState> {
             .map_err(|e| Error::App(format!("{e:?}")))
     }
 
-    pub async fn slab(&self, slab_id: &Hash256) -> Result<app_client::Slab> {
+    pub async fn slab(&self, slab_id: &Hash256) -> Result<PinnedSlab> {
         self.state
             .app
             .slab(slab_id)

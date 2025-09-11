@@ -12,8 +12,8 @@ use time::OffsetDateTime;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::Object;
 use crate::slabs::Sector;
+use crate::{Object, PinnedSlab, SharedObject};
 use sia::signing::PrivateKey;
 use sia::types::Hash256;
 
@@ -41,6 +41,9 @@ pub enum Error {
 
     #[error("format error: {0}")]
     Format(String),
+
+    #[error("custom error: {0}")]
+    Custom(String),
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -71,15 +74,6 @@ pub struct RegisterAppResponse {
     pub status_url: String,
     #[serde(with = "time::serde::rfc3339")]
     pub expiration: OffsetDateTime,
-}
-
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Slab {
-    pub id: Hash256,
-    pub encryption_key: EncryptionKey,
-    pub min_shards: u8,
-    pub sectors: Vec<Sector>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -223,7 +217,7 @@ impl Client {
     }
 
     /// Retrieves a slab from the indexer by its ID.
-    pub async fn slab(&self, slab_id: &Hash256) -> Result<Slab> {
+    pub async fn slab(&self, slab_id: &Hash256) -> Result<PinnedSlab> {
         self.get_json::<_, ()>(&format!("slabs/{slab_id}"), None)
             .await
     }
@@ -387,7 +381,7 @@ impl Client {
     /// # Returns
     /// A tuple with the object metadata and encryption key to decrypt
     /// the user metadata.
-    pub async fn shared_object(&self, mut share_url: Url) -> Result<(Object, [u8; 32])> {
+    pub async fn shared_object(&self, mut share_url: Url) -> Result<(SharedObject, [u8; 32])> {
         let encryption_key = match share_url.fragment() {
             Some(fragment) => {
                 let fragment = match fragment.strip_prefix("encryption_key=") {
@@ -403,7 +397,7 @@ impl Client {
             None => Err(Error::Format("missing encryption_key".into())),
         }?;
         share_url.set_fragment(None);
-        let obj: Object = Self::handle_response(
+        let obj = Self::handle_response(
             self.client
                 .get(share_url)
                 .timeout(Duration::from_secs(15))
@@ -547,7 +541,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_slab() {
-        let slab = Slab {
+        let slab = PinnedSlab {
             id: "43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28"
                 .parse()
                 .unwrap(),

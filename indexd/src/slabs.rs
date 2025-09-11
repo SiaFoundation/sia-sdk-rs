@@ -50,6 +50,15 @@ pub struct SlabSlice {
     pub length: usize,
 }
 
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PinnedSlab {
+    pub id: Hash256,
+    pub encryption_key: EncryptionKey,
+    pub min_shards: u8,
+    pub sectors: Vec<Sector>,
+}
+
 #[serde_as]
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +106,33 @@ impl Object {
             return Err("object key does not match slabs");
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedSlab {
+    pub id: Hash256,
+    pub encryption_key: EncryptionKey,
+    pub min_shards: u8,
+    pub sectors: Vec<Sector>,
+    pub offset: usize,
+    pub length: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedObject {
+    pub key: String,
+    pub slabs: Vec<SharedSlab>,
+    pub meta: Option<Vec<u8>>,
+}
+
+impl SharedObject {
+    pub fn size(&self) -> u64 {
+        self.slabs
+            .iter()
+            .fold(0_u64, |v, s| v + (s.length as u64 - s.offset as u64))
     }
 }
 
