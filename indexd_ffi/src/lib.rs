@@ -232,16 +232,18 @@ pub struct SlabPinParams {
 }
 
 impl TryInto<AppSlabPinParams> for SlabPinParams {
-    type Error = HexParseError;
+    type Error = Error;
 
-    fn try_into(self) -> Result<AppSlabPinParams, Self::Error> {
+    fn try_into(self) -> Result<AppSlabPinParams, Error> {
         Ok(AppSlabPinParams {
-            encryption_key: self.encryption_key.try_into().expect("SD"),
+            encryption_key: self.encryption_key
+                .try_into()
+                .map_err(|v| Error::Crypto(format!("failed to convert encryption key: {:?}", v)))?, 
             min_shards: self.min_shards.into(),
             sectors: self.sectors
                 .into_iter()
                 .map(|s| s.try_into())
-                .collect::<Result<Vec<_>, _>>()?, // <-- collect into Result
+                .collect::<Result<Vec<_>, _>>()?,
         })
     }
 }
