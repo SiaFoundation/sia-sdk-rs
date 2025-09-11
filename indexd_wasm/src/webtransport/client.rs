@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use gloo_console::{info, log};
 use gloo_timers::future::TimeoutFuture;
 use std::collections::{HashMap, VecDeque};
@@ -18,7 +18,6 @@ use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use sia::types::v2::{NetAddress, Protocol};
 use thiserror::Error;
-use time::OffsetDateTime;
 use web_transport::{ClientBuilder, RecvStream, SendStream, Session};
 
 const DEFAULT_BUFFER_SIZE: usize = 8 * 1024;
@@ -65,9 +64,7 @@ impl AsyncDecoder for Stream {
     type Error = Error;
     async fn decode_buf(&mut self, mut buf: &mut [u8]) -> Result<(), Self::Error> {
         while !buf.is_empty() {
-            if let Some(n) = self.recv.read_buf(&mut buf).await? {
-                buf = &mut buf[n..];
-            } else {
+            if let None = self.recv.read_buf(&mut buf).await? {
                 return Err(Error::StreamClosed);
             }
         }
@@ -253,7 +250,7 @@ impl ClientInner {
         let mut cached_prices = self.cached_prices.lock().unwrap();
         match cached_prices.get(host_key) {
             Some(prices) => {
-                if prices.valid_until < OffsetDateTime::now_utc() {
+                if prices.valid_until.unix_timestamp() < Utc::now().timestamp() {
                     cached_prices.remove(host_key);
                     None
                 } else {
@@ -298,9 +295,6 @@ impl ClientInner {
                 _ = TimeoutFuture::new(30000) =>  Err(Error::Timeout),
 
             }?;
-            let open_conns = &mut self.open_conns.lock().unwrap();
-            open_conns.insert(host, new_conn.clone());
-            debug!("established new connection to {host}");
             new_conn
         };
 
@@ -318,14 +312,14 @@ impl ClientInner {
             return Ok(prices);
         }
         let stream = self.host_stream(host_key).await?;
-        let start = chrono::Utc::now();
+        let start = Utc::now();
         let resp = RPCSettings::send_request(stream).await?.complete().await?;
-        debug!(
+        debug!(format!(
             "fetched prices for {host_key} in {}ms",
             (chrono::Utc::now() - start).num_milliseconds()
-        );
+        ));
         let prices = resp.settings.prices;
-        if prices.valid_until < OffsetDateTime::now_utc() {
+        if prices.valid_until.unix_timestamp() < Utc::now().timestamp() {
             return Err(Error::InvalidPrices);
         } else if !host_key.verify(prices.sig_hash().as_ref(), &prices.signature) {
             return Err(Error::InvalidSignature);
