@@ -76,12 +76,21 @@ async fn main() {
 
     info!("sharing object");
 
-    let share_url = sdk.object_share_url(object.key, encryption_key.to_vec(), SystemTime::now() + Duration::from_secs(600)).expect("share url");
+    let share_url = sdk
+        .object_share_url(
+            object.key,
+            encryption_key.to_vec(),
+            SystemTime::now() + Duration::from_secs(600),
+        )
+        .expect("share url");
     info!("share url: {}", share_url);
 
     info!("downloading shared object");
 
-    let reader = sdk.download_shared(share_url).await.expect("download shared");
+    let reader = sdk
+        .download_shared(share_url)
+        .await
+        .expect("download shared");
     let mut read_data = Vec::with_capacity(data.len());
     loop {
         let chunk = reader.read_chunk().await.expect("read chunk");
