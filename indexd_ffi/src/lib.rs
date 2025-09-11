@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use indexd::Url;
-use indexd::app_client::{Client as AppClient, RegisterAppRequest, SlabPinParams as AppSlabPinParams};
+use indexd::app_client::{
+    Client as AppClient, RegisterAppRequest, SlabPinParams as AppSlabPinParams,
+};
 use indexd::quic::{Client as HostClient, Downloader, Uploader};
 use log::debug;
 use rustls::{ClientConfig, RootCertStore};
@@ -236,11 +238,13 @@ impl TryInto<AppSlabPinParams> for SlabPinParams {
 
     fn try_into(self) -> Result<AppSlabPinParams, Error> {
         Ok(AppSlabPinParams {
-            encryption_key: self.encryption_key
+            encryption_key: self
+                .encryption_key
                 .try_into()
-                .map_err(|v| Error::Crypto(format!("failed to convert encryption key: {:?}", v)))?, 
+                .map_err(|v| Error::Crypto(format!("failed to convert encryption key: {:?}", v)))?,
             min_shards: self.min_shards.into(),
-            sectors: self.sectors
+            sectors: self
+                .sectors
                 .into_iter()
                 .map(|s| s.try_into())
                 .collect::<Result<Vec<_>, _>>()?,
@@ -709,9 +713,19 @@ impl SDK {
     }
 
     /// Pins a slab to the indexer.
-    pub async fn pin_slab(&self, slab_pin_params: SlabPinParams)-> Result<String, Error> {
-        let slab_id = self.app_client.pin_slab(slab_pin_params.try_into()?).await?;
+    pub async fn pin_slab(&self, slab_pin_params: SlabPinParams) -> Result<String, Error> {
+        let slab_id = self
+            .app_client
+            .pin_slab(slab_pin_params.try_into()?)
+            .await?;
         Ok(slab_id.to_string())
+    }
+
+    // UnpinSlab unpins a slab from the indexer.
+    pub async fn unpin_slab(&self, slab_id: String) -> Result<(), Error> {
+        let slab_id = Hash256::from_str(slab_id.as_str())?;
+        let slab = self.app_client.unpin_slab(&slab_id).await?;
+        Ok(slab.into())
     }
 }
 
