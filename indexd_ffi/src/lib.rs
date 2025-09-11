@@ -606,8 +606,7 @@ impl SDK {
         let encryption_key = EncryptionKey::try_from(encryption_key.as_ref())
             .map_err(|err| UploadError::Custom(err.to_string()))?;
 
-        let mut progress_tx: Option<UnboundedSender<()>> = None;
-        if let Some(callback) = options.progress_callback {
+        let progress_tx = if let Some(callback) = options.progress_callback {
             let total_shards = options.data_shards as u64 + options.parity_shards as u64;
             let slab_size = total_shards * SECTOR_SIZE as u64;
             let (tx, mut rx) = mpsc::unbounded_channel();
@@ -620,8 +619,10 @@ impl SDK {
                     callback.progress(size, slabs_size);
                 }
             });
-            progress_tx = Some(tx);
-        }
+            Some(tx)
+        } else {
+            None
+        };
 
         let result = tokio::spawn(async move {
             let res = uploader
