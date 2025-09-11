@@ -34,7 +34,7 @@ async fn main() {
 
     info!("connected");
 
-    let encryption_key = [1u8; 32];
+    let encryption_key: [u8; 32] = rand::random();
     let writer = sdk
         .upload(encryption_key.to_vec(), 1, 3)
         .await
