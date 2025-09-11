@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use indexd::app_client::{Client as AppClient, RegisterAppRequest};
-use indexd::quic::{Client as HostClient, Downloader, SlabFetcher, Uploader};
+use indexd::quic::{self, Client as HostClient, Downloader, SlabFetcher, Uploader};
 use indexd::{SlabSlice, Url};
 use log::debug;
 use rustls::{ClientConfig, RootCertStore};
@@ -16,9 +16,14 @@ use sia::signing::{PrivateKey, PublicKey};
 use sia::types::{self, Hash256, HexParseError};
 use thiserror::Error;
 use tokio::io::AsyncRead;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 use tokio::sync::{OnceCell, oneshot};
 use tokio::task::JoinHandle;
+
+#[uniffi::export(with_foreign)]
+pub trait UploadProgressCallback: Send + Sync {
+    fn progress(&self, uploaded: u64, encoded_size: u64);
+}
 
 #[derive(Debug, Error, uniffi::Error)]
 #[uniffi(flat_error)]
@@ -411,6 +416,23 @@ pub struct SharedObject {
     pub encryption_key: Vec<u8>,
 }
 
+impl SharedObject {
+    /// Calculates the total size of the object by summing the lengths of its slabs.
+    pub fn size(&self) -> u64 {
+        self.slabs
+            .iter()
+            .fold(0_u64, |v, s| v + (s.length as u64 - s.offset as u64))
+    }
+}
+
+#[derive(uniffi::Record)]
+pub struct UploadOptions {
+    pub max_inflight: u8,
+    pub data_shards: u8,
+    pub parity_shards: u8,
+    pub progress_callback: Option<Arc<dyn UploadProgressCallback>>,
+}
+
 /// An SDK enables interaction with an indexer and
 /// storage providers on the Sia network.
 #[derive(uniffi::Object)]
@@ -480,7 +502,6 @@ impl SDK {
                     self.app_client.clone(),
                     host_client.clone(),
                     self.app_key.clone(),
-                    12,
                 ))
             })
             .await;
@@ -491,7 +512,6 @@ impl SDK {
                     self.app_client.clone(),
                     host_client.clone(),
                     self.app_key.clone(),
-                    12,
                 ))
             })
             .await;
@@ -568,9 +588,8 @@ impl SDK {
     pub async fn upload(
         &self,
         encryption_key: Vec<u8>,
-        data_shards: u8,
-        parity_shards: u8,
         metadata: Option<Vec<u8>>,
+        options: UploadOptions,
     ) -> Result<Upload, UploadError> {
         let uploader = match self.uploader.get() {
             Some(uploader) => uploader.clone(),
@@ -581,14 +600,36 @@ impl SDK {
         let inner_buf = buf.clone();
         let encryption_key = EncryptionKey::try_from(encryption_key.as_ref())
             .map_err(|err| UploadError::Custom(err.to_string()))?;
+
+        let mut progress_tx: Option<UnboundedSender<()>> = None;
+        if let Some(callback) = options.progress_callback {
+            let total_shards = options.data_shards as u64 + options.parity_shards as u64;
+            let slab_shards = total_shards;
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                let mut sectors: u64 = 0;
+                while let Some(_) = rx.recv().await {
+                    sectors += 1;
+                    let size = sectors * SECTOR_SIZE as u64;
+                    let slabs_size = sectors.div_ceil(slab_shards) * total_shards * SECTOR_SIZE as u64;
+                    callback.progress(size, slabs_size);
+                }
+            });
+            progress_tx = Some(tx);
+        }
+
         let result = tokio::spawn(async move {
             let res = uploader
                 .upload(
                     inner_buf,
                     encryption_key,
-                    data_shards,
-                    parity_shards,
                     metadata,
+                    quic::UploadOptions {
+                        max_inflight: options.max_inflight as usize,
+                        data_shards: options.data_shards,
+                        parity_shards: options.parity_shards,
+                        shard_uploaded: progress_tx,
+                    },
                 )
                 .await
                 .map_err(|e| e.into());
@@ -693,7 +734,7 @@ impl SDK {
     /// A [`DownloadShared`] object that can be used to read the data in chunks
     pub async fn download_shared(
         &self,
-        share_url: String,
+        share_url: &String,
     ) -> Result<DownloadShared, DownloadError> {
         let downloader = match self.downloader.get() {
             Some(downloader) => downloader.clone(),
@@ -726,7 +767,7 @@ impl SDK {
     }
 
     /// Fetches the metadata for a shared object via a share URL.
-    pub async fn shared_object(&self, share_url: String) -> Result<SharedObject, DownloadError> {
+    pub async fn shared_object(&self, share_url: &String) -> Result<SharedObject, DownloadError> {
         let share_url: Url = share_url
             .parse()
             .map_err(|e| DownloadError::Custom(format!("{e}")))?;
@@ -934,17 +975,29 @@ impl Download {
         }
         let mut buf = Vec::with_capacity(rem as usize);
         self.downloader
-            .download_range(
+            .download(
                 &mut buf,
                 self.encryption_key.clone(),
                 self.slabs.clone(),
-                state.offset as usize,
-                rem as usize,
+                quic::DownloadOptions{
+                    offset: state.offset as usize,
+                    length: Some(rem as usize),
+                    ..Default::default()
+                },
             )
             .await?;
         self.update(buf.len() as u64);
         Ok(buf)
     }
+}
+
+/// Calculates the encoded size of data given the original size and erasure coding parameters.
+#[uniffi::export]
+pub fn encoded_size(size: u64, data_shards: u8, parity_shards: u8) -> u64 {
+    let total_shards = data_shards as u64 + parity_shards as u64;
+    let slab_size = total_shards * SECTOR_SIZE as u64;
+    let slabs = size.div_ceil(data_shards as u64 * SECTOR_SIZE as u64);
+    slabs * slab_size
 }
 
 /// Downloads data from the Sia network. It does so in chunks to support large files in
@@ -992,12 +1045,15 @@ impl DownloadShared {
         }
         let mut buf = Vec::with_capacity(rem as usize);
         self.downloader
-            .download_range(
+            .download(
                 &mut buf,
                 self.encryption_key.clone(),
                 self.slabs.clone(),
-                state.offset as usize,
-                rem as usize,
+                quic::DownloadOptions{
+                    offset: state.offset as usize,
+                    length: Some(rem as usize),
+                    ..Default::default()
+                },
             )
             .await?;
         self.update(buf.len() as u64);
