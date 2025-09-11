@@ -186,14 +186,14 @@ pub struct NetAddress {
 }
 
 #[derive(uniffi::Record)]
-pub struct Object {
+pub struct PinnedObject {
     pub key: String,
     pub slabs: Vec<Slab>,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
 }
 
-impl From<indexd::Object> for Object {
+impl From<indexd::Object> for PinnedObject {
     fn from(o: indexd::Object) -> Self {
         Self {
             key: o.key.to_string(),
@@ -204,7 +204,7 @@ impl From<indexd::Object> for Object {
     }
 }
 
-impl TryInto<indexd::Object> for Object {
+impl TryInto<indexd::Object> for PinnedObject {
     type Error = HexParseError;
 
     fn try_into(self) -> Result<indexd::Object, Self::Error> {
@@ -582,7 +582,7 @@ impl SDK {
         &self,
         cursor: Option<ObjectsCursor>,
         limit: u32,
-    ) -> Result<Vec<Object>, Error> {
+    ) -> Result<Vec<PinnedObject>, Error> {
         let cursor = match cursor {
             Some(c) => Some(indexd::app_client::ObjectsCursor {
                 after: c.after.into(),
@@ -598,7 +598,7 @@ impl SDK {
     }
 
     /// Saves an object to the indexer.
-    pub async fn save_object(&self, object: Object) -> Result<(), Error> {
+    pub async fn save_object(&self, object: PinnedObject) -> Result<(), Error> {
         let object = object.try_into()?;
         self.app_client.save_object(&object).await?;
         Ok(())
@@ -612,13 +612,13 @@ impl SDK {
     }
 
     /// Returns metadata about a specific object stored in the indexer.
-    pub async fn object(&self, key: String) -> Result<Object, Error> {
+    pub async fn object(&self, key: String) -> Result<PinnedObject, Error> {
         let key = Hash256::from_str(key.as_str())?;
         let obj = self.app_client.object(&key).await?;
         Ok(obj.into())
     }
 
-    pub async fn shared_object(&self, share_url: String) -> Result<Object, Error> {
+    pub async fn shared_object(&self, share_url: String) -> Result<PinnedObject, Error> {
         let share_url: Url = share_url
             .parse()
             .map_err(|e| Error::Custom(format!("{e}")))?;
