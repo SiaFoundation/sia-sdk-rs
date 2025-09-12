@@ -91,6 +91,12 @@ async fn main() {
         .expect("failed to unpin slab");
     info!("Unpinned slab: {}", slab_id);
 
+    let account = sdk.account().await.expect("failed to fetch account");
+    info!(
+        "Account {}: pinned_data={}, max_pinned_data={}, description={}",
+        account.account_key, account.pinned_data, account.max_pinned_data, account.description
+    );
+
     let encryption_key: [u8; 32] = rand::random();
     let writer = sdk
         .upload(
