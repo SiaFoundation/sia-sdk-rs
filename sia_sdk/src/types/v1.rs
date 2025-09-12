@@ -523,10 +523,10 @@ mod tests {
     use crate::signing::{PrivateKey, PublicKey, Signature};
     use crate::types::{BlockID, ChainIndex, Work};
     use crate::{address, contract_id, hash_256, siacoin_id, siafund_id};
+    use chrono::{DateTime, Duration};
     use serde::de::DeserializeOwned;
     use std::fmt::Debug;
     use std::vec;
-    use time::{Duration, OffsetDateTime};
 
     /// test_serialize_json is a helper to test serialization and deserialization of a struct to and from JSON.
     fn test_serialize_json<S: Serialize + DeserializeOwned + Debug + PartialEq>(
@@ -1016,11 +1016,11 @@ mod tests {
                     height: 1,
                     id: BlockID::default(),
                 },
-                prev_timestamps: [OffsetDateTime::UNIX_EPOCH; 11],
+                prev_timestamps: [DateTime::UNIX_EPOCH; 11],
                 depth: BlockID::default(),
                 child_target: BlockID::default(),
                 siafund_pool: Currency::new(0),
-                oak_time: Duration::new(0, 0),
+                oak_time: Duration::zero(),
                 oak_target: BlockID::default(),
                 foundation_primary_address: Address::new([0u8; 32]),
                 foundation_failsafe_address: Address::new([0u8; 32]),
@@ -1035,7 +1035,7 @@ mod tests {
                 initial_coinbase: Currency::new(0),
                 minimum_coinbase: Currency::new(0),
                 initial_target: BlockID::default(),
-                block_interval: Duration::new(1, 0),
+                block_interval: Duration::seconds(1),
                 maturity_delay: 0,
                 hardfork_dev_addr: HardforkDevAddr {
                     height: 0,
@@ -1046,13 +1046,13 @@ mod tests {
                 hardfork_storage_proof: HardforkStorageProof { height: 0 },
                 hardfork_asic: HardforkASIC {
                     height: 0,
-                    oak_time: Duration::new(0, 0),
+                    oak_time: Duration::zero(),
                     oak_target: BlockID::default(),
                 },
                 hardfork_oak: HardforkOak {
                     height: 0,
                     fix_height: 0,
-                    genesis_timestamp: OffsetDateTime::UNIX_EPOCH,
+                    genesis_timestamp: DateTime::UNIX_EPOCH,
                 },
                 hardfork_foundation: HardforkFoundation {
                     height: 0,
@@ -1139,11 +1139,11 @@ mod tests {
                     height: 1,
                     id: BlockID::default(),
                 },
-                prev_timestamps: [OffsetDateTime::UNIX_EPOCH; 11],
+                prev_timestamps: [DateTime::UNIX_EPOCH; 11],
                 depth: BlockID::default(),
                 child_target: BlockID::default(),
                 siafund_pool: Currency::new(0),
-                oak_time: Duration::new(0, 0),
+                oak_time: Duration::zero(),
                 oak_target: BlockID::default(),
                 foundation_primary_address: Address::new([0u8; 32]),
                 foundation_failsafe_address: Address::new([0u8; 32]),
@@ -1158,7 +1158,7 @@ mod tests {
                 initial_coinbase: Currency::new(0),
                 minimum_coinbase: Currency::new(0),
                 initial_target: BlockID::default(),
-                block_interval: Duration::new(1, 0),
+                block_interval: Duration::seconds(1),
                 maturity_delay: 0,
                 hardfork_dev_addr: HardforkDevAddr {
                     height: 0,
@@ -1169,13 +1169,13 @@ mod tests {
                 hardfork_storage_proof: HardforkStorageProof { height: 0 },
                 hardfork_asic: HardforkASIC {
                     height: 0,
-                    oak_time: Duration::new(0, 0),
+                    oak_time: Duration::zero(),
                     oak_target: BlockID::default(),
                 },
                 hardfork_oak: HardforkOak {
                     height: 0,
                     fix_height: 0,
-                    genesis_timestamp: OffsetDateTime::UNIX_EPOCH,
+                    genesis_timestamp: DateTime::UNIX_EPOCH,
                 },
                 hardfork_foundation: HardforkFoundation {
                     height: 0,
@@ -1656,11 +1656,11 @@ mod tests {
                     height: 1,
                     id: BlockID::default(),
                 },
-                prev_timestamps: [OffsetDateTime::UNIX_EPOCH; 11],
+                prev_timestamps: [DateTime::UNIX_EPOCH; 11],
                 depth: BlockID::default(),
                 child_target: BlockID::default(),
                 siafund_pool: Currency::new(0),
-                oak_time: Duration::new(0, 0),
+                oak_time: Duration::zero(),
                 oak_target: BlockID::default(),
                 foundation_primary_address: Address::new([0u8; 32]),
                 foundation_failsafe_address: Address::new([0u8; 32]),
@@ -1675,7 +1675,7 @@ mod tests {
                 initial_coinbase: Currency::new(0),
                 minimum_coinbase: Currency::new(0),
                 initial_target: BlockID::default(),
-                block_interval: Duration::new(1, 0),
+                block_interval: Duration::seconds(1),
                 maturity_delay: 0,
                 hardfork_dev_addr: HardforkDevAddr {
                     height: 0,
@@ -1686,13 +1686,13 @@ mod tests {
                 hardfork_storage_proof: HardforkStorageProof { height: 0 },
                 hardfork_asic: HardforkASIC {
                     height: 0,
-                    oak_time: Duration::new(0, 0),
+                    oak_time: Duration::zero(),
                     oak_target: BlockID::default(),
                 },
                 hardfork_oak: HardforkOak {
                     height: 0,
                     fix_height: 0,
-                    genesis_timestamp: OffsetDateTime::UNIX_EPOCH,
+                    genesis_timestamp: DateTime::UNIX_EPOCH,
                 },
                 hardfork_foundation: HardforkFoundation {
                     height: 0,

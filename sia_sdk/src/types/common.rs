@@ -2,9 +2,9 @@ use core::fmt;
 
 use crate::encoding_async::{AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable, AsyncSiaEncode};
 use blake2b_simd::Params;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use time::OffsetDateTime;
 
 use crate::encoding::{
     self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode, V1SiaDecodable, V1SiaDecode,
@@ -175,8 +175,7 @@ pub struct Block {
     #[serde(rename = "parentID")]
     pub parent_id: BlockID,
     pub nonce: u64,
-    #[serde(with = "time::serde::rfc3339")]
-    pub timestamp: OffsetDateTime,
+    pub timestamp: DateTime<Utc>,
     pub miner_payouts: Vec<SiacoinOutput>,
     pub transactions: Vec<v1::Transaction>,
 }
@@ -196,7 +195,7 @@ impl V1SiaDecodable for Block {
         Ok(Block {
             parent_id: BlockID::decode(r)?,
             nonce: u64::decode(r)?,
-            timestamp: OffsetDateTime::decode(r)?,
+            timestamp: DateTime::<Utc>::decode(r)?,
             miner_payouts: Vec::<SiacoinOutput>::decode_v1(r)?,
             transactions: Vec::<v1::Transaction>::decode_v1(r)?,
         })
@@ -513,7 +512,7 @@ mod tests {
                 "8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c"
             ),
             nonce: 1236112,
-            timestamp: OffsetDateTime::UNIX_EPOCH,
+            timestamp: DateTime::UNIX_EPOCH,
             miner_payouts: vec![SiacoinOutput {
                 value: Currency::new(57234234623612361),
                 address: address!(

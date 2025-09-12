@@ -1,7 +1,7 @@
 use crate::address;
+use chrono::{DateTime, Duration, Utc};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
-use time::{Duration, OffsetDateTime};
 
 use crate::encoding::{self, SiaDecodable, SiaEncodable};
 use crate::types::{Address, BlockID, ChainIndex, Currency, Hash256, SiacoinOutput, Work};
@@ -39,8 +39,7 @@ pub struct HardforkStorageProof {
 pub struct HardforkOak {
     pub height: u64,
     pub fix_height: u64,
-    #[serde(with = "time::serde::rfc3339")]
-    pub genesis_timestamp: OffsetDateTime,
+    pub genesis_timestamp: DateTime<Utc>,
 }
 
 /// HardforkASIC contains the parameters for a hardfork that changed the mining algorithm
@@ -95,10 +94,10 @@ pub struct Network {
     pub hardfork_v2: HardforkV2,
 }
 
-const fn unix_timestamp(secs: i64) -> OffsetDateTime {
-    match OffsetDateTime::from_unix_timestamp(secs) {
-        Ok(t) => t,
-        Err(_) => panic!("invalid timestamp"),
+const fn unix_timestamp(secs: i64) -> DateTime<Utc> {
+    match DateTime::from_timestamp_secs(secs) {
+        Some(t) => t,
+        None => panic!("invalid timestamp"),
     }
 }
 
@@ -351,7 +350,7 @@ impl<'de> Deserialize<'de> for ElementAccumulator {
 pub struct State {
     pub index: ChainIndex,
     #[serde(with = "crate::types::utils::timestamp_array")]
-    pub prev_timestamps: [OffsetDateTime; 11],
+    pub prev_timestamps: [DateTime<Utc>; 11],
     pub depth: BlockID,
     pub child_target: BlockID,
     pub siafund_pool: Currency,
@@ -408,11 +407,11 @@ impl SiaDecodable for State {
         } else {
             11
         };
-        let mut prev_timestamps = [OffsetDateTime::UNIX_EPOCH; 11];
+        let mut prev_timestamps = [DateTime::UNIX_EPOCH; 11];
         prev_timestamps[..timestamps_count]
             .iter_mut()
             .try_for_each(|ts| -> encoding::Result<()> {
-                *ts = OffsetDateTime::decode(r)?;
+                *ts = DateTime::<Utc>::decode(r)?;
                 Ok(())
             })?;
         Ok(State {
@@ -478,9 +477,9 @@ impl ChainState {
 
     // blocks_per_month estimates the number of blocks expected in a calendar month
     pub fn blocks_per_month(&self) -> u64 {
-        (Duration::days(365).whole_nanoseconds()
+        (Duration::days(365).num_milliseconds()
             / 12
-            / self.network.block_interval.whole_nanoseconds()) as u64
+            / self.network.block_interval.num_milliseconds()) as u64
     }
 
     /// foundation_subsidy returns the Foundation subsidy output for the child block.
@@ -533,8 +532,8 @@ mod tests {
     use crate::{block_id, hash_256};
 
     use super::*;
+    use chrono::FixedOffset;
     use serde_json;
-    use time::UtcOffset;
 
     #[test]
     fn test_serialize_network() {
@@ -568,13 +567,13 @@ mod tests {
                 height: 0,
                 id: block_id!("0000000000000000000000000000000000000000000000000000000000000000"),
             },
-            prev_timestamps: [OffsetDateTime::UNIX_EPOCH; 11],
+            prev_timestamps: [DateTime::UNIX_EPOCH; 11],
             depth: block_id!("0000000000000000000000000000000000000000000000000000000000000000"),
             child_target: block_id!(
                 "0000000000000000000000000000000000000000000000000000000000000000"
             ),
             siafund_pool: Currency::zero(),
-            oak_time: Duration::ZERO,
+            oak_time: Duration::zero(),
             oak_target: block_id!(
                 "0000000000000000000000000000000000000000000000000000000000000000"
             ),
@@ -615,72 +614,39 @@ mod tests {
                 id: block_id!("54b6800181215b654a2b64e8a0f39da6d5ad20f4e6eda87d50d36e93efd9cdb9"),
             },
             prev_timestamps: [
-                OffsetDateTime::parse(
-                    "2167-03-18T17:08:40-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "1971-03-30T07:40:44-08:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2226-11-12T19:51:30-08:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2013-09-10T15:07:20-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2230-05-18T20:13:07-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "1983-10-27T20:37:21-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2068-03-31T10:25:10-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2159-06-29T18:46:49-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2089-05-02T23:45:50-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2073-02-27T00:01:11-08:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2005-07-10T11:50:37-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2167-03-18T17:08:40-07:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("1971-03-30T07:40:44-08:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2226-11-12T19:51:30-08:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2013-09-10T15:07:20-07:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2230-05-18T20:13:07-07:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("1983-10-27T20:37:21-07:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2068-03-31T10:25:10-07:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2159-06-29T18:46:49-07:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2089-05-02T23:45:50-07:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2073-02-27T00:01:11-08:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2005-07-10T11:50:37-07:00")
+                    .unwrap()
+                    .to_utc(),
             ],
             depth: block_id!("fb66f6dd0517bd80a57c6fc1dd186eeb25a5f7dc550adc94a996731734f4a478"),
             child_target: block_id!(

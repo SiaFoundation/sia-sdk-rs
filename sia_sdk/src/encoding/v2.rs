@@ -1,6 +1,7 @@
+use chrono::{DateTime, Duration, Utc};
+
 use super::{Error, Result};
 use std::io::{Read, Write};
-use time::{Duration, OffsetDateTime};
 
 pub trait SiaEncodable {
     fn encode<W: Write>(&self, w: &mut W) -> Result<()>;
@@ -42,22 +43,25 @@ impl SiaDecodable for bool {
     }
 }
 
-impl SiaEncodable for OffsetDateTime {
+impl SiaEncodable for DateTime<Utc> {
     fn encode<W: Write>(&self, w: &mut W) -> Result<()> {
-        self.unix_timestamp().encode(w)
+        self.timestamp().encode(w)
     }
 }
 
-impl SiaDecodable for OffsetDateTime {
+impl SiaDecodable for DateTime<Utc> {
     fn decode<R: Read>(r: &mut R) -> Result<Self> {
         let timestamp = i64::decode(r)?;
-        Ok(OffsetDateTime::from_unix_timestamp(timestamp).unwrap())
+        DateTime::from_timestamp_secs(timestamp)
+            .ok_or_else(|| Error::InvalidValue(format!("invalid timestamp: {timestamp}")))
     }
 }
 
 impl SiaEncodable for Duration {
     fn encode<W: Write>(&self, w: &mut W) -> Result<()> {
-        (self.whole_nanoseconds() as u64).encode(w)
+        self.num_nanoseconds()
+            .ok_or_else(|| Error::InvalidValue("duration too large".into()))?
+            .encode(w)
     }
 }
 
