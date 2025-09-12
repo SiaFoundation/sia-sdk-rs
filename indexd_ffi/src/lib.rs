@@ -33,7 +33,7 @@ impl log::Log for ForeignLogger {
                 return true;
             }
         }
-        return false
+        false
     }
 
     fn log(&self, record: &log::Record) {
