@@ -5,9 +5,10 @@ on:
     branches:
       - master
   pull_request:
+
 jobs:
   test:
-    runs-on: tenki-standard-autoscale
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Setup Environment
