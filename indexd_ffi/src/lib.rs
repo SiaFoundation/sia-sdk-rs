@@ -16,7 +16,7 @@ use sia::signing::{PrivateKey, PublicKey};
 use sia::types::{self, Hash256, HexParseError};
 use thiserror::Error;
 use tokio::io::AsyncRead;
-use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{OnceCell, oneshot};
 use tokio::task::JoinHandle;
 
