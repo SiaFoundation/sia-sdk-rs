@@ -5,6 +5,7 @@ use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
 use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
+use sia::signing::PublicKey;
 
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -87,6 +88,20 @@ pub struct SlabPinParams {
 pub struct ObjectsCursor {
     pub after: OffsetDateTime,
     pub key: Hash256,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    pub account_key: PublicKey,
+    pub service_account: bool,
+    pub max_pinned_data: u64,
+    pub pinned_data: u64,
+    pub description: String,
+    #[serde(rename = "logoURL")]
+    pub logo_url: String,
+    #[serde(rename = "serviceURL")]
+    pub service_url: String,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -242,6 +257,11 @@ impl Client {
     /// Unpins a slab from the indexer.
     pub async fn unpin_slab(&self, slab_id: &Hash256) -> Result<()> {
         self.delete(&format!("slabs/{slab_id}")).await
+    }
+
+    /// Account returns the current account.
+    pub async fn account(&self) -> Result<Account> {
+        self.get_json::<_, ()>("account", None).await
     }
 
     /// Helper to send a signed DELETE request.
