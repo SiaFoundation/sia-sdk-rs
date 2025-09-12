@@ -26,5 +26,9 @@ jobs:
         run: cargo +nightly fmt --all -- --check
       - name: Clippy
         run: cargo clippy -- -D warnings
+      - name: Build docs
+        run: cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
       - name: Test
         run: cargo test
