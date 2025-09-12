@@ -88,12 +88,18 @@ impl Uploader {
         let host_key = hosts.pop_front()?;
         let root = select! {
             _ = TimeoutFuture::new(write_timeout_ms) => {
+                debug!("upload to {host_key} timed out, retrying");
+                let _ = hosts.retry(host_key);
                 Err(UploadError::Timeout)
             },
             res = client.write_sector(host_key, &account_key, data) => {
                 res.map_err(UploadError::from)
             }
-        }?;
+        }
+        .inspect_err(|_| {
+            debug!("upload to {host_key} failed, retrying");
+            let _ = hosts.retry(host_key);
+        })?;
 
         // TODO: retry host upon timeout
 
