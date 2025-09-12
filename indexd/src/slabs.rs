@@ -169,11 +169,13 @@ pub struct SharedSlab {
     pub length: usize,
 }
 
+#[serde_as]
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedObject {
     pub key: String,
     pub slabs: Vec<SharedSlab>,
+    #[serde_as(as = "Option<Base64>")]
     pub meta: Option<Vec<u8>>,
 }
 
