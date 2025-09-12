@@ -162,7 +162,7 @@ impl Uploader {
                     tasks.spawn(Self::upload_shard(permit, client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
                 }
             }
-            attempts += 1;
+            attempts = 10.min(attempts + 1);
         }
     }
 
