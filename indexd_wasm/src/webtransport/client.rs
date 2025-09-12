@@ -1,10 +1,9 @@
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
-use gloo_console::{info, log};
+use chrono::Utc;
+use gloo_console::log;
 use gloo_timers::future::TimeoutFuture;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use tokio::select;
 
 use gloo_console::debug;
@@ -230,7 +229,6 @@ struct ClientInner {
     client: web_transport::Client,
     hosts: Mutex<HashMap<PublicKey, Vec<NetAddress>>>,
     preferred_hosts: Mutex<PriorityQueue<PublicKey, i64>>,
-    open_conns: Mutex<HashMap<PublicKey, Session>>,
     cached_prices: Mutex<HashMap<PublicKey, HostPrices>>,
 }
 
@@ -241,7 +239,6 @@ impl ClientInner {
             client,
             hosts: Mutex::new(HashMap::new()),
             preferred_hosts: Mutex::new(PriorityQueue::new()),
-            open_conns: Mutex::new(HashMap::new()),
             cached_prices: Mutex::new(HashMap::new()),
         })
     }
@@ -265,10 +262,6 @@ impl ClientInner {
         self.cached_prices.lock().unwrap().insert(*host_key, prices);
     }
 
-    fn existing_conn(&self, _host: PublicKey) -> Option<Session> {
-        None // TODO: remove
-    }
-
     async fn new_session(&self, host: PublicKey) -> Result<Session, Error> {
         let addresses = {
             let hosts = self.hosts.lock().unwrap();
@@ -286,17 +279,11 @@ impl ClientInner {
     }
 
     async fn host_stream(&self, host: PublicKey) -> Result<Stream, Error> {
-        let mut conn = if let Some(conn) = self.existing_conn(host) {
-            debug!("reusing existing connection to {host}");
-            conn
-        } else {
-            let new_conn = select! {
-                conn = self.new_session(host) => conn,
-                _ = TimeoutFuture::new(30000) =>  Err(Error::Timeout),
+        let mut conn = select! {
+            conn = self.new_session(host) => conn,
+            _ = TimeoutFuture::new(30000) =>  Err(Error::Timeout),
 
-            }?;
-            new_conn
-        };
+        }?;
 
         let (send, recv) = conn.open_bi().await?;
         Ok(Stream { send, recv })

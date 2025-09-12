@@ -2756,6 +2756,7 @@ dependencies = [
  "blake2b_simd",
  "bytes",
  "chacha20",
+ "chrono",
  "criterion",
  "ed25519-dalek",
  "futures",

@@ -5,7 +5,6 @@ pub mod webtransport;
 use crate::webtransport::{DownloadError, Downloader, UploadError, Uploader};
 
 use crate::app_client::{Client, RegisterAppRequest};
-use gloo_console::log;
 use gloo_timers::future::TimeoutFuture;
 use sia::encryption::EncryptionKey;
 use sia::signing::PrivateKey;
@@ -148,12 +147,7 @@ impl SDK<RegisteredState> {
             self.state.app_key.clone(),
             12,
         );
-        let uploader = Uploader::new(
-            self.state.app,
-            dialer.clone(),
-            self.state.app_key.clone(),
-            12,
-        );
+        let uploader = Uploader::new(self.state.app, dialer.clone(), self.state.app_key.clone());
 
         Ok(SDK {
             state: ConnectedState {

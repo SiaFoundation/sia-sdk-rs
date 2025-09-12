@@ -57,22 +57,15 @@ pub enum UploadError {
 pub struct Uploader {
     app_client: AppClient,
     account_key: PrivateKey,
-    max_inflight: usize,
 
     client: Client,
 }
 
 impl Uploader {
-    pub fn new(
-        app_client: AppClient,
-        host_client: Client,
-        account_key: PrivateKey,
-        max_inflight: usize,
-    ) -> Self {
+    pub fn new(app_client: AppClient, host_client: Client, account_key: PrivateKey) -> Self {
         Uploader {
             app_client,
             account_key,
-            max_inflight,
             client: host_client,
         }
     }

@@ -123,7 +123,9 @@ impl AccountToken {
     }
 
     pub fn new(account_key: &PrivateKey, host_key: PublicKey) -> Self {
-        let expiration_time = OffsetDateTime::now_utc() + time::Duration::minutes(5);
+        let expiration_time = chrono::Utc::now() + chrono::Duration::minutes(5);
+        let expiration_time =
+            OffsetDateTime::from_unix_timestamp(expiration_time.timestamp()).unwrap();
         let sig_hash =
             Self::compute_sig_hash(&host_key, &account_key.public_key(), &expiration_time);
         AccountToken {
