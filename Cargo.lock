@@ -1463,7 +1463,7 @@ dependencies = [
  "pretty_env_logger",
  "rand",
  "rustls",
- "rustls-native-certs",
+ "rustls-platform-verifier 0.6.1",
  "sia_sdk",
  "thiserror 2.0.16",
  "tokio",
