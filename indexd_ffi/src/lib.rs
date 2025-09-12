@@ -857,7 +857,7 @@ impl Upload {
     /// Writes a chunk of data to the Sia network. The data will be
     /// erasure-coded and encrypted before upload.
     ///
-    /// Chunks should be written until EoF, then call [`finalize`].
+    /// Chunks should be written until EoF, then call [`Upload::finalize`].
     pub async fn write(&self, buf: &[u8]) -> Result<(), UploadError> {
         if self.result.is_finished() {
             return Err(UploadError::Closed);
