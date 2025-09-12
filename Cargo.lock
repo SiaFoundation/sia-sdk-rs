@@ -413,8 +413,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "145052bdd345b87320e369255277e3fb5152762ad123a901ef5c262dd38fe8d2"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link 0.2.0",
 ]
 
@@ -729,9 +731,9 @@ dependencies = [
 
 [[package]]
 name = "deranged"
-version = "0.4.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c9e6a11ca8224451684bc0d7d5a7adbf8f2fd6887261a1cfc3c0432f9d4068e"
+checksum = "d630bccd429a5bb5a64b5e94f693bfc48c9f8566418fda4c494cc94f911f87cc"
 dependencies = [
  "powerfmt",
  "serde",
@@ -1044,6 +1046,44 @@ name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
+
+[[package]]
+name = "gloo-console"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a17868f56b4a24f677b17c8cb69958385102fa879418052d60b50bc1727e261"
+dependencies = [
+ "gloo-utils",
+ "js-sys",
+ "serde",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "gloo-timers"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "gloo-utils"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5555354113b18c547c1d3a98fbf7fb32a9ff4f6fa112ce823a21641a0ba3aa"
+dependencies = [
+ "js-sys",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "web-sys",
+]
 
 [[package]]
 name = "goblin"
@@ -1469,6 +1509,31 @@ dependencies = [
  "tokio",
  "uniffi",
  "zeroize",
+]
+
+[[package]]
+name = "indexd_wasm"
+version = "0.0.1"
+dependencies = [
+ "blake2b_simd",
+ "bytes",
+ "chrono",
+ "futures",
+ "gloo-console",
+ "gloo-timers",
+ "httptest",
+ "priority-queue",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sia_sdk",
+ "thiserror 2.0.16",
+ "time",
+ "tokio",
+ "tokio-util",
+ "url",
+ "web-transport",
 ]
 
 [[package]]
@@ -2056,6 +2121,7 @@ version = "0.11.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49df843a9161c85bb8aae55f101bc0bac8bcafd637a620d9122fd7e0b2f7422e"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
  "fastbloom",
  "getrandom 0.3.3",
@@ -2690,6 +2756,7 @@ dependencies = [
  "blake2b_simd",
  "bytes",
  "chacha20",
+ "chrono",
  "criterion",
  "ed25519-dalek",
  "futures",
@@ -2938,12 +3005,11 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.41"
+version = "0.3.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a7619e19bc266e0f9c5e6686659d394bc57973859340060a69221e57dbc0c40"
+checksum = "83bde6f1ec10e72d583d91623c939f623002284ef622b87de38cfd546cbf2031"
 dependencies = [
  "deranged",
- "itoa",
  "num-conv",
  "powerfmt",
  "serde",
@@ -2953,15 +3019,15 @@ dependencies = [
 
 [[package]]
 name = "time-core"
-version = "0.1.4"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9e9a38711f559d9e3ce1cdb06dd7c5b8ea546bc90052da6d06bb76da74bb07c"
+checksum = "40868e7c1d2f0b8d73e4a8c7f0ff63af4f6d19be117e90bd73eb1d62cf831c6b"
 
 [[package]]
 name = "time-macros"
-version = "0.2.22"
+version = "0.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3526739392ec93fd8b359c8e98514cb3e8e021beb4e5f597b00a0221f8ed8a49"
+checksum = "30cfb0125f12d9c277f35663a0a33f8c30190f4e4574868a330595412d34ebf3"
 dependencies = [
  "num-conv",
  "time-core",
@@ -3454,6 +3520,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "web-streams"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15c4d5dbf19463c4b65e974303d453cc11991873c7a4a4953214f791d73303a2"
+dependencies = [
+ "thiserror 2.0.16",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "web-sys"
 version = "0.3.77"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3471,6 +3549,76 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "web-transport"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03efb036f13785e3cbb9285e9fb94872a0887a9f4e7efeb02647cc12f5e55eea"
+dependencies = [
+ "bytes",
+ "thiserror 2.0.16",
+ "url",
+ "web-transport-quinn",
+ "web-transport-wasm",
+]
+
+[[package]]
+name = "web-transport-proto"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb650c577c46254d16041c7fe0dc9901d9a42df3f46e77e9d05d1b3c17294b19"
+dependencies = [
+ "bytes",
+ "http",
+ "thiserror 2.0.16",
+ "url",
+]
+
+[[package]]
+name = "web-transport-quinn"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccba8a1ab2aae70119c9ada57e4a2324ebe1820a18814ca47a818f01dcd00f46"
+dependencies = [
+ "bytes",
+ "futures",
+ "http",
+ "log",
+ "quinn",
+ "rustls",
+ "rustls-native-certs",
+ "thiserror 2.0.16",
+ "tokio",
+ "url",
+ "web-transport-proto",
+ "web-transport-trait",
+]
+
+[[package]]
+name = "web-transport-trait"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4850148841799c83f033f4dddccb219f1f097aff6db1bda5b0d3be69fefb32bd"
+dependencies = [
+ "bytes",
+]
+
+[[package]]
+name = "web-transport-wasm"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44b2af1bed400caa442d75217bb7ece5e1ec853daf60affd5d2448c0a2063662"
+dependencies = [
+ "bytes",
+ "js-sys",
+ "thiserror 2.0.16",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-streams",
+ "web-sys",
 ]
 
 [[package]]

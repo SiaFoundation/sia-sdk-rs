@@ -767,14 +767,9 @@ impl<T: Transport> RPCWriteSector<T, RPCInit> {
             data: data.clone(),
         };
 
-        let (tx, rx) = oneshot::channel();
-        rayon::spawn(move || {
-            let root = merkle::sector_root(data.as_ref());
-            let _ = tx.send(root);
-        });
+        let root = merkle::sector_root(data.as_ref());
 
         transport.write_request(&request).await?;
-        let root = rx.await.unwrap();
 
         Ok(RPCWriteSector {
             root,
