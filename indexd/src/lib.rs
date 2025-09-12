@@ -2,7 +2,9 @@ pub mod app_client;
 mod slabs;
 
 pub mod quic;
-use crate::quic::{DownloadError, Downloader, SlabFetcher, UploadError, Uploader};
+use crate::quic::{
+    DownloadError, DownloadOptions, Downloader, SlabFetcher, UploadError, UploadOptions, Uploader,
+};
 
 use crate::app_client::{Client, ObjectsCursor, RegisterAppRequest};
 use log::debug;
@@ -153,13 +155,11 @@ impl SDK<RegisteredState> {
             self.state.app.clone(),
             dialer.clone(),
             self.state.app_key.clone(),
-            12,
         );
         let uploader = Uploader::new(
             self.state.app.clone(),
             dialer.clone(),
             self.state.app_key.clone(),
-            12,
         );
 
         Ok(SDK {
@@ -177,14 +177,13 @@ impl SDK<ConnectedState> {
         &self,
         reader: R,
         encryption_key: EncryptionKey,
-        data_shards: u8,
-        parity_shards: u8,
         metadata: Option<Vec<u8>>,
+        options: UploadOptions,
     ) -> Result<Object> {
         let object = self
             .state
             .uploader
-            .upload(reader, encryption_key, data_shards, parity_shards, metadata)
+            .upload(reader, encryption_key, metadata, options)
             .await?;
         Ok(object)
     }
@@ -194,27 +193,12 @@ impl SDK<ConnectedState> {
         writer: &mut W,
         encryption_key: EncryptionKey,
         object: &Object,
+        options: DownloadOptions,
     ) -> Result<()> {
         let slab_iterator = SlabFetcher::new(self.state.app.clone(), object.slabs.clone());
         self.state
             .downloader
-            .download(writer, encryption_key, slab_iterator)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn download_range<W: AsyncWriteExt + Unpin>(
-        &self,
-        writer: &mut W,
-        encryption_key: EncryptionKey,
-        object: &Object,
-        offset: usize,
-        length: usize,
-    ) -> Result<()> {
-        let slab_iterator = SlabFetcher::new(self.state.app.clone(), object.slabs.clone());
-        self.state
-            .downloader
-            .download_range(writer, encryption_key, slab_iterator, offset, length)
+            .download(writer, encryption_key, slab_iterator, options)
             .await?;
         Ok(())
     }

@@ -147,11 +147,27 @@ pub enum DownloadError {
     Custom(String),
 }
 
+pub struct DownloadOptions {
+    /// Maximum number of concurrent sector downloads.
+    pub max_inflight: usize,
+    pub offset: usize,
+    pub length: Option<usize>,
+}
+
+impl Default for DownloadOptions {
+    fn default() -> Self {
+        Self {
+            max_inflight: 20,
+            offset: 0,
+            length: None,
+        }
+    }
+}
+
 pub struct DownloaderInner {
     account_key: PrivateKey,
     host_client: Client,
     app_client: AppClient,
-    max_inflight: usize,
 }
 
 impl DownloaderInner {
@@ -181,18 +197,12 @@ pub struct Downloader {
 }
 
 impl Downloader {
-    pub fn new(
-        app_client: AppClient,
-        host_client: Client,
-        account_key: PrivateKey,
-        max_inflight: usize,
-    ) -> Self {
+    pub fn new(app_client: AppClient, host_client: Client, account_key: PrivateKey) -> Self {
         Self {
             inner: Arc::new(DownloaderInner {
                 account_key,
                 host_client,
                 app_client,
-                max_inflight,
             }),
         }
     }
@@ -203,15 +213,16 @@ impl Downloader {
     ///
     /// offset and limit are the byte range to download
     /// from each sector.
-    pub async fn download_slab_shards(
+    async fn download_slab_shards(
         &self,
         encryption_key: &EncryptionKey,
         sectors: &[Sector],
         min_shards: u8,
         offset: usize,
         limit: usize,
+        max_inflight: usize,
     ) -> Result<Vec<Option<Vec<u8>>>, DownloadError> {
-        let semaphore = Arc::new(Semaphore::new(self.inner.max_inflight));
+        let semaphore = Arc::new(Semaphore::new(max_inflight));
         let (data_shards, parity_shards) = sectors.split_at(min_shards as usize);
 
         let mut download_tasks = JoinSet::new();
@@ -325,13 +336,12 @@ impl Downloader {
         (start, end - start)
     }
 
-    pub async fn download_range<W: AsyncWriteExt + Unpin, S: SlabIterator>(
+    pub async fn download<W: AsyncWriteExt + Unpin, S: SlabIterator>(
         &self,
         w: &mut W,
         encryption_key: EncryptionKey,
         mut slabs: S,
-        mut offset: usize,
-        mut length: usize,
+        options: DownloadOptions,
     ) -> Result<(), DownloadError> {
         if self.inner.host_client.hosts().is_empty() {
             let hosts = self.inner.app_client.hosts().await?;
@@ -339,6 +349,10 @@ impl Downloader {
         }
 
         let max_length = slabs.max_length();
+        let mut offset = options.offset;
+        let mut length = options
+            .length
+            .unwrap_or_else(|| slabs.max_length() - offset);
         if offset + length > max_length {
             return Err(DownloadError::OutOfRange(offset, length));
         } else if length == 0 {
@@ -377,6 +391,7 @@ impl Downloader {
                     slab.min_shards,
                     shard_offset,
                     shard_length,
+                    options.max_inflight,
                 )
                 .await?;
             let data_shards = slab.min_shards as usize;
@@ -399,18 +414,5 @@ impl Downloader {
         w.flush().await?;
         bw.flush().await?;
         Ok(())
-    }
-
-    /// downloads data from the provided slabs and writes it
-    /// to the writer.
-    pub async fn download<W: AsyncWriteExt + Unpin, S: SlabIterator>(
-        &self,
-        w: &mut W,
-        encryption_key: EncryptionKey,
-        slabs: S,
-    ) -> Result<(), DownloadError> {
-        let total_length = slabs.max_length();
-        self.download_range(w, encryption_key, slabs, 0, total_length)
-            .await
     }
 }

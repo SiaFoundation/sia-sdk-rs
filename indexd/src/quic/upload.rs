@@ -58,22 +58,35 @@ pub enum UploadError {
 pub struct Uploader {
     app_client: AppClient,
     account_key: PrivateKey,
-    max_inflight: usize,
 
     client: Client,
 }
 
+pub struct UploadOptions {
+    pub data_shards: u8,
+    pub parity_shards: u8,
+    pub max_inflight: usize,
+    /// Optional channel to notify when each shard is uploaded.
+    /// This can be used to implement progress reporting.
+    pub shard_uploaded: Option<mpsc::UnboundedSender<()>>,
+}
+
+impl Default for UploadOptions {
+    fn default() -> Self {
+        Self {
+            data_shards: 10,
+            parity_shards: 30,
+            max_inflight: 16,
+            shard_uploaded: None,
+        }
+    }
+}
+
 impl Uploader {
-    pub fn new(
-        app_client: AppClient,
-        host_client: Client,
-        account_key: PrivateKey,
-        max_inflight: usize,
-    ) -> Self {
+    pub fn new(app_client: AppClient, host_client: Client, account_key: PrivateKey) -> Self {
         Uploader {
             app_client,
             account_key,
-            max_inflight,
             client: host_client,
         }
     }
@@ -160,16 +173,17 @@ impl Uploader {
         &self,
         mut r: R,
         encryption_key: EncryptionKey,
-        data_shards: u8,
-        parity_shards: u8,
         meta: Option<Vec<u8>>,
+        options: UploadOptions,
     ) -> Result<Object, UploadError> {
         if self.client.hosts().is_empty() {
             let hosts = self.app_client.hosts().await?;
             self.client.update_hosts(hosts);
         }
+        let data_shards = options.data_shards as usize;
+        let parity_shards = options.parity_shards as usize;
         let (slab_tx, mut slab_rx) = mpsc::unbounded_channel();
-        let semaphore = Arc::new(Semaphore::new(self.max_inflight));
+        let semaphore = Arc::new(Semaphore::new(options.max_inflight));
         let host_client = self.client.clone();
         let account_key = self.account_key.clone();
         let read_slab_res: JoinHandle<Result<(), UploadError>> = tokio::spawn({
@@ -184,8 +198,7 @@ impl Uploader {
                 let mut slab_index: usize = 0;
                 let slab_upload_tasks = TaskTracker::new();
                 loop {
-                    let rs =
-                        ErasureCoder::new(data_shards as usize, parity_shards as usize).unwrap();
+                    let rs = ErasureCoder::new(data_shards, parity_shards).unwrap();
                     let (mut shards, length) = rs.read_shards(&mut r).await?;
                     if length == 0 {
                         break;
@@ -196,7 +209,7 @@ impl Uploader {
 
                     let mut shard_upload_tasks = JoinSet::new();
                     // encrypt and start uploading data_shards immediately
-                    let mut unencrypted_data_shards = shards[..data_shards as usize].to_vec();
+                    let mut unencrypted_data_shards = shards[..data_shards].to_vec();
                     let encrypted_data_shards = spawn_blocking({
                         let slab_key = slab_key.clone();
                         move || {
@@ -224,8 +237,8 @@ impl Uploader {
                         let slab_key = slab_key.clone();
                         move || -> Vec<Vec<u8>> {
                             rs.encode_shards(&mut shards).unwrap();
-                            let mut parity_shards = shards[data_shards as usize..].to_vec();
-                            encrypt_shards(&slab_key, data_shards, 0, &mut parity_shards);
+                            let mut parity_shards = shards[data_shards..].to_vec();
+                            encrypt_shards(&slab_key, options.data_shards, 0, &mut parity_shards);
                             parity_shards
                         }
                     })
@@ -233,7 +246,7 @@ impl Uploader {
 
                     for (shard_index, shard) in encrypted_parity_shards.into_iter().enumerate() {
                         let permit = semaphore.clone().acquire_owned().await?;
-                        let shard_index = shard_index + data_shards as usize; // offset by data shards
+                        let shard_index = shard_index + data_shards; // offset by data shards
                         shard_upload_tasks.spawn(Self::upload_slab_shard(
                             permit,
                             host_client.clone(),
@@ -247,40 +260,46 @@ impl Uploader {
                     // wait for all shards to finish uploading
                     // this is done in a separate task to allow preparing the next slab
                     let slab_tx = slab_tx.clone();
+                    let progress_tx = options.shard_uploaded.clone();
                     slab_upload_tasks.spawn(async move {
-                    let mut slab = Slab {
-                        sectors: vec![
-                            Sector {
-                                root: Hash256::default(),
-                                host_key: PublicKey::new([0u8; 32])
-                            };
-                            (data_shards + parity_shards) as usize
-                        ],
-                        encryption_key: slab_key,
-                        offset: 0,
-                        length,
-                        min_shards: data_shards,
-                    };
-                    let mut remaining_shards = data_shards + parity_shards;
-                    while let Some(res) = shard_upload_tasks.join_next().await {
-                        let (shard_index, sector) = match res {
-                            Ok(Ok(s)) => s,
-                            Ok(Err(e)) => {
-                                slab_tx.send(Err(e)).unwrap();
-                                return;
-                            }
-                            Err(e) => {
-                                slab_tx.send(Err(e.into())).unwrap();
-                                return;
-                            }
+                        let mut slab = Slab {
+                            sectors: vec![
+                                Sector {
+                                    root: Hash256::default(),
+                                    host_key: PublicKey::new([0u8; 32])
+                                };
+                                data_shards + parity_shards
+                            ],
+                            encryption_key: slab_key,
+                            offset: 0,
+                            length,
+                            min_shards: options.data_shards,
                         };
-                        slab.sectors[shard_index] = sector;
-                        remaining_shards -= 1;
-                        debug!("slab {slab_index} shard {shard_index} uploaded ({remaining_shards} remaining)");
-                    }
-                    // send the completed slab to the channel
-                    slab_tx.send(Ok((slab_index, slab))).unwrap();
-                });
+                        let mut remaining_shards = data_shards + parity_shards;
+                        while let Some(res) = shard_upload_tasks.join_next().await {
+                            let (shard_index, sector) = match res {
+                                Ok(Ok(s)) => {
+                                    if let Some(chan) = &progress_tx {
+                                        let _ = chan.send(());
+                                    }
+                                    s
+                                },
+                                Ok(Err(e)) => {
+                                    slab_tx.send(Err(e)).unwrap();
+                                    return;
+                                }
+                                Err(e) => {
+                                    slab_tx.send(Err(e.into())).unwrap();
+                                    return;
+                                }
+                            };
+                            slab.sectors[shard_index] = sector;
+                            remaining_shards -= 1;
+                            debug!("slab {slab_index} shard {shard_index} uploaded ({remaining_shards} remaining)");
+                        }
+                        // send the completed slab to the channel
+                        slab_tx.send(Ok((slab_index, slab))).unwrap();
+                    });
                     slab_index += 1;
                 }
                 slab_upload_tasks.close();
