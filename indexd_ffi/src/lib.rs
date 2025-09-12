@@ -8,9 +8,8 @@ use std::time::SystemTime;
 use indexd::app_client::{
     Client as AppClient, RegisterAppRequest, SlabPinParams as AppSlabPinParams,
 };
-use indexd::quic;
 use indexd::quic::{Client as HostClient, Downloader, SlabFetcher, Uploader};
-use indexd::{SlabSlice, Url};
+use indexd::{SlabSlice, Url, quic};
 use log::debug;
 use rustls::{ClientConfig, RootCertStore};
 use sia::encryption::EncryptionKey;
