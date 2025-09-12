@@ -1,6 +1,19 @@
-use indexd_ffi::{AppMeta, PinnedSector, SDK, SlabPinParams};
-use log::info;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+
+use indexd_ffi::{
+    AppMeta, DownloadOptions, PinnedSector, SDK, SlabPinParams, UploadOptions,
+    UploadProgressCallback,
+};
+use log::info;
+
+pub struct ProgressLogger;
+
+impl UploadProgressCallback for ProgressLogger {
+    fn progress(&self, uploaded: u64, total_size: u64) {
+        info!("uploaded {}/{} bytes", uploaded, total_size);
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -80,7 +93,16 @@ async fn main() {
 
     let encryption_key: [u8; 32] = rand::random();
     let writer = sdk
-        .upload(encryption_key.to_vec(), 1, 3, None)
+        .upload(
+            encryption_key.to_vec(),
+            None,
+            UploadOptions {
+                data_shards: 1,
+                parity_shards: 3,
+                max_inflight: 12,
+                progress_callback: Some(Arc::new(ProgressLogger)),
+            },
+        )
         .await
         .expect("writer");
     let data = vec![1u8; 2 << 22];
@@ -92,7 +114,15 @@ async fn main() {
     info!("upload complete, got {} slabs", object.slabs.len());
 
     let reader = sdk
-        .download(&object, encryption_key.to_vec())
+        .download(
+            encryption_key.to_vec(),
+            &object,
+            DownloadOptions {
+                max_inflight: 12,
+                offset: 0,
+                length: None,
+            },
+        )
         .await
         .expect("reader init");
 
@@ -123,10 +153,20 @@ async fn main() {
         .expect("share url");
     info!("share url: {}", share_url);
 
+    let shared_object = sdk.shared_object(&share_url).await.expect("shared object");
+    assert_eq!(shared_object.size(), data.len() as u64, "length mismatch");
+
     info!("downloading shared object");
 
     let reader = sdk
-        .download_shared(share_url)
+        .download_shared(
+            &share_url,
+            DownloadOptions {
+                max_inflight: 12,
+                offset: 0,
+                length: None,
+            },
+        )
         .await
         .expect("download shared");
     let mut read_data = Vec::with_capacity(data.len());

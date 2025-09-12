@@ -120,19 +120,19 @@ pub struct SharedSlab {
     pub length: usize,
 }
 
+#[serde_as]
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedObject {
     pub key: String,
     pub slabs: Vec<SharedSlab>,
+    #[serde_as(as = "Option<Base64>")]
     pub meta: Option<Vec<u8>>,
 }
 
 impl SharedObject {
     pub fn size(&self) -> u64 {
-        self.slabs
-            .iter()
-            .fold(0_u64, |v, s| v + (s.length as u64 - s.offset as u64))
+        self.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
     }
 }
 
