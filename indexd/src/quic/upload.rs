@@ -169,6 +169,13 @@ impl Uploader {
     /// Reads until EOF and uploads all slabs.
     /// The data will be erasure coded, encrypted,
     /// and uploaded using the uploader's parameters.
+    ///
+    /// # Warnings
+    /// * The `encryption_key` must be unique for every upload. Reusing an
+    ///   encryption key will compromise the security of the data.
+    ///
+    /// # Returns
+    /// An object representing the uploaded data.
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
         mut r: R,

@@ -609,6 +609,10 @@ impl SDK {
 
     /// Uploads data to the Sia network and pins it to the indexer
     ///
+    /// # Warnings
+    /// * The `encryption_key` must be unique for every upload. Reusing an
+    ///   encryption key will compromise the security of the data.
+    ///
     /// # Returns
     /// An object representing the uploaded data.
     pub async fn upload(
