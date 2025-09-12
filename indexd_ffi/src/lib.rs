@@ -5,9 +5,11 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use indexd::app_client::{Client as AppClient, RegisterAppRequest};
-use indexd::quic::{self, Client as HostClient, Downloader, SlabFetcher, Uploader};
-use indexd::{SlabSlice, Url};
+use indexd::app_client::{
+    Client as AppClient, RegisterAppRequest, SlabPinParams as AppSlabPinParams,
+};
+use indexd::quic::{Client as HostClient, Downloader, SlabFetcher, Uploader};
+use indexd::{SlabSlice, Url, quic};
 use log::debug;
 use rustls::{ClientConfig, RootCertStore};
 use sia::encryption::EncryptionKey;
@@ -300,7 +302,7 @@ impl TryInto<sia::rhp::Host> for Host {
 }
 
 /// A sector stored on a specific host.
-#[derive(uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct PinnedSector {
     pub root: String,
     pub host_key: String,
@@ -359,6 +361,41 @@ impl TryInto<SlabSlice> for Slab {
             slab_id: Hash256::from_str(self.id.as_str())?,
             offset: self.offset as usize,
             length: self.length as usize,
+        })
+    }
+}
+
+impl TryInto<indexd::Sector> for PinnedSector {
+    type Error = HexParseError;
+
+    fn try_into(self) -> Result<indexd::Sector, Self::Error> {
+        Ok(indexd::Sector {
+            host_key: PublicKey::from_str(self.host_key.as_str())?,
+            root: Hash256::from_str(self.root.as_str())?,
+        })
+    }
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct SlabPinParams {
+    pub encryption_key: Vec<u8>,
+    pub min_shards: u8,
+    pub sectors: Vec<PinnedSector>,
+}
+
+impl TryInto<AppSlabPinParams> for SlabPinParams {
+    type Error = Error;
+
+    fn try_into(self) -> Result<AppSlabPinParams, Error> {
+        Ok(AppSlabPinParams {
+            encryption_key: EncryptionKey::try_from(self.encryption_key.as_ref())
+                .map_err(|v| Error::Crypto(format!("failed to convert encryption key: {:?}", v)))?,
+            min_shards: self.min_shards,
+            sectors: self
+                .sectors
+                .into_iter()
+                .map(|s| s.try_into())
+                .collect::<Result<Vec<_>, _>>()?,
         })
     }
 }
@@ -818,6 +855,22 @@ impl SDK {
         let slab_id = Hash256::from_str(slab_id.as_str())?;
         let slab = self.app_client.slab(&slab_id).await?;
         Ok(slab.into())
+    }
+
+    /// Pins a slab to the indexer.
+    pub async fn pin_slab(&self, slab_pin_params: SlabPinParams) -> Result<String, Error> {
+        let slab_id = self
+            .app_client
+            .pin_slab(slab_pin_params.try_into()?)
+            .await?;
+        Ok(slab_id.to_string())
+    }
+
+    /// UnpinSlab unpins a slab from the indexer.
+    pub async fn unpin_slab(&self, slab_id: String) -> Result<(), Error> {
+        let slab_id = Hash256::from_str(slab_id.as_str())?;
+        self.app_client.unpin_slab(&slab_id).await?;
+        Ok(())
     }
 
     /// Creates a signed URL that can be used to share object metadata
