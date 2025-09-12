@@ -413,8 +413,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "145052bdd345b87320e369255277e3fb5152762ad123a901ef5c262dd38fe8d2"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link 0.2.0",
 ]
 
@@ -1433,6 +1435,7 @@ version = "0.0.1"
 dependencies = [
  "blake2b_simd",
  "bytes",
+ "chrono",
  "futures",
  "hex",
  "httptest",
@@ -1448,7 +1451,6 @@ dependencies = [
  "serde_with",
  "sia_sdk",
  "thiserror 2.0.16",
- "time",
  "tokio",
  "tokio-util",
  "url",
@@ -2690,6 +2692,7 @@ dependencies = [
  "blake2b_simd",
  "bytes",
  "chacha20",
+ "chrono",
  "criterion",
  "ed25519-dalek",
  "futures",
@@ -2708,7 +2711,6 @@ dependencies = [
  "sha2",
  "sia-sdk-derive",
  "thiserror 2.0.16",
- "time",
  "tokio",
  "uint",
  "zeroize",

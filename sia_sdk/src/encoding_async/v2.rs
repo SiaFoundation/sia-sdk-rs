@@ -1,6 +1,6 @@
 use super::Error as EncodingError;
 use bytes::{Bytes, BytesMut};
-use time::{Duration, OffsetDateTime};
+use chrono::{DateTime, Duration, Utc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub trait AsyncEncoder {
@@ -71,23 +71,27 @@ impl AsyncSiaDecodable for bool {
     }
 }
 
-impl AsyncSiaEncodable for OffsetDateTime {
+impl AsyncSiaEncodable for DateTime<Utc> {
     async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
-        self.unix_timestamp().encode_async(w).await
+        self.timestamp().encode_async(w).await
     }
 }
 
-impl AsyncSiaDecodable for OffsetDateTime {
+impl AsyncSiaDecodable for DateTime<Utc> {
     async fn decode_async<D: AsyncDecoder>(r: &mut D) -> Result<Self, D::Error> {
         let timestamp = i64::decode_async(r).await?;
-        OffsetDateTime::from_unix_timestamp(timestamp)
-            .map_err(|e| EncodingError::InvalidValue(e.to_string()).into())
+        Ok(DateTime::from_timestamp_secs(timestamp).ok_or_else(|| {
+            EncodingError::InvalidValue(format!("invalid timestamp: {timestamp}"))
+        })?)
     }
 }
 
 impl AsyncSiaEncodable for Duration {
     async fn encode_async<E: AsyncEncoder>(&self, w: &mut E) -> Result<(), E::Error> {
-        (self.whole_nanoseconds() as u64).encode_async(w).await
+        self.num_nanoseconds()
+            .ok_or_else(|| EncodingError::InvalidValue("duration too large".into()))?
+            .encode_async(w)
+            .await
     }
 }
 

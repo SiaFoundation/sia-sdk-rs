@@ -2,8 +2,8 @@ use crate::encoding::SiaEncodable;
 use crate::encoding_async::{AsyncSiaDecodable, AsyncSiaDecode, AsyncSiaEncodable, AsyncSiaEncode};
 use crate::types::v2::NetAddress;
 use blake2b_simd::Params;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
 
 use crate::signing::{PrivateKey, PublicKey, Signature};
 use crate::types::{Address, Currency, Hash256};
@@ -44,7 +44,7 @@ pub struct HostPrices {
     /// The current height of the host's blockchain.
     pub tip_height: u64,
     /// The time until which the prices are valid.
-    pub valid_until: OffsetDateTime,
+    pub valid_until: DateTime<Utc>,
 
     pub signature: Signature,
 }
@@ -65,7 +65,7 @@ impl HostPrices {
     }
 
     /// Checks if the prices are valid for the given host key and timestamp.
-    pub fn is_valid(&self, host_key: &PublicKey, timestamp: OffsetDateTime) -> bool {
+    pub fn is_valid(&self, host_key: &PublicKey, timestamp: DateTime<Utc>) -> bool {
         self.valid_until > timestamp
             && self.tip_height > 0
             && host_key.verify(self.sig_hash().as_ref(), &self.signature)
@@ -104,7 +104,7 @@ pub struct HostSettings {
 pub struct AccountToken {
     pub host_key: PublicKey,
     pub account: PublicKey,
-    pub valid_until: OffsetDateTime,
+    pub valid_until: DateTime<Utc>,
 
     pub signature: Signature,
 }
@@ -113,7 +113,7 @@ impl AccountToken {
     fn compute_sig_hash(
         host_key: &PublicKey,
         account: &PublicKey,
-        valid_until: &OffsetDateTime,
+        valid_until: &DateTime<Utc>,
     ) -> Hash256 {
         let mut state = Params::new().hash_length(32).to_state();
         host_key.encode(&mut state).unwrap();
@@ -123,7 +123,7 @@ impl AccountToken {
     }
 
     pub fn new(account_key: &PrivateKey, host_key: PublicKey) -> Self {
-        let expiration_time = OffsetDateTime::now_utc() + time::Duration::minutes(5);
+        let expiration_time = chrono::Utc::now() + chrono::Duration::minutes(5);
         let sig_hash =
             Self::compute_sig_hash(&host_key, &account_key.public_key(), &expiration_time);
         AccountToken {

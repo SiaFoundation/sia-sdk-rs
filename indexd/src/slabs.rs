@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use serde_with::base64::Base64;
@@ -69,12 +70,8 @@ pub struct Object {
     // base64-encoded arbitrary metadata
     #[serde_as(as = "Base64")]
     pub meta: Vec<u8>,
-
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: time::OffsetDateTime,
-
-    #[serde(with = "time::serde::rfc3339")]
-    pub updated_at: time::OffsetDateTime,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl Object {
@@ -84,8 +81,8 @@ impl Object {
             slabs,
             meta: meta.unwrap_or_default(),
 
-            created_at: time::OffsetDateTime::now_utc(),
-            updated_at: time::OffsetDateTime::now_utc(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
         }
     }
 

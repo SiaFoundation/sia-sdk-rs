@@ -1215,8 +1215,8 @@ impl<T: Transport, S: RenterContractSigner, B: TransactionBuilder>
 #[cfg(test)]
 mod test {
     use bytes::BytesMut;
+    use chrono::DateTime;
     use std::io::Cursor;
-    use time::OffsetDateTime;
     use tokio::io::AsyncWriteExt;
 
     use super::*;
@@ -1292,7 +1292,7 @@ mod test {
         egress_price: Currency::siacoins(5),
         free_sector_price: Currency::siacoins(6),
         tip_height: 7,
-        valid_until: OffsetDateTime::UNIX_EPOCH,
+        valid_until: DateTime::UNIX_EPOCH,
         signature: Signature::new([0u8; 64]),
     };
 
@@ -1307,7 +1307,7 @@ mod test {
             bytes[0] = 11;
             bytes
         }),
-        valid_until: OffsetDateTime::UNIX_EPOCH,
+        valid_until: DateTime::UNIX_EPOCH,
         signature: Signature::new({
             let mut bytes = [0u8; 64];
             bytes[0] = 13;
@@ -1320,7 +1320,7 @@ mod test {
         const EXPECTED_HEX: &str = "52656164536563746f72000000000000000000a1edccce1bc2d300000000000000000042db999d3784a7010000000000000000e3c8666c53467b02000000000000000084b6333b6f084f03000000000000000025a4000a8bca22040000000000000000c691cdd8a68cf604000000000007000000000000000800000000000000090000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000b000000000000000000000000000000000000000000000000000000000000000c000000000000000d0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000f000000000000001000000000000000";
 
         let mut prices = TEST_PRICES;
-        prices.valid_until = OffsetDateTime::from_unix_timestamp(8).unwrap();
+        prices.valid_until = DateTime::from_timestamp_secs(8).unwrap();
         prices.signature = Signature::new({
             let mut bytes = [0u8; 64];
             bytes[0] = 9;
@@ -1328,7 +1328,7 @@ mod test {
         });
 
         let mut token = TEST_ACCOUNT_TOKEN;
-        token.valid_until = OffsetDateTime::from_unix_timestamp(12).unwrap();
+        token.valid_until = DateTime::from_timestamp_secs(12).unwrap();
         token.signature = Signature::new({
             let mut bytes = [0u8; 64];
             bytes[0] = 13;
