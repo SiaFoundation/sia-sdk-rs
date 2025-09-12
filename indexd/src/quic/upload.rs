@@ -10,6 +10,7 @@ use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, BufReader};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::{JoinHandle, JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
@@ -124,6 +125,7 @@ impl Uploader {
         account_key: PrivateKey,
         data: Bytes,
         shard_index: usize,
+        progress_callback: Option<UnboundedSender<()>>,
     ) -> Result<(usize, Sector), UploadError> {
         const BACKOFF_MULTIPLIER: u32 = 2;
 
@@ -145,6 +147,9 @@ impl Uploader {
                 Some(res) = tasks.join_next() => {
                     match res.unwrap() {
                         Ok(sector) => {
+                            if let Some(cb) = &progress_callback {
+                                let _ = cb.send(());
+                            }
                             return Ok((shard_index, sector));
                         }
                         Err(e) => {
@@ -227,6 +232,7 @@ impl Uploader {
                         account_key.clone(),
                         shard.into(),
                         shard_index,
+                        options.shard_uploaded.clone(),
                     ));
                 }
 
@@ -241,7 +247,6 @@ impl Uploader {
                     }
                 })
                 .await?;
-
                 for (shard_index, shard) in encrypted_parity_shards.into_iter().enumerate() {
                     let permit = semaphore.clone().acquire_owned().await?;
                     let shard_index = shard_index + data_shards; // offset by data shards
@@ -252,13 +257,13 @@ impl Uploader {
                         account_key.clone(),
                         shard.into(),
                         shard_index,
+                        options.shard_uploaded.clone(),
                     ));
                 }
 
                 // wait for all shards to finish uploading
                 // this is done in a separate task to allow preparing the next slab
                 let slab_tx = slab_tx.clone();
-                let progress_tx = options.shard_uploaded.clone();
                 slab_upload_tasks.spawn(async move {
                     let mut slab = Slab {
                         sectors: vec![
@@ -276,12 +281,7 @@ impl Uploader {
                     let mut remaining_shards = data_shards + parity_shards;
                     while let Some(res) = shard_upload_tasks.join_next().await {
                         let (shard_index, sector) = match res {
-                            Ok(Ok(s)) => {
-                                if let Some(chan) = &progress_tx {
-                                    let _ = chan.send(());
-                                }
-                                s
-                            },
+                            Ok(Ok(s)) => s,
                             Ok(Err(e)) => {
                                 slab_tx.send(Err(e)).unwrap();
                                 return;
