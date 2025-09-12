@@ -77,11 +77,7 @@ pub(crate) mod timestamp_array {
     }
 }
 
-/// Helper module for base64 serialization of:
-///
-/// ```
-/// Vec<Vec<u8>>
-/// ```
+/// Helper module for base64 serialization of `Vec<Vec<u8>>`.
 pub(crate) mod vec_base64 {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
