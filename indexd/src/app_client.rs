@@ -92,15 +92,17 @@ pub struct ObjectsCursor {
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
-    pub account_key: PublicKey,
+    // We should use a PublicKey here but indexd's account definition uses a
+    // proto.Account which does not include the ed25519 prefix.
+    pub account_key: Hash256,
     pub service_account: bool,
     pub max_pinned_data: u64,
     pub pinned_data: u64,
     pub description: String,
     #[serde(rename = "logoURL")]
-    pub logo_url: String,
+    pub logo_url: Option<String>,
     #[serde(rename = "serviceURL")]
-    pub service_url: String,
+    pub service_url: Option<String>,
 }
 
 type Result<T> = std::result::Result<T, Error>;
