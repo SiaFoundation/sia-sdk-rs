@@ -463,8 +463,8 @@ pub struct Account {
     pub max_pinned_data: u64,
     pub pinned_data: u64,
     pub description: String,
-    pub logo_url: String,
-    pub service_url: String,
+    pub logo_url: Option<String>,
+    pub service_url: Option<String>,
 }
 
 impl From<indexd::app_client::Account> for Account {

@@ -6,7 +6,6 @@ use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
 use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
-use sia::signing::PublicKey;
 
 use thiserror::Error;
 
