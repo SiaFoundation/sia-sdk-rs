@@ -6,7 +6,7 @@ use crate::quic::{
     DownloadError, DownloadOptions, Downloader, SlabFetcher, UploadError, UploadOptions, Uploader,
 };
 
-use crate::app_client::{Client, ObjectsCursor, RegisterAppRequest};
+use crate::app_client::{Account, Client, ObjectsCursor, RegisterAppRequest};
 use log::debug;
 use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
@@ -215,6 +215,14 @@ impl SDK<ConnectedState> {
         self.state
             .app
             .slab(slab_id)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
+    pub async fn account(&self) -> Result<Account> {
+        self.state
+            .app
+            .account()
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }
