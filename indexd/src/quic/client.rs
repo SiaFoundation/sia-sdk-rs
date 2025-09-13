@@ -373,6 +373,18 @@ impl ClientInner {
         Ok(Stream { send, recv })
     }
 
+    async fn fetch_prices(&self, host_key: PublicKey) -> Result<HostPrices, Error> {
+        let stream = self.host_stream(host_key).await?;
+        let resp = RPCSettings::send_request(stream).await?.complete().await?;
+        let prices = resp.settings.prices;
+        if prices.valid_until < Utc::now() {
+            return Err(Error::InvalidPrices);
+        } else if !host_key.verify(prices.sig_hash().as_ref(), &prices.signature) {
+            return Err(Error::InvalidSignature);
+        }
+        Ok(prices)
+    }
+
     pub async fn host_prices(
         &self,
         host_key: PublicKey,
@@ -382,19 +394,7 @@ impl ClientInner {
             debug!("using cached prices for {host_key}");
             return Ok(prices);
         }
-        let stream = self.host_stream(host_key).await?;
-        let start = Instant::now();
-        let resp = RPCSettings::send_request(stream).await?.complete().await?;
-        debug!(
-            "fetched prices for {host_key} in {}ms",
-            start.elapsed().as_millis()
-        );
-        let prices = resp.settings.prices;
-        if prices.valid_until < Utc::now() {
-            return Err(Error::InvalidPrices);
-        } else if !host_key.verify(prices.sig_hash().as_ref(), &prices.signature) {
-            return Err(Error::InvalidSignature);
-        }
+        let prices = timeout(Duration::from_millis(750), self.fetch_prices(host_key)).await??;
         self.set_cached_prices(&host_key, prices.clone());
         Ok(prices)
     }
