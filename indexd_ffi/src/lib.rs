@@ -11,7 +11,8 @@ use indexd::app_client::{
 use indexd::quic::{Client as HostClient, Downloader, SlabFetcher, Uploader};
 use indexd::{SlabSlice, Url, quic};
 use log::debug;
-use rustls::{ClientConfig, RootCertStore};
+use rustls::ClientConfig;
+use rustls_platform_verifier::ConfigVerifierExt;
 use sia::encryption::EncryptionKey;
 use sia::rhp::SECTOR_SIZE;
 use sia::signing::{PrivateKey, PublicKey};
@@ -604,17 +605,9 @@ impl SDK {
         }
 
         // load root certs
-        let mut roots = RootCertStore::empty();
-        for cert in rustls_native_certs::load_native_certs().certs {
-            // Ignore any certs that fail to parse
-            let _ = roots.add(cert);
-        }
-
-        let client_crypto = ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-
-        let host_client = HostClient::new(client_crypto)?;
+        let rustls_config =
+            ClientConfig::with_platform_verifier().map_err(|e| Error::Custom(e.to_string()))?;
+        let host_client = HostClient::new(rustls_config)?;
 
         self.uploader
             .get_or_init(|| async {

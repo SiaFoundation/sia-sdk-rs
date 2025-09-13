@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use chrono::Utc;
 use log::debug;
 use priority_queue::PriorityQueue;
 use quinn::crypto::rustls::QuicClientConfig;
@@ -24,7 +25,6 @@ use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use sia::types::v2::{NetAddress, Protocol};
 use std::sync::Mutex;
-use time::OffsetDateTime;
 
 struct Stream {
     send: SendStream,
@@ -295,7 +295,7 @@ impl ClientInner {
         let mut cached_prices = self.cached_prices.lock().unwrap();
         match cached_prices.get(host_key) {
             Some(prices) => {
-                if prices.valid_until < OffsetDateTime::now_utc() {
+                if prices.valid_until < Utc::now() {
                     cached_prices.remove(host_key);
                     None
                 } else {
@@ -390,7 +390,7 @@ impl ClientInner {
             start.elapsed().as_millis()
         );
         let prices = resp.settings.prices;
-        if prices.valid_until < OffsetDateTime::now_utc() {
+        if prices.valid_until < Utc::now() {
             return Err(Error::InvalidPrices);
         } else if !host_key.verify(prices.sig_hash().as_ref(), &prices.signature) {
             return Err(Error::InvalidSignature);
