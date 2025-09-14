@@ -644,6 +644,8 @@ pub trait Transport {
         request: &R,
     ) -> impl Future<Output = Result<(), Self::Error>>;
 
+    fn write_bytes(&mut self, data: Bytes) -> impl Future<Output = Result<(), Self::Error>>;
+
     fn write_response<R: RPCResponse>(
         &mut self,
         response: &R,
@@ -724,7 +726,7 @@ impl<T: Transport> RPCSettings<T, RPCComplete> {
 struct RPCWriteSectorRequest {
     pub prices: HostPrices,
     pub token: AccountToken,
-    pub data: Bytes,
+    pub data_len: usize,
 }
 impl_rpc_request!(RPCWriteSectorRequest, "WriteSector");
 
@@ -764,16 +766,18 @@ impl<T: Transport> RPCWriteSector<T, RPCInit> {
         let request = RPCWriteSectorRequest {
             prices,
             token,
-            data: data.clone(),
+            data_len: data.len(),
         };
 
         let (tx, rx) = oneshot::channel();
+        let root_data = data.clone();
         rayon::spawn(move || {
-            let root = merkle::sector_root(data.as_ref());
+            let root = merkle::sector_root(root_data.as_ref());
             let _ = tx.send(root);
         });
 
         transport.write_request(&request).await?;
+        transport.write_bytes(data).await?;
         let root = rx.await.unwrap();
 
         Ok(RPCWriteSector {
@@ -1266,6 +1270,11 @@ mod test {
             request.encode_request(self).await?;
             self.buf.flush().await?;
             self.buf.set_position(0); // ready to read
+            Ok(())
+        }
+
+        async fn write_bytes(&mut self, data: Bytes) -> Result<(), Self::Error> {
+            self.buf.write_all(&data).await?;
             Ok(())
         }
 

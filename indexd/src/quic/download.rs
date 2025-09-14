@@ -10,7 +10,7 @@ use sia::rhp::SEGMENT_SIZE;
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use thiserror::Error;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use tokio::task::{JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
@@ -358,8 +358,7 @@ impl Downloader {
         } else if length == 0 {
             return Ok(());
         }
-        let mut bw = BufWriter::new(w);
-        let mut w = CipherWriter::new(&mut bw, encryption_key, offset);
+        let mut w = CipherWriter::new(w, encryption_key, offset);
         loop {
             if length == 0 {
                 break;
@@ -412,7 +411,6 @@ impl Downloader {
             length -= slab_length;
         }
         w.flush().await?;
-        bw.flush().await?;
         Ok(())
     }
 }
