@@ -153,7 +153,7 @@ impl Uploader {
                             if tasks.is_empty() {
                                 let (host_key, attempts) = hosts.pop_front()?;
                                 write_timeout = Duration::from_millis(2500 + (attempts as u64 * 1000));
-                                tasks.spawn(Self::upload_shard(client.clone(),hosts.clone(), host_key, account_key.clone(), data.clone(), write_timeout));
+                                tasks.spawn(Self::upload_shard(client.clone(), hosts.clone(), host_key, account_key.clone(), data.clone(), write_timeout));
                             }
                         }
                     }
@@ -169,7 +169,7 @@ impl Uploader {
                             debug!("racing slow host for shard {shard_index}");
                             let (host_key, attempts) = hosts.pop_front()?;
                             let write_timeout = Duration::from_millis(500 + attempts as u64 * 10);
-                            Self::upload_shard(client.clone(),hosts.clone(), host_key, account_key, data, write_timeout).await
+                            Self::upload_shard(client.clone(), hosts.clone(), host_key, account_key, data, write_timeout).await
                         });
                     }
                 }
