@@ -151,17 +151,16 @@ impl Client {
         host_key: PublicKey,
         refresh: bool,
     ) -> Result<HostPrices, Error> {
-        let start = Instant::now();
         self.inner
             .host_prices(host_key, refresh)
             .await
-            .inspect(|_| {
+            .inspect_err(|_| {
                 self.inner
                     .preferred_hosts
                     .lock()
                     .unwrap()
                     .change_priority_by(&host_key, |metric| {
-                        metric.add_sample(start.elapsed());
+                        metric.add_failure();
                     });
             })
     }
@@ -184,7 +183,16 @@ impl Client {
                     .change_priority_by(&host_key, |metric| {
                         let elapsed = start.elapsed();
                         debug!("wrote sector to {host_key} in {}ms", elapsed.as_millis());
-                        metric.add_sample(elapsed);
+                        metric.add_write_sample(elapsed);
+                    });
+            })
+            .inspect_err(|_| {
+                self.inner
+                    .preferred_hosts
+                    .lock()
+                    .unwrap()
+                    .change_priority_by(&host_key, |metric| {
+                        metric.add_failure();
                     });
             })
     }
@@ -209,38 +217,89 @@ impl Client {
                     .change_priority_by(&host_key, |metric| {
                         let elapsed = start.elapsed();
                         debug!("read sector from {host_key} in {}ms", elapsed.as_millis());
-                        metric.add_sample(elapsed);
+                        metric.add_read_sample(elapsed);
+                    });
+            })
+            .inspect_err(|_| {
+                self.inner
+                    .preferred_hosts
+                    .lock()
+                    .unwrap()
+                    .change_priority_by(&host_key, |metric| {
+                        metric.add_failure();
                     });
             })
     }
 }
 
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
-struct HostMetric {
-    rpc_millis: u128,
-    successful: u64,
-}
+struct RPCAverage(u128, u64);
 
-impl HostMetric {
-    fn add_sample(&mut self, d: Duration) {
-        self.rpc_millis = self.rpc_millis.saturating_add(d.as_millis());
-        self.successful = self.successful.saturating_add(1);
+impl RPCAverage {
+    fn add_sample(&mut self, sample: u128) {
+        self.0 = self.0.saturating_add(sample);
+        self.1 = self.1.saturating_add(1);
     }
 
     fn avg(&self) -> u128 {
-        if self.successful == 0 {
+        if self.1 == 0 {
             u128::MAX
         } else {
-            self.rpc_millis / self.successful as u128
+            self.0 / self.1 as u128
         }
+    }
+}
+
+impl Ord for RPCAverage {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.avg().cmp(&self.avg()) // lower average latency is higher priority
+    }
+}
+
+impl PartialOrd for RPCAverage {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+struct HostMetric {
+    rpc_write_avg: RPCAverage,
+    rpc_read_avg: RPCAverage,
+    successful: i64, // negative values indicate failures
+}
+
+impl HostMetric {
+    fn add_write_sample(&mut self, d: Duration) {
+        self.rpc_write_avg.add_sample(d.as_millis());
+        self.successful = self.successful.saturating_add(1);
+    }
+
+    fn add_read_sample(&mut self, d: Duration) {
+        self.rpc_read_avg.add_sample(d.as_millis());
+        self.successful = self.successful.saturating_add(1);
+    }
+
+    fn add_failure(&mut self) {
+        self.successful = self.successful.saturating_sub(1);
     }
 }
 
 impl Ord for HostMetric {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match other.avg().cmp(&self.avg()) {
+        let avg_self = (self
+            .rpc_write_avg
+            .avg()
+            .saturating_add(self.rpc_read_avg.avg()))
+            / 2;
+        let avg_other = (other
+            .rpc_write_avg
+            .avg()
+            .saturating_add(other.rpc_read_avg.avg()))
+            / 2;
+        match avg_other.cmp(&avg_self) {
             std::cmp::Ordering::Equal => self.successful.cmp(&other.successful), // more successful RPCs is higher priority
-            ord => ord, // lower average latency is higher priority
+            ord => ord, // lower average speed is higher priority
         }
     }
 }

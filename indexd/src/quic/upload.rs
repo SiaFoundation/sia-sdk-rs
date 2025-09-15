@@ -124,7 +124,7 @@ impl Uploader {
         progress_callback: Option<UnboundedSender<()>>,
     ) -> Result<(usize, Sector), UploadError> {
         let (host_key, attempts) = hosts.pop_front()?;
-        let write_timeout = Duration::from_millis(500 + attempts as u64 * 10);
+        let write_timeout = Duration::from_millis(2500 + (attempts as u64 * 1000));
         let mut tasks = JoinSet::new();
         tasks.spawn(Self::upload_shard(
             client.clone(),
@@ -152,7 +152,7 @@ impl Uploader {
                             debug!("shard {shard_index} upload failed {e:?}");
                             if tasks.is_empty() {
                                 let (host_key, attempts) = hosts.pop_front()?;
-                                write_timeout = Duration::from_millis(500 + attempts as u64 * 10);
+                                write_timeout = Duration::from_millis(2500 + attempts as u64 * 1000);
                                 tasks.spawn(Self::upload_shard(client.clone(),hosts.clone(), host_key, account_key.clone(), data.clone(), write_timeout));
                             }
                         }
