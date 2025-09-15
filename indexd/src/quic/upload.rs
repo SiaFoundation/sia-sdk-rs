@@ -152,7 +152,7 @@ impl Uploader {
                             debug!("shard {shard_index} upload failed {e:?}");
                             if tasks.is_empty() {
                                 let (host_key, attempts) = hosts.pop_front()?;
-                                write_timeout = Duration::from_millis(2500 + attempts as u64 * 1000);
+                                write_timeout = Duration::from_millis(2500 + (attempts as u64 * 1000));
                                 tasks.spawn(Self::upload_shard(client.clone(),hosts.clone(), host_key, account_key.clone(), data.clone(), write_timeout));
                             }
                         }
