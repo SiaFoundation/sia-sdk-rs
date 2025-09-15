@@ -10,12 +10,11 @@ use std::num::ParseIntError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::{self, Error};
-use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::lookup_host;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 
-use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 use sia::encoding;
 use sia::encoding_async::AsyncDecoder;
 use sia::rhp::{
@@ -88,9 +87,12 @@ impl Transport for Stream {
     type Error = Error;
 
     async fn write_request<R: rhp::RPCRequest>(&mut self, req: &R) -> Result<(), Self::Error> {
-        let mut w = BufWriter::new(&mut self.send);
-        req.encode_request(&mut w).await?;
-        w.flush().await?;
+        req.encode_request(&mut self.send).await?;
+        Ok(())
+    }
+
+    async fn write_bytes(&mut self, data: Bytes) -> Result<(), Self::Error> {
+        self.send.write_chunk(data).await?;
         Ok(())
     }
 
@@ -99,9 +101,7 @@ impl Transport for Stream {
     }
 
     async fn write_response<RR: rhp::RPCResponse>(&mut self, resp: &RR) -> Result<(), Self::Error> {
-        let mut w = BufWriter::new(&mut self.send);
-        resp.encode_response(&mut w).await?;
-        w.flush().await?;
+        resp.encode_response(&mut self.send).await?;
         Ok(())
     }
 }
@@ -123,10 +123,13 @@ impl Client {
 
     pub fn hosts(&self) -> Vec<PublicKey> {
         let hosts = self.inner.hosts.lock().unwrap();
-        let preferred_hosts = self.inner.preferred_hosts.lock().unwrap();
-        preferred_hosts
-            .iter()
-            .map(|(host, _)| *host)
+        self.inner
+            .preferred_hosts
+            .lock()
+            .unwrap()
+            .clone()
+            .into_sorted_iter()
+            .map(|(host, _)| host)
             .filter(|host| hosts.contains_key(host))
             .collect()
     }
@@ -138,7 +141,7 @@ impl Client {
         for host in hosts {
             hosts_map.insert(host.public_key, host.addresses);
             if !priority_queue.contains(&host.public_key) {
-                priority_queue.push(host.public_key, 1);
+                priority_queue.push(host.public_key, HostMetric::default());
             }
         }
     }
@@ -151,22 +154,13 @@ impl Client {
         self.inner
             .host_prices(host_key, refresh)
             .await
-            .inspect(|_| {
-                self.inner
-                    .preferred_hosts
-                    .lock()
-                    .unwrap()
-                    .change_priority_by(&host_key, |successful_rpcs| {
-                        *successful_rpcs += 1;
-                    });
-            })
             .inspect_err(|_| {
                 self.inner
                     .preferred_hosts
                     .lock()
                     .unwrap()
-                    .change_priority_by(&host_key, |successful_rpcs| {
-                        *successful_rpcs -= 1;
+                    .change_priority_by(&host_key, |metric| {
+                        metric.add_failure();
                     });
             })
     }
@@ -177,6 +171,7 @@ impl Client {
         account_key: &PrivateKey,
         sector: Bytes,
     ) -> Result<Hash256, Error> {
+        let start = Instant::now();
         self.inner
             .write_sector(host_key, account_key, sector)
             .await
@@ -185,8 +180,10 @@ impl Client {
                     .preferred_hosts
                     .lock()
                     .unwrap()
-                    .change_priority_by(&host_key, |successful_rpcs| {
-                        *successful_rpcs += 1;
+                    .change_priority_by(&host_key, |metric| {
+                        let elapsed = start.elapsed();
+                        debug!("wrote sector to {host_key} in {}ms", elapsed.as_millis());
+                        metric.add_write_sample(elapsed);
                     });
             })
             .inspect_err(|_| {
@@ -194,8 +191,8 @@ impl Client {
                     .preferred_hosts
                     .lock()
                     .unwrap()
-                    .change_priority_by(&host_key, |successful_rpcs| {
-                        *successful_rpcs -= 1;
+                    .change_priority_by(&host_key, |metric| {
+                        metric.add_failure();
                     });
             })
     }
@@ -208,6 +205,7 @@ impl Client {
         offset: usize,
         length: usize,
     ) -> Result<Bytes, Error> {
+        let start = Instant::now();
         self.inner
             .read_sector(host_key, account_key, root, offset, length)
             .await
@@ -216,8 +214,10 @@ impl Client {
                     .preferred_hosts
                     .lock()
                     .unwrap()
-                    .change_priority_by(&host_key, |successful_rpcs| {
-                        *successful_rpcs += 1;
+                    .change_priority_by(&host_key, |metric| {
+                        let elapsed = start.elapsed();
+                        debug!("read sector from {host_key} in {}ms", elapsed.as_millis());
+                        metric.add_read_sample(elapsed);
                     });
             })
             .inspect_err(|_| {
@@ -225,10 +225,88 @@ impl Client {
                     .preferred_hosts
                     .lock()
                     .unwrap()
-                    .change_priority_by(&host_key, |successful_rpcs| {
-                        *successful_rpcs -= 1;
+                    .change_priority_by(&host_key, |metric| {
+                        metric.add_failure();
                     });
             })
+    }
+}
+
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+struct RPCAverage(u128, u64);
+
+impl RPCAverage {
+    fn add_sample(&mut self, sample: u128) {
+        self.0 = self.0.saturating_add(sample);
+        self.1 = self.1.saturating_add(1);
+    }
+
+    fn avg(&self) -> u128 {
+        if self.1 == 0 {
+            u128::MAX
+        } else {
+            self.0 / self.1 as u128
+        }
+    }
+}
+
+impl Ord for RPCAverage {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.avg().cmp(&self.avg()) // lower average latency is higher priority
+    }
+}
+
+impl PartialOrd for RPCAverage {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+struct HostMetric {
+    rpc_write_avg: RPCAverage,
+    rpc_read_avg: RPCAverage,
+    successful: i64, // negative values indicate failures
+}
+
+impl HostMetric {
+    fn add_write_sample(&mut self, d: Duration) {
+        self.rpc_write_avg.add_sample(d.as_millis());
+        self.successful = self.successful.saturating_add(1);
+    }
+
+    fn add_read_sample(&mut self, d: Duration) {
+        self.rpc_read_avg.add_sample(d.as_millis());
+        self.successful = self.successful.saturating_add(1);
+    }
+
+    fn add_failure(&mut self) {
+        self.successful = self.successful.saturating_sub(1);
+    }
+}
+
+impl Ord for HostMetric {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let avg_self = (self
+            .rpc_write_avg
+            .avg()
+            .saturating_add(self.rpc_read_avg.avg()))
+            / 2;
+        let avg_other = (other
+            .rpc_write_avg
+            .avg()
+            .saturating_add(other.rpc_read_avg.avg()))
+            / 2;
+        match avg_other.cmp(&avg_self) {
+            std::cmp::Ordering::Equal => self.successful.cmp(&other.successful), // more successful RPCs is higher priority
+            ord => ord, // lower average speed is higher priority
+        }
+    }
+}
+
+impl PartialOrd for HostMetric {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -243,18 +321,30 @@ struct ClientInner {
     endpoint_v6: Option<Endpoint>,
 
     hosts: Mutex<HashMap<PublicKey, Vec<NetAddress>>>,
-    preferred_hosts: Mutex<PriorityQueue<PublicKey, i64>>,
+    preferred_hosts: Mutex<PriorityQueue<PublicKey, HostMetric>>,
     open_conns: Mutex<HashMap<PublicKey, Connection>>,
     cached_prices: Mutex<HashMap<PublicKey, HostPrices>>,
+    cached_tokens: Mutex<HashMap<PublicKey, AccountToken>>,
 }
 
 impl ClientInner {
     fn new(mut client_config: ClientConfig) -> Result<Self, Error> {
+        const MAX_STREAM_BANDWIDTH: u64 = 1024 * 1024 * 1024; // 1 GiB/s
+        const EXPECTED_RTT: u64 = 100; // ms
         client_config.enable_early_data = true;
         client_config.alpn_protocols = vec![b"sia/rhp4".to_vec()];
 
+        let mut transport_config = quinn::TransportConfig::default();
+        transport_config.max_concurrent_bidi_streams(VarInt::from_u32(0));
+        transport_config.max_concurrent_uni_streams(VarInt::from_u32(0));
+        transport_config.max_idle_timeout(Some(VarInt::from_u32(30_000).into()));
+        transport_config.keep_alive_interval(Some(Duration::from_secs(10)));
+        transport_config
+            .stream_receive_window(VarInt::from_u64(MAX_STREAM_BANDWIDTH * EXPECTED_RTT).unwrap());
+
         let client_config = QuicClientConfig::try_from(client_config).unwrap();
-        let client_config = quinn::ClientConfig::new(Arc::new(client_config));
+        let mut client_config = quinn::ClientConfig::new(Arc::new(client_config));
+        client_config.transport_config(Arc::new(transport_config));
 
         let endpoint_v4 = match quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into()) {
             Ok(mut endpoint) => {
@@ -288,7 +378,20 @@ impl ClientInner {
             preferred_hosts: Mutex::new(PriorityQueue::new()),
             open_conns: Mutex::new(HashMap::new()),
             cached_prices: Mutex::new(HashMap::new()),
+            cached_tokens: Mutex::new(HashMap::new()),
         })
+    }
+
+    fn get_token(&self, host_key: &PublicKey, account_key: &PrivateKey) -> AccountToken {
+        let mut cached_tokens = self.cached_tokens.lock().unwrap();
+        if let Some(token) = cached_tokens.get(host_key)
+            && token.valid_until > Utc::now()
+        {
+            return token.clone();
+        }
+        let token = AccountToken::new(account_key, *host_key);
+        cached_tokens.insert(*host_key, token.clone());
+        token
     }
 
     fn get_cached_prices(&self, host_key: &PublicKey) -> Option<HostPrices> {
@@ -359,13 +462,11 @@ impl ClientInner {
 
     async fn host_stream(&self, host: PublicKey) -> Result<Stream, Error> {
         let conn = if let Some(conn) = self.existing_conn(host) {
-            debug!("reusing existing connection to {host}");
             conn
         } else {
             let new_conn = timeout(Duration::from_secs(30), self.new_conn(host)).await??;
             let open_conns = &mut self.open_conns.lock().unwrap();
             open_conns.insert(host, new_conn.clone());
-            debug!("established new connection to {host}");
             new_conn
         };
 
@@ -391,7 +492,6 @@ impl ClientInner {
         refresh: bool,
     ) -> Result<HostPrices, Error> {
         if !refresh && let Some(prices) = self.get_cached_prices(&host_key) {
-            debug!("using cached prices for {host_key}");
             return Ok(prices);
         }
         let prices = timeout(Duration::from_millis(750), self.fetch_prices(host_key)).await??;
@@ -406,17 +506,12 @@ impl ClientInner {
         sector: Bytes,
     ) -> Result<Hash256, Error> {
         let prices = self.host_prices(host_key, false).await?;
-        let token = AccountToken::new(account_key, host_key);
+        let token = self.get_token(&host_key, account_key);
         let stream = self.host_stream(host_key).await?;
-        let start = Instant::now();
         let resp = RPCWriteSector::send_request(stream, prices, token, sector)
             .await?
             .complete()
             .await?;
-        debug!(
-            "wrote sector to {host_key} in {}ms",
-            start.elapsed().as_millis()
-        );
         Ok(resp.root)
     }
 
@@ -429,17 +524,12 @@ impl ClientInner {
         length: usize,
     ) -> Result<Bytes, Error> {
         let prices = self.host_prices(host_key, false).await?;
-        let token = AccountToken::new(account_key, host_key);
+        let token = self.get_token(&host_key, account_key);
         let stream = self.host_stream(host_key).await?;
-        let start = Instant::now();
         let resp = RPCReadSector::send_request(stream, prices, token, root, offset, length)
             .await?
             .complete()
             .await?;
-        debug!(
-            "read {length} bytes from {host_key} in {}ms",
-            start.elapsed().as_millis()
-        );
         Ok(resp.data)
     }
 }
@@ -455,28 +545,44 @@ pub enum QueueError {
     MutexError,
 }
 
+#[derive(Debug)]
+struct HostQueueInner {
+    hosts: VecDeque<PublicKey>,
+    attempts: HashMap<PublicKey, usize>,
+}
+
 /// A thread-safe queue of host public keys.
 #[derive(Debug, Clone)]
-pub struct HostQueue(Arc<Mutex<VecDeque<PublicKey>>>);
+pub struct HostQueue {
+    inner: Arc<Mutex<HostQueueInner>>,
+}
 
 impl HostQueue {
     pub fn new(hosts: Vec<PublicKey>) -> Self {
-        Self(Arc::new(Mutex::new(VecDeque::from(hosts))))
+        Self {
+            inner: Arc::new(Mutex::new(HostQueueInner {
+                hosts: VecDeque::from(hosts),
+                attempts: HashMap::new(),
+            })),
+        }
     }
 
-    pub fn pop_front(&self) -> Result<PublicKey, QueueError> {
-        self.0
-            .lock()
-            .map_err(|_| QueueError::MutexError)?
-            .pop_front()
-            .ok_or(QueueError::NoMoreHosts)
+    pub fn pop_front(&self) -> Result<(PublicKey, usize), QueueError> {
+        let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
+        let host_key = inner.hosts.pop_front().ok_or(QueueError::NoMoreHosts)?;
+
+        let attempts = inner.attempts.get(&host_key).cloned().unwrap_or(0);
+        Ok((host_key, attempts + 1))
     }
 
     pub fn retry(&self, host: PublicKey) -> Result<(), QueueError> {
-        self.0
-            .lock()
-            .map_err(|_| QueueError::MutexError)?
-            .push_back(host);
+        let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
+        inner.hosts.push_back(host);
+        inner
+            .attempts
+            .entry(host)
+            .and_modify(|e| *e += 1)
+            .or_insert(1);
         Ok(())
     }
 }
