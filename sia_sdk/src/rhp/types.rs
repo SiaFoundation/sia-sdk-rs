@@ -99,7 +99,7 @@ pub struct HostSettings {
 
 /// An account token is used to pay for RPC calls that do not
 /// require a contract.
-#[derive(Debug, PartialEq, Serialize, Deserialize, AsyncSiaEncode, AsyncSiaDecode)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AsyncSiaEncode, AsyncSiaDecode)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountToken {
     pub host_key: PublicKey,
