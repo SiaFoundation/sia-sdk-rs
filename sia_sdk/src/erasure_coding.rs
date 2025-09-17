@@ -93,17 +93,16 @@ impl ErasureCoder {
         // allocate memory for shards
         let mut shards: Vec<Vec<u8>> = Vec::with_capacity(self.data_shards);
         for _ in 0..self.data_shards + self.parity_shards {
-            shards.push(vec![0u8; SECTOR_SIZE]);
+            shards.push(Vec::with_capacity(SECTOR_SIZE));
         }
 
         // limit total read size to the size of the slab's data shards
         let mut r = r.take(self.data_shards as u64 * SECTOR_SIZE as u64);
         let mut data_size = 0;
-        for off in (0..SECTOR_SIZE).step_by(SEGMENT_SIZE) {
-            let start = off;
-            let end = off + SEGMENT_SIZE;
+        let mut segment = [0u8; SEGMENT_SIZE];
+        let mut eof = false;
+        for _ in (0..SECTOR_SIZE).step_by(SEGMENT_SIZE) {
             for shard in &mut shards[..self.data_shards].iter_mut() {
-                let segment = &mut shard[start..end];
                 let mut bytes_read = 0;
                 while bytes_read < SEGMENT_SIZE {
                     // note: read_exact + UnexpectedEoF is not used due to the documentation
@@ -113,12 +112,30 @@ impl ErasureCoder {
                     // possible implementation of the Read trait.
                     let n = r.read(&mut segment[bytes_read..]).await?;
                     if n == 0 {
-                        return Ok((shards, data_size));
+                        eof = true;
+                        break;
                     }
                     bytes_read += n;
                     data_size += n;
                 }
+                if bytes_read > 0 {
+                    // the full segment is used regardless of bytes_read so
+                    // that each shard is a multiple of SEGMENT_SIZE.
+                    shard.extend_from_slice(&segment);
+                }
+
+                if eof {
+                    break;
+                }
             }
+            if eof {
+                break;
+            }
+        }
+        // ensure all shards are the same length
+        let shard_len = shards[0].len();
+        for shard in &mut shards {
+            shard.resize(shard_len, 0);
         }
         Ok((shards, data_size))
     }
@@ -203,14 +220,12 @@ mod tests {
             );
 
             for (i, data) in data[..size].chunks(64).enumerate() {
-                let mut chunk = [0u8; SEGMENT_SIZE];
-                chunk[..data.len()].copy_from_slice(data); // pad it out with zeros
                 let index = i % DATA_SHARDS;
                 let offset = (i / DATA_SHARDS) * SEGMENT_SIZE;
 
                 assert_eq!(
-                    &shards[index][offset..offset + 64],
-                    chunk,
+                    &shards[index][offset..offset + data.len()],
+                    data,
                     "data size {data_size} shard {index} mismatch at offset {offset}"
                 );
             }
@@ -221,9 +236,11 @@ mod tests {
     async fn test_striped_read_write() {
         const DATA_SHARDS: usize = 4;
         const PARITY_SHARDS: usize = 1;
+        const DATA_SIZE: usize = SECTOR_SIZE * 7 / 2; // 3.5 shards of data
+        const SHARD_SIZE: usize = DATA_SIZE.div_ceil(SEGMENT_SIZE) * SEGMENT_SIZE / DATA_SHARDS;
         let coder = ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).unwrap();
 
-        let mut data = vec![0u8; SECTOR_SIZE * 7 / 2]; // 3.5 shards of data
+        let mut data = vec![0u8; DATA_SIZE];
         data[..SECTOR_SIZE].fill(1);
         data[SECTOR_SIZE..2 * SECTOR_SIZE].fill(2);
         data[2 * SECTOR_SIZE..3 * SECTOR_SIZE].fill(3);
@@ -233,12 +250,11 @@ mod tests {
 
         // we expect 5 shards and the last one is an empty parity shard
         assert_eq!(shards.len(), 5);
-        assert_eq!(size, SECTOR_SIZE * 7 / 2);
-        assert_eq!(shards[4], [0u8; SECTOR_SIZE]);
+        assert_eq!(size, DATA_SIZE);
+        assert_eq!(shards[4], [0u8; SHARD_SIZE]);
 
         for shard in &shards[..4] {
-            // every shard should be of SECTOR_SIZE
-            assert_eq!(shard.len(), SECTOR_SIZE);
+            assert_eq!(shard.len(), SHARD_SIZE);
 
             // first quarter of every shard is 1s
             assert_eq!(shard[0..SECTOR_SIZE / 4], [1u8; SECTOR_SIZE / 4]);
@@ -255,20 +271,14 @@ mod tests {
                 [3u8; SECTOR_SIZE / 4]
             );
 
-            // half of the fourth quarter is 4s
-            assert_eq!(
-                shard[SECTOR_SIZE / 4 * 3..SECTOR_SIZE / 8 * 7],
-                [4u8; SECTOR_SIZE / 8]
-            );
-
-            // remainder is padded with 0s
-            assert_eq!(shard[SECTOR_SIZE / 8 * 7..], [0u8; SECTOR_SIZE / 8]);
+            // remainder is 4s
+            assert_eq!(shard[SECTOR_SIZE / 4 * 3..], [4u8; SECTOR_SIZE / 8]);
         }
 
         // encoding the read shards should succeed without errors and cause the
         // parity shard to be filled
         coder.encode_shards(&mut shards).unwrap();
-        assert_ne!(shards[4], [0u8; SECTOR_SIZE]);
+        assert_ne!(shards[4], [0u8; SHARD_SIZE]);
 
         // joining the shards back together should result in the original data
         let shards: Vec<Option<Vec<u8>>> = shards.iter().cloned().map(Some).collect();

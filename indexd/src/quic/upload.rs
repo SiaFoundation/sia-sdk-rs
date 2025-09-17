@@ -9,7 +9,7 @@ use sia::rhp;
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::{JoinHandle, JoinSet, spawn_blocking};
@@ -114,6 +114,10 @@ impl Uploader {
         Ok(Sector { root, host_key })
     }
 
+    fn calc_write_timeout(attempts: usize) -> Duration {
+        Duration::from_secs(10 + attempts as u64)
+    }
+
     async fn upload_slab_shard(
         permit: OwnedSemaphorePermit,
         client: Client,
@@ -124,7 +128,7 @@ impl Uploader {
         progress_callback: Option<UnboundedSender<()>>,
     ) -> Result<(usize, Sector), UploadError> {
         let (host_key, attempts) = hosts.pop_front()?;
-        let write_timeout = Duration::from_millis(2500 + (attempts as u64 * 1000));
+        let write_timeout = Self::calc_write_timeout(attempts);
         let mut tasks = JoinSet::new();
         tasks.spawn(Self::upload_shard(
             client.clone(),
@@ -134,7 +138,6 @@ impl Uploader {
             data.clone(),
             write_timeout,
         ));
-        let mut write_timeout = write_timeout;
         let semaphore = permit.semaphore();
         loop {
             let hosts = hosts.clone();
@@ -152,13 +155,13 @@ impl Uploader {
                             debug!("shard {shard_index} upload failed {e:?}");
                             if tasks.is_empty() {
                                 let (host_key, attempts) = hosts.pop_front()?;
-                                write_timeout = Duration::from_millis(2500 + (attempts as u64 * 1000));
+                                let write_timeout = Self::calc_write_timeout(attempts);
                                 tasks.spawn(Self::upload_shard(client.clone(), hosts.clone(), host_key, account_key.clone(), data.clone(), write_timeout));
                             }
                         }
                     }
                 },
-                _ = sleep(write_timeout/2) => {
+                _ = sleep(write_timeout / 4) => {
                     if let Ok(racer) = semaphore.clone().try_acquire_owned() {
                         // only race if there's an empty slot
                         let client = client.clone();
@@ -168,7 +171,7 @@ impl Uploader {
                             let _racer = racer; // hold the permit until the task completes
                             debug!("racing slow host for shard {shard_index}");
                             let (host_key, attempts) = hosts.pop_front()?;
-                            let write_timeout = Duration::from_millis(500 + attempts as u64 * 10);
+                            let write_timeout = Self::calc_write_timeout(attempts);
                             Self::upload_shard(client.clone(), hosts.clone(), host_key, account_key, data, write_timeout).await
                         });
                     }
@@ -182,7 +185,7 @@ impl Uploader {
     /// and uploaded using the uploader's parameters.
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
-        mut r: R,
+        r: R,
         encryption_key: EncryptionKey,
         meta: Option<Vec<u8>>,
         options: UploadOptions,
@@ -198,9 +201,6 @@ impl Uploader {
         let host_client = self.client.clone();
         let account_key = self.account_key.clone();
         let read_slab_res: JoinHandle<Result<(), UploadError>> = tokio::spawn(async move {
-            // use a buffered reader since the erasure coder reads 64 bytes at a time.
-            let r = BufReader::new(&mut r);
-
             // encrypt the stream
             let mut r = CipherReader::new(r, encryption_key, 0);
 

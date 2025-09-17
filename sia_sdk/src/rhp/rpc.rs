@@ -1,5 +1,5 @@
 use crate::rhp::merkle;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::marker::PhantomData;
@@ -772,7 +772,15 @@ impl<T: Transport> RPCWriteSector<T, RPCInit> {
         let (tx, rx) = oneshot::channel();
         let root_data = data.clone();
         rayon::spawn(move || {
-            let root = merkle::sector_root(root_data.as_ref());
+            let root_data = if root_data.len() != SECTOR_SIZE {
+                let mut data = BytesMut::with_capacity(SECTOR_SIZE);
+                data.extend_from_slice(&root_data);
+                data.resize(SECTOR_SIZE, 0);
+                data.freeze()
+            } else {
+                root_data
+            };
+            let root = merkle::sector_root(&root_data);
             let _ = tx.send(root);
         });
 

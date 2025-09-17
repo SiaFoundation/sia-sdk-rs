@@ -18,7 +18,8 @@ use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 use sia::encoding;
 use sia::encoding_async::AsyncDecoder;
 use sia::rhp::{
-    self, AccountToken, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector, Transport,
+    self, AccountToken, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector, SECTOR_SIZE,
+    Transport,
 };
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
@@ -182,8 +183,8 @@ impl Client {
                     .unwrap()
                     .change_priority_by(&host_key, |metric| {
                         let elapsed = start.elapsed();
-                        debug!("wrote sector to {host_key} in {}ms", elapsed.as_millis());
                         metric.add_write_sample(elapsed);
+                        debug!("wrote sector to {host_key} in {}ms", elapsed.as_millis());
                     });
             })
             .inspect_err(|_| {
@@ -267,37 +268,45 @@ struct HostMetric {
     rpc_write_avg: RPCAverage,
     rpc_read_avg: RPCAverage,
     successful: i64, // negative values indicate failures
+    tried: bool,     // whether the host has been tried yet
 }
 
 impl HostMetric {
     fn add_write_sample(&mut self, d: Duration) {
+        self.tried = true;
         self.rpc_write_avg.add_sample(d.as_millis());
         self.successful = self.successful.saturating_add(1);
     }
 
     fn add_read_sample(&mut self, d: Duration) {
+        self.tried = true;
         self.rpc_read_avg.add_sample(d.as_millis());
         self.successful = self.successful.saturating_add(1);
     }
 
     fn add_failure(&mut self) {
+        self.tried = true;
         self.successful = self.successful.saturating_sub(1);
+    }
+
+    fn avg(&self) -> u128 {
+        (self
+            .rpc_write_avg
+            .avg()
+            .saturating_add(self.rpc_read_avg.avg()))
+            / 2
     }
 }
 
 impl Ord for HostMetric {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let avg_self = (self
-            .rpc_write_avg
-            .avg()
-            .saturating_add(self.rpc_read_avg.avg()))
-            / 2;
-        let avg_other = (other
-            .rpc_write_avg
-            .avg()
-            .saturating_add(other.rpc_read_avg.avg()))
-            / 2;
-        match avg_other.cmp(&avg_self) {
+        // new hosts are higher priority to get a baseline
+        if !self.tried && other.tried {
+            return std::cmp::Ordering::Greater;
+        } else if self.tried && !other.tried {
+            return std::cmp::Ordering::Less;
+        }
+        match other.avg().cmp(&self.avg()) {
             std::cmp::Ordering::Equal => self.successful.cmp(&other.successful), // more successful RPCs is higher priority
             ord => ord, // lower average speed is higher priority
         }
@@ -339,6 +348,7 @@ impl ClientInner {
         transport_config.max_concurrent_uni_streams(VarInt::from_u32(0));
         transport_config.max_idle_timeout(Some(VarInt::from_u32(30_000).into()));
         transport_config.keep_alive_interval(Some(Duration::from_secs(10)));
+        transport_config.datagram_send_buffer_size(4 * SECTOR_SIZE);
         transport_config
             .stream_receive_window(VarInt::from_u64(MAX_STREAM_BANDWIDTH * EXPECTED_RTT).unwrap());
 
@@ -494,7 +504,7 @@ impl ClientInner {
         if !refresh && let Some(prices) = self.get_cached_prices(&host_key) {
             return Ok(prices);
         }
-        let prices = timeout(Duration::from_millis(750), self.fetch_prices(host_key)).await??;
+        let prices = self.fetch_prices(host_key).await?;
         self.set_cached_prices(&host_key, prices.clone());
         Ok(prices)
     }
