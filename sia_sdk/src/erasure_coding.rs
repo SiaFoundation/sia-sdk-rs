@@ -136,7 +136,9 @@ impl ErasureCoder {
 
 #[cfg(test)]
 mod tests {
-    use rand::RngCore;
+    use rand::{RngCore, random};
+
+    use crate::encryption::{EncryptionKey, encrypt_shard, encrypt_shards};
 
     use super::*;
 
@@ -337,5 +339,68 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(data, reconstructed_data);
+    }
+
+    #[tokio::test]
+    async fn test_read_partial_reconstruct_full() {
+        const DATA_SHARDS: usize = 10;
+        const PARITY_SHARDS: usize = 20;
+        const DATA_SIZE: usize = 100; // 256 KB
+        let key_seed: [u8; 32] = random();
+        let encryption_key = EncryptionKey::from(key_seed);
+        let coder = ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).expect("erasure coder");
+
+        let mut data = vec![0u8; DATA_SIZE];
+        rand::rng().fill_bytes(&mut data);
+
+        // read, encode, and encrypt the shards
+        let (mut shards, size) = coder
+            .read_shards(&mut &data[..])
+            .await
+            .expect("read shards");
+        assert_eq!(size, data.len());
+        assert_eq!(shards.len(), DATA_SHARDS + PARITY_SHARDS);
+        coder.encode_shards(&mut shards).expect("encoded shards");
+
+        // encrypt a clone of the shards so the originals can be compared against
+        let mut encrypted_shards = shards.clone();
+        encrypt_shards(&encryption_key, 0, 0, &mut encrypted_shards);
+
+        // reconstruct the data shards from full sectors to simulate repairs
+        let mut full_shards = Vec::with_capacity(DATA_SHARDS + PARITY_SHARDS);
+        for (i, shard) in encrypted_shards.iter().enumerate() {
+            let mut sector = vec![0u8; SECTOR_SIZE];
+            sector[..shard.len()].copy_from_slice(&shard);
+            // decrypt the shard
+            encrypt_shard(&encryption_key, i as u8, 0, &mut sector);
+            full_shards.push(Some(sector));
+        }
+
+        // recover all data shards
+        for i in 0..DATA_SHARDS {
+            full_shards[i] = None;
+        }
+
+        coder
+            .reconstruct_data_shards(&mut full_shards)
+            .expect("reconstructed");
+
+        // check that the recovered data matches the original data shards
+        for (i, shard) in full_shards[..DATA_SHARDS].iter().enumerate() {
+            let shard = shard.clone().expect("shard present");
+            assert_eq!(shards[i], shard[..shards[i].len()], "shard {i} mismatch");
+        }
+
+        // try to write the recovered data
+        let mut recovered_data = Vec::new();
+        ErasureCoder::write_data_shards(
+            &mut recovered_data,
+            &full_shards[..DATA_SHARDS],
+            0,
+            data.len(),
+        )
+        .await
+        .expect("write data shards");
+        assert_eq!(data, recovered_data);
     }
 }
