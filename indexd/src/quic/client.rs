@@ -301,10 +301,9 @@ impl HostMetric {
 impl Ord for HostMetric {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // new hosts are higher priority to get a baseline
-        if !self.tried && other.tried {
-            return std::cmp::Ordering::Greater;
-        } else if self.tried && !other.tried {
-            return std::cmp::Ordering::Less;
+        let tried_cmp = other.tried.cmp(&self.tried);
+        if tried_cmp != std::cmp::Ordering::Equal {
+            return tried_cmp;
         }
         match other.avg().cmp(&self.avg()) {
             std::cmp::Ordering::Equal => self.successful.cmp(&other.successful), // more successful RPCs is higher priority
