@@ -100,8 +100,7 @@ impl ErasureCoder {
         let mut r = r.take(self.data_shards as u64 * SECTOR_SIZE as u64);
         let mut data_size = 0;
         let mut segment = [0u8; SEGMENT_SIZE];
-        let mut eof = false;
-        for _ in (0..SECTOR_SIZE).step_by(SEGMENT_SIZE) {
+        'segments: for _ in (0..SECTOR_SIZE).step_by(SEGMENT_SIZE) {
             for shard in &mut shards[..self.data_shards].iter_mut() {
                 let mut bytes_read = 0;
                 while bytes_read < SEGMENT_SIZE {
@@ -112,24 +111,18 @@ impl ErasureCoder {
                     // possible implementation of the Read trait.
                     let n = r.read(&mut segment[bytes_read..]).await?;
                     if n == 0 {
-                        eof = true;
-                        break;
+                        if bytes_read > 0 {
+                            // the full segment is used regardless of bytes_read so
+                            // that each shard is guaranteed to be a multiple of
+                            // SEGMENT_SIZE.
+                            shard.extend_from_slice(&segment);
+                        }
+                        break 'segments;
                     }
                     bytes_read += n;
                     data_size += n;
                 }
-                if bytes_read > 0 {
-                    // the full segment is used regardless of bytes_read so
-                    // that each shard is a multiple of SEGMENT_SIZE.
-                    shard.extend_from_slice(&segment);
-                }
-
-                if eof {
-                    break;
-                }
-            }
-            if eof {
-                break;
+                shard.extend_from_slice(&segment);
             }
         }
         // ensure all shards are the same length

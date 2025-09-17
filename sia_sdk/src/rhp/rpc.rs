@@ -772,6 +772,7 @@ impl<T: Transport> RPCWriteSector<T, RPCInit> {
         let (tx, rx) = oneshot::channel();
         let root_data = data.clone();
         rayon::spawn(move || {
+            // pad data to SECTOR_SIZE if needed
             let root_data = if root_data.len() != SECTOR_SIZE {
                 let mut data = BytesMut::with_capacity(SECTOR_SIZE);
                 data.extend_from_slice(&root_data);
