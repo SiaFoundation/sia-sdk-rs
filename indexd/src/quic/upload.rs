@@ -76,7 +76,7 @@ impl Default for UploadOptions {
     fn default() -> Self {
         Self {
             data_shards: 10,
-            parity_shards: 30,
+            parity_shards: 20,
             max_inflight: 16,
             shard_uploaded: None,
         }
