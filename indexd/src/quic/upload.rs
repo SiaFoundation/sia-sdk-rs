@@ -184,6 +184,7 @@ impl Uploader {
         &self,
         mut r: R,
         encryption_key: EncryptionKey,
+        nonce_prefix: [u8; 16],
         meta: Option<Vec<u8>>,
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
@@ -202,7 +203,7 @@ impl Uploader {
             let r = BufReader::new(&mut r);
 
             // encrypt the stream
-            let mut r = CipherReader::new(r, encryption_key, 0);
+            let mut r = CipherReader::new(r, encryption_key, nonce_prefix, 0);
 
             let mut slab_index: usize = 0;
             let slab_upload_tasks = TaskTracker::new();

@@ -489,7 +489,9 @@ impl ChainState {
             return None;
         }
         let blocks_per_month = self.blocks_per_month();
-        if (self.child_height() - self.network.hardfork_foundation.height) % blocks_per_month != 0 {
+        if !(self.child_height() - self.network.hardfork_foundation.height)
+            .is_multiple_of(blocks_per_month)
+        {
             return None;
         }
 

@@ -340,6 +340,7 @@ impl Downloader {
         &self,
         w: &mut W,
         encryption_key: EncryptionKey,
+        nonce_prefix: [u8; 16],
         mut slabs: S,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
@@ -358,7 +359,7 @@ impl Downloader {
         } else if length == 0 {
             return Ok(());
         }
-        let mut w = CipherWriter::new(w, encryption_key, offset);
+        let mut w = CipherWriter::new(w, encryption_key, nonce_prefix, offset);
         loop {
             if length == 0 {
                 break;
