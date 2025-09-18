@@ -358,7 +358,8 @@ impl Downloader {
         } else if length == 0 {
             return Ok(());
         }
-        let mut w = CipherWriter::new(w, encryption_key, offset);
+        let nonce_prefix = [0u8; 16];
+        let mut w = CipherWriter::new(w, encryption_key, nonce_prefix, offset);
         loop {
             if length == 0 {
                 break;

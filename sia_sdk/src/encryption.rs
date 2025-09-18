@@ -63,8 +63,9 @@ pub fn encrypt_shards(
 /// For performance reasons, prefer using `encrypt_shards` when encrypting
 /// multiple shards.
 pub fn encrypt_shard(key: &EncryptionKey, index: u8, offset: usize, shard: &mut [u8]) {
-    let mut nonce: [u8; 24] = [0u8; 24]; // XChaCha20 nonce size
+    let mut nonce: [u8; 24] = [0u8; 24]; // XChaCha20 nonce siz
     nonce[0] = index;
+
     let mut cipher = XChaCha20::new(key.as_ref().into(), &nonce.into());
     cipher.seek(offset);
     cipher.apply_keystream(shard);
@@ -76,10 +77,10 @@ pub struct CipherReader<R: AsyncRead> {
 }
 
 impl<R: AsyncRead> CipherReader<R> {
-    pub fn new(inner: R, key: EncryptionKey, offset: usize) -> Self {
+    pub fn new(inner: R, key: EncryptionKey, nonce_prefix: [u8; 16], offset: usize) -> Self {
         Self {
             inner,
-            cipher: Chacha20Cipher::new(key, offset as u64),
+            cipher: Chacha20Cipher::new(key, nonce_prefix, offset as u64),
         }
     }
 }
@@ -107,10 +108,10 @@ pub struct CipherWriter<W: AsyncWrite> {
 }
 
 impl<W: AsyncWrite> CipherWriter<W> {
-    pub fn new(inner: W, key: EncryptionKey, offset: usize) -> Self {
+    pub fn new(inner: W, key: EncryptionKey, nonce_prefix: [u8; 16], offset: usize) -> Self {
         Self {
             inner,
-            cipher: Chacha20Cipher::new(key, offset as u64),
+            cipher: Chacha20Cipher::new(key, nonce_prefix, offset as u64),
             buf: Vec::new(),
         }
     }
@@ -148,6 +149,7 @@ struct Chacha20Cipher {
     #[allow(clippy::type_complexity)]
     inner: StreamCipherCoreWrapper<XChaChaCore<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B1>, B0>>>,
     key: EncryptionKey,
+    nonce_prefix: [u8; 16],
     nonce: [u8; 24],
     offset: u64,
 }
@@ -155,19 +157,21 @@ struct Chacha20Cipher {
 impl Chacha20Cipher {
     const MAX_BYTES_PER_NONCE: u64 = u32::MAX as u64 * 64;
 
-    fn nonce_for_offset(offset: u64) -> [u8; 24] {
+    fn nonce_for_offset(nonce_prefix: [u8; 16], offset: u64) -> [u8; 24] {
         let mut nonce: [u8; 24] = [0u8; 24];
+        nonce[0..16].copy_from_slice(&nonce_prefix);
         nonce[16..24].copy_from_slice(&(offset / Self::MAX_BYTES_PER_NONCE).to_le_bytes());
         nonce
     }
 
-    pub fn new(key: EncryptionKey, offset: u64) -> Self {
-        let nonce = Self::nonce_for_offset(offset);
+    pub fn new(key: EncryptionKey, nonce_prefix: [u8; 16], offset: u64) -> Self {
+        let nonce = Self::nonce_for_offset(nonce_prefix, offset);
         let mut cipher = XChaCha20::new(key.as_ref().into(), &nonce.into());
         cipher.seek(offset % Self::MAX_BYTES_PER_NONCE);
         Self {
             inner: cipher,
             key,
+            nonce_prefix,
             nonce,
             offset,
         }
@@ -196,7 +200,7 @@ impl StreamCipher for Chacha20Cipher {
         self.inner.try_apply_keystream_inout(first)?;
 
         // update nonce and reinitialize cipher
-        self.nonce = Self::nonce_for_offset(self.offset);
+        self.nonce = Self::nonce_for_offset(self.nonce_prefix, self.offset);
         self.inner = XChaCha20::new(self.key.as_ref().into(), &self.nonce.into());
 
         // encrypt the second part
@@ -258,14 +262,17 @@ mod test {
     async fn test_cipher_reader_writer() {
         let key = EncryptionKey::from([1u8; 32]);
         let data = b"lorem ipsum dolor sit amet, consectetur adipiscing elit";
+        let nonce_prefix = rand::random::<[u8; 16]>();
 
         for offset in [0, 10, u32::MAX as usize * 64 - 10, u32::MAX as usize * 64] {
-            let mut reader = CipherReader::new(data.as_ref(), key.clone(), offset);
+            let mut reader =
+                CipherReader::new(data.as_ref(), key.clone(), nonce_prefix.clone(), offset);
             let mut cipher_text = vec![0u8; data.len()];
             reader.read_exact(&mut cipher_text).await.unwrap();
             assert_ne!(cipher_text, data);
 
-            let mut writer = CipherWriter::new(Vec::new(), key.clone(), offset);
+            let mut writer =
+                CipherWriter::new(Vec::new(), key.clone(), nonce_prefix.clone(), offset);
             writer.write_all(&cipher_text).await.unwrap();
             let plaintext = writer.inner;
             assert_eq!(plaintext, data);

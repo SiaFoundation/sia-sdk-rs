@@ -202,7 +202,8 @@ impl Uploader {
             let r = BufReader::new(&mut r);
 
             // encrypt the stream
-            let mut r = CipherReader::new(r, encryption_key, 0);
+            let nonce_prefix = [0u8; 16];
+            let mut r = CipherReader::new(r, encryption_key, nonce_prefix, 0);
 
             let mut slab_index: usize = 0;
             let slab_upload_tasks = TaskTracker::new();
