@@ -747,7 +747,7 @@ impl SDK {
             .map_err(|e| DownloadError::Custom(format!("{e}")))?;
         let (object, encryption_key) = self.app_client.shared_object(share_url).await?;
         let nonce_prefix = match object.meta {
-            Some(ref v) => first_16_bytes(&v),
+            Some(ref v) => first_16_bytes(v),
             None => [0u8; 16],
         };
         Ok(DownloadShared {
@@ -1003,7 +1003,7 @@ impl Download {
             .download(
                 &mut buf,
                 self.encryption_key.clone(),
-                self.nonce_prefix.clone(),
+                self.nonce_prefix,
                 self.slabs.clone(),
                 quic::DownloadOptions {
                     offset: state.offset as usize,
@@ -1075,7 +1075,7 @@ impl DownloadShared {
             .download(
                 &mut buf,
                 self.encryption_key.clone(),
-                self.nonce_prefix.clone(),
+                self.nonce_prefix,
                 self.slabs.clone(),
                 quic::DownloadOptions {
                     offset: state.offset as usize,
