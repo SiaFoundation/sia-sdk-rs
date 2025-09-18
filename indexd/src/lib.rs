@@ -192,13 +192,14 @@ impl SDK<ConnectedState> {
         &self,
         writer: &mut W,
         encryption_key: EncryptionKey,
+        nonce_prefix: [u8; 16],
         object: &Object,
         options: DownloadOptions,
     ) -> Result<()> {
         let slab_iterator = SlabFetcher::new(self.state.app.clone(), object.slabs.clone());
         self.state
             .downloader
-            .download(writer, encryption_key, slab_iterator, options)
+            .download(writer, encryption_key, nonce_prefix, slab_iterator, options)
             .await?;
         Ok(())
     }

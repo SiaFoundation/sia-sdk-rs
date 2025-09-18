@@ -197,12 +197,12 @@ impl Uploader {
         let semaphore = Arc::new(Semaphore::new(options.max_inflight));
         let host_client = self.client.clone();
         let account_key = self.account_key.clone();
+        let nonce_prefix = rand::random::<[u8; 16]>();
         let read_slab_res: JoinHandle<Result<(), UploadError>> = tokio::spawn(async move {
             // use a buffered reader since the erasure coder reads 64 bytes at a time.
             let r = BufReader::new(&mut r);
 
             // encrypt the stream
-            let nonce_prefix = [0u8; 16];
             let mut r = CipherReader::new(r, encryption_key, nonce_prefix, 0);
 
             let mut slab_index: usize = 0;

@@ -489,6 +489,13 @@ pub struct SDK {
     uploader: OnceCell<Arc<Uploader>>,
 }
 
+fn first_16_bytes(data: &[u8]) -> [u8; 16] {
+    let mut arr = [0u8; 16];
+    let len = data.len().min(16);
+    arr[..len].copy_from_slice(&data[..len]);
+    arr
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl SDK {
     /// Creates a new SDK instance.
@@ -711,6 +718,7 @@ impl SDK {
         let slabs = SlabFetcher::new(self.app_client.clone(), slabs.clone());
         Ok(Download {
             encryption_key,
+            nonce_prefix: first_16_bytes(&object.metadata),
             slabs,
             state: Arc::new(Mutex::new(DownloadState {
                 offset: options.offset,
@@ -738,8 +746,13 @@ impl SDK {
             .parse()
             .map_err(|e| DownloadError::Custom(format!("{e}")))?;
         let (object, encryption_key) = self.app_client.shared_object(share_url).await?;
+        let nonce_prefix = match object.meta {
+            Some(ref v) => first_16_bytes(&v),
+            None => [0u8; 16],
+        };
         Ok(DownloadShared {
             encryption_key: EncryptionKey::from(encryption_key),
+            nonce_prefix,
             slabs: object
                 .slabs
                 .iter()
@@ -948,6 +961,7 @@ struct DownloadState {
 #[derive(uniffi::Object)]
 pub struct Download {
     encryption_key: EncryptionKey,
+    nonce_prefix: [u8; 16],
     slabs: SlabFetcher,
     state: Arc<Mutex<DownloadState>>,
     downloader: Arc<Downloader>,
@@ -989,6 +1003,7 @@ impl Download {
             .download(
                 &mut buf,
                 self.encryption_key.clone(),
+                self.nonce_prefix.clone(),
                 self.slabs.clone(),
                 quic::DownloadOptions {
                     offset: state.offset as usize,
@@ -1018,6 +1033,7 @@ pub fn encoded_size(size: u64, data_shards: u8, parity_shards: u8) -> u64 {
 #[derive(uniffi::Object)]
 pub struct DownloadShared {
     encryption_key: EncryptionKey,
+    nonce_prefix: [u8; 16],
     slabs: VecDeque<indexd::Slab>,
     state: Arc<Mutex<DownloadState>>,
     downloader: Arc<Downloader>,
@@ -1059,6 +1075,7 @@ impl DownloadShared {
             .download(
                 &mut buf,
                 self.encryption_key.clone(),
+                self.nonce_prefix.clone(),
                 self.slabs.clone(),
                 quic::DownloadOptions {
                     offset: state.offset as usize,
