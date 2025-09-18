@@ -347,7 +347,11 @@ impl Uploader {
         }
         read_slab_res.await??;
 
-        let object = Object::new(slabs, meta);
+        let nonce_meta = nonce_prefix
+            .into_iter()
+            .chain(meta.unwrap_or_default())
+            .collect();
+        let object = Object::new(slabs, Some(nonce_meta));
         self.app_client.save_object(&object).await?;
         Ok(object)
     }
