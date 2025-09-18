@@ -184,6 +184,7 @@ impl Uploader {
         &self,
         mut r: R,
         encryption_key: EncryptionKey,
+        nonce_prefix: [u8; 16],
         meta: Option<Vec<u8>>,
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
@@ -197,7 +198,6 @@ impl Uploader {
         let semaphore = Arc::new(Semaphore::new(options.max_inflight));
         let host_client = self.client.clone();
         let account_key = self.account_key.clone();
-        let nonce_prefix = rand::random::<[u8; 16]>();
         let read_slab_res: JoinHandle<Result<(), UploadError>> = tokio::spawn(async move {
             // use a buffered reader since the erasure coder reads 64 bytes at a time.
             let r = BufReader::new(&mut r);
@@ -347,11 +347,7 @@ impl Uploader {
         }
         read_slab_res.await??;
 
-        let nonce_meta = nonce_prefix
-            .into_iter()
-            .chain(meta.unwrap_or_default())
-            .collect();
-        let object = Object::new(slabs, Some(nonce_meta));
+        let object = Object::new(slabs, meta);
         self.app_client.save_object(&object).await?;
         Ok(object)
     }

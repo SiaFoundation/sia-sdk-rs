@@ -177,13 +177,14 @@ impl SDK<ConnectedState> {
         &self,
         reader: R,
         encryption_key: EncryptionKey,
+        nonce_prefix: [u8; 16],
         metadata: Option<Vec<u8>>,
         options: UploadOptions,
     ) -> Result<Object> {
         let object = self
             .state
             .uploader
-            .upload(reader, encryption_key, metadata, options)
+            .upload(reader, encryption_key, nonce_prefix, metadata, options)
             .await?;
         Ok(object)
     }

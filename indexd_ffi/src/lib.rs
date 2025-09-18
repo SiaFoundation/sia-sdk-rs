@@ -453,6 +453,7 @@ pub struct SharedObject {
     pub slabs: Vec<SharedSlab>,
     pub meta: Option<Vec<u8>>,
     pub encryption_key: Vec<u8>,
+    pub nonce_prefix: Vec<u8>,
 }
 
 impl SharedObject {
@@ -487,13 +488,6 @@ pub struct SDK {
     app_client: AppClient,
     downloader: OnceCell<Arc<Downloader>>,
     uploader: OnceCell<Arc<Uploader>>,
-}
-
-fn first_16_bytes(data: &[u8]) -> [u8; 16] {
-    let mut arr = [0u8; 16];
-    let len = data.len().min(16);
-    arr[..len].copy_from_slice(&data[..len]);
-    arr
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -633,6 +627,7 @@ impl SDK {
     pub async fn upload(
         &self,
         encryption_key: Vec<u8>,
+        nonce_prefix: Vec<u8>,
         metadata: Option<Vec<u8>>,
         options: UploadOptions,
     ) -> Result<Upload, UploadError> {
@@ -645,6 +640,9 @@ impl SDK {
         let inner_buf = buf.clone();
         let encryption_key = EncryptionKey::try_from(encryption_key.as_ref())
             .map_err(|err| UploadError::Custom(err.to_string()))?;
+        let nonce_prefix: [u8; 16] = nonce_prefix.try_into().map_err(|v: Vec<u8>| {
+            UploadError::Custom(format!("invalid nonce length: {}", v.len()))
+        })?;
 
         let progress_tx = if let Some(callback) = options.progress_callback {
             let total_shards = options.data_shards as u64 + options.parity_shards as u64;
@@ -669,6 +667,7 @@ impl SDK {
                 .upload(
                     inner_buf,
                     encryption_key,
+                    nonce_prefix,
                     metadata,
                     quic::UploadOptions {
                         max_inflight: options.max_inflight as usize,
@@ -695,6 +694,7 @@ impl SDK {
     pub async fn download(
         &self,
         encryption_key: Vec<u8>,
+        nonce_prefix: Vec<u8>,
         object: &PinnedObject,
         options: DownloadOptions,
     ) -> Result<Download, DownloadError> {
@@ -715,10 +715,14 @@ impl SDK {
             .collect::<Result<Vec<SlabSlice>, HexParseError>>()?;
         let encryption_key = EncryptionKey::try_from(encryption_key.as_ref())
             .map_err(|err| DownloadError::Custom(err.to_string()))?;
+        let nonce_prefix: [u8; 16] = nonce_prefix.try_into().map_err(|v: Vec<u8>| {
+            DownloadError::Custom(format!("invalid nonce length: {}", v.len()))
+        })?;
+
         let slabs = SlabFetcher::new(self.app_client.clone(), slabs.clone());
         Ok(Download {
             encryption_key,
-            nonce_prefix: first_16_bytes(&object.metadata),
+            nonce_prefix,
             slabs,
             state: Arc::new(Mutex::new(DownloadState {
                 offset: options.offset,
@@ -745,11 +749,8 @@ impl SDK {
         let share_url: Url = share_url
             .parse()
             .map_err(|e| DownloadError::Custom(format!("{e}")))?;
-        let (object, encryption_key) = self.app_client.shared_object(share_url).await?;
-        let nonce_prefix = match object.meta {
-            Some(ref v) => first_16_bytes(v),
-            None => [0u8; 16],
-        };
+        let (object, encryption_key, nonce_prefix) =
+            self.app_client.shared_object(share_url).await?;
         Ok(DownloadShared {
             encryption_key: EncryptionKey::from(encryption_key),
             nonce_prefix,
@@ -778,7 +779,8 @@ impl SDK {
         let share_url: Url = share_url
             .parse()
             .map_err(|e| DownloadError::Custom(format!("{e}")))?;
-        let (object, encryption_key) = self.app_client.shared_object(share_url).await?;
+        let (object, encryption_key, nonce_prefix) =
+            self.app_client.shared_object(share_url).await?;
 
         Ok(SharedObject {
             key: object.key,
@@ -803,6 +805,7 @@ impl SDK {
                 .collect(),
             meta: object.meta,
             encryption_key: encryption_key.to_vec(),
+            nonce_prefix: nonce_prefix.to_vec(),
         })
     }
 
@@ -888,15 +891,22 @@ impl SDK {
         &self,
         object_key: String,
         encryption_key: Vec<u8>,
+        nonce_prefix: Vec<u8>,
         valid_until: SystemTime,
     ) -> Result<String, Error> {
         let object_key = Hash256::from_str(&object_key)?;
         let encryption_key: [u8; 32] = encryption_key
             .try_into()
             .map_err(|_| Error::Custom("encryption key must be 32 bytes".into()))?;
-        let u =
-            self.app_client
-                .object_share_url(&object_key, encryption_key, valid_until.into())?;
+        let nonce_prefix: [u8; 16] = nonce_prefix
+            .try_into()
+            .map_err(|_| Error::Custom("nonce prefix must be 16 bytes".into()))?;
+        let u = self.app_client.object_share_url(
+            &object_key,
+            encryption_key,
+            nonce_prefix,
+            valid_until.into(),
+        )?;
         Ok(u.to_string())
     }
 }

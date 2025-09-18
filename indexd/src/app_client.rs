@@ -352,6 +352,7 @@ impl Client {
         &self,
         object_key: &Hash256,
         encryption_key: [u8; 32],
+        nonce_prefix: [u8; 16],
         valid_until: DateTime<Utc>,
     ) -> Result<Url> {
         let mut url = self
@@ -361,7 +362,12 @@ impl Client {
         let params = self.sign(&url, Method::GET, None, valid_until);
 
         url.set_fragment(Some(
-            format!("encryption_key={}", hex::encode(encryption_key)).as_str(),
+            format!(
+                "encryption_key={}&nonce_prefix={}",
+                hex::encode(encryption_key),
+                hex::encode(nonce_prefix)
+            )
+            .as_str(),
         ));
 
         let mut pairs = url.query_pairs_mut();
@@ -380,21 +386,44 @@ impl Client {
     /// # Returns
     /// A tuple with the object metadata and encryption key to decrypt
     /// the user metadata.
-    pub async fn shared_object(&self, mut share_url: Url) -> Result<(SharedObject, [u8; 32])> {
-        let encryption_key = match share_url.fragment() {
-            Some(fragment) => {
-                let fragment = match fragment.strip_prefix("encryption_key=") {
-                    Some(fragment) => Ok(fragment),
-                    None => Err(Error::Format("missing encryption_key".into())),
-                }?;
-                let mut out = [0u8; 32];
-                hex::decode_to_slice(fragment, &mut out).map_err(|_| {
-                    Error::Format("encryption key must be 32 hex-encoded bytes".into())
-                })?;
-                Ok(out)
+    pub async fn shared_object(
+        &self,
+        mut share_url: Url,
+    ) -> Result<(SharedObject, [u8; 32], [u8; 16])> {
+        let fragment = share_url
+            .fragment()
+            .ok_or_else(|| Error::Format("missing fragment".into()))?;
+
+        let mut encryption_key: Option<[u8; 32]> = None;
+        let mut nonce_prefix: Option<[u8; 16]> = None;
+        for kv in fragment.split('&') {
+            let mut parts = kv.splitn(2, '=');
+            let key = parts.next().unwrap_or("");
+            let val = parts.next().unwrap_or("");
+            match key {
+                "encryption_key" => {
+                    let mut out = [0u8; 32];
+                    hex::decode_to_slice(val, &mut out).map_err(|_| {
+                        Error::Format("encryption key must be 32 hex-encoded bytes".into())
+                    })?;
+                    encryption_key = Some(out);
+                }
+                "nonce_prefix" => {
+                    let mut out = [0u8; 16];
+                    hex::decode_to_slice(val, &mut out).map_err(|_| {
+                        Error::Format("nonce_prefix must be 16 hex-encoded bytes".into())
+                    })?;
+                    nonce_prefix = Some(out);
+                }
+                _ => {}
             }
-            None => Err(Error::Format("missing encryption_key".into())),
-        }?;
+        }
+
+        let encryption_key =
+            encryption_key.ok_or_else(|| Error::Format("missing encryption_key".into()))?;
+        let nonce_prefix =
+            nonce_prefix.ok_or_else(|| Error::Format("missing nonce_prefix".into()))?;
+
         share_url.set_fragment(None);
         let obj = Self::handle_response(
             self.client
@@ -405,7 +434,7 @@ impl Client {
         )
         .await?;
 
-        Ok((obj, encryption_key))
+        Ok((obj, encryption_key, nonce_prefix))
     }
 
     fn sign(
