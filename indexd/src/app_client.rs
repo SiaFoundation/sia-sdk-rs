@@ -378,18 +378,7 @@ impl Client {
         Ok(pairs.finish().to_owned())
     }
 
-    /// Retrieves the object metadata using a pre-signed url
-    ///
-    /// # Arguments
-    /// `share_url` a pre-signed url for the App objects API
-    ///
-    /// # Returns
-    /// A tuple with the object metadata and encryption key to decrypt
-    /// the user metadata.
-    pub async fn shared_object(
-        &self,
-        mut share_url: Url,
-    ) -> Result<(SharedObject, [u8; 32], [u8; 16])> {
+    fn parse_share_url(share_url: Url) -> Result<([u8; 32], [u8; 16])> {
         let fragment = share_url
             .fragment()
             .ok_or_else(|| Error::Format("missing fragment".into()))?;
@@ -423,6 +412,23 @@ impl Client {
             encryption_key.ok_or_else(|| Error::Format("missing encryption_key".into()))?;
         let nonce_prefix =
             nonce_prefix.ok_or_else(|| Error::Format("missing nonce_prefix".into()))?;
+
+        Ok((encryption_key, nonce_prefix))
+    }
+
+    /// Retrieves the object metadata using a pre-signed url
+    ///
+    /// # Arguments
+    /// `share_url` a pre-signed url for the App objects API
+    ///
+    /// # Returns
+    /// A tuple with the object metadata and encryption key to decrypt
+    /// the user metadata.
+    pub async fn shared_object(
+        &self,
+        mut share_url: Url,
+    ) -> Result<(SharedObject, [u8; 32], [u8; 16])> {
+        let (encryption_key, nonce_prefix) = Client::parse_share_url(share_url.clone())?;
 
         share_url.set_fragment(None);
         let obj = Self::handle_response(
@@ -478,6 +484,28 @@ mod tests {
             hash,
             hash_256!("a9f0bda1b97b7d44ae6369ac830851a115311bb59aa2d848beda6ae95d10ad18")
         )
+    }
+
+    #[test]
+    fn test_parse_share_url() {
+        let encryption_key = rand::random::<[u8; 32]>();
+        let nonce_prefix = rand::random::<[u8; 16]>();
+
+        let app_key = PrivateKey::from_seed(&[0u8; 32]);
+        let client = Client::new("https://foo.bar", app_key).unwrap();
+        let share_url = client
+            .object_share_url(
+                &hash_256!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                encryption_key,
+                nonce_prefix,
+                DateTime::from_timestamp_secs(123).unwrap(),
+            )
+            .unwrap();
+
+        let (parsed_encryption_key, parsed_nonce_prefix) =
+            Client::parse_share_url(share_url).unwrap();
+        assert_eq!(encryption_key, parsed_encryption_key);
+        assert_eq!(nonce_prefix, parsed_nonce_prefix);
     }
 
     #[test]
