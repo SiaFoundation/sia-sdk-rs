@@ -106,6 +106,15 @@ impl Object {
     }
 }
 
+/// UploadMeta represents an uploaded object and the metadata needed to
+/// retrieve it.
+#[derive(Debug, PartialEq)]
+pub struct UploadMeta {
+    pub encryption_key: EncryptionKey,
+    pub nonce_prefix: [u8; 16],
+    pub object: Object,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedSlab {

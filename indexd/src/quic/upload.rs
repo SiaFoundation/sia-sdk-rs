@@ -20,7 +20,7 @@ use tokio_util::task::TaskTracker;
 use crate::app_client::{Client as AppClient, SlabPinParams};
 use crate::quic::client::{Client, HostQueue};
 use crate::quic::{self, QueueError};
-use crate::{Object, Sector, Slab, SlabSlice};
+use crate::{Object, Sector, Slab, SlabSlice, UploadMeta};
 
 #[derive(Debug, Error)]
 pub enum UploadError {
@@ -183,11 +183,9 @@ impl Uploader {
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
         mut r: R,
-        encryption_key: EncryptionKey,
-        nonce_prefix: [u8; 16],
         meta: Option<Vec<u8>>,
         options: UploadOptions,
-    ) -> Result<Object, UploadError> {
+    ) -> Result<UploadMeta, UploadError> {
         if self.client.hosts().is_empty() {
             let hosts = self.app_client.hosts().await?;
             self.client.update_hosts(hosts);
@@ -198,12 +196,16 @@ impl Uploader {
         let semaphore = Arc::new(Semaphore::new(options.max_inflight));
         let host_client = self.client.clone();
         let account_key = self.account_key.clone();
+
+        let nonce_prefix = rand::random::<[u8; 16]>();
+        let encryption_key = rand::random::<[u8; 32]>();
+
         let read_slab_res: JoinHandle<Result<(), UploadError>> = tokio::spawn(async move {
             // use a buffered reader since the erasure coder reads 64 bytes at a time.
             let r = BufReader::new(&mut r);
 
             // encrypt the stream
-            let mut r = CipherReader::new(r, encryption_key, nonce_prefix, 0);
+            let mut r = CipherReader::new(r, EncryptionKey::from(encryption_key), nonce_prefix, 0);
 
             let mut slab_index: usize = 0;
             let slab_upload_tasks = TaskTracker::new();
@@ -349,6 +351,10 @@ impl Uploader {
 
         let object = Object::new(slabs, meta);
         self.app_client.save_object(&object).await?;
-        Ok(object)
+        Ok(UploadMeta {
+            encryption_key: EncryptionKey::from(encryption_key),
+            nonce_prefix,
+            object,
+        })
     }
 }
