@@ -8,7 +8,6 @@ use crate::quic::{
 
 use crate::app_client::{Client, ObjectsCursor, RegisterAppRequest};
 use log::debug;
-use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
 use sia::signing::PrivateKey;
 use sia::types::Hash256;
@@ -190,15 +189,20 @@ impl SDK<ConnectedState> {
     pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
         writer: &mut W,
-        encryption_key: EncryptionKey,
-        nonce_prefix: [u8; 16],
-        object: &Object,
+        upload_meta: &UploadMeta,
         options: DownloadOptions,
     ) -> Result<()> {
-        let slab_iterator = SlabFetcher::new(self.state.app.clone(), object.slabs.clone());
+        let slab_iterator =
+            SlabFetcher::new(self.state.app.clone(), upload_meta.object.slabs.clone());
         self.state
             .downloader
-            .download(writer, encryption_key, nonce_prefix, slab_iterator, options)
+            .download(
+                writer,
+                upload_meta.encryption_key.clone(),
+                upload_meta.nonce_prefix,
+                slab_iterator,
+                options,
+            )
             .await?;
         Ok(())
     }

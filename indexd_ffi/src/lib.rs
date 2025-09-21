@@ -246,6 +246,8 @@ impl TryInto<indexd::Object> for PinnedObject {
     }
 }
 
+/// UploadMeta represents an uploaded object and the metadata needed to
+/// retrieve it.
 #[derive(uniffi::Record)]
 pub struct UploadMeta {
     pub encryption_key: Vec<u8>,
@@ -701,16 +703,15 @@ impl SDK {
     /// A [`Download`] object that can be used to read the data in chunks
     pub async fn download(
         &self,
-        encryption_key: Vec<u8>,
-        nonce_prefix: Vec<u8>,
-        object: &PinnedObject,
+        upload_meta: &UploadMeta,
         options: DownloadOptions,
     ) -> Result<Download, DownloadError> {
         let downloader = match self.downloader.get() {
             Some(downloader) => downloader.clone(),
             None => return Err(DownloadError::NotConnected),
         };
-        let slabs = object
+        let slabs = upload_meta
+            .object
             .slabs
             .iter()
             .map(|s| {
@@ -721,11 +722,16 @@ impl SDK {
                 })
             })
             .collect::<Result<Vec<SlabSlice>, HexParseError>>()?;
-        let encryption_key = EncryptionKey::try_from(encryption_key.as_ref())
+        let encryption_key = EncryptionKey::try_from(upload_meta.encryption_key.as_ref())
             .map_err(|err| DownloadError::Custom(err.to_string()))?;
-        let nonce_prefix: [u8; 16] = nonce_prefix.try_into().map_err(|v: Vec<u8>| {
-            DownloadError::Custom(format!("invalid nonce length: {}", v.len()))
-        })?;
+        let nonce_prefix: [u8; 16] =
+            upload_meta
+                .nonce_prefix
+                .clone()
+                .try_into()
+                .map_err(|v: Vec<u8>| {
+                    DownloadError::Custom(format!("invalid nonce length: {}", v.len()))
+                })?;
 
         let slabs = SlabFetcher::new(self.app_client.clone(), slabs.clone());
         Ok(Download {
@@ -734,7 +740,7 @@ impl SDK {
             slabs,
             state: Arc::new(Mutex::new(DownloadState {
                 offset: options.offset,
-                length: options.length.unwrap_or(object.size()),
+                length: options.length.unwrap_or(upload_meta.object.size()),
                 max_inflight: options.max_inflight,
             })),
             downloader,
