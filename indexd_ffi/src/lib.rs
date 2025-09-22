@@ -455,6 +455,32 @@ pub struct SharedObject {
     pub encryption_key: Vec<u8>,
 }
 
+/// An account registered on the indexer.
+#[derive(uniffi::Record)]
+pub struct Account {
+    pub account_key: String,
+    pub service_account: bool,
+    pub max_pinned_data: u64,
+    pub pinned_data: u64,
+    pub description: String,
+    pub logo_url: Option<String>,
+    pub service_url: Option<String>,
+}
+
+impl From<indexd::app_client::Account> for Account {
+    fn from(a: indexd::app_client::Account) -> Self {
+        Self {
+            account_key: a.account_key.to_string(),
+            service_account: a.service_account,
+            max_pinned_data: a.max_pinned_data,
+            pinned_data: a.pinned_data,
+            description: a.description,
+            logo_url: a.logo_url,
+            service_url: a.service_url,
+        }
+    }
+}
+
 impl SharedObject {
     /// Calculates the total size of the object by summing the lengths of its slabs.
     pub fn size(&self) -> u64 {
@@ -867,6 +893,12 @@ impl SDK {
         let slab_id = Hash256::from_str(slab_id.as_str())?;
         self.app_client.unpin_slab(&slab_id).await?;
         Ok(())
+    }
+
+    /// Returns the current account.
+    pub async fn account(&self) -> Result<Account, Error> {
+        let account = self.app_client.account().await?;
+        Ok(account.into())
     }
 
     /// Creates a signed URL that can be used to share object metadata

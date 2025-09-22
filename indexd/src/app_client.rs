@@ -88,6 +88,22 @@ pub struct ObjectsCursor {
     pub key: Hash256,
 }
 
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    // We should use a PublicKey here but indexd's account definition uses a
+    // proto.Account which does not include the ed25519 prefix.
+    pub account_key: Hash256,
+    pub service_account: bool,
+    pub max_pinned_data: u64,
+    pub pinned_data: u64,
+    pub description: String,
+    #[serde(rename = "logoURL")]
+    pub logo_url: Option<String>,
+    #[serde(rename = "serviceURL")]
+    pub service_url: Option<String>,
+}
+
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone)]
@@ -241,6 +257,11 @@ impl Client {
     /// Unpins a slab from the indexer.
     pub async fn unpin_slab(&self, slab_id: &Hash256) -> Result<()> {
         self.delete(&format!("slabs/{slab_id}")).await
+    }
+
+    /// Account returns the current account.
+    pub async fn account(&self) -> Result<Account> {
+        self.get_json::<_, ()>("account", None).await
     }
 
     /// Helper to send a signed DELETE request.
