@@ -204,12 +204,33 @@ pub struct NetAddress {
 pub struct PinnedObject {
     pub key: String,
     pub slabs: Vec<Slab>,
-    pub metadata: Vec<u8>,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
+
+    encrypted_metadata: Vec<u8>, // accessed via 'decrypt'
 }
 
 impl PinnedObject {
+    /// Decrypts the metadata of an object and returns it.
+    ///
+    /// # Arguments
+    /// * `key` - The 32-byte encryption key used when uploading the object.
+    ///
+    /// # Returns
+    /// The decrypted metadata, or None if no metadata was provided.
+    pub fn decrypt_metadata(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
+        if self.encrypted_metadata.is_empty() {
+            return Ok(None);
+        }
+        let encryption_key =
+            EncryptionKey::try_from(key.as_ref()).map_err(|err| Error::Custom(err.to_string()))?;
+        let encrypted_meta = indexd::EncryptedMetadata::from(self.encrypted_metadata.clone());
+        let decrypted = encrypted_meta
+            .decrypt(&encryption_key)
+            .map_err(|err| Error::Custom(format!("failed to decrypt metadata: {}", err)))?;
+        Ok(Some(decrypted))
+    }
+
     /// Calculates the total size of the object by summing the lengths of its slabs.
     pub fn size(&self) -> u64 {
         self.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
@@ -221,7 +242,7 @@ impl From<indexd::Object> for PinnedObject {
         Self {
             key: o.key.to_string(),
             slabs: o.slabs.into_iter().map(|s| s.into()).collect(),
-            metadata: o.meta,
+            encrypted_metadata: o.meta.as_ref().into(),
             created_at: o.created_at.into(),
             updated_at: o.updated_at.into(),
         }
@@ -239,7 +260,7 @@ impl TryInto<indexd::Object> for PinnedObject {
                 .into_iter()
                 .map(|s| s.try_into())
                 .collect::<Result<Vec<SlabSlice>, HexParseError>>()?,
-            meta: Vec::with_capacity(0), // TODO: handle encryption
+            meta: self.encrypted_metadata.into(),
             created_at: self.created_at.into(),
             updated_at: self.updated_at.into(),
         })
@@ -647,6 +668,10 @@ impl SDK {
 
     /// Uploads data to the Sia network and pins it to the indexer
     ///
+    /// # Warnings
+    /// * The `encryption_key` must be unique for every upload. Reusing an
+    ///   encryption key will compromise the security of the data.
+    ///
     /// # Returns
     /// An object representing the uploaded data.
     pub async fn upload(
@@ -848,6 +873,7 @@ impl SDK {
             .app_client
             .objects(cursor, Some(limit as usize))
             .await?;
+
         Ok(objects.into_iter().map(|o| o.into()).collect())
     }
 
