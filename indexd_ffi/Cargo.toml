@@ -10,7 +10,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 indexd = { version = "0.0.1", path = "../indexd" }
 log = "0.4.28"
 rand = "0.9.2"
-rustls = "0.23.31"
+rustls = "0.23.32"
 rustls-platform-verifier = "0.6.1"
 sia_sdk = { version = "0.0.2", path = "../sia_sdk" }
 thiserror = "2.0.16"

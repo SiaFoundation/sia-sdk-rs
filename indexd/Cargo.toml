@@ -15,8 +15,8 @@ path = "src/lib.rs"
 
 [dependencies]
 reqwest = { version = "0.12.23", features = ["json"] }
-rustls = { version = "0.23.31", features = ["ring"] }
-serde = "1.0.223"
+rustls = { version = "0.23.32", features = ["ring"] }
+serde = "1.0.226"
 serde_json = "1.0.145"
 thiserror = "2.0.16"
 sia_sdk = { path = "../sia_sdk" }
@@ -29,8 +29,8 @@ quinn = "0.11.9"
 bytes = "1.10.1"
 futures = "0.3.31"
 tokio-util = { version = "0.7.16", features = ["rt"] }
-priority-queue = "2.5.0"
-serde_with = {version = "3.14.0", features = ["base64"]}
+priority-queue = "2.6.0"
+serde_with = {version = "3.14.1", features = ["base64"]}
 hex = "0.4.3"
 chacha20poly1305 = "0.10.1"
 chrono = { version = "0.4.42", features = ["serde"] }
