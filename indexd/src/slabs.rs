@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
@@ -118,12 +119,8 @@ pub struct Object {
     // base64-encoded arbitrary metadata
     #[serde_as(as = "Base64")]
     pub meta: EncryptedMetadata,
-
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: time::OffsetDateTime,
-
-    #[serde(with = "time::serde::rfc3339")]
-    pub updated_at: time::OffsetDateTime,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl Object {
@@ -133,8 +130,8 @@ impl Object {
             slabs,
             meta: meta.unwrap_or_default(),
 
-            created_at: time::OffsetDateTime::now_utc(),
-            updated_at: time::OffsetDateTime::now_utc(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
         }
     }
 

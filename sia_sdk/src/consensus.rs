@@ -1,7 +1,7 @@
 use crate::address;
+use chrono::{DateTime, Duration, Utc};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
-use time::{Duration, OffsetDateTime};
 
 use crate::encoding::{self, SiaDecodable, SiaEncodable};
 use crate::types::{Address, BlockID, ChainIndex, Currency, Hash256, SiacoinOutput, Work};
@@ -39,8 +39,7 @@ pub struct HardforkStorageProof {
 pub struct HardforkOak {
     pub height: u64,
     pub fix_height: u64,
-    #[serde(with = "time::serde::rfc3339")]
-    pub genesis_timestamp: OffsetDateTime,
+    pub genesis_timestamp: DateTime<Utc>,
 }
 
 /// HardforkASIC contains the parameters for a hardfork that changed the mining algorithm
@@ -95,10 +94,10 @@ pub struct Network {
     pub hardfork_v2: HardforkV2,
 }
 
-const fn unix_timestamp(secs: i64) -> OffsetDateTime {
-    match OffsetDateTime::from_unix_timestamp(secs) {
-        Ok(t) => t,
-        Err(_) => panic!("invalid timestamp"),
+const fn unix_timestamp(secs: i64) -> DateTime<Utc> {
+    match DateTime::from_timestamp_secs(secs) {
+        Some(t) => t,
+        None => panic!("invalid timestamp"),
     }
 }
 
@@ -351,7 +350,7 @@ impl<'de> Deserialize<'de> for ElementAccumulator {
 pub struct State {
     pub index: ChainIndex,
     #[serde(with = "crate::types::utils::timestamp_array")]
-    pub prev_timestamps: [OffsetDateTime; 11],
+    pub prev_timestamps: [DateTime<Utc>; 11],
     pub depth: BlockID,
     pub child_target: BlockID,
     pub siafund_pool: Currency,
@@ -408,11 +407,11 @@ impl SiaDecodable for State {
         } else {
             11
         };
-        let mut prev_timestamps = [OffsetDateTime::UNIX_EPOCH; 11];
+        let mut prev_timestamps = [DateTime::UNIX_EPOCH; 11];
         prev_timestamps[..timestamps_count]
             .iter_mut()
             .try_for_each(|ts| -> encoding::Result<()> {
-                *ts = OffsetDateTime::decode(r)?;
+                *ts = DateTime::<Utc>::decode(r)?;
                 Ok(())
             })?;
         Ok(State {
@@ -478,9 +477,9 @@ impl ChainState {
 
     // blocks_per_month estimates the number of blocks expected in a calendar month
     pub fn blocks_per_month(&self) -> u64 {
-        (Duration::days(365).whole_nanoseconds()
+        (Duration::days(365).num_milliseconds()
             / 12
-            / self.network.block_interval.whole_nanoseconds()) as u64
+            / self.network.block_interval.num_milliseconds()) as u64
     }
 
     /// foundation_subsidy returns the Foundation subsidy output for the child block.
@@ -490,7 +489,7 @@ impl ChainState {
             return None;
         }
         let blocks_per_month = self.blocks_per_month();
-        if (self.child_height() - self.network.hardfork_foundation.height) % blocks_per_month != 0 {
+        if !(self.child_height() - self.network.hardfork_foundation.height).is_multiple_of(blocks_per_month) {
             return None;
         }
 
@@ -533,8 +532,8 @@ mod tests {
     use crate::{block_id, hash_256};
 
     use super::*;
+    use chrono::FixedOffset;
     use serde_json;
-    use time::UtcOffset;
 
     #[test]
     fn test_serialize_network() {
@@ -568,13 +567,13 @@ mod tests {
                 height: 0,
                 id: block_id!("0000000000000000000000000000000000000000000000000000000000000000"),
             },
-            prev_timestamps: [OffsetDateTime::UNIX_EPOCH; 11],
+            prev_timestamps: [DateTime::UNIX_EPOCH; 11],
             depth: block_id!("0000000000000000000000000000000000000000000000000000000000000000"),
             child_target: block_id!(
                 "0000000000000000000000000000000000000000000000000000000000000000"
             ),
             siafund_pool: Currency::zero(),
-            oak_time: Duration::ZERO,
+            oak_time: Duration::zero(),
             oak_target: block_id!(
                 "0000000000000000000000000000000000000000000000000000000000000000"
             ),
@@ -594,7 +593,7 @@ mod tests {
             attestations: 0,
         };
 
-        const EMPTY_JSON_STR: &str = "{\"index\":{\"height\":0,\"id\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"prevTimestamps\":[\"1970-01-01T00:00:00Z\",\"1970-01-01T00:00:00Z\",\"1970-01-01T00:00:00Z\",\"1970-01-01T00:00:00Z\",\"1970-01-01T00:00:00Z\",\"1970-01-01T00:00:00Z\",\"1970-01-01T00:00:00Z\",\"1970-01-01T00:00:00Z\",\"1970-01-01T00:00:00Z\",\"1970-01-01T00:00:00Z\",\"1970-01-01T00:00:00Z\"],\"depth\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"childTarget\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"siafundPool\":\"0\",\"oakTime\":0,\"oakTarget\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"foundationPrimaryAddress\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\",\"foundationFailsafeAddress\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\",\"totalWork\":\"0\",\"difficulty\":\"0\",\"oakWork\":\"0\",\"elements\":{\"numLeaves\":0,\"trees\":[]},\"attestations\":0}";
+        const EMPTY_JSON_STR: &str = "{\"index\":{\"height\":0,\"id\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"prevTimestamps\":[\"1970-01-01T00:00:00+00:00\",\"1970-01-01T00:00:00+00:00\",\"1970-01-01T00:00:00+00:00\",\"1970-01-01T00:00:00+00:00\",\"1970-01-01T00:00:00+00:00\",\"1970-01-01T00:00:00+00:00\",\"1970-01-01T00:00:00+00:00\",\"1970-01-01T00:00:00+00:00\",\"1970-01-01T00:00:00+00:00\",\"1970-01-01T00:00:00+00:00\",\"1970-01-01T00:00:00+00:00\"],\"depth\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"childTarget\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"siafundPool\":\"0\",\"oakTime\":0,\"oakTarget\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"foundationPrimaryAddress\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\",\"foundationFailsafeAddress\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\",\"totalWork\":\"0\",\"difficulty\":\"0\",\"oakWork\":\"0\",\"elements\":{\"numLeaves\":0,\"trees\":[]},\"attestations\":0}";
 
         let serialized = serde_json::to_string(&s).unwrap();
         assert_eq!(EMPTY_JSON_STR, serialized);
@@ -615,72 +614,39 @@ mod tests {
                 id: block_id!("54b6800181215b654a2b64e8a0f39da6d5ad20f4e6eda87d50d36e93efd9cdb9"),
             },
             prev_timestamps: [
-                OffsetDateTime::parse(
-                    "2167-03-18T17:08:40-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "1971-03-30T07:40:44-08:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2226-11-12T19:51:30-08:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2013-09-10T15:07:20-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2230-05-18T20:13:07-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "1983-10-27T20:37:21-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2068-03-31T10:25:10-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2159-06-29T18:46:49-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2089-05-02T23:45:50-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2073-02-27T00:01:11-08:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
-                OffsetDateTime::parse(
-                    "2005-07-10T11:50:37-07:00",
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .unwrap()
-                .to_offset(UtcOffset::UTC),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2167-03-18T17:08:40-07:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("1971-03-30T07:40:44-08:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2226-11-12T19:51:30-08:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2013-09-10T15:07:20-07:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2230-05-18T20:13:07-07:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("1983-10-27T20:37:21-07:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2068-03-31T10:25:10-07:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2159-06-29T18:46:49-07:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2089-05-02T23:45:50-07:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2073-02-27T00:01:11-08:00")
+                    .unwrap()
+                    .to_utc(),
+                DateTime::<FixedOffset>::parse_from_rfc3339("2005-07-10T11:50:37-07:00")
+                    .unwrap()
+                    .to_utc(),
             ],
             depth: block_id!("fb66f6dd0517bd80a57c6fc1dd186eeb25a5f7dc550adc94a996731734f4a478"),
             child_target: block_id!(
@@ -781,7 +747,7 @@ mod tests {
             attestations: 4796228701811883082,
         };
 
-        const JSON_STR: &str = "{\"index\":{\"height\":16173070238323073115,\"id\":\"54b6800181215b654a2b64e8a0f39da6d5ad20f4e6eda87d50d36e93efd9cdb9\"},\"prevTimestamps\":[\"2167-03-19T00:08:40Z\",\"1971-03-30T15:40:44Z\",\"2226-11-13T03:51:30Z\",\"2013-09-10T22:07:20Z\",\"2230-05-19T03:13:07Z\",\"1983-10-28T03:37:21Z\",\"2068-03-31T17:25:10Z\",\"2159-06-30T01:46:49Z\",\"2089-05-03T06:45:50Z\",\"2073-02-27T08:01:11Z\",\"2005-07-10T18:50:37Z\"],\"depth\":\"fb66f6dd0517bd80a57c6fc1dd186eeb25a5f7dc550adc94a996731734f4a478\",\"childTarget\":\"188d65bc61f7398757be167c70139bc79e2f387551bd0338b81f3938850033c2\",\"siafundPool\":\"184937863921143879963732603265618430015\",\"oakTime\":5097318764767379519,\"oakTarget\":\"5e7e960e017d5772f3341bd8d80fc797de245c760a3f9e84f4da66f9e0ee95aa\",\"foundationPrimaryAddress\":\"95ae9eb00188ade3367e57e5bdc522a16e95a8d28e1b940d2d128273aa7a833001a060dec431\",\"foundationFailsafeAddress\":\"cfb49736296ae52965fd7d66d55720eeadfc2be586db65699050bce175c56056d3fbc1803e15\",\"totalWork\":\"74729819229046869798018345563024899883189146032533830356652983039509219541660\",\"difficulty\":\"65194889020289389878379369533805235500859175566680960159551424936807420310662\",\"oakWork\":\"57256974569838769713335634640292932580615837804690422146878608831130432685755\",\"elements\":{\"numLeaves\":4899977171010125798,\"trees\":[\"78a9fabda865dafcaf474d48bdb1272595513cf92290917392ff58ca8bea591a\",\"e6a5ea278d90592e0518fbf2e83f41507486fe57e8e4ffbe152f13250df696bf\",\"2488cae3f7046f8b04aec217a09358db22d8ae36f883d1ccae9382edca79c54e\",\"e498f1adbe88c58bc9dabf487437b8d191a78fbb3d8cfe19a4c1759ae232b4f4\",\"96130e35228422970057745ef4b92d285434c25187c44110922554d0ae040678\",\"44f29b39d6e4f509d5d41834db4fd6a831ccca33bb46185a5ad01f2789581337\",\"75f0b42f9d291c4ff4e57f403893e0ca18fdc64f0723e0f29b6aeed834db1ac2\",\"4ce129d69c69971497c556d9eeec0de8c1dd9cc4b0750be9fffd9ec3226ce7a3\",\"f3321bf48aed89100db44b3080f3f350d10b6de213527b19ad57bdd1cd47576a\",\"724c8bf4c8459625190ae18b2fc1d9353d2d3b34c80d4d4fbcd48258c9a11c97\",\"062b2371de9dfad15931a1e72c46afe492ad697447680ea43300ed516bcc2742\",\"b23ca0a83b0367755e2c53c1f7ed9e6d372c220ae0f344082cf5d52c40287893\",\"9b1b446dd599fd5dab08e83738b92651d8aaa7be072db313d237c68ce1094ea1\",\"a03c962c184055ccbf7a42c9a13a0d4c38125535a830832a6fff3029d6deada3\",\"df5d9e1e3a220d2429f9064adecb86ecae916619c93e17d237b5972692e558fd\",\"2d6315b7a91d62bd31e4738259f56f58075bd14ee2f1e2625738f506a7564176\",\"26b1d48ab8c3f0707bd5afdf4a3ef757abc9b6a0be75b8a3cecbcd5994473a72\",\"f897c92aca8d6ef46a41a3a50aff0527bd09be029355d28c2360ec9cb309b1ae\",\"f80ff7cbcad8c465278a59588a3a0d000cc3130e96fb56d257229c1a50d93125\",\"7a84f42433ecd9352e2ffd8bdc8556c87ec93697cf4c4873d4ab51d2b85c44c1\",\"00c03e0af90a26d0a4bb4b243f99b2d361de2412d82f357f6224eceb2f19c142\",\"e0a8f77abd726e928580656d7ab49dc276603e936e04b9caf53a2a27338e3cd1\",\"e376ebd2f0c93013cf6c856fb76e7b60e64a300a9a4b839844074cac4da42b8d\",\"5fcc77f29cfdb51aac9fff250e1ee7607457ce5a280e946150931d793272593a\",\"ad34b2dce6a7136584c5ffea74c66e5613593dddac9eb666ff6a6aef42386968\",\"3d1afa6b931fea014211bb6b08d9508389dd0a9c47a25670ca110bcc8ce8ead1\",\"df427b938f6ef07cd67da1ab11ad8fb4e6b0a97c03325c1fc8b1c3b0c4b8f7f4\",\"8c3d435fdb6ee44e26155c116a86f4dc2b54b05becb08777a63e1d1ad7c3cbc2\",\"11671f5bd2856de1b4925ee0b82f9cda6179db132c9930431d26f0ccdbb8a822\",\"19dcd3ac59669e10420b36d4e588206ae123a0c8ae64b20e1ede697efc556291\",\"65542a8b2c1bca8d78d6517357853c1d54f6b53f04a8327f28ae2d5d022c5597\"]},\"attestations\":4796228701811883082}";
+        const JSON_STR: &str = "{\"index\":{\"height\":16173070238323073115,\"id\":\"54b6800181215b654a2b64e8a0f39da6d5ad20f4e6eda87d50d36e93efd9cdb9\"},\"prevTimestamps\":[\"2167-03-19T00:08:40+00:00\",\"1971-03-30T15:40:44+00:00\",\"2226-11-13T03:51:30+00:00\",\"2013-09-10T22:07:20+00:00\",\"2230-05-19T03:13:07+00:00\",\"1983-10-28T03:37:21+00:00\",\"2068-03-31T17:25:10+00:00\",\"2159-06-30T01:46:49+00:00\",\"2089-05-03T06:45:50+00:00\",\"2073-02-27T08:01:11+00:00\",\"2005-07-10T18:50:37+00:00\"],\"depth\":\"fb66f6dd0517bd80a57c6fc1dd186eeb25a5f7dc550adc94a996731734f4a478\",\"childTarget\":\"188d65bc61f7398757be167c70139bc79e2f387551bd0338b81f3938850033c2\",\"siafundPool\":\"184937863921143879963732603265618430015\",\"oakTime\":5097318764767379519,\"oakTarget\":\"5e7e960e017d5772f3341bd8d80fc797de245c760a3f9e84f4da66f9e0ee95aa\",\"foundationPrimaryAddress\":\"95ae9eb00188ade3367e57e5bdc522a16e95a8d28e1b940d2d128273aa7a833001a060dec431\",\"foundationFailsafeAddress\":\"cfb49736296ae52965fd7d66d55720eeadfc2be586db65699050bce175c56056d3fbc1803e15\",\"totalWork\":\"74729819229046869798018345563024899883189146032533830356652983039509219541660\",\"difficulty\":\"65194889020289389878379369533805235500859175566680960159551424936807420310662\",\"oakWork\":\"57256974569838769713335634640292932580615837804690422146878608831130432685755\",\"elements\":{\"numLeaves\":4899977171010125798,\"trees\":[\"78a9fabda865dafcaf474d48bdb1272595513cf92290917392ff58ca8bea591a\",\"e6a5ea278d90592e0518fbf2e83f41507486fe57e8e4ffbe152f13250df696bf\",\"2488cae3f7046f8b04aec217a09358db22d8ae36f883d1ccae9382edca79c54e\",\"e498f1adbe88c58bc9dabf487437b8d191a78fbb3d8cfe19a4c1759ae232b4f4\",\"96130e35228422970057745ef4b92d285434c25187c44110922554d0ae040678\",\"44f29b39d6e4f509d5d41834db4fd6a831ccca33bb46185a5ad01f2789581337\",\"75f0b42f9d291c4ff4e57f403893e0ca18fdc64f0723e0f29b6aeed834db1ac2\",\"4ce129d69c69971497c556d9eeec0de8c1dd9cc4b0750be9fffd9ec3226ce7a3\",\"f3321bf48aed89100db44b3080f3f350d10b6de213527b19ad57bdd1cd47576a\",\"724c8bf4c8459625190ae18b2fc1d9353d2d3b34c80d4d4fbcd48258c9a11c97\",\"062b2371de9dfad15931a1e72c46afe492ad697447680ea43300ed516bcc2742\",\"b23ca0a83b0367755e2c53c1f7ed9e6d372c220ae0f344082cf5d52c40287893\",\"9b1b446dd599fd5dab08e83738b92651d8aaa7be072db313d237c68ce1094ea1\",\"a03c962c184055ccbf7a42c9a13a0d4c38125535a830832a6fff3029d6deada3\",\"df5d9e1e3a220d2429f9064adecb86ecae916619c93e17d237b5972692e558fd\",\"2d6315b7a91d62bd31e4738259f56f58075bd14ee2f1e2625738f506a7564176\",\"26b1d48ab8c3f0707bd5afdf4a3ef757abc9b6a0be75b8a3cecbcd5994473a72\",\"f897c92aca8d6ef46a41a3a50aff0527bd09be029355d28c2360ec9cb309b1ae\",\"f80ff7cbcad8c465278a59588a3a0d000cc3130e96fb56d257229c1a50d93125\",\"7a84f42433ecd9352e2ffd8bdc8556c87ec93697cf4c4873d4ab51d2b85c44c1\",\"00c03e0af90a26d0a4bb4b243f99b2d361de2412d82f357f6224eceb2f19c142\",\"e0a8f77abd726e928580656d7ab49dc276603e936e04b9caf53a2a27338e3cd1\",\"e376ebd2f0c93013cf6c856fb76e7b60e64a300a9a4b839844074cac4da42b8d\",\"5fcc77f29cfdb51aac9fff250e1ee7607457ce5a280e946150931d793272593a\",\"ad34b2dce6a7136584c5ffea74c66e5613593dddac9eb666ff6a6aef42386968\",\"3d1afa6b931fea014211bb6b08d9508389dd0a9c47a25670ca110bcc8ce8ead1\",\"df427b938f6ef07cd67da1ab11ad8fb4e6b0a97c03325c1fc8b1c3b0c4b8f7f4\",\"8c3d435fdb6ee44e26155c116a86f4dc2b54b05becb08777a63e1d1ad7c3cbc2\",\"11671f5bd2856de1b4925ee0b82f9cda6179db132c9930431d26f0ccdbb8a822\",\"19dcd3ac59669e10420b36d4e588206ae123a0c8ae64b20e1ede697efc556291\",\"65542a8b2c1bca8d78d6517357853c1d54f6b53f04a8327f28ae2d5d022c5597\"]},\"attestations\":4796228701811883082}";
 
         let serialized = serde_json::to_string(&s).unwrap();
         assert_eq!(JSON_STR, serialized);

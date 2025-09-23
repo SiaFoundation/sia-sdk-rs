@@ -5,11 +5,14 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use indexd::app_client::{Client as AppClient, RegisterAppRequest};
-use indexd::quic::{self, Client as HostClient, Downloader, SlabFetcher, Uploader};
-use indexd::{SlabSlice, Url};
+use indexd::app_client::{
+    Client as AppClient, RegisterAppRequest, SlabPinParams as AppSlabPinParams,
+};
+use indexd::quic::{Client as HostClient, Downloader, SlabFetcher, Uploader};
+use indexd::{SlabSlice, Url, quic};
 use log::debug;
-use rustls::{ClientConfig, RootCertStore};
+use rustls::ClientConfig;
+use rustls_platform_verifier::ConfigVerifierExt;
 use sia::encryption::EncryptionKey;
 use sia::rhp::SECTOR_SIZE;
 use sia::signing::{PrivateKey, PublicKey};
@@ -19,6 +22,9 @@ use tokio::io::AsyncRead;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{OnceCell, oneshot};
 use tokio::task::JoinHandle;
+
+mod logging;
+pub use logging::*;
 
 #[uniffi::export(with_foreign)]
 pub trait UploadProgressCallback: Send + Sync {
@@ -321,7 +327,7 @@ impl TryInto<sia::rhp::Host> for Host {
 }
 
 /// A sector stored on a specific host.
-#[derive(uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct PinnedSector {
     pub root: String,
     pub host_key: String,
@@ -384,6 +390,41 @@ impl TryInto<SlabSlice> for Slab {
     }
 }
 
+impl TryInto<indexd::Sector> for PinnedSector {
+    type Error = HexParseError;
+
+    fn try_into(self) -> Result<indexd::Sector, Self::Error> {
+        Ok(indexd::Sector {
+            host_key: PublicKey::from_str(self.host_key.as_str())?,
+            root: Hash256::from_str(self.root.as_str())?,
+        })
+    }
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct SlabPinParams {
+    pub encryption_key: Vec<u8>,
+    pub min_shards: u8,
+    pub sectors: Vec<PinnedSector>,
+}
+
+impl TryInto<AppSlabPinParams> for SlabPinParams {
+    type Error = Error;
+
+    fn try_into(self) -> Result<AppSlabPinParams, Error> {
+        Ok(AppSlabPinParams {
+            encryption_key: EncryptionKey::try_from(self.encryption_key.as_ref())
+                .map_err(|v| Error::Crypto(format!("failed to convert encryption key: {:?}", v)))?,
+            min_shards: self.min_shards,
+            sectors: self
+                .sectors
+                .into_iter()
+                .map(|s| s.try_into())
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
 /// The response from requesting app authorization.
 ///
 /// The `response_url` is the URL the user should visit to authorize the app.
@@ -433,6 +474,32 @@ pub struct SharedObject {
     pub slabs: Vec<SharedSlab>,
     pub meta: Option<Vec<u8>>,
     pub encryption_key: Vec<u8>,
+}
+
+/// An account registered on the indexer.
+#[derive(uniffi::Record)]
+pub struct Account {
+    pub account_key: String,
+    pub service_account: bool,
+    pub max_pinned_data: u64,
+    pub pinned_data: u64,
+    pub description: String,
+    pub logo_url: Option<String>,
+    pub service_url: Option<String>,
+}
+
+impl From<indexd::app_client::Account> for Account {
+    fn from(a: indexd::app_client::Account) -> Self {
+        Self {
+            account_key: a.account_key.to_string(),
+            service_account: a.service_account,
+            max_pinned_data: a.max_pinned_data,
+            pinned_data: a.pinned_data,
+            description: a.description,
+            logo_url: a.logo_url,
+            service_url: a.service_url,
+        }
+    }
 }
 
 impl SharedObject {
@@ -510,17 +577,9 @@ impl SDK {
         }
 
         // load root certs
-        let mut roots = RootCertStore::empty();
-        for cert in rustls_native_certs::load_native_certs().certs {
-            // Ignore any certs that fail to parse
-            let _ = roots.add(cert);
-        }
-
-        let client_crypto = ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-
-        let host_client = HostClient::new(client_crypto)?;
+        let rustls_config =
+            ClientConfig::with_platform_verifier().map_err(|e| Error::Custom(e.to_string()))?;
+        let host_client = HostClient::new(rustls_config)?;
 
         self.uploader
             .get_or_init(|| async {
@@ -846,6 +905,28 @@ impl SDK {
         Ok(slab.into())
     }
 
+    /// Pins a slab to the indexer.
+    pub async fn pin_slab(&self, slab_pin_params: SlabPinParams) -> Result<String, Error> {
+        let slab_id = self
+            .app_client
+            .pin_slab(slab_pin_params.try_into()?)
+            .await?;
+        Ok(slab_id.to_string())
+    }
+
+    /// UnpinSlab unpins a slab from the indexer.
+    pub async fn unpin_slab(&self, slab_id: String) -> Result<(), Error> {
+        let slab_id = Hash256::from_str(slab_id.as_str())?;
+        self.app_client.unpin_slab(&slab_id).await?;
+        Ok(())
+    }
+
+    /// Returns the current account.
+    pub async fn account(&self) -> Result<Account, Error> {
+        let account = self.app_client.account().await?;
+        Ok(account.into())
+    }
+
     /// Creates a signed URL that can be used to share object metadata
     /// with other people using an indexer.
     pub fn object_share_url(
@@ -883,7 +964,7 @@ impl Upload {
     /// Writes a chunk of data to the Sia network. The data will be
     /// erasure-coded and encrypted before upload.
     ///
-    /// Chunks should be written until EoF, then call [`finalize`].
+    /// Chunks should be written until EoF, then call [`Upload::finalize`].
     pub async fn write(&self, buf: &[u8]) -> Result<(), UploadError> {
         if self.result.is_finished() {
             return Err(UploadError::Closed);

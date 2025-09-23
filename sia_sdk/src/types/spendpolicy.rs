@@ -10,13 +10,13 @@ use crate::signing::{PublicKey, Signature};
 use crate::types::v1::UnlockConditions;
 use crate::types::{Address, Hash256};
 use blake2b_simd::Params;
+use chrono::{DateTime, Utc};
 use core::fmt;
 use serde::de::{self, MapAccess, Visitor};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
-use time::OffsetDateTime;
 
 const POLICY_ABOVE_PREFIX: u8 = 1;
 const POLICY_AFTER_PREFIX: u8 = 2;
@@ -65,7 +65,7 @@ pub enum SpendPolicy {
     /// A policy that is only valid after a block height
     Above(u64),
     /// A policy that is only valid after a timestamp
-    After(OffsetDateTime),
+    After(DateTime<Utc>),
     /// A policy that requires a valid signature from an ed25519 key pair
     PublicKey(PublicKey),
     /// A policy that requires a valid SHA256 hash preimage
@@ -113,7 +113,7 @@ impl SpendPolicy {
     }
 
     /// Create a policy that is only valid after a certain timestamp
-    pub fn after(timestamp: OffsetDateTime) -> Self {
+    pub fn after(timestamp: DateTime<Utc>) -> Self {
         Self::After(timestamp)
     }
 
@@ -221,8 +221,8 @@ impl<'de> Deserialize<'de> for SpendPolicy {
                     POLICY_AFTER_STR => {
                         let unix_seconds: u64 =
                             serde_json::from_value(policy_value).map_err(de::Error::custom)?;
-                        let timestamp = OffsetDateTime::from_unix_timestamp(unix_seconds as i64)
-                            .map_err(|_| de::Error::custom("invalid timestamp"))?;
+                        let timestamp = DateTime::from_timestamp_secs(unix_seconds as i64)
+                            .ok_or(de::Error::custom("invalid timestamp"))?;
                         Ok(SpendPolicy::After(timestamp))
                     }
                     POLICY_PUBLIC_KEY_STR => {
@@ -288,7 +288,7 @@ impl Serialize for SpendPolicy {
                 state.serialize_field("policy", height)?;
             }
             SpendPolicy::After(time) => {
-                let unix_seconds = time.unix_timestamp() as u64;
+                let unix_seconds = time.timestamp() as u64;
                 state.serialize_field("policy", &unix_seconds)?;
             }
             SpendPolicy::PublicKey(pk) => {
@@ -328,7 +328,7 @@ impl SiaEncodable for SpendPolicy {
             w.write_all(&[policy.type_prefix()])?;
             match policy {
                 SpendPolicy::Above(height) => height.encode(w),
-                SpendPolicy::After(time) => (time.unix_timestamp() as u64).encode(w),
+                SpendPolicy::After(time) => (time.timestamp() as u64).encode(w),
                 SpendPolicy::PublicKey(pk) => pk.encode(w),
                 SpendPolicy::Hash(hash) => hash.encode(w),
                 SpendPolicy::Threshold(of, policies) => {
@@ -358,10 +358,8 @@ impl SiaDecodable for SpendPolicy {
                 POLICY_ABOVE_PREFIX => Ok(SpendPolicy::Above(u64::decode(r)?)),
                 POLICY_AFTER_PREFIX => {
                     let unix_seconds = u64::decode(r)?;
-                    let timestamp: OffsetDateTime =
-                        OffsetDateTime::from_unix_timestamp(unix_seconds as i64).map_err(|_| {
-                            encoding::Error::Custom("invalid timestamp".to_string())
-                        })?;
+                    let timestamp = DateTime::from_timestamp_secs(unix_seconds as i64)
+                        .ok_or(EncodingError::Custom("invalid timestamp".to_string()))?;
                     Ok(SpendPolicy::After(timestamp))
                 }
                 POLICY_PUBLIC_KEY_PREFIX => Ok(SpendPolicy::PublicKey(PublicKey::decode(r)?)),
@@ -403,7 +401,7 @@ impl AsyncSiaEncodable for SpendPolicy {
             e.encode_buf(&[policy.type_prefix()]).await?;
             match policy {
                 SpendPolicy::Above(height) => height.encode_async(e).await,
-                SpendPolicy::After(time) => (time.unix_timestamp() as u64).encode_async(e).await,
+                SpendPolicy::After(time) => (time.timestamp() as u64).encode_async(e).await,
                 SpendPolicy::PublicKey(pk) => pk.encode_async(e).await,
                 SpendPolicy::Hash(hash) => hash.encode_async(e).await,
                 SpendPolicy::Threshold(of, policies) => {
@@ -432,7 +430,7 @@ impl AsyncSiaDecodable for SpendPolicy {
             match policy_type {
                 POLICY_ABOVE_PREFIX => Ok(SpendPolicy::Above(u64::decode_async(d).await?)),
                 POLICY_AFTER_PREFIX => {
-                    Ok(SpendPolicy::After(OffsetDateTime::decode_async(d).await?))
+                    Ok(SpendPolicy::After(DateTime::<Utc>::decode_async(d).await?))
                 }
                 POLICY_PUBLIC_KEY_PREFIX => {
                     Ok(SpendPolicy::PublicKey(PublicKey::decode_async(d).await?))
@@ -510,7 +508,7 @@ mod tests {
                 "c2fba9b9607c800e80d9284ed0fb9a55737ba1bbd67311d0d9242dd6376bed0c6ee355e814fa",
             ),
             (
-                SpendPolicy::After(OffsetDateTime::from_unix_timestamp(1433600000).unwrap()),
+                SpendPolicy::After(DateTime::from_timestamp_secs(1433600000).unwrap()),
                 "5bdb96e33ffdf72619ad38bee57ad4db9eb242aeb2ee32020ba16179af5d46d501bd2011806b",
             ),
             (
@@ -534,7 +532,7 @@ mod tests {
                             vec![
                                 SpendPolicy::PublicKey(PublicKey::new([0; 32])),
                                 SpendPolicy::After(
-                                    OffsetDateTime::from_unix_timestamp(1433600000).unwrap(),
+                                    DateTime::from_timestamp_secs(1433600000).unwrap(),
                                 ),
                             ],
                         ),
@@ -553,7 +551,7 @@ mod tests {
     fn test_opaque_policy() {
         let test_cases = vec![
             SpendPolicy::above(100),
-            SpendPolicy::after(OffsetDateTime::from_unix_timestamp(100).unwrap()),
+            SpendPolicy::after(DateTime::from_timestamp_secs(100).unwrap()),
             SpendPolicy::public_key(PublicKey::new([0; 32])),
             SpendPolicy::hash(Hash256::from([0; 32])),
             SpendPolicy::threshold(
@@ -572,7 +570,7 @@ mod tests {
                         2,
                         vec![
                             SpendPolicy::public_key(PublicKey::new([0; 32])),
-                            SpendPolicy::after(OffsetDateTime::from_unix_timestamp(100).unwrap()),
+                            SpendPolicy::after(DateTime::from_timestamp_secs(100).unwrap()),
                         ],
                     ),
                     SpendPolicy::PublicKey(PublicKey::new([1; 32])),
@@ -618,7 +616,7 @@ mod tests {
                 "01016400000000000000",
             ),
             (
-                SpendPolicy::after(OffsetDateTime::from_unix_timestamp(100).unwrap()),
+                SpendPolicy::after(DateTime::from_timestamp_secs(100).unwrap()),
                 "{\"type\":\"after\",\"policy\":100}",
                 "01026400000000000000",
             ),
@@ -653,9 +651,7 @@ mod tests {
                             2,
                             vec![
                                 SpendPolicy::public_key(PublicKey::new([0; 32])),
-                                SpendPolicy::after(
-                                    OffsetDateTime::from_unix_timestamp(100).unwrap(),
-                                ),
+                                SpendPolicy::after(DateTime::from_timestamp_secs(100).unwrap()),
                             ],
                         ),
                         SpendPolicy::PublicKey(PublicKey::new([0; 32])),

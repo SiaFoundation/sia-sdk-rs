@@ -644,6 +644,8 @@ pub trait Transport {
         request: &R,
     ) -> impl Future<Output = Result<(), Self::Error>>;
 
+    fn write_bytes(&mut self, data: Bytes) -> impl Future<Output = Result<(), Self::Error>>;
+
     fn write_response<R: RPCResponse>(
         &mut self,
         response: &R,
@@ -724,7 +726,7 @@ impl<T: Transport> RPCSettings<T, RPCComplete> {
 struct RPCWriteSectorRequest {
     pub prices: HostPrices,
     pub token: AccountToken,
-    pub data: Bytes,
+    pub data_len: usize,
 }
 impl_rpc_request!(RPCWriteSectorRequest, "WriteSector");
 
@@ -764,16 +766,18 @@ impl<T: Transport> RPCWriteSector<T, RPCInit> {
         let request = RPCWriteSectorRequest {
             prices,
             token,
-            data: data.clone(),
+            data_len: data.len(),
         };
 
         let (tx, rx) = oneshot::channel();
+        let root_data = data.clone();
         rayon::spawn(move || {
-            let root = merkle::sector_root(data.as_ref());
+            let root = merkle::sector_root(root_data.as_ref());
             let _ = tx.send(root);
         });
 
         transport.write_request(&request).await?;
+        transport.write_bytes(data).await?;
         let root = rx.await.unwrap();
 
         Ok(RPCWriteSector {
@@ -1215,8 +1219,8 @@ impl<T: Transport, S: RenterContractSigner, B: TransactionBuilder>
 #[cfg(test)]
 mod test {
     use bytes::BytesMut;
+    use chrono::DateTime;
     use std::io::Cursor;
-    use time::OffsetDateTime;
     use tokio::io::AsyncWriteExt;
 
     use super::*;
@@ -1269,6 +1273,11 @@ mod test {
             Ok(())
         }
 
+        async fn write_bytes(&mut self, data: Bytes) -> Result<(), Self::Error> {
+            self.buf.write_all(&data).await?;
+            Ok(())
+        }
+
         async fn write_response<R: RPCResponse>(
             &mut self,
             response: &R,
@@ -1292,7 +1301,7 @@ mod test {
         egress_price: Currency::siacoins(5),
         free_sector_price: Currency::siacoins(6),
         tip_height: 7,
-        valid_until: OffsetDateTime::UNIX_EPOCH,
+        valid_until: DateTime::UNIX_EPOCH,
         signature: Signature::new([0u8; 64]),
     };
 
@@ -1307,7 +1316,7 @@ mod test {
             bytes[0] = 11;
             bytes
         }),
-        valid_until: OffsetDateTime::UNIX_EPOCH,
+        valid_until: DateTime::UNIX_EPOCH,
         signature: Signature::new({
             let mut bytes = [0u8; 64];
             bytes[0] = 13;
@@ -1320,7 +1329,7 @@ mod test {
         const EXPECTED_HEX: &str = "52656164536563746f72000000000000000000a1edccce1bc2d300000000000000000042db999d3784a7010000000000000000e3c8666c53467b02000000000000000084b6333b6f084f03000000000000000025a4000a8bca22040000000000000000c691cdd8a68cf604000000000007000000000000000800000000000000090000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000b000000000000000000000000000000000000000000000000000000000000000c000000000000000d0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000f000000000000001000000000000000";
 
         let mut prices = TEST_PRICES;
-        prices.valid_until = OffsetDateTime::from_unix_timestamp(8).unwrap();
+        prices.valid_until = DateTime::from_timestamp_secs(8).unwrap();
         prices.signature = Signature::new({
             let mut bytes = [0u8; 64];
             bytes[0] = 9;
@@ -1328,7 +1337,7 @@ mod test {
         });
 
         let mut token = TEST_ACCOUNT_TOKEN;
-        token.valid_until = OffsetDateTime::from_unix_timestamp(12).unwrap();
+        token.valid_until = DateTime::from_timestamp_secs(12).unwrap();
         token.signature = Signature::new({
             let mut bytes = [0u8; 64];
             bytes[0] = 13;

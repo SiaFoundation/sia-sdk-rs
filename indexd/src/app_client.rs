@@ -1,13 +1,13 @@
 use std::time::Duration;
 
 use blake2b_simd::Params;
+use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
 use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
 
 use thiserror::Error;
-use time::OffsetDateTime;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -72,8 +72,7 @@ pub struct RegisterAppResponse {
     pub response_url: String,
     #[serde(rename = "statusURL")]
     pub status_url: String,
-    #[serde(with = "time::serde::rfc3339")]
-    pub expiration: OffsetDateTime,
+    pub expiration: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -85,8 +84,24 @@ pub struct SlabPinParams {
 }
 
 pub struct ObjectsCursor {
-    pub after: OffsetDateTime,
+    pub after: DateTime<Utc>,
     pub key: Hash256,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    // We should use a PublicKey here but indexd's account definition uses a
+    // proto.Account which does not include the ed25519 prefix.
+    pub account_key: Hash256,
+    pub service_account: bool,
+    pub max_pinned_data: u64,
+    pub pinned_data: u64,
+    pub description: String,
+    #[serde(rename = "logoURL")]
+    pub logo_url: Option<String>,
+    #[serde(rename = "serviceURL")]
+    pub service_url: Option<String>,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -128,7 +143,7 @@ impl Client {
             &url,
             Method::GET,
             None,
-            OffsetDateTime::now_utc() + Duration::from_secs(60),
+            Utc::now() + Duration::from_secs(60),
         );
         let resp = self
             .client
@@ -151,7 +166,7 @@ impl Client {
             &status_url,
             Method::GET,
             None,
-            OffsetDateTime::now_utc() + Duration::from_secs(60),
+            Utc::now() + Duration::from_secs(60),
         );
         let resp = self
             .client
@@ -190,7 +205,7 @@ impl Client {
             query_params.push(("limit", limit.to_string()));
         }
         if let Some(ObjectsCursor { after, key }) = cursor {
-            query_params.push(("after", after.to_string()));
+            query_params.push(("after", after.to_rfc3339())); // indexd expects RFC3339
             query_params.push(("key", key.to_string()));
         }
         self.get_json::<_, _>("objects", Some(&query_params)).await
@@ -244,6 +259,11 @@ impl Client {
         self.delete(&format!("slabs/{slab_id}")).await
     }
 
+    /// Account returns the current account.
+    pub async fn account(&self) -> Result<Account> {
+        self.get_json::<_, ()>("account", None).await
+    }
+
     /// Helper to send a signed DELETE request.
     async fn delete(&self, path: &str) -> Result<()> {
         let url = self.url.join(path)?;
@@ -251,7 +271,7 @@ impl Client {
             &url,
             Method::DELETE,
             None,
-            OffsetDateTime::now_utc() + Duration::from_secs(60),
+            Utc::now() + Duration::from_secs(60),
         );
         Self::handle_response::<EmptyResponse>(
             self.client
@@ -277,7 +297,7 @@ impl Client {
             &url,
             Method::GET,
             None,
-            OffsetDateTime::now_utc() + Duration::from_secs(60),
+            Utc::now() + Duration::from_secs(60),
         );
         let mut builder = self.client.get(url).timeout(Duration::from_secs(15));
         if let Some(q) = query_params {
@@ -309,7 +329,7 @@ impl Client {
             &url,
             Method::POST,
             Some(&body),
-            OffsetDateTime::now_utc() + Duration::from_secs(60),
+            Utc::now() + Duration::from_secs(60),
         );
         Self::handle_response(
             self.client
@@ -327,14 +347,14 @@ impl Client {
         url: &Url,
         method: Method,
         body: Option<&[u8]>,
-        valid_until: time::OffsetDateTime,
+        valid_until: DateTime<Utc>,
     ) -> Hash256 {
         let mut state = Params::new().hash_length(32).to_state();
         state
             .update(method.as_str().as_bytes())
             .update(url.host_str().unwrap_or("").as_bytes())
             .update(url.path().as_bytes())
-            .update(&valid_until.unix_timestamp().to_le_bytes());
+            .update(&valid_until.timestamp().to_le_bytes());
         if let Some(body) = body {
             state.update(body);
         }
@@ -353,7 +373,7 @@ impl Client {
         &self,
         object_key: &Hash256,
         encryption_key: [u8; 32],
-        valid_until: OffsetDateTime,
+        valid_until: DateTime<Utc>,
     ) -> Result<Url> {
         let mut url = self
             .url
@@ -414,14 +434,11 @@ impl Client {
         url: &Url,
         method: Method,
         body: Option<&[u8]>,
-        valid_until: OffsetDateTime,
+        valid_until: DateTime<Utc>,
     ) -> [(&'static str, String); 3] {
         let hash = Self::request_hash(url, method, body, valid_until);
         [
-            (
-                "SiaIdx-ValidUntil",
-                valid_until.unix_timestamp().to_string(),
-            ),
+            ("SiaIdx-ValidUntil", valid_until.timestamp().to_string()),
             ("SiaIdx-Credential", self.app_key.public_key().to_string()),
             (
                 "SiaIdx-Signature",
@@ -433,10 +450,9 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use sia::{hash_256, public_key};
-    use time::format_description::well_known::Rfc3339;
-
     use crate::{Object, SlabSlice};
+    use chrono::FixedOffset;
+    use sia::{hash_256, public_key};
 
     use super::*;
     use httptest::http::Response;
@@ -447,7 +463,7 @@ mod tests {
     fn test_request_hash() {
         let method = Method::POST;
         let url = Url::parse("https://foo.bar/foo").unwrap();
-        let valid_until = OffsetDateTime::from_unix_timestamp(123).unwrap();
+        let valid_until = DateTime::from_timestamp_secs(123).unwrap();
         let body = b"hello world!";
         let hash = Client::request_hash(&url, method, Some(body), valid_until);
         assert_eq!(
@@ -466,7 +482,7 @@ mod tests {
             &"https://foo.bar/baz.jpg".parse().unwrap(),
             Method::POST,
             Some("{}".as_bytes()),
-            OffsetDateTime::from_unix_timestamp(123).unwrap() + Duration::from_secs(60),
+            DateTime::from_timestamp_secs(123).unwrap() + Duration::from_secs(60),
         );
         assert_eq!(params[0], ("SiaIdx-ValidUntil", "183".to_string()));
         assert_eq!(
@@ -491,7 +507,7 @@ mod tests {
             &"https://foo.bar/baz.jpg".parse().unwrap(),
             Method::GET,
             None,
-            OffsetDateTime::from_unix_timestamp(123).unwrap() + Duration::from_secs(60),
+            DateTime::from_timestamp_secs(123).unwrap() + Duration::from_secs(60),
         );
         assert_eq!(params[0], ("SiaIdx-ValidUntil", "183".to_string()));
         assert_eq!(
@@ -823,7 +839,7 @@ mod tests {
             RegisterAppResponse {
                 response_url: "https://response.com".to_string(),
                 status_url: "https://status.com".to_string(),
-                expiration: OffsetDateTime::from_unix_timestamp(100).unwrap(),
+                expiration: DateTime::from_timestamp_secs(100).unwrap(),
             }
         )
     }
@@ -849,10 +865,16 @@ mod tests {
                 },
             ],
             meta: b"hello world!".to_vec().into(),
-            created_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
-                .unwrap(),
-            updated_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
-                .unwrap(),
+            created_at: DateTime::<FixedOffset>::parse_from_rfc3339(
+                "2025-09-09T16:10:46.898399-07:00",
+            )
+            .unwrap()
+            .to_utc(),
+            updated_at: DateTime::<FixedOffset>::parse_from_rfc3339(
+                "2025-09-09T16:10:46.898399-07:00",
+            )
+            .unwrap()
+            .to_utc(),
         };
 
         const TEST_OBJECT_JSON: &str = r#"
@@ -917,10 +939,16 @@ mod tests {
                 },
             ],
             meta: b"hello world!".to_vec().into(),
-            created_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
-                .unwrap(),
-            updated_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
-                .unwrap(),
+            created_at: DateTime::<FixedOffset>::parse_from_rfc3339(
+                "2025-09-09T16:10:46.898399-07:00",
+            )
+            .unwrap()
+            .to_utc(),
+            updated_at: DateTime::<FixedOffset>::parse_from_rfc3339(
+                "2025-09-09T16:10:46.898399-07:00",
+            )
+            .unwrap()
+            .to_utc(),
         };
 
         const TEST_OBJECTS_JSON: &str = r#"
@@ -950,7 +978,7 @@ mod tests {
             Expectation::matching(all_of![
                 request::method_path("GET", "/objects"),
                 request::query(url_decoded(all_of![
-                    contains(("after", "2025-09-09 16:10:46.898399 -07:00:00")),
+                    contains(("after", "2025-09-09T23:10:46.898399+00:00")),
                     contains((
                         "key",
                         "1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef"
@@ -972,7 +1000,7 @@ mod tests {
             client
                 .objects(
                     Some(ObjectsCursor {
-                        after: object.updated_at,
+                        after: object.updated_at.into(),
                         key: object.key,
                     }),
                     Some(1)
@@ -1023,10 +1051,16 @@ mod tests {
                 },
             ],
             meta: b"hello world!".to_vec().into(),
-            created_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
-                .unwrap(),
-            updated_at: OffsetDateTime::parse("2025-09-09T16:10:46.898399-07:00", &Rfc3339)
-                .unwrap(),
+            created_at: DateTime::<FixedOffset>::parse_from_rfc3339(
+                "2025-09-09T16:10:46.898399-07:00",
+            )
+            .unwrap()
+            .to_utc(),
+            updated_at: DateTime::<FixedOffset>::parse_from_rfc3339(
+                "2025-09-09T16:10:46.898399-07:00",
+            )
+            .unwrap()
+            .to_utc(),
         };
 
         let server = Server::run();

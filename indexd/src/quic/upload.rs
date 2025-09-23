@@ -10,10 +10,11 @@ use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, BufReader};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::{JoinHandle, JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tokio_util::task::TaskTracker;
 
 use crate::app_client::{Client as AppClient, SlabPinParams};
@@ -75,7 +76,7 @@ impl Default for UploadOptions {
     fn default() -> Self {
         Self {
             data_shards: 10,
-            parity_shards: 30,
+            parity_shards: 20,
             max_inflight: 16,
             shard_uploaded: None,
         }
@@ -92,28 +93,24 @@ impl Uploader {
     }
 
     async fn upload_shard(
-        _permit: OwnedSemaphorePermit,
         client: Client,
         hosts: HostQueue,
+        host_key: PublicKey,
         account_key: PrivateKey,
         data: Bytes,
         write_timeout: Duration,
     ) -> Result<Sector, UploadError> {
-        let host_key = hosts.pop_front()?;
         let root = timeout(
             write_timeout,
             client.write_sector(host_key, &account_key, data),
         )
         .await
         .inspect_err(|_| {
-            debug!("upload to {host_key} timed out, retrying");
             let _ = hosts.retry(host_key);
         })?
         .inspect_err(|_| {
-            debug!("upload to {host_key} failed, retrying");
             let _ = hosts.retry(host_key);
         })?;
-
         Ok(Sector { root, host_key })
     }
 
@@ -124,45 +121,59 @@ impl Uploader {
         account_key: PrivateKey,
         data: Bytes,
         shard_index: usize,
+        progress_callback: Option<UnboundedSender<()>>,
     ) -> Result<(usize, Sector), UploadError> {
-        const BACKOFF_MULTIPLIER: u32 = 2;
-
-        let semaphore = permit.semaphore().clone();
-        let initial_timeout = Duration::from_secs(10);
+        let (host_key, attempts) = hosts.pop_front()?;
+        let write_timeout = Duration::from_millis(2500 + (attempts as u64 * 1000));
         let mut tasks = JoinSet::new();
         tasks.spawn(Self::upload_shard(
-            permit,
             client.clone(),
             hosts.clone(),
+            host_key,
             account_key.clone(),
             data.clone(),
-            initial_timeout,
+            write_timeout,
         ));
-        let mut attempts = 0;
+        let mut write_timeout = write_timeout;
+        let semaphore = permit.semaphore();
         loop {
-            let timeout = initial_timeout * BACKOFF_MULTIPLIER.pow(attempts);
+            let hosts = hosts.clone();
             tokio::select! {
+                biased;
                 Some(res) = tasks.join_next() => {
                     match res.unwrap() {
                         Ok(sector) => {
+                            if let Some(cb) = &progress_callback {
+                                let _ = cb.send(());
+                            }
                             return Ok((shard_index, sector));
                         }
                         Err(e) => {
                             debug!("shard {shard_index} upload failed {e:?}");
                             if tasks.is_empty() {
-                                let permit = semaphore.clone().acquire_owned().await?;
-                                tasks.spawn(Self::upload_shard(permit, client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
+                                let (host_key, attempts) = hosts.pop_front()?;
+                                write_timeout = Duration::from_millis(2500 + (attempts as u64 * 1000));
+                                tasks.spawn(Self::upload_shard(client.clone(), hosts.clone(), host_key, account_key.clone(), data.clone(), write_timeout));
                             }
                         }
                     }
                 },
-                _ = tokio::time::sleep(timeout / 2) => {
-                    let permit = semaphore.clone().acquire_owned().await?;
-                    debug!("racing slow host for shard {shard_index}");
-                    tasks.spawn(Self::upload_shard(permit, client.clone(), hosts.clone(), account_key.clone(), data.clone(), timeout));
+                _ = sleep(write_timeout/2) => {
+                    if let Ok(racer) = semaphore.clone().try_acquire_owned() {
+                        // only race if there's an empty slot
+                        let client = client.clone();
+                        let data = data.clone();
+                        let account_key = account_key.clone();
+                        tasks.spawn(async move {
+                            let _racer = racer; // hold the permit until the task completes
+                            debug!("racing slow host for shard {shard_index}");
+                            let (host_key, attempts) = hosts.pop_front()?;
+                            let write_timeout = Duration::from_millis(500 + attempts as u64 * 10);
+                            Self::upload_shard(client.clone(), hosts.clone(), host_key, account_key, data, write_timeout).await
+                        });
+                    }
                 }
             }
-            attempts += 1;
         }
     }
 
@@ -214,7 +225,6 @@ impl Uploader {
                     // unique encryption key for the slab
                     let slab_key = EncryptionKey::from(rand::random::<[u8; 32]>());
 
-                    let mut shard_upload_tasks = JoinSet::new();
                     // encrypt and start uploading data_shards immediately
                     let mut unencrypted_data_shards = shards[..data_shards].to_vec();
                     let encrypted_data_shards = spawn_blocking({
@@ -226,6 +236,7 @@ impl Uploader {
                     })
                     .await?;
 
+                    let mut shard_upload_tasks = JoinSet::new();
                     let hosts = HostQueue::new(host_client.hosts());
                     for (shard_index, shard) in encrypted_data_shards.into_iter().enumerate() {
                         let permit = semaphore.clone().acquire_owned().await?;
@@ -236,6 +247,7 @@ impl Uploader {
                             account_key.clone(),
                             shard.into(),
                             shard_index,
+                            options.shard_uploaded.clone(),
                         ));
                     }
 
@@ -261,6 +273,7 @@ impl Uploader {
                             account_key.clone(),
                             shard.into(),
                             shard_index,
+                            options.shard_uploaded.clone(),
                         ));
                     }
 
