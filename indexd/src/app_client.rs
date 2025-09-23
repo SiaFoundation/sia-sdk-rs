@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::slabs::Sector;
 use crate::{Object, PinnedSlab, SharedObject};
-use sia::signing::PrivateKey;
+use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 
 pub use reqwest::{IntoUrl, Url};
@@ -91,9 +91,7 @@ pub struct ObjectsCursor {
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
-    // We should use a PublicKey here but indexd's account definition uses a
-    // proto.Account which does not include the ed25519 prefix.
-    pub account_key: Hash256,
+    pub account_key: PublicKey,
     pub service_account: bool,
     pub max_pinned_data: u64,
     pub pinned_data: u64,
