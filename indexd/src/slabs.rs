@@ -182,6 +182,14 @@ impl SharedObject {
     }
 }
 
+/// UploadMeta represents an uploaded object and the metadata needed to
+/// retrieve it.
+#[derive(Debug, PartialEq)]
+pub struct UploadMeta {
+    pub encryption_key: EncryptionKey,
+    pub object: Object,
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

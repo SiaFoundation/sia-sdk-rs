@@ -267,6 +267,23 @@ impl TryInto<indexd::Object> for PinnedObject {
     }
 }
 
+/// UploadMeta represents an uploaded object and the metadata needed to
+/// retrieve it.
+#[derive(uniffi::Record)]
+pub struct UploadMeta {
+    pub encryption_key: Vec<u8>,
+    pub object: PinnedObject,
+}
+
+impl From<indexd::UploadMeta> for UploadMeta {
+    fn from(upload_meta: indexd::UploadMeta) -> Self {
+        Self {
+            encryption_key: upload_meta.encryption_key.as_ref().into(),
+            object: upload_meta.object.into(),
+        }
+    }
+}
+
 /// Information about a storage provider on the
 /// Sia network.
 #[derive(uniffi::Record)]
@@ -676,7 +693,6 @@ impl SDK {
     /// An object representing the uploaded data.
     pub async fn upload(
         &self,
-        encryption_key: Vec<u8>,
         metadata: Option<Vec<u8>>,
         options: UploadOptions,
     ) -> Result<Upload, UploadError> {
@@ -687,8 +703,6 @@ impl SDK {
         let buf = ChunkedWriter::default();
         let (tx, rx) = oneshot::channel();
         let inner_buf = buf.clone();
-        let encryption_key = EncryptionKey::try_from(encryption_key.as_ref())
-            .map_err(|err| UploadError::Custom(err.to_string()))?;
 
         let progress_tx = if let Some(callback) = options.progress_callback {
             let total_shards = options.data_shards as u64 + options.parity_shards as u64;
@@ -712,7 +726,6 @@ impl SDK {
             let res = uploader
                 .upload(
                     inner_buf,
-                    encryption_key,
                     metadata,
                     quic::UploadOptions {
                         max_inflight: options.max_inflight as usize,
@@ -946,7 +959,7 @@ impl SDK {
     }
 }
 
-pub type UploadReceiver = Mutex<Option<oneshot::Receiver<Result<indexd::Object, UploadError>>>>;
+pub type UploadReceiver = Mutex<Option<oneshot::Receiver<Result<indexd::UploadMeta, UploadError>>>>;
 
 /// Uploads data to the Sia network. It does so in chunks to support large files in
 /// arbitrary languages.
@@ -979,7 +992,7 @@ impl Upload {
     ///
     /// The caller must store the metadata locally in order to download
     /// it in the future.
-    pub async fn finalize(&self) -> Result<PinnedObject, UploadError> {
+    pub async fn finalize(&self) -> Result<UploadMeta, UploadError> {
         self.reader.close()?;
         let rx = self
             .rx
