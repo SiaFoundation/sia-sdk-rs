@@ -176,16 +176,15 @@ impl SDK<ConnectedState> {
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
         reader: R,
-        encryption_key: EncryptionKey,
         metadata: Option<Vec<u8>>,
         options: UploadOptions,
-    ) -> Result<Object> {
-        let object = self
+    ) -> Result<UploadMeta> {
+        let upload_meta = self
             .state
             .uploader
-            .upload(reader, encryption_key, metadata, options)
+            .upload(reader, metadata, options)
             .await?;
-        Ok(object)
+        Ok(upload_meta)
     }
 
     pub async fn download<W: AsyncWriteExt + Unpin>(

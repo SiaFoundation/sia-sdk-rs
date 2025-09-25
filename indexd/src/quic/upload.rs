@@ -20,7 +20,7 @@ use tokio_util::task::TaskTracker;
 use crate::app_client::{Client as AppClient, SlabPinParams};
 use crate::quic::client::{Client, HostQueue};
 use crate::quic::{self, QueueError};
-use crate::{EncryptedMetadata, Object, Sector, Slab, SlabSlice};
+use crate::{EncryptedMetadata, Object, Sector, Slab, SlabSlice, UploadMeta};
 
 #[derive(Debug, Error)]
 pub enum UploadError {
@@ -190,10 +190,9 @@ impl Uploader {
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
         mut r: R,
-        encryption_key: EncryptionKey,
         meta: Option<Vec<u8>>,
         options: UploadOptions,
-    ) -> Result<Object, UploadError> {
+    ) -> Result<UploadMeta, UploadError> {
         if self.client.hosts().is_empty() {
             let hosts = self.app_client.hosts().await?;
             self.client.update_hosts(hosts);
@@ -204,6 +203,7 @@ impl Uploader {
         let semaphore = Arc::new(Semaphore::new(options.max_inflight));
         let host_client = self.client.clone();
         let account_key = self.account_key.clone();
+        let encryption_key = EncryptionKey::from(rand::random::<[u8; 32]>());
         let read_slab_res: JoinHandle<Result<(), UploadError>> = tokio::spawn({
             let encryption_key = encryption_key.clone();
             async move {
@@ -368,6 +368,9 @@ impl Uploader {
             meta.map(|meta| EncryptedMetadata::encrypt(&meta, &encryption_key)),
         );
         self.app_client.save_object(&object).await?;
-        Ok(object)
+        Ok(UploadMeta {
+            encryption_key,
+            object,
+        })
     }
 }
