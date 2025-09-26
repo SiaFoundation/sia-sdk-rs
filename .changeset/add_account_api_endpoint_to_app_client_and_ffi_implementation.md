@@ -5,4 +5,4 @@ indexd_ffi: minor
 sia_sdk_derive: minor
 ---
 
-# Add account API endpoint to app_client and FFI implementation
+# Add account API endpoint to app_client and FFI implementation.
