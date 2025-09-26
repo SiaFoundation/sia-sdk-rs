@@ -268,6 +268,15 @@ impl SDK<ConnectedState> {
             })
     }
 
+    pub async fn prune_slabs(&self) -> Result<()> {
+        self.state
+            .app
+            .prune_slabs()
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))?;
+        Ok(())
+    }
+
     pub async fn save_object(&self, object: &Object) -> Result<()> {
         self.state
             .app
