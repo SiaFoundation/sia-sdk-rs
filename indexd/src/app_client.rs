@@ -257,6 +257,13 @@ impl Client {
         self.delete(&format!("slabs/{slab_id}")).await
     }
 
+    /// Unpins slabs not used by any object on the account.
+    pub async fn prune_slabs(&self) -> Result<()> {
+        self.post_json::<_, EmptyResponse>("slabs/prune", &())
+            .await
+            .map(|_| ())
+    }
+
     /// Account returns the current account.
     pub async fn account(&self) -> Result<Account> {
         self.get_json::<_, ()>("account", None).await
