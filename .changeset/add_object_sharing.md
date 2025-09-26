@@ -2,4 +2,4 @@
 indexd_ffi: minor
 ---
 
-# Add object sharing
+# Add object sharing.
