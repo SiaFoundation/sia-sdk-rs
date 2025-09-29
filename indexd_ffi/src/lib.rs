@@ -519,6 +519,42 @@ impl From<indexd::app_client::Account> for Account {
     }
 }
 
+impl TryInto<indexd::SharedSlab> for SharedSlab {
+    type Error = Error;
+
+    fn try_into(self) -> Result<indexd::SharedSlab, Self::Error> {
+        Ok(indexd::SharedSlab {
+            id: Hash256::from_str(self.slab_id.as_str())?,
+            encryption_key: EncryptionKey::try_from(self.encryption_key.as_ref())
+                .map_err(|v| Error::Crypto(format!("failed to convert encryption key: {:?}", v)))?,
+            min_shards: self.min_shards,
+            sectors: self
+                .sectors
+                .into_iter()
+                .map(|s| s.try_into())
+                .collect::<Result<Vec<indexd::Sector>, HexParseError>>()?,
+            offset: self.offset as usize,
+            length: self.length as usize,
+        })
+    }
+}
+
+impl TryInto<indexd::SharedObject> for SharedObject {
+    type Error = Error;
+
+    fn try_into(self) -> Result<indexd::SharedObject, Self::Error> {
+        Ok(indexd::SharedObject {
+            key: self.key,
+            slabs: self
+                .slabs
+                .into_iter()
+                .map(|s| s.try_into())
+                .collect::<Result<Vec<indexd::SharedSlab>, Error>>()?,
+            meta: self.meta,
+        })
+    }
+}
+
 impl SharedObject {
     /// Calculates the total size of the object by summing the lengths of its slabs.
     pub fn size(&self) -> u64 {
@@ -901,6 +937,13 @@ impl SDK {
     pub async fn delete_object(&self, key: String) -> Result<(), Error> {
         let key = Hash256::from_str(key.as_str())?;
         self.app_client.delete_object(&key).await?;
+        Ok(())
+    }
+
+    /// Pins all of the slabs of a shared object and saves it.
+    pub async fn pin_shared_object(&self, shared: SharedObject) -> Result<(), Error> {
+        let shared = shared.try_into()?;
+        self.app_client.pin_shared_object(&shared).await?;
         Ok(())
     }
 

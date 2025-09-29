@@ -284,4 +284,13 @@ impl SDK<ConnectedState> {
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }
+
+    pub async fn pin_shared_object(&self, shared: &SharedObject) -> Result<()> {
+        self.state
+            .app
+            .pin_shared_object(shared)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))?;
+        Ok(())
+    }
 }

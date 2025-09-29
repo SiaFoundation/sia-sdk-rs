@@ -221,6 +221,13 @@ impl Client {
         self.delete(&format!("objects/{key}")).await
     }
 
+    /// Pins all of the slabs of a shared object and saves it.
+    pub async fn pin_shared_object(&self, shared: &SharedObject) -> Result<()> {
+        self.post_json::<_, EmptyResponse>("objects/shared", shared)
+            .await
+            .map(|_| ())
+    }
+
     /// Requests an application connection to the indexer.
     pub async fn request_app_connection(
         &self,
