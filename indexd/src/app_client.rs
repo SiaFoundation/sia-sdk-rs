@@ -696,6 +696,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_prune_slabs() {
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(request::method_path("POST", format!("/slabs/prune")))
+                .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        client.prune_slabs().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_handle_response() {
         let server = Server::run();
         server.expect(
