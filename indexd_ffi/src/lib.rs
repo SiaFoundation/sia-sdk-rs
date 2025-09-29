@@ -533,8 +533,14 @@ impl TryInto<indexd::SharedSlab> for SharedSlab {
                 .into_iter()
                 .map(|s| s.try_into())
                 .collect::<Result<Vec<indexd::Sector>, HexParseError>>()?,
-            offset: self.offset as usize,
-            length: self.length as usize,
+            offset: self
+                .offset
+                .try_into()
+                .map_err(|v| Error::Custom(format!("failed to convert offset {:} to usize", v)))?,
+            length: self
+                .offset
+                .try_into()
+                .map_err(|v| Error::Custom(format!("failed to convert length {:} to usize", v)))?,
         })
     }
 }
