@@ -89,7 +89,7 @@ impl ErasureCoder {
     pub async fn read_shards<R: AsyncRead + Unpin>(
         &self,
         r: &mut R,
-    ) -> Result<(Vec<Vec<u8>>, usize)> {
+    ) -> Result<(Vec<Vec<u8>>, u32)> {
         // allocate memory for shards
         let mut shards: Vec<Vec<u8>> = Vec::with_capacity(self.data_shards);
         for _ in 0..self.data_shards + self.parity_shards {
@@ -116,7 +116,7 @@ impl ErasureCoder {
                         return Ok((shards, data_size));
                     }
                     bytes_read += n;
-                    data_size += n;
+                    data_size += n as u32;
                 }
             }
         }
@@ -195,14 +195,17 @@ mod tests {
 
             let (shards, size) = coder.read_shards(&mut &data[..]).await.unwrap();
 
-            assert_eq!(size, expected_size, "data size {data_size} mismatch");
+            assert_eq!(
+                size as usize, expected_size,
+                "data size {data_size} mismatch"
+            );
             assert_eq!(
                 shards.len(),
                 DATA_SHARDS + PARITY_SHARDS,
                 "data size {data_size} shard count mismatch"
             );
 
-            for (i, data) in data[..size].chunks(64).enumerate() {
+            for (i, data) in data[..size as usize].chunks(64).enumerate() {
                 let mut chunk = [0u8; SEGMENT_SIZE];
                 chunk[..data.len()].copy_from_slice(data); // pad it out with zeros
                 let index = i % DATA_SHARDS;
@@ -233,7 +236,7 @@ mod tests {
 
         // we expect 5 shards and the last one is an empty parity shard
         assert_eq!(shards.len(), 5);
-        assert_eq!(size, SECTOR_SIZE * 7 / 2);
+        assert_eq!(size as usize, SECTOR_SIZE * 7 / 2);
         assert_eq!(shards[4], [0u8; SECTOR_SIZE]);
 
         for shard in &shards[..4] {

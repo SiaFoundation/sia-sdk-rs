@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use log::debug;
-use sia::encryption::{CipherReader, EncryptionKey, encrypt_shards};
+use rand::TryRngCore;
+use rand::rngs::OsRng;
+use sia::encryption::{EncryptionKey, encrypt_shards};
 use sia::erasure_coding::{self, ErasureCoder};
 use sia::rhp;
 use sia::signing::{PrivateKey, PublicKey};
@@ -20,7 +22,7 @@ use tokio_util::task::TaskTracker;
 use crate::app_client::{Client as AppClient, SlabPinParams};
 use crate::quic::client::{Client, HostQueue};
 use crate::quic::{self, QueueError};
-use crate::{EncryptedMetadata, Object, Sector, Slab, SlabSlice, UploadMeta};
+use crate::{Object, Sector, Slab, SlabSlice};
 
 #[derive(Debug, Error)]
 pub enum UploadError {
@@ -189,10 +191,9 @@ impl Uploader {
     /// An object representing the uploaded data.
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
-        mut r: R,
-        meta: Option<Vec<u8>>,
+        r: R,
         options: UploadOptions,
-    ) -> Result<UploadMeta, UploadError> {
+    ) -> Result<Object, UploadError> {
         if self.client.hosts().is_empty() {
             let hosts = self.app_client.hosts().await?;
             self.client.update_hosts(hosts);
@@ -203,85 +204,82 @@ impl Uploader {
         let semaphore = Arc::new(Semaphore::new(options.max_inflight));
         let host_client = self.client.clone();
         let account_key = self.account_key.clone();
-        let encryption_key = EncryptionKey::from(rand::random::<[u8; 32]>());
-        let read_slab_res: JoinHandle<Result<(), UploadError>> = tokio::spawn({
-            let encryption_key = encryption_key.clone();
-            async move {
-                // use a buffered reader since the erasure coder reads 64 bytes at a time.
-                let r = BufReader::new(&mut r);
+        let mut object = Object::default();
 
-                // encrypt the stream
-                let mut r = CipherReader::new(r, encryption_key, 0);
+        // use a buffered reader since the erasure coder reads 64 bytes at a time.
+        let mut r = object.reader(BufReader::new(r), 0);
+        let read_slab_res: JoinHandle<Result<(), UploadError>> = tokio::spawn(async move {
+            let mut slab_index: usize = 0;
+            let slab_upload_tasks = TaskTracker::new();
+            loop {
+                let rs = ErasureCoder::new(data_shards, parity_shards).unwrap();
+                let (mut shards, length) = rs.read_shards(&mut r).await?;
+                if length == 0 {
+                    break;
+                }
 
-                let mut slab_index: usize = 0;
-                let slab_upload_tasks = TaskTracker::new();
-                loop {
-                    let rs = ErasureCoder::new(data_shards, parity_shards).unwrap();
-                    let (mut shards, length) = rs.read_shards(&mut r).await?;
-                    if length == 0 {
-                        break;
+                // unique encryption key for the slab
+                let mut slab_key = [0u8; 32];
+                OsRng.try_fill_bytes(&mut slab_key).unwrap();
+                let slab_key = EncryptionKey::from(rand::random::<[u8; 32]>());
+
+                // encrypt and start uploading data_shards immediately
+                let mut unencrypted_data_shards = shards[..data_shards].to_vec();
+                let encrypted_data_shards = spawn_blocking({
+                    let slab_key = slab_key.clone();
+                    move || {
+                        encrypt_shards(&slab_key, 0, 0, &mut unencrypted_data_shards);
+                        unencrypted_data_shards
                     }
+                })
+                .await?;
 
-                    // unique encryption key for the slab
-                    let slab_key = EncryptionKey::from(rand::random::<[u8; 32]>());
+                let mut shard_upload_tasks = JoinSet::new();
+                let hosts = HostQueue::new(host_client.hosts());
+                for (shard_index, shard) in encrypted_data_shards.into_iter().enumerate() {
+                    let permit = semaphore.clone().acquire_owned().await?;
+                    shard_upload_tasks.spawn(Self::upload_slab_shard(
+                        permit,
+                        host_client.clone(),
+                        hosts.clone(),
+                        account_key.clone(),
+                        shard.into(),
+                        shard_index,
+                        options.shard_uploaded.clone(),
+                    ));
+                }
 
-                    // encrypt and start uploading data_shards immediately
-                    let mut unencrypted_data_shards = shards[..data_shards].to_vec();
-                    let encrypted_data_shards = spawn_blocking({
-                        let slab_key = slab_key.clone();
-                        move || {
-                            encrypt_shards(&slab_key, 0, 0, &mut unencrypted_data_shards);
-                            unencrypted_data_shards
-                        }
-                    })
-                    .await?;
-
-                    let mut shard_upload_tasks = JoinSet::new();
-                    let hosts = HostQueue::new(host_client.hosts());
-                    for (shard_index, shard) in encrypted_data_shards.into_iter().enumerate() {
-                        let permit = semaphore.clone().acquire_owned().await?;
-                        shard_upload_tasks.spawn(Self::upload_slab_shard(
-                            permit,
-                            host_client.clone(),
-                            hosts.clone(),
-                            account_key.clone(),
-                            shard.into(),
-                            shard_index,
-                            options.shard_uploaded.clone(),
-                        ));
+                // calculate the parity shards, encrypt, then upload them
+                let encrypted_parity_shards = spawn_blocking({
+                    let slab_key = slab_key.clone();
+                    move || -> Vec<Vec<u8>> {
+                        rs.encode_shards(&mut shards).unwrap();
+                        let mut parity_shards = shards[data_shards..].to_vec();
+                        encrypt_shards(&slab_key, options.data_shards, 0, &mut parity_shards);
+                        parity_shards
                     }
+                })
+                .await?;
 
-                    // calculate the parity shards, encrypt, then upload them
-                    let encrypted_parity_shards = spawn_blocking({
-                        let slab_key = slab_key.clone();
-                        move || -> Vec<Vec<u8>> {
-                            rs.encode_shards(&mut shards).unwrap();
-                            let mut parity_shards = shards[data_shards..].to_vec();
-                            encrypt_shards(&slab_key, options.data_shards, 0, &mut parity_shards);
-                            parity_shards
-                        }
-                    })
-                    .await?;
+                for (shard_index, shard) in encrypted_parity_shards.into_iter().enumerate() {
+                    let permit = semaphore.clone().acquire_owned().await?;
+                    let shard_index = shard_index + data_shards; // offset by data shards
+                    shard_upload_tasks.spawn(Self::upload_slab_shard(
+                        permit,
+                        host_client.clone(),
+                        hosts.clone(),
+                        account_key.clone(),
+                        shard.into(),
+                        shard_index,
+                        options.shard_uploaded.clone(),
+                    ));
+                }
 
-                    for (shard_index, shard) in encrypted_parity_shards.into_iter().enumerate() {
-                        let permit = semaphore.clone().acquire_owned().await?;
-                        let shard_index = shard_index + data_shards; // offset by data shards
-                        shard_upload_tasks.spawn(Self::upload_slab_shard(
-                            permit,
-                            host_client.clone(),
-                            hosts.clone(),
-                            account_key.clone(),
-                            shard.into(),
-                            shard_index,
-                            options.shard_uploaded.clone(),
-                        ));
-                    }
-
-                    // wait for all shards to finish uploading
-                    // this is done in a separate task to allow preparing the next slab
-                    let slab_tx = slab_tx.clone();
-                    let progress_tx = options.shard_uploaded.clone();
-                    slab_upload_tasks.spawn(async move {
+                // wait for all shards to finish uploading
+                // this is done in a separate task to allow preparing the next slab
+                let slab_tx = slab_tx.clone();
+                let progress_tx = options.shard_uploaded.clone();
+                slab_upload_tasks.spawn(async move {
                         let mut slab = Slab {
                             sectors: vec![
                                 Sector {
@@ -320,13 +318,12 @@ impl Uploader {
                         // send the completed slab to the channel
                         slab_tx.send(Ok((slab_index, slab))).unwrap();
                     });
-                    slab_index += 1;
-                }
-                slab_upload_tasks.close();
-                slab_upload_tasks.wait().await;
-                drop(slab_tx);
-                Ok(())
+                slab_index += 1;
             }
+            slab_upload_tasks.close();
+            slab_upload_tasks.wait().await;
+            drop(slab_tx);
+            Ok(())
         });
 
         let mut slabs = Vec::new();
@@ -363,14 +360,9 @@ impl Uploader {
         }
         read_slab_res.await??;
 
-        let object = Object::new(
-            slabs,
-            meta.map(|meta| EncryptedMetadata::encrypt(&meta, &encryption_key)),
-        );
-        self.app_client.save_object(&object).await?;
-        Ok(UploadMeta {
-            encryption_key,
-            object,
-        })
+        object.slabs = slabs;
+        let sealed = object.seal(&self.account_key);
+        self.app_client.save_object(&sealed).await?;
+        Ok(object)
     }
 }

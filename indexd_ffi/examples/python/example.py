@@ -1,5 +1,5 @@
 import asyncio
-from indexd_ffi import AppMeta, Sdk, UploadOptions, DownloadOptions, set_logger, Logger
+from indexd_ffi import generate_recovery_phrase, AppKey, AppMeta, Sdk, UploadOptions, DownloadOptions, set_logger, Logger
 from logging import fatal
 
 class PrintLogger(Logger):
@@ -17,7 +17,11 @@ class PrintLogger(Logger):
 
 set_logger(PrintLogger(), "debug")
 async def main():
-    sdk = Sdk("https://app.sia.storage", b'\x01' * 32)
+    mnemonic = generate_recovery_phrase()
+    print("mnemonic:", mnemonic)
+    app_id = b'\x01' * 32
+    app_key = AppKey(mnemonic, app_id)
+    sdk = Sdk("https://app.sia.storage", app_key)
     if not await sdk.connect():
         print("App not connected")
         resp = await sdk.request_app_connection(AppMeta(
@@ -27,6 +31,7 @@ async def main():
             logo_url=None,
             callback_url=None,
         ))
+        print(f"Please approve connection {resp.response_url}")
         connected = await sdk.wait_for_connect(resp)
         if not connected:
             fatal("user rejected connection")
@@ -34,7 +39,7 @@ async def main():
     print("Connected to indexd")
 
     encryption_key = b'\x01' * 32
-    writer = await sdk.upload(encryption_key, None, UploadOptions(
+    writer = await sdk.upload(UploadOptions(
         max_inflight=15,
         data_shards=1,
         parity_shards=3,
@@ -47,7 +52,10 @@ async def main():
     obj = await writer.finalize()
     print("Upload finished")
 
-    reader = await sdk.download(encryption_key, obj, DownloadOptions(
+    sealed = obj.seal(app_key)
+    print("sealed:", sealed)
+
+    reader = await sdk.download(obj, DownloadOptions(
         max_inflight=15,
         offset=0,
         length=None,

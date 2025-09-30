@@ -1,14 +1,21 @@
 use chrono::{DateTime, Utc};
+use rand::TryRngCore;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
-use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
-use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
-use sia::encoding::{SiaEncodable, SiaEncode};
-use sia::encryption::EncryptionKey;
-use sia::signing::PublicKey;
+use sia::blake2::{Blake2b256, Digest};
+use sia::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
+use sia::encryption::{CipherReader, CipherWriter, EncryptionKey};
+use sia::signing::{PrivateKey, PublicKey, Signature};
 use sia::types::Hash256;
+use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite};
+
+use crate::encryption::{
+    DecryptError, open_encryption_key, open_metadata, seal_master_key, seal_metadata,
+};
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,8 +32,8 @@ pub struct Slab {
     pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
-    pub offset: usize,
-    pub length: usize,
+    pub offset: u32,
+    pub length: u32,
 }
 
 impl Slab {
@@ -44,13 +51,35 @@ impl Slab {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, SiaEncode)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SlabSlice {
     #[serde(rename = "slabID")]
     pub slab_id: Hash256,
-    pub offset: usize,
-    pub length: usize,
+    pub offset: u32,
+    pub length: u32,
+}
+
+impl SiaEncodable for SlabSlice {
+    fn encode<W: std::io::Write>(&self, w: &mut W) -> encoding::Result<()> {
+        self.slab_id.encode(w)?;
+        let combined: u64 = (self.offset as u64) << 32 | (self.length as u64);
+        combined.encode(w)?;
+        Ok(())
+    }
+}
+
+impl SiaDecodable for SlabSlice {
+    fn decode<R: std::io::Read>(r: &mut R) -> encoding::Result<Self> {
+        let slab_id = Hash256::decode(r)?;
+        let combined = u64::decode(r)?;
+
+        Ok(Self {
+            slab_id,
+            offset: (combined >> 32) as u32,
+            length: combined as u32,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -62,96 +91,154 @@ pub struct PinnedSlab {
     pub sectors: Vec<Sector>,
 }
 
-#[derive(Debug, Serialize, PartialEq, Default)]
-pub struct EncryptedMetadata(Vec<u8>);
-
-impl From<Vec<u8>> for EncryptedMetadata {
-    fn from(value: Vec<u8>) -> Self {
-        Self(value)
-    }
-}
-
-impl AsRef<[u8]> for EncryptedMetadata {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-pub type DecryptionError = chacha20poly1305::aead::Error;
-pub type DecryptionResult<T> = std::result::Result<T, DecryptionError>;
-
-impl EncryptedMetadata {
-    /// Encrypts the provided metadata using the given key. The cipher used is
-    /// XChaCha20Poly1305 with uses XChaCha20 for encryption and Poly1305 for
-    /// authentication. The resulting encrypted data is prefixed with a 24-byte
-    /// nonce.
-    pub fn encrypt(meta: &[u8], key: &EncryptionKey) -> Self {
-        let cipher = chacha20poly1305::XChaCha20Poly1305::new(key.as_ref().into());
-        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-        let encrypted = cipher
-            .encrypt(&nonce, meta)
-            .expect("encryption never fails");
-        nonce
-            .into_iter()
-            .chain(encrypted)
-            .collect::<Vec<u8>>()
-            .into()
-    }
-
-    pub fn decrypt(&self, key: &EncryptionKey) -> DecryptionResult<Vec<u8>> {
-        if self.0.len() < 24 {
-            return Err(chacha20poly1305::aead::Error);
-        }
-        let (nonce_bytes, ciphertext) = self.0.split_at(24);
-        let nonce = XNonce::from_slice(nonce_bytes);
-        let cipher = XChaCha20Poly1305::new(key.as_ref().into());
-        cipher.decrypt(nonce, ciphertext)
-    }
+#[derive(Debug, Error)]
+pub enum SealedObjectError {
+    #[error("decryption error: {0}")]
+    Decryption(#[from] DecryptError),
+    #[error("sealed object ID does not match contents")]
+    ContentsMismatch,
+    #[error("encoding error: {0}")]
+    Encoding(#[from] encoding::Error),
+    #[error("invalid signature")]
+    InvalidSignature,
 }
 
 #[serde_as]
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, SiaEncode, SiaDecode, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Object {
-    pub key: Hash256,
-    pub slabs: Vec<SlabSlice>,
-
-    // base64-encoded arbitrary metadata
+pub struct SealedObject {
     #[serde_as(as = "Base64")]
-    pub meta: EncryptedMetadata,
+    pub encrypted_master_key: Vec<u8>,
+    pub slabs: Vec<SlabSlice>,
+    #[serde_as(as = "Base64")]
+    pub encrypted_metadata: Vec<u8>,
+    pub signature: Signature,
+
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl SealedObject {
+    fn sig_hash(
+        object_id: &Hash256,
+        encrypted_master_key: &[u8],
+        encrypted_metadata: &[u8],
+    ) -> Hash256 {
+        let mut state = Blake2b256::default();
+        object_id.encode(&mut state).unwrap();
+        state.update(encrypted_master_key);
+        state.update(encrypted_metadata);
+        state.finalize().into()
+    }
+
+    pub fn id(&self) -> Hash256 {
+        let mut state = Blake2b256::default();
+        for slab in self.slabs.iter() {
+            slab.encode(&mut state).unwrap();
+        }
+        state.finalize().into()
+    }
+
+    pub fn open(self, app_key: &PrivateKey) -> Result<Object, SealedObjectError> {
+        let object_id = self.id();
+
+        let sig_hash = Self::sig_hash(
+            &object_id,
+            &self.encrypted_master_key,
+            &self.encrypted_metadata,
+        );
+        if !app_key
+            .public_key()
+            .verify(sig_hash.as_ref(), &self.signature)
+        {
+            return Err(SealedObjectError::InvalidSignature);
+        }
+
+        let master_encryption_key =
+            open_encryption_key(app_key, &object_id, &self.encrypted_master_key)?;
+        let metadata = open_metadata(&master_encryption_key, &object_id, &self.encrypted_metadata)?;
+
+        Ok(Object {
+            encryption_key: master_encryption_key,
+            slabs: self.slabs,
+            metadata,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+// An Object represents a file stored on the Sia network, consisting of multiple slabs and
+// associated metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Object {
+    encryption_key: EncryptionKey, // not public to avoid accidental exposure
+
+    pub slabs: Vec<SlabSlice>,
+    pub metadata: Vec<u8>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 impl Object {
-    pub fn new(slabs: Vec<SlabSlice>, meta: Option<EncryptedMetadata>) -> Self {
-        Self {
-            key: Self::object_key_from_slabs(&slabs),
-            slabs,
-            meta: meta.unwrap_or_default(),
+    /// Returns the total size of the object by summing the lengths of its slabs.
+    pub fn size(&self) -> u64 {
+        self.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
+    }
 
+    /// Returns a reader that encrypts data on-the-fly using the object's encryption key.
+    pub fn reader<R: AsyncRead + Unpin>(&self, r: R, offset: usize) -> CipherReader<R> {
+        CipherReader::new(r, self.encryption_key.clone(), offset)
+    }
+
+    /// Returns a writer that encrypts data on-the-fly using the object's encryption key.
+    pub fn writer<W: AsyncWrite + Unpin>(&self, w: W, offset: usize) -> CipherWriter<W> {
+        CipherWriter::new(w, self.encryption_key.clone(), offset)
+    }
+}
+
+impl Default for Object {
+    fn default() -> Self {
+        let mut key: [u8; 32] = [0; 32];
+        OsRng.try_fill_bytes(&mut key).unwrap();
+        Object {
+            encryption_key: EncryptionKey::from(key),
+            slabs: Vec::new(),
+            metadata: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
     }
+}
 
-    /// creates a unique identifier for the object by hashing the list of slabs
-    /// its made up of.
-    fn object_key_from_slabs(slabs: &[SlabSlice]) -> Hash256 {
-        let mut state = blake2b_simd::Params::new().hash_length(32).to_state();
-        for slab in slabs {
-            slab.encode(&mut state)
-                .expect("encoding slabs shouldn't fail");
+impl Object {
+    pub fn id(&self) -> Hash256 {
+        let mut state = Blake2b256::default();
+        for slab in self.slabs.iter() {
+            slab.encode(&mut state).unwrap();
         }
         state.finalize().into()
     }
 
-    /// validate_object checks that the integrity of the object is intact.
-    pub fn validate_object(&self) -> Result<(), &'static str> {
-        if self.key != Self::object_key_from_slabs(&self.slabs) {
-            return Err("object key does not match slabs");
+    pub fn seal(&self, app_key: &PrivateKey) -> SealedObject {
+        let object_id = self.id();
+
+        let encrypted_master_key = seal_master_key(app_key, &object_id, &self.encryption_key);
+        let encrypted_metadata = seal_metadata(&self.encryption_key, &object_id, &self.metadata);
+
+        let sig_hash =
+            SealedObject::sig_hash(&object_id, &encrypted_master_key, &encrypted_metadata);
+        let signature = app_key.sign(sig_hash.as_ref());
+
+        SealedObject {
+            encrypted_master_key,
+            slabs: self.slabs.clone(),
+            encrypted_metadata,
+            signature,
+
+            created_at: self.created_at,
+            updated_at: self.updated_at,
         }
-        Ok(())
     }
 }
 
@@ -162,32 +249,197 @@ pub struct SharedSlab {
     pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
-    pub offset: usize,
-    pub length: usize,
+    pub offset: u32,
+    pub length: u32,
 }
 
-#[serde_as]
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SharedObject {
-    pub key: String,
-    pub slabs: Vec<SharedSlab>,
-    #[serde_as(as = "Option<Base64>")]
-    pub meta: Option<Vec<u8>>,
-}
-
-impl SharedObject {
-    pub fn size(&self) -> u64 {
-        self.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
+impl From<SharedSlab> for Slab {
+    fn from(val: SharedSlab) -> Self {
+        Slab {
+            encryption_key: val.encryption_key,
+            min_shards: val.min_shards,
+            sectors: val.sectors,
+            offset: val.offset,
+            length: val.length,
+        }
     }
 }
 
-/// UploadMeta represents an uploaded object and the metadata needed to
-/// retrieve it.
-#[derive(Debug, PartialEq)]
-pub struct UploadMeta {
-    pub encryption_key: EncryptionKey,
-    pub object: Object,
+/// A SharedObject is an object that can be shared with others. It contains the encryption key
+/// needed to decrypt the data, as well as the slabs that make up the object.
+///
+/// It has no public fields to avoid corruption of the internal state.
+pub struct SharedObject {
+    encryption_key: EncryptionKey,
+    slabs: Vec<SharedSlab>,
+    metadata: Option<Vec<u8>>,
+}
+
+impl SharedObject {
+    pub fn new(
+        encryption_key: EncryptionKey,
+        slabs: Vec<SharedSlab>,
+        metadata: Option<Vec<u8>>,
+    ) -> Self {
+        SharedObject {
+            encryption_key,
+            slabs,
+            metadata,
+        }
+    }
+
+    pub fn slabs(&self) -> &Vec<SharedSlab> {
+        &self.slabs
+    }
+
+    pub fn metadata(&self) -> Vec<u8> {
+        self.metadata.clone().unwrap_or_default()
+    }
+
+    /// Computes the total size of the object by summing the lengths of its slabs.
+    pub fn size(&self) -> u64 {
+        self.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
+    }
+
+    /// Returns a writer that decrypts data on-the-fly using the object's encryption key.
+    pub fn writer<W: AsyncWrite + Unpin>(&self, w: W, offset: usize) -> CipherWriter<W> {
+        CipherWriter::new(w, self.encryption_key.clone(), offset)
+    }
+
+    /// Converts the SharedObject into an Object that can be saved to an indexer.
+    /// The slabs must be pinned before the object can be saved.
+    pub fn object(&self) -> Object {
+        Object {
+            encryption_key: self.encryption_key.clone(),
+            slabs: self
+                .slabs
+                .iter()
+                .map(|s| SlabSlice {
+                    slab_id: s.id,
+                    offset: s.offset,
+                    length: s.length,
+                })
+                .collect(),
+            metadata: self.metadata.clone().unwrap_or_default(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+}
+
+impl From<SharedObject> for Object {
+    fn from(val: SharedObject) -> Self {
+        Object {
+            encryption_key: val.encryption_key,
+            slabs: val
+                .slabs
+                .iter()
+                .map(|s| SlabSlice {
+                    slab_id: s.id,
+                    offset: s.offset,
+                    length: s.length,
+                })
+                .collect(),
+            metadata: val.metadata.unwrap_or_default(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+}
+
+pub(crate) mod encryption {
+    use chacha20poly1305::aead::{Aead, OsRng};
+    use chacha20poly1305::{AeadCore, KeyInit, XChaCha20Poly1305};
+    use sia::blake2::Blake2b256;
+    use sia::encryption::EncryptionKey;
+    use sia::signing::PrivateKey;
+    use sia::types::Hash256;
+    use thiserror::Error;
+
+    const NONCE_SIZE: usize = 24;
+
+    #[derive(Error, Debug)]
+    pub enum DecryptError {
+        #[error("decryption error")]
+        Decryption,
+        #[error("invalid encryption key length")]
+        KeyLength,
+    }
+
+    pub(crate) fn derive_encryption_key(key: &[u8], salt: &[u8], domain: &[u8]) -> EncryptionKey {
+        let hkdf = hkdf::SimpleHkdf::<Blake2b256>::new(Some(salt), key);
+        let mut okm = [0u8; 32];
+        hkdf.expand(domain, &mut okm).unwrap();
+        okm.into()
+    }
+
+    pub(crate) fn seal_master_key(
+        app_key: &PrivateKey,
+        object_id: &Hash256,
+        encryption_key: &EncryptionKey,
+    ) -> Vec<u8> {
+        let master_encryption_key =
+            derive_encryption_key(app_key.as_ref(), object_id.as_ref(), b"master");
+        let encryption_key_cipher = XChaCha20Poly1305::new(master_encryption_key.as_ref().into());
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let encrypted_master_key = encryption_key_cipher
+            .encrypt(&nonce, encryption_key.as_ref().as_ref())
+            .expect("encryption failed");
+        [nonce.to_vec(), encrypted_master_key].concat()
+    }
+
+    pub(crate) fn open_encryption_key(
+        app_key: &PrivateKey,
+        object_id: &Hash256,
+        encrypted_master_key: &[u8],
+    ) -> Result<EncryptionKey, DecryptError> {
+        if encrypted_master_key.len() < NONCE_SIZE {
+            return Err(DecryptError::Decryption);
+        }
+        let master_encryption_key =
+            derive_encryption_key(app_key.as_ref(), object_id.as_ref(), b"master");
+        let encryption_key_cipher = XChaCha20Poly1305::new(master_encryption_key.as_ref().into());
+        let (nonce_bytes, ciphertext) = encrypted_master_key.split_at(NONCE_SIZE);
+        let nonce = chacha20poly1305::XNonce::from_slice(nonce_bytes);
+        let decrypted_master_key = encryption_key_cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| DecryptError::Decryption)?;
+        EncryptionKey::try_from(decrypted_master_key.as_ref()).map_err(|_| DecryptError::KeyLength)
+    }
+
+    pub(crate) fn seal_metadata(
+        master_key: &EncryptionKey,
+        object_id: &Hash256,
+        metadata: &[u8],
+    ) -> Vec<u8> {
+        let metadata_encryption_key =
+            derive_encryption_key(master_key.as_ref(), object_id.as_ref(), b"metadata");
+        let metadata_cipher = XChaCha20Poly1305::new(metadata_encryption_key.as_ref().into());
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let encrypted_metadata = metadata_cipher
+            .encrypt(&nonce, metadata)
+            .expect("encryption failed");
+        [nonce.to_vec(), encrypted_metadata].concat()
+    }
+
+    pub(crate) fn open_metadata(
+        master_key: &EncryptionKey,
+        object_id: &Hash256,
+        encrypted_metadata: &[u8],
+    ) -> Result<Vec<u8>, DecryptError> {
+        if encrypted_metadata.len() < NONCE_SIZE {
+            return Err(DecryptError::Decryption);
+        }
+        let metadata_encryption_key =
+            derive_encryption_key(master_key.as_ref(), object_id.as_ref(), b"metadata");
+        let metadata_cipher = XChaCha20Poly1305::new(metadata_encryption_key.as_ref().into());
+        let (nonce_bytes, ciphertext) = encrypted_metadata.split_at(NONCE_SIZE);
+        let nonce = chacha20poly1305::XNonce::from_slice(nonce_bytes);
+        let decrypted_metadata = metadata_cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| DecryptError::Decryption)?;
+        Ok(decrypted_metadata)
+    }
 }
 
 #[cfg(test)]
@@ -237,7 +489,7 @@ mod test {
     }
 
     #[test]
-    fn test_object_validation() {
+    fn test_object_roundtrip() {
         let slabs = vec![
             SlabSlice {
                 slab_id: hash_256!(
@@ -254,42 +506,50 @@ mod test {
                 length: 100,
             },
         ];
-        let meta = b"hello world".to_vec().into();
+        let meta = b"hello, world!".to_vec();
 
-        let mut obj = Object::new(slabs.clone(), Some(meta));
-        obj.validate_object().expect("object should be valid");
-        assert_eq!(
-            obj.key,
-            hash_256!("369cbab41f56f89ddc5adb417a5b9600137c7533adf91ab203cba96bcbce5b89")
-        );
+        let mut obj = Object::default();
+        obj.slabs = slabs.clone();
+        obj.metadata = meta.clone();
 
-        // without the metadata the key should be the same
-        let obj2 = Object::new(slabs.clone(), None);
-        obj2.validate_object().expect("object should be valid");
-        assert_eq!(obj.key, obj2.key);
+        let seed: [u8; 32] = rand::random();
+        let private_key = PrivateKey::from_seed(&seed);
 
-        // tamper with obj to break validation
-        obj.slabs = vec![];
-        assert!(obj.validate_object().is_err());
+        let sealed = obj.seal(&private_key);
+        let opened = sealed.open(&private_key).expect("should open");
+
+        assert_eq!(opened.slabs, slabs);
+        assert_eq!(opened.metadata, meta);
     }
 
+    /// tests that the SealedObject struct is compatible with the Go implementation
+    /// by deserializing a reference object
     #[test]
-    fn test_metadata_encryption() {
-        let key: EncryptionKey = [1u8; 32].into();
-        let meta = b"this is some metadata".to_vec();
+    fn test_sealed_object_golden() {
+        let mut seed = [0u8; 32];
+        hex::decode_to_slice(
+            "9593edfd90ef2da9973af3bca88afdf54b6e7ff66ff6c749505734b9cf6b8aec",
+            &mut seed,
+        )
+        .expect("hex");
+        let app_key = PrivateKey::from_seed(&seed);
 
-        let encrypted = EncryptedMetadata::encrypt(&meta, &key);
-        assert_ne!(encrypted.as_ref(), &meta);
+        let mut expected_object_key = [0u8; 32];
+        hex::decode_to_slice(
+            "cd280dd064e3c2d4259579bf0deda2492962c130ee8d7d2e11f1daca3e5cc579",
+            &mut expected_object_key,
+        )
+        .expect("hex");
+        let expected_object_key = EncryptionKey::from(expected_object_key);
 
-        let decrypted = encrypted.decrypt(&key).expect("decryption should work");
-        assert_eq!(decrypted, meta);
+        let expected_metadata = hex::decode("b9d615255cc17596e3870c3adf5e11c1da0dd78e30f29c6b6d223949c7d91492db55cdc6e04ce65b5b1fea4ccc953e883d5bf23e9c893ecb5221e7315f16e7f95dfc70f0ed1ee1306e8733a22a5faf1b139f01f0f77ae00d71fe3bbefa4b65aca80f749e4788ace89beaa79ac651aedc54cba7066264df9db54c22c1e17cea1a").expect("hex");
 
-        // decryption with wrong key should fail
-        let wrong_key: EncryptionKey = [2u8; 32].into();
-        assert!(encrypted.decrypt(&wrong_key).is_err());
+        let sealed_data = hex::decode("48000000000000001529a6b279adde408340e4666792e87e8cc6f62fa0f5b97cc56e130c4e43a3adf71a851e87cb03c3d29c980272f5c77884ed5b02e98159bcb80d5261a3eea95a3d558593ae5f8ea7020000000000000027ddebaa17cffe1270fcc9b336719d398fca392861b182afdc5f311407773b5c881300000a000000386fcda0139c927cc12a661ba37e05852dcbce41222273cd2bf1c3515e2fa9840010000020000000a8000000000000002a8b962d783aa304a65b382b9bd018fade00fa82028445098ee0821486d25a4ad3611facfa4598ddc29ce159f32fe8e0505a438d92d20ba3b4bfe21c618058f72a50319088d005e171a04cddc77cbc5dff9dee0d56d7d177862e353664a3df95506a4fd46b3879e02b0cf23954637c616934c3fd8b85eb50769c094e86f25c4ecc497253a8d3384cead8cfd2f8a4398c20fb7ab5a6360365fa1ba19c90339f1cb8987ebd482eff4c595121c84f4234e00fa0d6b0a29b0714f44ffe1a5f80c7e9b3238dfbd2a2185d3b80edb39ba37bc805d252e314034354a34f652b37bf90a3bc0a6f2d822bc70800096e88f1ffffff00096e88f1ffffff").expect("hex");
+        let sealed = SealedObject::decode(&mut &sealed_data[..]).expect("decode");
+        let opened = sealed.open(&app_key).expect("open");
 
-        // decryption of invalid data should fail
-        let invalid_encrypted = EncryptedMetadata::from(vec![0u8; 100]);
-        assert!(invalid_encrypted.decrypt(&key).is_err());
+        assert_eq!(opened.encryption_key, expected_object_key);
+        assert_eq!(opened.slabs.len(), 2);
+        assert_eq!(opened.metadata, expected_metadata);
     }
 }
