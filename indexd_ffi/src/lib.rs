@@ -947,9 +947,15 @@ impl SDK {
     }
 
     /// Pins all of the slabs of a shared object and saves it.
-    pub async fn pin_shared_object(&self, shared: SharedObject) -> Result<(), Error> {
+    pub async fn pin_shared_object(
+        &self,
+        encrypted_master_key: Vec<u8>,
+        shared: SharedObject,
+    ) -> Result<(), Error> {
         let shared = shared.try_into()?;
-        self.app_client.pin_shared_object(&shared).await?;
+        self.app_client
+            .pin_shared_object(encrypted_master_key, &shared)
+            .await?;
         Ok(())
     }
 

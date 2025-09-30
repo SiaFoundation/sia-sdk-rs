@@ -83,6 +83,13 @@ pub struct SlabPinParams {
     pub sectors: Vec<Sector>,
 }
 
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PinSharedObjectRequest {
+    pub encrypted_master_key: Vec<u8>,
+    pub shared_object: SharedObject,
+}
+
 pub struct ObjectsCursor {
     pub after: DateTime<Utc>,
     pub key: Hash256,
@@ -222,10 +229,20 @@ impl Client {
     }
 
     /// Pins all of the slabs of a shared object and saves it.
-    pub async fn pin_shared_object(&self, shared: &SharedObject) -> Result<()> {
-        self.post_json::<_, EmptyResponse>("objects/shared", shared)
-            .await
-            .map(|_| ())
+    pub async fn pin_shared_object(
+        &self,
+        encrypted_master_key: Vec<u8>,
+        shared: &SharedObject,
+    ) -> Result<()> {
+        self.post_json::<_, EmptyResponse>(
+            "objects/shared",
+            &PinSharedObjectRequest {
+                encrypted_master_key: encrypted_master_key,
+                shared_object: shared.clone(),
+            },
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Requests an application connection to the indexer.

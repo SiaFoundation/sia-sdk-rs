@@ -285,10 +285,14 @@ impl SDK<ConnectedState> {
             .map_err(|e| Error::App(format!("{e:?}")))
     }
 
-    pub async fn pin_shared_object(&self, shared: &SharedObject) -> Result<()> {
+    pub async fn pin_shared_object(
+        &self,
+        encrypted_master_key: Vec<u8>,
+        shared: &SharedObject,
+    ) -> Result<()> {
         self.state
             .app
-            .pin_shared_object(shared)
+            .pin_shared_object(encrypted_master_key, shared)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())
