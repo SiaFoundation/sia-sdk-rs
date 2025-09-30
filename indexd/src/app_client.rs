@@ -706,9 +706,6 @@ mod tests {
             ])
             .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
         );
-            Expectation::matching(request::method_path("POST", format!("/slabs/prune")))
-                .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
-        );
 
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string(), app_key).unwrap();
