@@ -702,7 +702,7 @@ mod tests {
         server.expect(
             Expectation::matching(all_of![
                 request::method_path("POST", "/slabs/prune"),
-                request::body(""),
+                request::body("null"),
             ])
             .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
         );
