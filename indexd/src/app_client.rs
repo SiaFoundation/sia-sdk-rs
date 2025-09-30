@@ -700,6 +700,12 @@ mod tests {
         let server = Server::run();
 
         server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/slabs/prune"),
+                request::body(""),
+            ])
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
             Expectation::matching(request::method_path("POST", format!("/slabs/prune")))
                 .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
         );
