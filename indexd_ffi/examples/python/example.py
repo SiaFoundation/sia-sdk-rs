@@ -38,7 +38,6 @@ async def main():
 
     print("Connected to indexd")
 
-    encryption_key = b'\x01' * 32
     writer = await sdk.upload(UploadOptions(
         max_inflight=15,
         data_shards=1,

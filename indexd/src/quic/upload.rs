@@ -221,7 +221,7 @@ impl Uploader {
                 // unique encryption key for the slab
                 let mut slab_key = [0u8; 32];
                 OsRng.try_fill_bytes(&mut slab_key).unwrap();
-                let slab_key = EncryptionKey::from(rand::random::<[u8; 32]>());
+                let slab_key = EncryptionKey::from(slab_key);
 
                 // encrypt and start uploading data_shards immediately
                 let mut unencrypted_data_shards = shards[..data_shards].to_vec();

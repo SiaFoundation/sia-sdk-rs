@@ -19,6 +19,8 @@ pub use reqwest::{IntoUrl, Url};
 mod slabs;
 pub use slabs::*;
 
+mod object_encryption;
+
 pub struct DisconnectedState;
 
 pub struct RegisteredState {

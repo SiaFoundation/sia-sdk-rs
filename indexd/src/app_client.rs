@@ -16,7 +16,7 @@ use thiserror::Error;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::encryption::open_metadata;
+use crate::object_encryption::{DecryptError, open_metadata};
 use crate::slabs::Sector;
 use crate::{PinnedSlab, SealedObject, SharedObject, SharedSlab, SlabSlice};
 use sia::signing::{PrivateKey, PublicKey};
@@ -48,7 +48,7 @@ pub enum Error {
     Format(String),
 
     #[error("decryption error: {0}")]
-    Decryption(#[from] crate::encryption::DecryptError),
+    Decryption(#[from] DecryptError),
 
     #[error("custom error: {0}")]
     Custom(String),
@@ -113,13 +113,13 @@ pub struct Account {
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SharedObjectJSON {
+struct SharedObjectResponse {
     pub slabs: Vec<SharedSlab>,
     #[serde_as(as = "Option<Base64>")]
     pub encrypted_metadata: Option<Vec<u8>>,
 }
 
-impl SharedObjectJSON {
+impl SharedObjectResponse {
     pub fn id(&self) -> Hash256 {
         let mut state = Blake2b256::new();
         for slab in &self.slabs {
@@ -447,7 +447,7 @@ impl Client {
             None => Err(Error::Format("missing encryption_key".into())),
         }?;
         share_url.set_fragment(None);
-        let shared_object: SharedObjectJSON = Self::handle_response(
+        let shared_object: SharedObjectResponse = Self::handle_response(
             self.client
                 .get(share_url)
                 .timeout(Duration::from_secs(15))
@@ -494,9 +494,6 @@ impl Client {
 mod tests {
     use chrono::FixedOffset;
     use sia::signing::Signature;
-    // use crate::{Object, SealedObject, SlabSlice};
-    // use chrono::FixedOffset;
-    // use sia::signing::Signature;
     use sia::{hash_256, public_key};
 
     use super::*;
