@@ -1,5 +1,10 @@
 uniffi::setup_scaffolding!();
 
+use base64::prelude::*;
+use rand::TryRngCore;
+use rand::rngs::OsRng;
+use sia::blake2::{Blake2b256, Digest};
+use sia::seed::{Seed, SeedError};
 use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -9,14 +14,14 @@ use indexd::app_client::{
     Client as AppClient, RegisterAppRequest, SlabPinParams as AppSlabPinParams,
 };
 use indexd::quic::{Client as HostClient, Downloader, SlabFetcher, Uploader};
-use indexd::{SlabSlice, Url, quic};
+use indexd::{SealedObjectError, SlabSlice, Url, quic};
 use log::debug;
 use rustls::ClientConfig;
 use rustls_platform_verifier::ConfigVerifierExt;
-use sia::encryption::EncryptionKey;
 use sia::rhp::SECTOR_SIZE;
-use sia::signing::{PrivateKey, PublicKey};
+use sia::signing::{self, PrivateKey, PublicKey, Signature};
 use sia::types::{self, Hash256, HexParseError};
+use sia::{encoding, encryption};
 use thiserror::Error;
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -48,6 +53,9 @@ pub enum Error {
 
     #[error("not connected")]
     NotConnected,
+
+    #[error("sealed object error: {0}")]
+    SealedObject(#[from] SealedObjectError),
 
     #[error("error: {0}")]
     Custom(String),
@@ -200,87 +208,251 @@ pub struct NetAddress {
     pub address: String,
 }
 
-#[derive(uniffi::Record)]
-pub struct PinnedObject {
-    pub key: String,
-    pub slabs: Vec<Slab>,
-    pub created_at: SystemTime,
-    pub updated_at: SystemTime,
-
-    encrypted_metadata: Vec<u8>, // accessed via 'decrypt'
+#[derive(Debug, Error, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum EncryptionKeyParseError {
+    #[error("failed to decode base64: {0}")]
+    Base64(#[from] base64::DecodeError),
+    #[error("invalid key length: {0}, expected 32 bytes")]
+    KeyLength(usize),
 }
 
-impl PinnedObject {
-    /// Decrypts the metadata of an object and returns it.
+#[derive(uniffi::Object)]
+pub struct EncryptionKey(encryption::EncryptionKey);
+
+#[uniffi::export]
+impl EncryptionKey {
+    #[uniffi::constructor]
+    pub fn parse(str: String) -> Result<Self, EncryptionKeyParseError> {
+        let data = BASE64_STANDARD.decode(str.as_bytes())?;
+        if data.len() != 32 {
+            return Err(EncryptionKeyParseError::KeyLength(data.len()));
+        }
+        Ok(Self(encryption::EncryptionKey::from(
+            <[u8; 32]>::try_from(data).unwrap(),
+        )))
+    }
+
+    /// Exports the key as a base64 encoded string.
+    ///
+    /// This should be used to store the key securely.
+    /// The key should never be shared or transmitted
+    /// in plaintext.
+    pub fn export(&self) -> String {
+        BASE64_STANDARD.encode(self.0.as_ref())
+    }
+}
+
+impl From<encryption::EncryptionKey> for EncryptionKey {
+    fn from(key: encryption::EncryptionKey) -> Self {
+        Self(key)
+    }
+}
+
+#[derive(Debug, Error, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum AppKeyError {
+    #[error("seed error: {0}")]
+    RecoveryPhrase(#[from] SeedError),
+
+    #[error("invalid app ID length: {0}, expected 32 bytes")]
+    AppIdLength(usize),
+}
+
+/// An AppKey is used to sign requests to the indexer.
+#[derive(uniffi::Object)]
+pub struct AppKey(signing::PrivateKey);
+
+/// Generates a new BIP-32 12-word recovery phrase.
+#[uniffi::export]
+pub fn generate_recovery_phrase() -> String {
+    let mut seed = [0u8; 16];
+    OsRng.try_fill_bytes(&mut seed).unwrap();
+    let seed = Seed::new(seed);
+    seed.to_mnemonic()
+}
+
+#[uniffi::export]
+impl AppKey {
+    /// Creates a new AppKey from a recovery phrase and a unique app ID.
+    /// The app ID should be a unique 32-byte value. The value is not secret,
+    /// but it should be random and unique to the app.
+    #[uniffi::constructor]
+    pub fn new(recovery_phrase: String, app_id: Vec<u8>) -> Result<Self, AppKeyError> {
+        if app_id.len() != 32 {
+            return Err(AppKeyError::AppIdLength(app_id.len()));
+        }
+        let seed = Seed::from_mnemonic(&recovery_phrase)?;
+        let mut state = Blake2b256::new();
+        state.update(seed.as_bytes());
+        state.update(app_id);
+
+        let seed = state.finalize().into();
+        Ok(Self(PrivateKey::from_seed(&seed)))
+    }
+}
+
+#[derive(Debug, Error, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum ObjectError {
+    #[error("sealed object error: {0}")]
+    SealedObject(#[from] SealedObjectError),
+
+    #[error("encoding error: {0}")]
+    Encoding(#[from] encoding::Error),
+}
+
+/// An object represents a file stored on the Sia network.
+///
+/// It is made up of one or more slabs, which are erasure-coded segments of the file.
+/// The object is encrypted with a unique encryption key, which is used to encrypt
+/// the slabs and the metadata.
+///
+/// It can be sealed for sharing, which encrypts the object's encryption key
+/// with a master key derived from the app key and a random nonce.
+///
+/// It has no public fields to prevent accidental corruption of the object.
+#[derive(uniffi::Object)]
+pub struct Object {
+    inner: Arc<Mutex<indexd::Object>>,
+}
+
+impl Object {
+    fn object(&self) -> indexd::Object {
+        self.inner.lock().unwrap().clone()
+    }
+}
+
+#[uniffi::export]
+impl Object {
+    /// Opens a sealed object using the provided app key.
     ///
     /// # Arguments
-    /// * `key` - The 32-byte encryption key used when uploading the object.
+    /// * `app_key` - The app key used to derive the master key to decrypt the object's encryption key.
+    /// * `sealed` - The sealed object to open.
     ///
     /// # Returns
-    /// The decrypted metadata, or None if no metadata was provided.
-    pub fn decrypt_metadata(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
-        if self.encrypted_metadata.is_empty() {
-            return Ok(None);
-        }
-        let encryption_key =
-            EncryptionKey::try_from(key.as_ref()).map_err(|err| Error::Custom(err.to_string()))?;
-        let encrypted_meta = indexd::EncryptedMetadata::from(self.encrypted_metadata.clone());
-        let decrypted = encrypted_meta
-            .decrypt(&encryption_key)
-            .map_err(|err| Error::Custom(format!("failed to decrypt metadata: {}", err)))?;
-        Ok(Some(decrypted))
+    /// The unsealed object or an error if the object could not be opened.
+    #[uniffi::constructor]
+    pub fn open(app_key: Arc<AppKey>, sealed: SealedObject) -> Result<Self, ObjectError> {
+        let sealed = indexd::SealedObject {
+            encrypted_master_key: sealed.encrypted_master_key,
+            slabs: sealed
+                .slabs
+                .into_iter()
+                .map(|s| s.try_into().unwrap())
+                .collect(),
+            encrypted_metadata: sealed.encrypted_metadata,
+            signature: Signature::try_from(sealed.signature.as_ref())?,
+            created_at: sealed.created_at.into(),
+            updated_at: sealed.updated_at.into(),
+        };
+        let obj = sealed.open(&app_key.0)?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(obj)),
+        })
     }
 
-    /// Calculates the total size of the object by summing the lengths of its slabs.
+    /// Seal the object for offline storage.
+    /// # Arguments
+    /// * `app_key` - The app key used to derive the master key to encrypt the object's encryption key.
+    ///
+    /// # Returns
+    /// The sealed object.
+    pub fn seal(&self, app_key: Arc<AppKey>) -> SealedObject {
+        let inner = self.inner.lock().unwrap();
+        SealedObject::from(inner.seal(&app_key.0))
+    }
+
+    /// Returns the object's ID, which is the Blake2b hash of its slabs.
+    pub fn id(&self) -> String {
+        let inner = self.inner.lock().unwrap();
+        inner.id().to_string()
+    }
+
+    /// Returns the total size of the object by summing the lengths of its slabs.
     pub fn size(&self) -> u64 {
-        self.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
+        let inner = self.inner.lock().unwrap();
+        inner.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
+    }
+
+    /// Returns the slabs that make up the object.
+    pub fn slabs(&self) -> Vec<Slab> {
+        let inner = self.inner.lock().unwrap();
+        inner.slabs.iter().cloned().map(|s| s.into()).collect()
+    }
+
+    /// Returns the metadata associated with the object.
+    pub fn metadata(&self) -> Vec<u8> {
+        let inner = self.inner.lock().unwrap();
+        inner.metadata.clone()
+    }
+
+    /// Updates the metadata associated with the object.
+    pub fn update_metadata(&self, metadata: Vec<u8>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.metadata = metadata;
+    }
+
+    /// Returns the time the object was created.
+    pub fn created_at(&self) -> SystemTime {
+        let inner = self.inner.lock().unwrap();
+        inner.created_at.into()
+    }
+
+    /// Returns the time the object was last updated.
+    pub fn updated_at(&self) -> SystemTime {
+        let inner = self.inner.lock().unwrap();
+        inner.updated_at.into()
     }
 }
 
-impl From<indexd::Object> for PinnedObject {
-    fn from(o: indexd::Object) -> Self {
+#[derive(uniffi::Record)]
+pub struct SealedObject {
+    pub id: String,
+    pub encrypted_master_key: Vec<u8>,
+    pub slabs: Vec<Slab>,
+    pub encrypted_metadata: Vec<u8>,
+    pub signature: Vec<u8>,
+
+    pub created_at: SystemTime,
+    pub updated_at: SystemTime,
+}
+
+impl From<indexd::SealedObject> for SealedObject {
+    fn from(o: indexd::SealedObject) -> Self {
         Self {
-            key: o.key.to_string(),
+            id: o.id().to_string(),
+            encrypted_master_key: o.encrypted_master_key,
             slabs: o.slabs.into_iter().map(|s| s.into()).collect(),
-            encrypted_metadata: o.meta.as_ref().into(),
+            encrypted_metadata: o.encrypted_metadata,
+            signature: o.signature.as_ref().to_vec(),
             created_at: o.created_at.into(),
             updated_at: o.updated_at.into(),
         }
     }
 }
 
-impl TryInto<indexd::Object> for PinnedObject {
-    type Error = HexParseError;
+impl TryInto<indexd::SealedObject> for SealedObject {
+    type Error = SealedObjectError;
 
-    fn try_into(self) -> Result<indexd::Object, Self::Error> {
-        Ok(indexd::Object {
-            key: Hash256::from_str(self.key.as_str())?,
+    fn try_into(self) -> Result<indexd::SealedObject, Self::Error> {
+        let sealed = indexd::SealedObject {
+            encrypted_master_key: self.encrypted_master_key,
             slabs: self
                 .slabs
                 .into_iter()
-                .map(|s| s.try_into())
-                .collect::<Result<Vec<SlabSlice>, HexParseError>>()?,
-            meta: self.encrypted_metadata.into(),
+                .map(|s| s.try_into().unwrap())
+                .collect(),
+            encrypted_metadata: self.encrypted_metadata,
+            signature: Signature::try_from(self.signature.as_ref())?,
             created_at: self.created_at.into(),
             updated_at: self.updated_at.into(),
-        })
-    }
-}
-
-/// UploadMeta represents an uploaded object and the metadata needed to
-/// retrieve it.
-#[derive(uniffi::Record)]
-pub struct UploadMeta {
-    pub encryption_key: Vec<u8>,
-    pub object: PinnedObject,
-}
-
-impl From<indexd::UploadMeta> for UploadMeta {
-    fn from(upload_meta: indexd::UploadMeta) -> Self {
-        Self {
-            encryption_key: upload_meta.encryption_key.as_ref().into(),
-            object: upload_meta.object.into(),
+        };
+        if sealed.id().to_string() != self.id {
+            return Err(SealedObjectError::ContentsMismatch);
         }
+        Ok(sealed)
     }
 }
 
@@ -389,8 +561,8 @@ impl From<SlabSlice> for Slab {
     fn from(s: SlabSlice) -> Self {
         Self {
             id: s.slab_id.to_string(),
-            offset: s.offset as u32,
-            length: s.length as u32,
+            offset: s.offset,
+            length: s.length,
         }
     }
 }
@@ -401,8 +573,8 @@ impl TryInto<SlabSlice> for Slab {
     fn try_into(self) -> Result<SlabSlice, Self::Error> {
         Ok(SlabSlice {
             slab_id: Hash256::from_str(self.id.as_str())?,
-            offset: self.offset as usize,
-            length: self.length as usize,
+            offset: self.offset,
+            length: self.length,
         })
     }
 }
@@ -420,7 +592,7 @@ impl TryInto<indexd::Sector> for PinnedSector {
 
 #[derive(Clone, uniffi::Record)]
 pub struct SlabPinParams {
-    pub encryption_key: Vec<u8>,
+    pub encryption_key: Arc<EncryptionKey>,
     pub min_shards: u8,
     pub sectors: Vec<PinnedSector>,
 }
@@ -430,8 +602,7 @@ impl TryInto<AppSlabPinParams> for SlabPinParams {
 
     fn try_into(self) -> Result<AppSlabPinParams, Error> {
         Ok(AppSlabPinParams {
-            encryption_key: EncryptionKey::try_from(self.encryption_key.as_ref())
-                .map_err(|v| Error::Crypto(format!("failed to convert encryption key: {:?}", v)))?,
+            encryption_key: self.encryption_key.0.clone(),
             min_shards: self.min_shards,
             sectors: self
                 .sectors
@@ -473,26 +644,6 @@ impl From<indexd::app_client::ObjectsCursor> for ObjectsCursor {
     }
 }
 
-/// A slab that has been shared via a share URL.
-#[derive(uniffi::Record)]
-pub struct SharedSlab {
-    pub slab_id: String,
-    pub encryption_key: Vec<u8>,
-    pub min_shards: u8,
-    pub sectors: Vec<PinnedSector>,
-    pub offset: u32,
-    pub length: u32,
-}
-
-/// An object that has been shared via a share URL.
-#[derive(uniffi::Record)]
-pub struct SharedObject {
-    pub key: String,
-    pub slabs: Vec<SharedSlab>,
-    pub meta: Option<Vec<u8>>,
-    pub encryption_key: Vec<u8>,
-}
-
 /// An account registered on the indexer.
 #[derive(uniffi::Record)]
 pub struct Account {
@@ -516,13 +667,6 @@ impl From<indexd::app_client::Account> for Account {
             logo_url: a.logo_url,
             service_url: a.service_url,
         }
-    }
-}
-
-impl SharedObject {
-    /// Calculates the total size of the object by summing the lengths of its slabs.
-    pub fn size(&self) -> u64 {
-        self.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
     }
 }
 
@@ -564,15 +708,11 @@ impl SDK {
     /// # Returns
     /// A new SDK instance.
     #[uniffi::constructor]
-    pub fn new(indexer_url: String, app_seed: Vec<u8>) -> Result<Self, Error> {
-        let app_seed: [u8; 32] = app_seed
-            .try_into()
-            .map_err(|_| Error::Custom("App seed must be 32 bytes".into()))?;
-        let app_key = PrivateKey::from_seed(&app_seed);
-        let app_client = AppClient::new(indexer_url, app_key.clone())?;
+    pub fn new(indexer_url: String, app_key: Arc<AppKey>) -> Result<Self, Error> {
+        let app_client = AppClient::new(indexer_url, app_key.0.clone())?;
 
         Ok(Self {
-            app_key,
+            app_key: app_key.0.clone(),
             app_client: app_client.clone(),
             downloader: OnceCell::new(),
             uploader: OnceCell::new(),
@@ -691,11 +831,7 @@ impl SDK {
     ///
     /// # Returns
     /// An object representing the uploaded data.
-    pub async fn upload(
-        &self,
-        metadata: Option<Vec<u8>>,
-        options: UploadOptions,
-    ) -> Result<Upload, UploadError> {
+    pub async fn upload(&self, options: UploadOptions) -> Result<Upload, UploadError> {
         let uploader = match self.uploader.get() {
             Some(uploader) => uploader.clone(),
             None => return Err(UploadError::NotConnected),
@@ -726,7 +862,6 @@ impl SDK {
             let res = uploader
                 .upload(
                     inner_buf,
-                    metadata,
                     quic::UploadOptions {
                         max_inflight: options.max_inflight as usize,
                         data_shards: options.data_shards,
@@ -748,37 +883,25 @@ impl SDK {
     /// Initiates a download of the data referenced by the object, starting at `offset` and reading `length` bytes.
     ///
     /// # Returns
-    /// A [`Download`] object that can be used to read the data in chunks
+    /// A [Download] object that can be used to read the data in chunks
     pub async fn download(
         &self,
-        encryption_key: Vec<u8>,
-        object: &PinnedObject,
+        object: Arc<Object>,
         options: DownloadOptions,
     ) -> Result<Download, DownloadError> {
         let downloader = match self.downloader.get() {
             Some(downloader) => downloader.clone(),
             None => return Err(DownloadError::NotConnected),
         };
-        let slabs = object
-            .slabs
-            .iter()
-            .map(|s| {
-                Ok(SlabSlice {
-                    slab_id: Hash256::from_str(s.id.as_str())?,
-                    offset: s.offset as usize,
-                    length: s.length as usize,
-                })
-            })
-            .collect::<Result<Vec<SlabSlice>, HexParseError>>()?;
-        let encryption_key = EncryptionKey::try_from(encryption_key.as_ref())
-            .map_err(|err| DownloadError::Custom(err.to_string()))?;
-        let slabs = SlabFetcher::new(self.app_client.clone(), slabs.clone());
+        let object = object.object();
+        let object_size = object.size();
+        let slabs = SlabFetcher::new(self.app_client.clone(), object.slabs.clone());
         Ok(Download {
-            encryption_key,
+            object,
             slabs,
             state: Arc::new(Mutex::new(DownloadState {
                 offset: options.offset,
-                length: options.length.unwrap_or(object.size()),
+                length: options.length.unwrap_or(object_size),
                 max_inflight: options.max_inflight,
             })),
             downloader,
@@ -801,60 +924,35 @@ impl SDK {
         let share_url: Url = share_url
             .parse()
             .map_err(|e| DownloadError::Custom(format!("{e}")))?;
-        let (object, encryption_key) = self.app_client.shared_object(share_url).await?;
-        Ok(DownloadShared {
-            encryption_key: EncryptionKey::from(encryption_key),
-            slabs: object
-                .slabs
+        let shared_object = self.app_client.shared_object(share_url).await?;
+        let object_size = shared_object.size();
+        let slab_iterator = VecDeque::from(
+            shared_object
+                .slabs()
                 .iter()
-                .map(|s| indexd::Slab {
-                    encryption_key: s.encryption_key.clone(),
-                    min_shards: s.min_shards,
-                    offset: s.offset,
-                    length: s.length,
-                    sectors: s.sectors.clone(),
-                })
-                .collect(),
+                .map(|s| s.clone().into())
+                .collect::<Vec<indexd::Slab>>(),
+        );
+        Ok(DownloadShared {
+            shared_object,
+            slabs: slab_iterator,
             state: Arc::new(Mutex::new(DownloadState {
                 offset: options.offset,
-                length: options.length.unwrap_or(object.size()),
+                length: options.length.unwrap_or(object_size),
                 max_inflight: options.max_inflight,
             })),
             downloader,
         })
     }
 
-    /// Fetches the metadata for a shared object via a share URL.
-    pub async fn shared_object(&self, share_url: &str) -> Result<SharedObject, DownloadError> {
+    /// Retrieves the unsealed metadata for a shared object via a share URL.
+    pub async fn shared_object_metadata(&self, share_url: &str) -> Result<Vec<u8>, DownloadError> {
         let share_url: Url = share_url
             .parse()
             .map_err(|e| DownloadError::Custom(format!("{e}")))?;
-        let (object, encryption_key) = self.app_client.shared_object(share_url).await?;
+        let object = self.app_client.shared_object(share_url).await?;
 
-        Ok(SharedObject {
-            key: object.key,
-            slabs: object
-                .slabs
-                .into_iter()
-                .map(|s| SharedSlab {
-                    slab_id: s.id.to_string(),
-                    encryption_key: s.encryption_key.as_ref().to_vec(),
-                    min_shards: s.min_shards,
-                    offset: s.offset as u32,
-                    length: s.length as u32,
-                    sectors: s
-                        .sectors
-                        .into_iter()
-                        .map(|sec| PinnedSector {
-                            root: sec.root.to_string(),
-                            host_key: sec.host_key.to_string(),
-                        })
-                        .collect(),
-                })
-                .collect(),
-            meta: object.meta,
-            encryption_key: encryption_key.to_vec(),
-        })
+        Ok(object.metadata())
     }
 
     /// Returns a list of all usable hosts.
@@ -874,7 +972,7 @@ impl SDK {
         &self,
         cursor: Option<ObjectsCursor>,
         limit: u32,
-    ) -> Result<Vec<PinnedObject>, Error> {
+    ) -> Result<Vec<Arc<Object>>, Error> {
         let cursor = match cursor {
             Some(c) => Some(indexd::app_client::ObjectsCursor {
                 after: c.after.into(),
@@ -887,13 +985,25 @@ impl SDK {
             .objects(cursor, Some(limit as usize))
             .await?;
 
-        Ok(objects.into_iter().map(|o| o.into()).collect())
+        let objects = objects
+            .into_iter()
+            .map(|o| {
+                o.open(&self.app_key).map(|obj| {
+                    Arc::new(Object {
+                        inner: Arc::new(Mutex::new(obj)),
+                    })
+                })
+            })
+            .collect::<Result<Vec<Arc<Object>>, SealedObjectError>>()?;
+        Ok(objects)
     }
 
     /// Saves an object to the indexer.
-    pub async fn save_object(&self, object: PinnedObject) -> Result<(), Error> {
-        let object = object.try_into()?;
-        self.app_client.save_object(&object).await?;
+    pub async fn save_object(&self, object: Arc<Object>) -> Result<(), Error> {
+        let object = object.object();
+        self.app_client
+            .save_object(&object.seal(&self.app_key))
+            .await?;
         Ok(())
     }
 
@@ -905,10 +1015,13 @@ impl SDK {
     }
 
     /// Returns metadata about a specific object stored in the indexer.
-    pub async fn object(&self, key: String) -> Result<PinnedObject, Error> {
+    pub async fn object(&self, key: String) -> Result<Arc<Object>, Error> {
         let key = Hash256::from_str(key.as_str())?;
         let obj = self.app_client.object(&key).await?;
-        Ok(obj.into())
+        let obj = obj.open(&self.app_key)?;
+        Ok(Arc::new(Object {
+            inner: Arc::new(Mutex::new(obj)),
+        }))
     }
 
     /// Returns metadata about a slab stored in the indexer.
@@ -966,7 +1079,7 @@ impl SDK {
     }
 }
 
-pub type UploadReceiver = Mutex<Option<oneshot::Receiver<Result<indexd::UploadMeta, UploadError>>>>;
+pub type UploadReceiver = Mutex<Option<oneshot::Receiver<Result<indexd::Object, UploadError>>>>;
 
 /// Uploads data to the Sia network. It does so in chunks to support large files in
 /// arbitrary languages.
@@ -999,7 +1112,7 @@ impl Upload {
     ///
     /// The caller must store the metadata locally in order to download
     /// it in the future.
-    pub async fn finalize(&self) -> Result<UploadMeta, UploadError> {
+    pub async fn finalize(&self) -> Result<Arc<Object>, UploadError> {
         self.reader.close()?;
         let rx = self
             .rx
@@ -1008,7 +1121,9 @@ impl Upload {
             .take()
             .ok_or(UploadError::Closed)?;
         let object = rx.await.map_err(|e| UploadError::Custom(e.to_string()))??;
-        Ok(object.into())
+        Ok(Arc::new(Object {
+            inner: Arc::new(Mutex::new(object)),
+        }))
     }
 }
 
@@ -1025,7 +1140,7 @@ struct DownloadState {
 /// Language bindings should provide a higher-level implementation that wraps a stream.
 #[derive(uniffi::Object)]
 pub struct Download {
-    encryption_key: EncryptionKey,
+    object: indexd::Object,
     slabs: SlabFetcher,
     state: Arc<Mutex<DownloadState>>,
     downloader: Arc<Downloader>,
@@ -1063,10 +1178,10 @@ impl Download {
             return Ok(Vec::with_capacity(0));
         }
         let mut buf = Vec::with_capacity(rem as usize);
+        let mut w = self.object.writer(&mut buf, state.offset as usize);
         self.downloader
-            .download(
-                &mut buf,
-                self.encryption_key.clone(),
+            .download_slabs(
+                &mut w,
                 self.slabs.clone(),
                 quic::DownloadOptions {
                     offset: state.offset as usize,
@@ -1095,7 +1210,7 @@ pub fn encoded_size(size: u64, data_shards: u8, parity_shards: u8) -> u64 {
 /// Language bindings should provide a higher-level implementation that wraps a stream.
 #[derive(uniffi::Object)]
 pub struct DownloadShared {
-    encryption_key: EncryptionKey,
+    shared_object: indexd::SharedObject,
     slabs: VecDeque<indexd::Slab>,
     state: Arc<Mutex<DownloadState>>,
     downloader: Arc<Downloader>,
@@ -1133,10 +1248,10 @@ impl DownloadShared {
             return Ok(Vec::with_capacity(0));
         }
         let mut buf = Vec::with_capacity(rem as usize);
+        let mut w = self.shared_object.writer(&mut buf, state.offset as usize);
         self.downloader
-            .download(
-                &mut buf,
-                self.encryption_key.clone(),
+            .download_slabs(
+                &mut w,
                 self.slabs.clone(),
                 quic::DownloadOptions {
                     offset: state.offset as usize,

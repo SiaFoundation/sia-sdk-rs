@@ -1,9 +1,13 @@
 use std::time::Duration;
 
-use blake2b_simd::Params;
+use blake2::Digest;
 use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
+use serde_with::base64::Base64;
+use serde_with::serde_as;
+use sia::blake2::Blake2b256;
+use sia::encoding::SiaEncodable;
 use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
 
@@ -12,8 +16,9 @@ use thiserror::Error;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::object_encryption::{DecryptError, open_metadata};
 use crate::slabs::Sector;
-use crate::{Object, PinnedSlab, SharedObject};
+use crate::{PinnedSlab, SealedObject, SharedObject, SharedSlab, SlabSlice};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 
@@ -41,6 +46,9 @@ pub enum Error {
 
     #[error("format error: {0}")]
     Format(String),
+
+    #[error("decryption error: {0}")]
+    Decryption(#[from] DecryptError),
 
     #[error("custom error: {0}")]
     Custom(String),
@@ -100,6 +108,31 @@ pub struct Account {
     pub logo_url: Option<String>,
     #[serde(rename = "serviceURL")]
     pub service_url: Option<String>,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedObjectResponse {
+    pub slabs: Vec<SharedSlab>,
+    #[serde_as(as = "Option<Base64>")]
+    pub encrypted_metadata: Option<Vec<u8>>,
+}
+
+impl SharedObjectResponse {
+    pub fn id(&self) -> Hash256 {
+        let mut state = Blake2b256::new();
+        for slab in &self.slabs {
+            SlabSlice {
+                slab_id: slab.id,
+                offset: slab.offset,
+                length: slab.length,
+            }
+            .encode(&mut state)
+            .unwrap();
+        }
+        state.finalize().into()
+    }
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -186,7 +219,7 @@ impl Client {
     }
 
     /// Retrieves an object from the indexer by its key.
-    pub async fn object(&self, key: &Hash256) -> Result<Object> {
+    pub async fn object(&self, key: &Hash256) -> Result<SealedObject> {
         self.get_json::<_, ()>(&format!("objects/{key}"), None)
             .await
     }
@@ -197,7 +230,7 @@ impl Client {
         &self,
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
-    ) -> Result<Vec<Object>> {
+    ) -> Result<Vec<SealedObject>> {
         let mut query_params = Vec::new();
         if let Some(limit) = limit {
             query_params.push(("limit", limit.to_string()));
@@ -210,7 +243,7 @@ impl Client {
     }
 
     /// Saves an object to the indexer.
-    pub async fn save_object(&self, object: &Object) -> Result<()> {
+    pub async fn save_object(&self, object: &SealedObject) -> Result<()> {
         self.post_json::<_, EmptyResponse>("objects", object)
             .await
             .map(|_| ())
@@ -356,12 +389,11 @@ impl Client {
         body: Option<&[u8]>,
         valid_until: DateTime<Utc>,
     ) -> Hash256 {
-        let mut state = Params::new().hash_length(32).to_state();
-        state
-            .update(method.as_str().as_bytes())
-            .update(url.host_str().unwrap_or("").as_bytes())
-            .update(url.path().as_bytes())
-            .update(&valid_until.timestamp().to_le_bytes());
+        let mut state = Blake2b256::new();
+        state.update(method.as_str().as_bytes());
+        state.update(url.host_str().unwrap_or("").as_bytes());
+        state.update(url.path().as_bytes());
+        state.update(valid_until.timestamp().to_le_bytes());
         if let Some(body) = body {
             state.update(body);
         }
@@ -408,7 +440,7 @@ impl Client {
     /// # Returns
     /// A tuple with the object metadata and encryption key to decrypt
     /// the user metadata.
-    pub async fn shared_object(&self, mut share_url: Url) -> Result<(SharedObject, [u8; 32])> {
+    pub async fn shared_object(&self, mut share_url: Url) -> Result<SharedObject> {
         let encryption_key = match share_url.fragment() {
             Some(fragment) => {
                 let fragment = match fragment.strip_prefix("encryption_key=") {
@@ -419,12 +451,12 @@ impl Client {
                 hex::decode_to_slice(fragment, &mut out).map_err(|_| {
                     Error::Format("encryption key must be 32 hex-encoded bytes".into())
                 })?;
-                Ok(out)
+                Ok(EncryptionKey::from(out))
             }
             None => Err(Error::Format("missing encryption_key".into())),
         }?;
         share_url.set_fragment(None);
-        let obj = Self::handle_response(
+        let shared_object: SharedObjectResponse = Self::handle_response(
             self.client
                 .get(share_url)
                 .timeout(Duration::from_secs(15))
@@ -433,7 +465,19 @@ impl Client {
         )
         .await?;
 
-        Ok((obj, encryption_key))
+        let object_id = shared_object.id();
+        let metadata = if let Some(encrypted_metadata) = shared_object.encrypted_metadata {
+            let meta = open_metadata(&encryption_key, &object_id, &encrypted_metadata)?;
+            Some(meta)
+        } else {
+            None
+        };
+
+        Ok(SharedObject::new(
+            encryption_key,
+            shared_object.slabs,
+            metadata,
+        ))
     }
 
     fn sign(
@@ -457,8 +501,8 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Object, SlabSlice};
     use chrono::FixedOffset;
+    use sia::signing::Signature;
     use sia::{hash_256, public_key};
 
     use super::*;
@@ -853,8 +897,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_object() {
-        let object = Object {
-            key: hash_256!("1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef"),
+        let object = SealedObject {
+            encrypted_master_key: vec![1u8; 72],
+            encrypted_metadata: b"hello world!".to_vec(),
+            signature: Signature::from([2u8; 64]),
             slabs: vec![
                 SlabSlice {
                     slab_id: hash_256!(
@@ -871,7 +917,6 @@ mod tests {
                     length: 512,
                 },
             ],
-            meta: b"hello world!".to_vec().into(),
             created_at: DateTime::<FixedOffset>::parse_from_rfc3339(
                 "2025-09-09T16:10:46.898399-07:00",
             )
@@ -886,7 +931,7 @@ mod tests {
 
         const TEST_OBJECT_JSON: &str = r#"
         {
-          "key": "1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef",
+          "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
           "slabs": [
            {
             "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
@@ -899,18 +944,20 @@ mod tests {
             "length": 512
            }
           ],
-          "meta": "aGVsbG8gd29ybGQh",
+          "encryptedMetadata": "aGVsbG8gd29ybGQh",
+          "signature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
           "createdAt": "2025-09-09T16:10:46.898399-07:00",
           "updatedAt": "2025-09-09T16:10:46.898399-07:00"
          }
         "#;
 
         let server = Server::run();
+        let object_id = object.id();
 
         server.expect(
             Expectation::matching(request::method_path(
                 "GET",
-                "/objects/1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef",
+                format!("/objects/{}", object_id),
             ))
             .respond_with(
                 Response::builder()
@@ -922,13 +969,13 @@ mod tests {
 
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string(), app_key).unwrap();
-        assert_eq!(client.object(&object.key).await.unwrap(), object);
+        assert_eq!(client.object(&object_id).await.unwrap(), object);
     }
 
     #[tokio::test]
     async fn test_objects() {
-        let object = Object {
-            key: hash_256!("1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef"),
+        let object = SealedObject {
+            encrypted_master_key: vec![1u8; 72],
             slabs: vec![
                 SlabSlice {
                     slab_id: hash_256!(
@@ -945,7 +992,8 @@ mod tests {
                     length: 512,
                 },
             ],
-            meta: b"hello world!".to_vec().into(),
+            encrypted_metadata: b"hello world!".to_vec(),
+            signature: Signature::from([2u8; 64]),
             created_at: DateTime::<FixedOffset>::parse_from_rfc3339(
                 "2025-09-09T16:10:46.898399-07:00",
             )
@@ -960,7 +1008,7 @@ mod tests {
 
         const TEST_OBJECTS_JSON: &str = r#"
         [{
-          "key": "1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef",
+          "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
           "slabs": [
            {
             "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
@@ -973,12 +1021,14 @@ mod tests {
             "length": 512
            }
           ],
-          "meta": "aGVsbG8gd29ybGQh",
+          "encryptedMetadata": "aGVsbG8gd29ybGQh",
+          "signature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
           "createdAt": "2025-09-09T16:10:46.898399-07:00",
           "updatedAt": "2025-09-09T16:10:46.898399-07:00"
          }]
         "#;
 
+        let object_id = object.id();
         let server = Server::run();
 
         server.expect(
@@ -986,10 +1036,7 @@ mod tests {
                 request::method_path("GET", "/objects"),
                 request::query(url_decoded(all_of![
                     contains(("after", "2025-09-09T23:10:46.898399+00:00")),
-                    contains((
-                        "key",
-                        "1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef"
-                    )),
+                    contains(("key", object_id.to_string())),
                     contains(("limit", "1")),
                 ]))
             ])
@@ -1008,7 +1055,7 @@ mod tests {
                 .objects(
                     Some(ObjectsCursor {
                         after: object.updated_at.into(),
-                        key: object.key,
+                        key: object.id(),
                     }),
                     Some(1)
                 )
@@ -1039,8 +1086,9 @@ mod tests {
 
     #[tokio::test]
     async fn save_object() {
-        let object = Object {
-            key: hash_256!("1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef"),
+        let object = SealedObject {
+            encrypted_master_key: vec![1u8; 72],
+            signature: Signature::from([2u8; 64]),
             slabs: vec![
                 SlabSlice {
                     slab_id: hash_256!(
@@ -1057,7 +1105,7 @@ mod tests {
                     length: 512,
                 },
             ],
-            meta: b"hello world!".to_vec().into(),
+            encrypted_metadata: b"hello world!".to_vec().into(),
             created_at: DateTime::<FixedOffset>::parse_from_rfc3339(
                 "2025-09-09T16:10:46.898399-07:00",
             )

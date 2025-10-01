@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use log::debug;
-use sia::encryption::{CipherWriter, EncryptionKey, encrypt_shard};
+use sia::encryption::{EncryptionKey, encrypt_shard};
 use sia::erasure_coding::{self, ErasureCoder};
 use sia::rhp::SEGMENT_SIZE;
 use sia::signing::{PrivateKey, PublicKey};
@@ -19,7 +19,7 @@ use tokio::time::sleep;
 use crate::app_client::{self, Client as AppClient};
 use crate::quic::client::Client;
 use crate::quic::{self};
-use crate::{Sector, Slab, SlabSlice};
+use crate::{Object, Sector, SharedObject, Slab, SlabSlice};
 
 /// A SlabIterator can be used to iterate over slabs to be downloaded.
 /// This is used to abstract over different sources of slabs, such as
@@ -40,7 +40,7 @@ impl SlabIterator for VecDeque<Slab> {
     }
 
     fn max_length(&self) -> usize {
-        self.iter().fold(0, |sum, slab| sum + slab.length)
+        self.iter().fold(0, |sum, slab| sum + slab.length as usize)
     }
 }
 
@@ -110,7 +110,9 @@ impl SlabIterator for SlabFetcher {
     }
 
     fn max_length(&self) -> usize {
-        self.slabs.iter().fold(0, |sum, slab| sum + slab.length)
+        self.slabs
+            .iter()
+            .fold(0, |sum, slab| sum + slab.length as usize)
     }
 }
 
@@ -336,10 +338,15 @@ impl Downloader {
         (start, end - start)
     }
 
-    pub async fn download<W: AsyncWriteExt + Unpin, S: SlabIterator>(
+    /// Downloads slabs from the provided SlabIterator and writes
+    /// the encrypted data to the provided writer.
+    ///
+    /// This is a low-level function that can be used to download
+    /// arbitrary slabs. Most users should use [Downloader::download]
+    /// or [Downloader::download_shared] instead.
+    pub async fn download_slabs<W: AsyncWriteExt + Unpin, S: SlabIterator>(
         &self,
         w: &mut W,
-        encryption_key: EncryptionKey,
         mut slabs: S,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
@@ -358,7 +365,6 @@ impl Downloader {
         } else if length == 0 {
             return Ok(());
         }
-        let mut w = CipherWriter::new(w, encryption_key, offset);
         loop {
             if length == 0 {
                 break;
@@ -371,15 +377,15 @@ impl Downloader {
                 Some(s) => s,
                 None => break,
             };
-            let n = slab.length - slab.offset;
+            let n = (slab.length - slab.offset) as usize;
             if offset >= n {
                 offset -= n;
                 continue;
             }
 
-            let slab_offset = slab.offset + offset;
+            let slab_offset = slab.offset as usize + offset;
             offset = 0;
-            let slab_length = (slab.length - slab_offset).min(length);
+            let slab_length = (slab.length as usize - slab_offset).min(length);
             let (shard_offset, shard_length) =
                 Self::sector_region(slab.min_shards as usize, slab_offset, slab_length);
 
@@ -402,7 +408,7 @@ impl Downloader {
             })
             .await??;
             ErasureCoder::write_data_shards(
-                &mut w,
+                w,
                 &shards[..data_shards],
                 slab_offset % (SEGMENT_SIZE * slab.min_shards as usize),
                 slab_length,
@@ -412,5 +418,28 @@ impl Downloader {
         }
         w.flush().await?;
         Ok(())
+    }
+
+    pub async fn download<W: AsyncWriteExt + Unpin>(
+        &self,
+        w: W,
+        object: &Object,
+        options: DownloadOptions,
+    ) -> Result<(), DownloadError> {
+        let slab_iterator = SlabFetcher::new(self.inner.app_client.clone(), object.slabs.clone());
+        let mut w = object.writer(w, options.offset);
+        self.download_slabs(&mut w, slab_iterator, options).await
+    }
+
+    pub async fn download_shared<W: AsyncWriteExt + Unpin>(
+        &self,
+        w: W,
+        object: &SharedObject,
+        options: DownloadOptions,
+    ) -> Result<(), DownloadError> {
+        let slabs: Vec<Slab> = object.slabs().iter().map(|s| s.clone().into()).collect();
+        let mut w = object.writer(w, options.offset);
+        self.download_slabs(&mut w, VecDeque::from(slabs), options)
+            .await
     }
 }

@@ -59,6 +59,14 @@ macro_rules! impl_hash_id {
             }
         }
 
+        impl From<crate::blake2::Output> for $name {
+            fn from(output: crate::blake2::Output) -> Self {
+                let mut h = [0; 32];
+                h.copy_from_slice(&output[..32]);
+                Self(h)
+            }
+        }
+
         impl From<[u8; 32]> for $name {
             fn from(data: [u8; 32]) -> Self {
                 $name(data)
