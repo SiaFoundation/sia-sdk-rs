@@ -675,32 +675,22 @@ impl From<indexd::app_client::Account> for Account {
 /// Provides options for an upload operation.
 #[derive(uniffi::Record)]
 pub struct UploadOptions {
+    #[uniffi(default = 10)]
     pub max_inflight: u8,
+    #[uniffi(default = 10)]
     pub data_shards: u8,
+    #[uniffi(default = 20)]
     pub parity_shards: u8,
 
     /// Optional metadata to attach to the object.
     /// This will be encrypted with the object's master key.
+    #[uniffi(default = None)]
     pub metadata: Option<Vec<u8>>,
     /// Optional callback to report upload progress.
     /// The callback will be called with the number of bytes uploaded
     /// and the total encoded size of the upload.
+    #[uniffi(default = None)]
     pub progress_callback: Option<Arc<dyn UploadProgressCallback>>,
-}
-
-#[uniffi::export]
-impl UploadOptions {
-    /// Creates a new UploadOptions with default values.
-    #[uniffi::constructor]
-    fn new() -> Self {
-        Self {
-            max_inflight: 10,
-            data_shards: 10,
-            parity_shards: 20,
-            metadata: None,
-            progress_callback: None,
-        }
-    }
 }
 
 /// Provides options for a download operation.
