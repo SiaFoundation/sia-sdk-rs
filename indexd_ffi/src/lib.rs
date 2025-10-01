@@ -678,7 +678,29 @@ pub struct UploadOptions {
     pub max_inflight: u8,
     pub data_shards: u8,
     pub parity_shards: u8,
+
+    /// Optional metadata to attach to the object.
+    /// This will be encrypted with the object's master key.
+    pub metadata: Option<Vec<u8>>,
+    /// Optional callback to report upload progress.
+    /// The callback will be called with the number of bytes uploaded
+    /// and the total encoded size of the upload.
     pub progress_callback: Option<Arc<dyn UploadProgressCallback>>,
+}
+
+#[uniffi::export]
+impl UploadOptions {
+    /// Creates a new UploadOptions with default values.
+    #[uniffi::constructor]
+    fn new() -> Self {
+        Self {
+            max_inflight: 10,
+            data_shards: 10,
+            parity_shards: 20,
+            metadata: None,
+            progress_callback: None,
+        }
+    }
 }
 
 /// Provides options for a download operation.
@@ -868,6 +890,7 @@ impl SDK {
                         max_inflight: options.max_inflight as usize,
                         data_shards: options.data_shards,
                         parity_shards: options.parity_shards,
+                        metadata: options.metadata,
                         shard_uploaded: progress_tx,
                     },
                 )
