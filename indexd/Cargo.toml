@@ -34,6 +34,8 @@ serde_with = {version = "3.14.1", features = ["base64"]}
 hex = "0.4.3"
 chacha20poly1305 = "0.10.1"
 chrono = { version = "0.4.42", features = ["serde"] }
+blake2 = "0.10.6"
+hkdf = "0.12.4"
 
 [dev-dependencies]
 httptest = "0.16.3"

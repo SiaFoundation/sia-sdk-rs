@@ -1,14 +1,12 @@
 pub mod app_client;
-mod slabs;
 
 pub mod quic;
 use crate::quic::{
-    DownloadError, DownloadOptions, Downloader, SlabFetcher, UploadError, UploadOptions, Uploader,
+    DownloadError, DownloadOptions, Downloader, UploadError, UploadOptions, Uploader,
 };
 
 use crate::app_client::{Account, Client, ObjectsCursor, RegisterAppRequest};
 use log::debug;
-use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
 use sia::signing::PrivateKey;
 use sia::types::Hash256;
@@ -17,7 +15,11 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub use reqwest::{IntoUrl, Url};
+
+mod slabs;
 pub use slabs::*;
+
+mod object_encryption;
 
 pub struct DisconnectedState;
 
@@ -30,6 +32,7 @@ pub struct RegisteredState {
 }
 
 pub struct ConnectedState {
+    app_key: PrivateKey,
     app: Client,
     downloader: Downloader,
     uploader: Uploader,
@@ -48,6 +51,9 @@ pub enum Error {
 
     #[error("TLS error: {0}")]
     Tls(String),
+
+    #[error("sealed object: {0}")]
+    SealedObject(#[from] SealedObjectError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -164,6 +170,7 @@ impl SDK<RegisteredState> {
 
         Ok(SDK {
             state: ConnectedState {
+                app_key: self.state.app_key,
                 app: self.state.app,
                 downloader,
                 uploader,
@@ -176,28 +183,31 @@ impl SDK<ConnectedState> {
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
         reader: R,
-        metadata: Option<Vec<u8>>,
         options: UploadOptions,
-    ) -> Result<UploadMeta> {
-        let upload_meta = self
-            .state
-            .uploader
-            .upload(reader, metadata, options)
-            .await?;
-        Ok(upload_meta)
+    ) -> Result<Object> {
+        let object = self.state.uploader.upload(reader, options).await?;
+        Ok(object)
     }
 
     pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
-        writer: &mut W,
-        encryption_key: EncryptionKey,
+        w: W,
         object: &Object,
         options: DownloadOptions,
     ) -> Result<()> {
-        let slab_iterator = SlabFetcher::new(self.state.app.clone(), object.slabs.clone());
+        self.state.downloader.download(w, object, options).await?;
+        Ok(())
+    }
+
+    pub async fn download_shared<W: AsyncWriteExt + Unpin>(
+        &self,
+        w: W,
+        object: &SharedObject,
+        options: DownloadOptions,
+    ) -> Result<()> {
         self.state
             .downloader
-            .download(writer, encryption_key, slab_iterator, options)
+            .download_shared(w, object, options)
             .await?;
         Ok(())
     }
@@ -235,16 +245,15 @@ impl SDK<ConnectedState> {
     }
 
     pub async fn object(&self, key: &Hash256) -> Result<Object> {
-        self.state
+        let sealed = self
+            .state
             .app
             .object(key)
             .await
-            .map_err(|e| Error::App(format!("{e:?}")))
-            .and_then(|obj| {
-                obj.validate_object()
-                    .map(|_| obj)
-                    .map_err(|err| Error::App(err.to_string()))
-            })
+            .map_err(|e| Error::App(format!("{e:?}")))?;
+
+        let obj = sealed.open(&self.state.app_key)?;
+        Ok(obj)
     }
 
     pub async fn objects(
@@ -252,20 +261,18 @@ impl SDK<ConnectedState> {
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
     ) -> Result<Vec<Object>> {
-        self.state
+        let sealed = self
+            .state
             .app
             .objects(cursor, limit)
             .await
-            .map_err(|e| Error::App(format!("{e:?}")))
-            .and_then(|objs| {
-                objs.into_iter()
-                    .map(|obj| {
-                        obj.validate_object()
-                            .map(|_| obj)
-                            .map_err(|err| Error::App(err.to_string()))
-                    })
-                    .collect()
-            })
+            .map_err(|e| Error::App(format!("{e:?}")))?;
+
+        let objs = sealed
+            .into_iter()
+            .map(|s| s.open(&self.state.app_key))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(objs)
     }
 
     pub async fn prune_slabs(&self) -> Result<()> {
@@ -278,9 +285,10 @@ impl SDK<ConnectedState> {
     }
 
     pub async fn save_object(&self, object: &Object) -> Result<()> {
+        let sealed = object.seal(&self.state.app_key);
         self.state
             .app
-            .save_object(object)
+            .save_object(&sealed)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())

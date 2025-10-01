@@ -99,8 +99,10 @@ impl PrivateKey {
         let sk = SigningKey::from_bytes(&self.0[..32].try_into().unwrap());
         Signature::new(sk.sign(h).to_bytes())
     }
+}
 
-    pub fn as_bytes(&self) -> &[u8] {
+impl AsRef<[u8]> for PrivateKey {
+    fn as_ref(&self) -> &[u8] {
         &self.0
     }
 }
