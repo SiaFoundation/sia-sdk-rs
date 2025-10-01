@@ -918,12 +918,19 @@ impl SDK {
         Ok(slab.into())
     }
 
+    /// Pins slabs to the indexer.
+    pub async fn pin_slabs(&self, slabs: Vec<SlabPinParams>) -> Result<Vec<String>, Error> {
+        let slabs: Vec<AppSlabPinParams> = slabs
+            .into_iter()
+            .map(|s| s.try_into())
+            .collect::<Result<Vec<_>, _>>()?;
+        let slab_ids = self.app_client.pin_slabs(slabs).await?;
+        Ok(slab_ids.into_iter().map(|s| s.to_string()).collect())
+    }
+
     /// Pins a slab to the indexer.
-    pub async fn pin_slab(&self, slab_pin_params: SlabPinParams) -> Result<String, Error> {
-        let slab_id = self
-            .app_client
-            .pin_slab(slab_pin_params.try_into()?)
-            .await?;
+    pub async fn pin_slab(&self, slab: SlabPinParams) -> Result<String, Error> {
+        let slab_id = self.app_client.pin_slab(slab.try_into()?).await?;
         Ok(slab_id.to_string())
     }
 
