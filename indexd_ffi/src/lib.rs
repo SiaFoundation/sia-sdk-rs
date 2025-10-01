@@ -302,15 +302,15 @@ pub enum ObjectError {
     Encoding(#[from] encoding::Error),
 }
 
-/// An object that has been pinned to an indexer. Objects are immutable 
-/// data stored on the Sia network. The data is erasure-coded and distributed across 
-/// multiple storage providers. The object is encrypted with a unique encryption key, 
-/// which is used to encrypt the metadata. 
-/// 
-/// Custom user-defined metadata can be associated with the object. It is 
+/// An object that has been pinned to an indexer. Objects are immutable
+/// data stored on the Sia network. The data is erasure-coded and distributed across
+/// multiple storage providers. The object is encrypted with a unique encryption key,
+/// which is used to encrypt the metadata.
+///
+/// Custom user-defined metadata can be associated with the object. It is
 /// recommended to use a portable format like JSON for metadata.
 ///
-/// It can be sealed for secure offline storage or transmission and 
+/// It can be sealed for secure offline storage or transmission and
 /// later opened using the app key.
 ///
 /// It has no public fields to prevent accidental leakage or corruption.
