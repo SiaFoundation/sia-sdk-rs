@@ -2,12 +2,15 @@ use crate::signing::PrivateKey;
 use crate::types::Hash256;
 use bip39::{Error as MnemonicError, Language, Mnemonic};
 use blake2b_simd::Params;
+use thiserror::Error;
 
 pub struct Seed([u8; 16]);
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Error)]
 pub enum SeedError {
+    #[error("failed to parse recovery phrase")]
     MnemonicError,
+    #[error("invalid length of entropy, must be 16 bytes")]
     InvalidLength,
 }
 
@@ -253,7 +256,7 @@ mod tests {
         let seed = Seed::from_mnemonic(PHRASE).unwrap();
         for (i, expected) in test_addresses {
             let pk = seed.private_key(i);
-            assert_eq!(pk.as_bytes(), expected, "index {i}");
+            assert_eq!(pk.as_ref(), expected, "index {i}");
         }
     }
 

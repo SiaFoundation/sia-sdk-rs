@@ -16,6 +16,7 @@ path = "src/lib.rs"
 [dependencies]
 base64 = "0.22.1"
 bip39 = "2.2.0"
+blake2 = "0.10.6"
 blake2b_simd = "1.0.3"
 bytes = "1.10.1"
 chacha20 = "0.9.1"
