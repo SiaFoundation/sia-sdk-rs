@@ -302,33 +302,35 @@ pub enum ObjectError {
     Encoding(#[from] encoding::Error),
 }
 
-/// An object represents a file stored on the Sia network.
+/// An object that has been pinned to an indexer. Objects are immutable
+/// data stored on the Sia network. The data is erasure-coded and distributed across
+/// multiple storage providers. The object is encrypted with a unique encryption key,
+/// which is used to encrypt the metadata.
 ///
-/// It is made up of one or more slabs, which are erasure-coded segments of the file.
-/// The object is encrypted with a unique encryption key, which is used to encrypt
-/// the slabs and the metadata.
+/// Custom user-defined metadata can be associated with the object. It is
+/// recommended to use a portable format like JSON for metadata.
 ///
-/// It can be sealed for sharing, which encrypts the object's encryption key
-/// with a master key derived from the app key and a random nonce.
+/// It can be sealed for secure offline storage or transmission and
+/// later opened using the app key.
 ///
-/// It has no public fields to prevent accidental corruption of the object.
+/// It has no public fields to prevent accidental leakage or corruption.
 #[derive(uniffi::Object)]
-pub struct Object {
+pub struct PinnedObject {
     inner: Arc<Mutex<indexd::Object>>,
 }
 
-impl Object {
+impl PinnedObject {
     fn object(&self) -> indexd::Object {
         self.inner.lock().unwrap().clone()
     }
 }
 
 #[uniffi::export]
-impl Object {
+impl PinnedObject {
     /// Opens a sealed object using the provided app key.
     ///
     /// # Arguments
-    /// * `app_key` - The app key used to derive the master key to decrypt the object's encryption key.
+    /// * `app_key` - The app key that was used to seal the object.
     /// * `sealed` - The sealed object to open.
     ///
     /// # Returns
@@ -886,7 +888,7 @@ impl SDK {
     /// A [Download] object that can be used to read the data in chunks
     pub async fn download(
         &self,
-        object: Arc<Object>,
+        object: Arc<PinnedObject>,
         options: DownloadOptions,
     ) -> Result<Download, DownloadError> {
         let downloader = match self.downloader.get() {
@@ -972,7 +974,7 @@ impl SDK {
         &self,
         cursor: Option<ObjectsCursor>,
         limit: u32,
-    ) -> Result<Vec<Arc<Object>>, Error> {
+    ) -> Result<Vec<Arc<PinnedObject>>, Error> {
         let cursor = match cursor {
             Some(c) => Some(indexd::app_client::ObjectsCursor {
                 after: c.after.into(),
@@ -989,17 +991,17 @@ impl SDK {
             .into_iter()
             .map(|o| {
                 o.open(&self.app_key).map(|obj| {
-                    Arc::new(Object {
+                    Arc::new(PinnedObject {
                         inner: Arc::new(Mutex::new(obj)),
                     })
                 })
             })
-            .collect::<Result<Vec<Arc<Object>>, SealedObjectError>>()?;
+            .collect::<Result<Vec<Arc<PinnedObject>>, SealedObjectError>>()?;
         Ok(objects)
     }
 
     /// Saves an object to the indexer.
-    pub async fn save_object(&self, object: Arc<Object>) -> Result<(), Error> {
+    pub async fn save_object(&self, object: Arc<PinnedObject>) -> Result<(), Error> {
         let object = object.object();
         self.app_client
             .save_object(&object.seal(&self.app_key))
@@ -1015,11 +1017,11 @@ impl SDK {
     }
 
     /// Returns metadata about a specific object stored in the indexer.
-    pub async fn object(&self, key: String) -> Result<Arc<Object>, Error> {
+    pub async fn object(&self, key: String) -> Result<Arc<PinnedObject>, Error> {
         let key = Hash256::from_str(key.as_str())?;
         let obj = self.app_client.object(&key).await?;
         let obj = obj.open(&self.app_key)?;
-        Ok(Arc::new(Object {
+        Ok(Arc::new(PinnedObject {
             inner: Arc::new(Mutex::new(obj)),
         }))
     }
@@ -1105,7 +1107,7 @@ impl Upload {
     ///
     /// The caller must store the metadata locally in order to download
     /// it in the future.
-    pub async fn finalize(&self) -> Result<Arc<Object>, UploadError> {
+    pub async fn finalize(&self) -> Result<Arc<PinnedObject>, UploadError> {
         self.reader.close()?;
         let rx = self
             .rx
@@ -1114,7 +1116,7 @@ impl Upload {
             .take()
             .ok_or(UploadError::Closed)?;
         let object = rx.await.map_err(|e| UploadError::Custom(e.to_string()))??;
-        Ok(Arc::new(Object {
+        Ok(Arc::new(PinnedObject {
             inner: Arc::new(Mutex::new(object)),
         }))
     }
