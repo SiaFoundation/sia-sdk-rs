@@ -328,7 +328,7 @@ impl Client {
         path: &str,
         body: Option<&S>,
     ) -> Result<D> {
-        let body = body.map_or(None, |body| Some(to_vec(body).ok()?));
+        let body = body.map(|body| to_vec(body).ok()).flatten();
         let url = self.url.join(path)?;
         let query_params = self.sign(
             &url,
