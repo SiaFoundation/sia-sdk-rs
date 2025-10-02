@@ -83,7 +83,7 @@ pub struct RegisterAppResponse {
     pub expiration: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SlabPinParams {
     pub encryption_key: EncryptionKey,
@@ -280,9 +280,18 @@ impl Client {
         self.get_json("slabs", Some(&params)).await
     }
 
-    /// Pins a slab to the indexer.
+    /// Pins slabs to the indexer.
+    pub async fn pin_slabs(&self, slabs: Vec<SlabPinParams>) -> Result<Vec<Hash256>> {
+        self.post_json("slabs", Some(&slabs)).await
+    }
+
+    /// Pin a slab to the indexer.
     pub async fn pin_slab(&self, slab: SlabPinParams) -> Result<Hash256> {
-        self.post_json("slabs", Some(&slab)).await
+        self.pin_slabs(vec![slab])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(Error::Custom("no slab digest".to_string()))
     }
 
     /// Unpins a slab from the indexer.
@@ -709,12 +718,12 @@ mod tests {
         server.expect(
             Expectation::matching(all_of![
                 request::method_path("POST", "/slabs"),
-                request::body(serde_json::to_string(&slab).unwrap())
+                request::body(serde_json::to_string(&vec![slab.clone()]).unwrap())
             ])
             .respond_with(
                 Response::builder()
                     .status(StatusCode::OK)
-                    .body("\"43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28\"")
+                    .body("[\"43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28\"]")
                     .unwrap(),
             ),
         );
