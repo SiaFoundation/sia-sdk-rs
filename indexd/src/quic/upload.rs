@@ -69,6 +69,10 @@ pub struct UploadOptions {
     pub data_shards: u8,
     pub parity_shards: u8,
     pub max_inflight: usize,
+
+    /// Optional metadata to attach to the object.
+    /// This will be encrypted with the object's master key.
+    pub metadata: Option<Vec<u8>>,
     /// Optional channel to notify when each shard is uploaded.
     /// This can be used to implement progress reporting.
     pub shard_uploaded: Option<mpsc::UnboundedSender<()>>,
@@ -80,6 +84,7 @@ impl Default for UploadOptions {
             data_shards: 10,
             parity_shards: 20,
             max_inflight: 16,
+            metadata: None,
             shard_uploaded: None,
         }
     }
@@ -205,6 +210,9 @@ impl Uploader {
         let host_client = self.client.clone();
         let account_key = self.account_key.clone();
         let mut object = Object::default();
+        if let Some(metadata) = options.metadata {
+            object.metadata = metadata;
+        }
 
         // use a buffered reader since the erasure coder reads 64 bytes at a time.
         let mut r = object.reader(BufReader::new(r), 0);
