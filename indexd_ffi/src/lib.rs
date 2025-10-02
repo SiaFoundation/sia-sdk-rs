@@ -1062,6 +1062,12 @@ impl SDK {
         Ok(())
     }
 
+    /// Unpins slabs not used by any object on the account.
+    pub async fn prune_slabs(&self) -> Result<(), Error> {
+        self.app_client.prune_slabs().await?;
+        Ok(())
+    }
+
     /// Returns the current account.
     pub async fn account(&self) -> Result<Account, Error> {
         let account = self.app_client.account().await?;

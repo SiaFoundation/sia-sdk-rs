@@ -244,7 +244,7 @@ impl Client {
 
     /// Saves an object to the indexer.
     pub async fn save_object(&self, object: &SealedObject) -> Result<()> {
-        self.post_json::<_, EmptyResponse>("objects", object)
+        self.post_json::<_, EmptyResponse>("objects", Some(object))
             .await
             .map(|_| ())
     }
@@ -259,7 +259,7 @@ impl Client {
         &self,
         opts: &RegisterAppRequest,
     ) -> Result<RegisterAppResponse> {
-        self.post_json("auth/connect", opts).await
+        self.post_json("auth/connect", Some(opts)).await
     }
 
     /// Retrieves a slab from the indexer by its ID.
@@ -282,12 +282,19 @@ impl Client {
 
     /// Pins a slab to the indexer.
     pub async fn pin_slab(&self, slab: SlabPinParams) -> Result<Hash256> {
-        self.post_json("slabs", &slab).await
+        self.post_json("slabs", Some(&slab)).await
     }
 
     /// Unpins a slab from the indexer.
     pub async fn unpin_slab(&self, slab_id: &Hash256) -> Result<()> {
         self.delete(&format!("slabs/{slab_id}")).await
+    }
+
+    /// Unpins slabs not used by any object on the account.
+    pub async fn prune_slabs(&self) -> Result<()> {
+        self.post_json::<(), EmptyResponse>("slabs/prune", None)
+            .await
+            .map(|_| ())
     }
 
     /// Account returns the current account.
@@ -352,26 +359,26 @@ impl Client {
     async fn post_json<S: Serialize, D: DeserializeOwned>(
         &self,
         path: &str,
-        body: &S,
+        body: Option<&S>,
     ) -> Result<D> {
-        let body = to_vec(body)?;
+        let body = body.and_then(|body| to_vec(body).ok());
         let url = self.url.join(path)?;
         let query_params = self.sign(
             &url,
             Method::POST,
-            Some(&body),
+            body.as_deref(),
             Utc::now() + Duration::from_secs(60),
         );
-        Self::handle_response(
-            self.client
-                .post(url)
-                .query(&query_params)
-                .timeout(Duration::from_secs(15))
-                .body(body)
-                .send()
-                .await?,
-        )
-        .await
+        let mut builder = self
+            .client
+            .post(url)
+            .query(&query_params)
+            .timeout(Duration::from_secs(15));
+
+        if let Some(body) = body {
+            builder = builder.body(body);
+        }
+        Self::handle_response(builder.send().await?).await
     }
 
     fn request_hash(
@@ -593,7 +600,7 @@ mod tests {
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string(), app_key).unwrap();
         let _: Result<()> = client.get_json::<_, ()>("", None).await;
-        let _: Result<()> = client.post_json("", &"").await;
+        let _: Result<()> = client.post_json::<(), ()>("", None).await;
         let _: Result<()> = client.delete("").await;
     }
 
@@ -733,6 +740,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_prune_slabs() {
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/slabs/prune"),
+                request::body(""),
+            ])
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        client.prune_slabs().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_handle_response() {
         let server = Server::run();
         server.expect(
@@ -750,7 +774,7 @@ mod tests {
         let expected_error = Error::Api("something went wrong".to_string());
         let get_error = client.get_json::<(), ()>("", None).await.unwrap_err();
         assert_eq!(get_error.to_string(), expected_error.to_string());
-        let post_error = client.post_json::<(), ()>("", &()).await.unwrap_err();
+        let post_error = client.post_json::<(), ()>("", None).await.unwrap_err();
         assert_eq!(post_error.to_string(), expected_error.to_string());
         let delete_error = client.delete("").await.unwrap_err();
         assert_eq!(delete_error.to_string(), expected_error.to_string());

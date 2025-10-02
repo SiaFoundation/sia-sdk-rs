@@ -275,7 +275,16 @@ impl SDK<ConnectedState> {
         Ok(objs)
     }
 
-    pub async fn save_object(&self, object: Object) -> Result<()> {
+    pub async fn prune_slabs(&self) -> Result<()> {
+        self.state
+            .app
+            .prune_slabs()
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))?;
+        Ok(())
+    }
+
+    pub async fn save_object(&self, object: &Object) -> Result<()> {
         let sealed = object.seal(&self.state.app_key);
         self.state
             .app
