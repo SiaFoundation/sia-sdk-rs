@@ -1,6 +1,9 @@
 import asyncio
+import json
+from sys import stdin
 from indexd_ffi import generate_recovery_phrase, AppKey, AppMeta, Sdk, UploadOptions, DownloadOptions, set_logger, Logger
 from logging import fatal
+from datetime import datetime, timedelta, timezone
 
 class PrintLogger(Logger):
     def debug(self, msg):
@@ -17,7 +20,11 @@ class PrintLogger(Logger):
 
 set_logger(PrintLogger(), "debug")
 async def main():
-    mnemonic = generate_recovery_phrase()
+    print("Enter mnemonic (or leave empty to generate new):")
+    mnemonic = stdin.readline().strip()
+    if not mnemonic:
+        mnemonic = generate_recovery_phrase()
+
     print("mnemonic:", mnemonic)
     app_id = b'\x01' * 32
     app_key = AppKey(mnemonic, app_id)
@@ -39,27 +46,54 @@ async def main():
     print("Connected to indexd")
 
     writer = await sdk.upload(UploadOptions(
-        max_inflight=15,
-        data_shards=1,
-        parity_shards=3,
-        progress_callback=None
+        metadata=json.dumps({"example": "value"}).encode(),
     ))
     print("starting upload")
-    wrote_data = b'x02' * 1024
+    wrote_data = b'hello, world!'
     await writer.write(wrote_data)
-    print("Wrote 1024 bytes")
+    print("Wrote", len(wrote_data), "bytes")
     obj = await writer.finalize()
-    print("Upload finished")
+    print("Upload finished", obj.size(), obj.metadata().decode())
 
     sealed = obj.seal(app_key)
-    print("sealed:", sealed)
+    print("sealed:", sealed.id, sealed.signature)
 
-    reader = await sdk.download(obj, DownloadOptions(
-        max_inflight=15,
-        offset=0,
-        length=None,
-    ))
-    read_data = await reader.read_chunk()
+    reader = sdk.download(obj, DownloadOptions())
+    read_data = b''
+    while True:
+        chunk = await reader.read_chunk()
+        if not chunk:
+            break
+        read_data += chunk
+
+    if wrote_data != read_data:
+        print("data mismatch", wrote_data, read_data)
+
+    shared_object_url = sdk.share_object(obj, datetime.now(timezone.utc) + timedelta(hours=1))  # Expires in 1 hour
+    shared_object = await sdk.shared_object(shared_object_url)
+    print("shared object:", shared_object.size(), shared_object.metadata().decode())
+
+    shared_reader = sdk.download_shared(shared_object, DownloadOptions())
+    read_data = b''
+    while True:
+        chunk = await shared_reader.read_chunk()
+        if not chunk:
+            break
+        read_data += chunk
+    if wrote_data != read_data:
+        print("data mismatch", wrote_data, read_data)
+
+    new_object = await sdk.pin_shared(shared_object)
+    print("pinned object:", new_object.size(), new_object.metadata().decode())
+
+    new_reader = sdk.download(new_object, DownloadOptions())
+    read_data = b''
+    while True:
+        chunk = await new_reader.read_chunk()
+        if not chunk:
+            break
+        read_data += chunk
+
     if wrote_data != read_data:
         print("data mismatch", wrote_data, read_data)
 

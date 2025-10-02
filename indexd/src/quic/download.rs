@@ -437,7 +437,7 @@ impl Downloader {
         object: &SharedObject,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
-        let slabs: Vec<Slab> = object.slabs().iter().map(|s| s.clone().into()).collect();
+        let slabs: Vec<Slab> = object.slabs().clone();
         let mut w = object.writer(w, options.offset);
         self.download_slabs(&mut w, VecDeque::from(slabs), options)
             .await

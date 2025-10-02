@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::{DecryptError, open_metadata};
 use crate::slabs::Sector;
-use crate::{PinnedSlab, SealedObject, SharedObject, SharedSlab, SlabSlice};
+use crate::{Object, PinnedSlab, SealedObject, SharedObject, Slab, SlabSlice};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 
@@ -110,11 +110,34 @@ pub struct Account {
     pub service_url: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedObjectSlab {
+    pub id: Hash256,
+    pub encryption_key: EncryptionKey,
+    pub min_shards: u8,
+    pub sectors: Vec<Sector>,
+    pub offset: u32,
+    pub length: u32,
+}
+
+impl From<SharedObjectSlab> for Slab {
+    fn from(val: SharedObjectSlab) -> Self {
+        Slab {
+            encryption_key: val.encryption_key,
+            min_shards: val.min_shards,
+            sectors: val.sectors,
+            offset: val.offset,
+            length: val.length,
+        }
+    }
+}
+
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SharedObjectResponse {
-    pub slabs: Vec<SharedSlab>,
+    pub slabs: Vec<SharedObjectSlab>,
     #[serde_as(as = "Option<Base64>")]
     pub encrypted_metadata: Option<Vec<u8>>,
 }
@@ -123,8 +146,9 @@ impl SharedObjectResponse {
     pub fn id(&self) -> Hash256 {
         let mut state = Blake2b256::new();
         for slab in &self.slabs {
+            let slab: Slab = slab.clone().into();
             SlabSlice {
-                slab_id: slab.id,
+                slab_id: slab.digest(),
                 offset: slab.offset,
                 length: slab.length,
             }
@@ -415,20 +439,18 @@ impl Client {
     /// - `object_key` the key of the object
     /// - `encryption_key` the key used to encrypt the metadata
     /// - `valid_until` the time the link expires
-    pub fn object_share_url(
-        &self,
-        object_key: &Hash256,
-        encryption_key: [u8; 32],
-        valid_until: DateTime<Utc>,
-    ) -> Result<Url> {
+    pub fn object_share_url(&self, object: &Object, valid_until: DateTime<Utc>) -> Result<Url> {
         let mut url = self
             .url
-            .join(format!("objects/{}/shared", object_key).as_str())?;
+            .join(format!("objects/{}/shared", object.id()).as_str())?;
 
         let params = self.sign(&url, Method::GET, None, valid_until);
-
         url.set_fragment(Some(
-            format!("encryption_key={}", hex::encode(encryption_key)).as_str(),
+            format!(
+                "encryption_key={}",
+                hex::encode(object.encryption_key().as_ref())
+            )
+            .as_str(),
         ));
 
         let mut pairs = url.query_pairs_mut();
@@ -482,7 +504,7 @@ impl Client {
 
         Ok(SharedObject::new(
             encryption_key,
-            shared_object.slabs,
+            shared_object.slabs.into_iter().map(|s| s.into()).collect(),
             metadata,
         ))
     }

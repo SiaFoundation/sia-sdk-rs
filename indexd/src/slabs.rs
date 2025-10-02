@@ -27,7 +27,7 @@ pub struct Sector {
 
 /// A Slab is an erasure-coded collection of sectors. The sectors can be downloaded and
 /// used to recover the original data.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Slab {
     pub encryption_key: EncryptionKey,
     pub min_shards: u8,
@@ -195,6 +195,13 @@ impl Object {
     pub fn writer<W: AsyncWrite + Unpin>(&self, w: W, offset: usize) -> CipherWriter<W> {
         CipherWriter::new(w, self.encryption_key.clone(), offset)
     }
+
+    /// Returns the object's encryption key.
+    ///
+    /// Be careful when using this function to avoid accidental exposure.
+    pub(crate) fn encryption_key(&self) -> &EncryptionKey {
+        &self.encryption_key
+    }
 }
 
 impl Default for Object {
@@ -242,45 +249,19 @@ impl Object {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SharedSlab {
-    pub id: Hash256,
-    pub encryption_key: EncryptionKey,
-    pub min_shards: u8,
-    pub sectors: Vec<Sector>,
-    pub offset: u32,
-    pub length: u32,
-}
-
-impl From<SharedSlab> for Slab {
-    fn from(val: SharedSlab) -> Self {
-        Slab {
-            encryption_key: val.encryption_key,
-            min_shards: val.min_shards,
-            sectors: val.sectors,
-            offset: val.offset,
-            length: val.length,
-        }
-    }
-}
-
 /// A SharedObject is an object that can be shared with others. It contains the encryption key
 /// needed to decrypt the data, as well as the slabs that make up the object.
 ///
 /// It has no public fields to avoid corruption of the internal state.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SharedObject {
     encryption_key: EncryptionKey,
-    slabs: Vec<SharedSlab>,
+    slabs: Vec<Slab>,
     metadata: Option<Vec<u8>>,
 }
 
 impl SharedObject {
-    pub fn new(
-        encryption_key: EncryptionKey,
-        slabs: Vec<SharedSlab>,
-        metadata: Option<Vec<u8>>,
-    ) -> Self {
+    pub fn new(encryption_key: EncryptionKey, slabs: Vec<Slab>, metadata: Option<Vec<u8>>) -> Self {
         SharedObject {
             encryption_key,
             slabs,
@@ -288,7 +269,7 @@ impl SharedObject {
         }
     }
 
-    pub fn slabs(&self) -> &Vec<SharedSlab> {
+    pub fn slabs(&self) -> &Vec<Slab> {
         &self.slabs
     }
 
@@ -315,7 +296,7 @@ impl SharedObject {
                 .slabs
                 .iter()
                 .map(|s| SlabSlice {
-                    slab_id: s.id,
+                    slab_id: s.digest(),
                     offset: s.offset,
                     length: s.length,
                 })
@@ -335,7 +316,7 @@ impl From<SharedObject> for Object {
                 .slabs
                 .iter()
                 .map(|s| SlabSlice {
-                    slab_id: s.id,
+                    slab_id: s.digest(),
                     offset: s.offset,
                     length: s.length,
                 })

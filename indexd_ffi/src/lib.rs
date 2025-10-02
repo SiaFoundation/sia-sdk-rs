@@ -10,11 +10,9 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use indexd::app_client::{
-    Client as AppClient, RegisterAppRequest, SlabPinParams as AppSlabPinParams,
-};
+use indexd::app_client::{Client as AppClient, RegisterAppRequest, SlabPinParams};
 use indexd::quic::{Client as HostClient, Downloader, SlabFetcher, Uploader};
-use indexd::{SealedObjectError, SlabSlice, Url, quic};
+use indexd::{Object, SealedObjectError, SlabSlice, Url, quic};
 use log::debug;
 use rustls::ClientConfig;
 use rustls_platform_verifier::ConfigVerifierExt;
@@ -458,6 +456,27 @@ impl TryInto<indexd::SealedObject> for SealedObject {
     }
 }
 
+/// An object that has been shared from an indexer. Shared objects
+/// are read-only and cannot be modified. They can be downloaded
+/// using [Sdk.download_shared] or pinned using [Sdk.pin_shared].
+///
+/// It has no public fields to prevent accidental leakage or corruption.
+#[derive(uniffi::Object)]
+pub struct SharedObject(indexd::SharedObject);
+
+#[uniffi::export]
+impl SharedObject {
+    /// Returns the size of the object by summing the lengths of its slabs.
+    pub fn size(&self) -> u64 {
+        self.0.size()
+    }
+
+    /// Returns the slabs that make up the object.
+    pub fn metadata(&self) -> Vec<u8> {
+        self.0.metadata()
+    }
+}
+
 /// Information about a storage provider on the
 /// Sia network.
 #[derive(uniffi::Record)]
@@ -592,29 +611,6 @@ impl TryInto<indexd::Sector> for PinnedSector {
     }
 }
 
-#[derive(Clone, uniffi::Record)]
-pub struct SlabPinParams {
-    pub encryption_key: Arc<EncryptionKey>,
-    pub min_shards: u8,
-    pub sectors: Vec<PinnedSector>,
-}
-
-impl TryInto<AppSlabPinParams> for SlabPinParams {
-    type Error = Error;
-
-    fn try_into(self) -> Result<AppSlabPinParams, Error> {
-        Ok(AppSlabPinParams {
-            encryption_key: self.encryption_key.0.clone(),
-            min_shards: self.min_shards,
-            sectors: self
-                .sectors
-                .into_iter()
-                .map(|s| s.try_into())
-                .collect::<Result<Vec<_>, _>>()?,
-        })
-    }
-}
-
 /// The response from requesting app authorization.
 ///
 /// The `response_url` is the URL the user should visit to authorize the app.
@@ -696,8 +692,11 @@ pub struct UploadOptions {
 /// Provides options for a download operation.
 #[derive(uniffi::Record)]
 pub struct DownloadOptions {
+    #[uniffi(default = 10)]
     pub max_inflight: u8,
+    #[uniffi(default = 0)]
     pub offset: u64,
+    #[uniffi(default = None)]
     pub length: Option<u64>,
 }
 
@@ -899,7 +898,7 @@ impl SDK {
     ///
     /// # Returns
     /// A [Download] object that can be used to read the data in chunks
-    pub async fn download(
+    pub fn download(
         &self,
         object: Arc<PinnedObject>,
         options: DownloadOptions,
@@ -927,29 +926,20 @@ impl SDK {
     ///
     /// # Returns
     /// A [`DownloadShared`] object that can be used to read the data in chunks
-    pub async fn download_shared(
+    pub fn download_shared(
         &self,
-        share_url: &str,
+        shared_object: Arc<SharedObject>,
         options: DownloadOptions,
     ) -> Result<DownloadShared, DownloadError> {
         let downloader = match self.downloader.get() {
             Some(downloader) => downloader.clone(),
             None => return Err(DownloadError::NotConnected),
         };
-        let share_url: Url = share_url
-            .parse()
-            .map_err(|e| DownloadError::Custom(format!("{e}")))?;
-        let shared_object = self.app_client.shared_object(share_url).await?;
-        let object_size = shared_object.size();
-        let slab_iterator = VecDeque::from(
-            shared_object
-                .slabs()
-                .iter()
-                .map(|s| s.clone().into())
-                .collect::<Vec<indexd::Slab>>(),
-        );
+        let object_size = shared_object.0.size();
+        let slabs = shared_object.0.slabs().clone();
+        let slab_iterator = VecDeque::from(slabs);
         Ok(DownloadShared {
-            shared_object,
+            shared_object: shared_object.0.clone(),
             slabs: slab_iterator,
             state: Arc::new(Mutex::new(DownloadState {
                 offset: options.offset,
@@ -958,16 +948,6 @@ impl SDK {
             })),
             downloader,
         })
-    }
-
-    /// Retrieves the unsealed metadata for a shared object via a share URL.
-    pub async fn shared_object_metadata(&self, share_url: &str) -> Result<Vec<u8>, DownloadError> {
-        let share_url: Url = share_url
-            .parse()
-            .map_err(|e| DownloadError::Custom(format!("{e}")))?;
-        let object = self.app_client.shared_object(share_url).await?;
-
-        Ok(object.metadata())
     }
 
     /// Returns a list of all usable hosts.
@@ -1030,13 +1010,13 @@ impl SDK {
     }
 
     /// Returns metadata about a specific object stored in the indexer.
-    pub async fn object(&self, key: String) -> Result<Arc<PinnedObject>, Error> {
+    pub async fn object(&self, key: String) -> Result<PinnedObject, Error> {
         let key = Hash256::from_str(key.as_str())?;
         let obj = self.app_client.object(&key).await?;
         let obj = obj.open(&self.app_key)?;
-        Ok(Arc::new(PinnedObject {
+        Ok(PinnedObject {
             inner: Arc::new(Mutex::new(obj)),
-        }))
+        })
     }
 
     /// Returns metadata about a slab stored in the indexer.
@@ -1044,29 +1024,6 @@ impl SDK {
         let slab_id = Hash256::from_str(slab_id.as_str())?;
         let slab = self.app_client.slab(&slab_id).await?;
         Ok(slab.into())
-    }
-
-    /// Pins slabs to the indexer.
-    pub async fn pin_slabs(&self, slabs: Vec<SlabPinParams>) -> Result<Vec<String>, Error> {
-        let slabs: Vec<AppSlabPinParams> = slabs
-            .into_iter()
-            .map(|s| s.try_into())
-            .collect::<Result<Vec<_>, _>>()?;
-        let slab_ids = self.app_client.pin_slabs(slabs).await?;
-        Ok(slab_ids.into_iter().map(|s| s.to_string()).collect())
-    }
-
-    /// Pins a slab to the indexer.
-    pub async fn pin_slab(&self, slab: SlabPinParams) -> Result<String, Error> {
-        let slab_id = self.app_client.pin_slab(slab.try_into()?).await?;
-        Ok(slab_id.to_string())
-    }
-
-    /// UnpinSlab unpins a slab from the indexer.
-    pub async fn unpin_slab(&self, slab_id: String) -> Result<(), Error> {
-        let slab_id = Hash256::from_str(slab_id.as_str())?;
-        self.app_client.unpin_slab(&slab_id).await?;
-        Ok(())
     }
 
     /// Unpins slabs not used by any object on the account.
@@ -1083,20 +1040,52 @@ impl SDK {
 
     /// Creates a signed URL that can be used to share object metadata
     /// with other people using an indexer.
-    pub fn object_share_url(
+    pub fn share_object(
         &self,
-        object_key: String,
-        encryption_key: Vec<u8>,
+        object: Arc<PinnedObject>,
         valid_until: SystemTime,
     ) -> Result<String, Error> {
-        let object_key = Hash256::from_str(&object_key)?;
-        let encryption_key: [u8; 32] = encryption_key
-            .try_into()
-            .map_err(|_| Error::Custom("encryption key must be 32 bytes".into()))?;
-        let u =
-            self.app_client
-                .object_share_url(&object_key, encryption_key, valid_until.into())?;
+        let u = self
+            .app_client
+            .object_share_url(&object.object(), valid_until.into())?;
         Ok(u.to_string())
+    }
+
+    /// Retrieves a shared object from a signed URL.
+    pub async fn shared_object(&self, shared_url: &str) -> Result<SharedObject, Error> {
+        let shared_object = self
+            .app_client
+            .shared_object(
+                shared_url
+                    .parse()
+                    .map_err(|e| Error::Custom(format!("{e}")))?,
+            )
+            .await?;
+        Ok(SharedObject(shared_object))
+    }
+
+    /// Pins a shared object to the indexer and returns a [PinnedObject].
+    pub async fn pin_shared(&self, shared: Arc<SharedObject>) -> Result<PinnedObject, Error> {
+        let shared_object = shared.0.clone();
+
+        let slabs = shared_object
+            .slabs()
+            .iter()
+            .map(|s| SlabPinParams {
+                encryption_key: s.encryption_key.clone(),
+                min_shards: s.min_shards,
+                sectors: s.sectors.clone(),
+            })
+            .collect();
+
+        self.app_client.pin_slabs(slabs).await?;
+
+        let object: Object = shared_object.into();
+        let sealed_object: indexd::SealedObject = object.seal(&self.app_key);
+        self.app_client.save_object(&sealed_object).await?;
+        Ok(PinnedObject {
+            inner: Arc::new(Mutex::new(object)),
+        })
     }
 }
 
@@ -1133,7 +1122,7 @@ impl Upload {
     ///
     /// The caller must store the metadata locally in order to download
     /// it in the future.
-    pub async fn finalize(&self) -> Result<Arc<PinnedObject>, UploadError> {
+    pub async fn finalize(&self) -> Result<PinnedObject, UploadError> {
         self.reader.close()?;
         let rx = self
             .rx
@@ -1142,9 +1131,9 @@ impl Upload {
             .take()
             .ok_or(UploadError::Closed)?;
         let object = rx.await.map_err(|e| UploadError::Custom(e.to_string()))??;
-        Ok(Arc::new(PinnedObject {
+        Ok(PinnedObject {
             inner: Arc::new(Mutex::new(object)),
-        }))
+        })
     }
 }
 
