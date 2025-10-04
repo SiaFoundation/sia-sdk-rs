@@ -2,6 +2,12 @@
 name = "indexd_ffi"
 version = "0.2.0"
 edition = "2024"
+repository = "https://github.com/SiaFoundation/sia-sdk-rs"
+license = "MIT"
+description = "FFI SDK for interacting with a Sia network indexer"
+authors = ["The Sia Foundation"]
+categories = ["cryptography::cryptocurrencies"]
+keywords = ["sia", "decentralized", "blockchain", "depin", "storage"]
 
 [lib]
 crate-type = ["rlib", "cdylib", "staticlib"]
