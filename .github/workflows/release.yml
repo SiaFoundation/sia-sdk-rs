@@ -4,7 +4,10 @@ on:
   pull_request:
     types: [closed]
     branches: [master]
-  workflow_dispatch:
+
+permissions:
+  contents: write
+
 
 jobs:
   release:
@@ -19,6 +22,8 @@ jobs:
           rustup update stable
           cargo install knope
       - name: Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           knope release
           cargo publish --workspace
