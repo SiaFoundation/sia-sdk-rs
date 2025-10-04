@@ -1515,6 +1515,7 @@ dependencies = [
  "sia_sdk",
  "thiserror 2.0.17",
  "tokio",
+ "tokio-util",
  "uniffi",
  "zeroize",
 ]

@@ -5,6 +5,8 @@ use rand::TryRngCore;
 use rand::rngs::OsRng;
 use sia::blake2::{Blake2b256, Digest};
 use sia::seed::{Seed, SeedError};
+use tokio::select;
+use tokio_util::sync::CancellationToken;
 use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -23,7 +25,7 @@ use sia::{encoding, encryption};
 use thiserror::Error;
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::{OnceCell, oneshot};
+use tokio::sync::OnceCell;
 use tokio::task::JoinHandle;
 
 mod logging;
@@ -64,6 +66,9 @@ pub enum Error {
 pub enum UploadError {
     #[error("buffer closed")]
     Closed,
+
+    #[error("upload cancelled")]
+    Cancelled,
 
     #[error("upload error: {0}")]
     Upload(#[from] indexd::quic::UploadError),
@@ -850,9 +855,6 @@ impl SDK {
             None => return Err(UploadError::NotConnected),
         };
         let buf = ChunkedWriter::default();
-        let (tx, rx) = oneshot::channel();
-        let inner_buf = buf.clone();
-
         let progress_tx = if let Some(callback) = options.progress_callback {
             let total_shards = options.data_shards as u64 + options.parity_shards as u64;
             let slab_size = total_shards * SECTOR_SIZE as u64;
@@ -871,10 +873,18 @@ impl SDK {
             None
         };
 
+        let cancel_token = CancellationToken::new();
+        let result_token = cancel_token.clone();
+        let result_buf = buf.clone();
         let result = tokio::spawn(async move {
-            let res = uploader
-                .upload(
-                    inner_buf,
+            debug!("starting upload task");
+            select! {
+                _ = result_token.cancelled() => {
+                    debug!("upload cancelled");
+                    return Err(UploadError::Cancelled);
+                }
+                res = uploader.upload(
+                    result_buf,
                     quic::UploadOptions {
                         max_inflight: options.max_inflight as usize,
                         data_shards: options.data_shards,
@@ -882,15 +892,13 @@ impl SDK {
                         metadata: options.metadata,
                         shard_uploaded: progress_tx,
                     },
-                )
-                .await
-                .map_err(|e| e.into());
-            let _ = tx.send(res);
+                ) => res.map_err(|e| e.into()),
+            }
         });
         Ok(Upload {
             reader: buf.clone(),
-            result,
-            rx: Mutex::new(Some(rx)),
+            result: Mutex::new(Some(result)),
+            cancel: cancel_token,
         })
     }
 
@@ -1089,17 +1097,26 @@ impl SDK {
     }
 }
 
-pub type UploadReceiver = Mutex<Option<oneshot::Receiver<Result<indexd::Object, UploadError>>>>;
-
 /// Uploads data to the Sia network. It does so in chunks to support large files in
-/// arbitrary languages.
+/// arbitrary languages. 
+/// 
+/// Callers should write data using [`Upload::write`] until EoF, then call
+/// [`Upload::finalize`] to complete the upload and get the metadata. [`Upload::cancel`]
+/// can be called to abort an in-progress upload.
 ///
 /// Language bindings should provide a higher-level implementation that wraps a stream.
 #[derive(uniffi::Object)]
 pub struct Upload {
     reader: ChunkedWriter,
-    result: JoinHandle<()>,
-    rx: UploadReceiver,
+    result: Mutex<Option<JoinHandle<Result<Object, UploadError>>>>,
+    cancel: CancellationToken,
+}
+
+impl Drop for Upload {
+    fn drop(&mut self) {
+        self.cancel();
+        let _ = self.result.lock().unwrap().take(); // drop the result
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -1109,31 +1126,37 @@ impl Upload {
     ///
     /// Chunks should be written until EoF, then call [`Upload::finalize`].
     pub async fn write(&self, buf: &[u8]) -> Result<(), UploadError> {
-        if self.result.is_finished() {
-            return Err(UploadError::Closed);
-        }
-        self.reader.push_chunk(buf.to_vec()).await?;
-        Ok(())
+        self.reader.push_chunk(buf.to_vec()).await
+    }
+
+    /// Cancels an in-progress upload. This will drop any data
+    /// that has already been written.
+    pub fn cancel(&self) {
+        self.cancel.cancel(); // signal cancellation
+        let _ = self.reader.close(); // ignore error
     }
 
     /// Waits for all chunks of data to be pinned to the indexer and
     /// returns the metadata. Data can no longer be written after
-    /// calling finalize.
+    /// calling finalize. This function must only be called once.
     ///
     /// The caller must store the metadata locally in order to download
     /// it in the future.
     pub async fn finalize(&self) -> Result<PinnedObject, UploadError> {
         self.reader.close()?;
-        let rx = self
-            .rx
-            .lock()
-            .map_err(|e| UploadError::Custom(e.to_string()))?
-            .take()
-            .ok_or(UploadError::Closed)?;
-        let object = rx.await.map_err(|e| UploadError::Custom(e.to_string()))??;
-        Ok(PinnedObject {
-            inner: Arc::new(Mutex::new(object)),
-        })
+        let result = {
+            let mut result = self.result.lock().unwrap();
+            result.take()
+        };
+        match result {
+            Some(result) => {
+                let object = result.await.unwrap()?;
+                Ok(PinnedObject {
+                    inner: Arc::new(Mutex::new(object)),
+                })
+            },
+            None => return Err(UploadError::Closed),
+        }
     }
 }
 
