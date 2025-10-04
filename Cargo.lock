@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "indexd"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "blake2",
  "blake2b_simd",
@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "indexd_ffi"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "base64",
  "indexd",
@@ -2676,7 +2676,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "sia-sdk-derive"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2685,7 +2685,7 @@ dependencies = [
 
 [[package]]
 name = "sia_sdk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "bip39",
