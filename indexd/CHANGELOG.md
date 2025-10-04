@@ -22,10 +22,7 @@
 - Remove separate range methods.
 - Use randomly generated encryption keys.
 - Validate object key when fetching objects from indexd.
-
-#### Add method for pinning multiple slabs
-
-After https://github.com/SiaFoundation/indexd/pull/427 is merged, we will need to send an array of SlabPinParams to the pin slabs endpoint.  This PR makes the changes needed for that and also adds in helpers that preserve the old `pin_slab` functionality.
+- Add method for pinning multiple slabs
 
 ### Fixes
 
