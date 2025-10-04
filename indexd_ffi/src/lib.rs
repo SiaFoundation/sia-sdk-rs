@@ -5,12 +5,12 @@ use rand::TryRngCore;
 use rand::rngs::OsRng;
 use sia::blake2::{Blake2b256, Digest};
 use sia::seed::{Seed, SeedError};
-use tokio::select;
-use tokio_util::sync::CancellationToken;
 use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+use tokio::select;
+use tokio_util::sync::CancellationToken;
 
 use indexd::app_client::{Client as AppClient, RegisterAppRequest, SlabPinParams};
 use indexd::quic::{Client as HostClient, Downloader, SlabFetcher, Uploader};
@@ -24,8 +24,8 @@ use sia::types::{self, Hash256, HexParseError};
 use sia::{encoding, encryption};
 use thiserror::Error;
 use tokio::io::AsyncRead;
-use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::OnceCell;
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinHandle;
 
 mod logging;
@@ -877,11 +877,9 @@ impl SDK {
         let result_token = cancel_token.clone();
         let result_buf = buf.clone();
         let result = tokio::spawn(async move {
-            debug!("starting upload task");
             select! {
                 _ = result_token.cancelled() => {
-                    debug!("upload cancelled");
-                    return Err(UploadError::Cancelled);
+                    Err(UploadError::Cancelled)
                 }
                 res = uploader.upload(
                     result_buf,
@@ -1098,8 +1096,8 @@ impl SDK {
 }
 
 /// Uploads data to the Sia network. It does so in chunks to support large files in
-/// arbitrary languages. 
-/// 
+/// arbitrary languages.
+///
 /// Callers should write data using [`Upload::write`] until EoF, then call
 /// [`Upload::finalize`] to complete the upload and get the metadata. [`Upload::cancel`]
 /// can be called to abort an in-progress upload.
@@ -1154,8 +1152,8 @@ impl Upload {
                 Ok(PinnedObject {
                     inner: Arc::new(Mutex::new(object)),
                 })
-            },
-            None => return Err(UploadError::Closed),
+            }
+            None => Err(UploadError::Closed),
         }
     }
 }
