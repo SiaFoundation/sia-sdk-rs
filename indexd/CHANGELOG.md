@@ -1,3 +1,9 @@
+## 0.1.2 (2025-10-04)
+
+### Features
+
+- Add JSON serialization to ChainState
+
 ## 0.1.1 (2025-10-04)
 
 ### Features
