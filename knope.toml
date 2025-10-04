@@ -1,26 +1,32 @@
 [packages.sia_sdk]
 versioned_files = [
     "sia_sdk/Cargo.toml",
-    { path = "indexd/Cargo.toml", dependency = "sia_sdk" }
+    { path = "indexd/Cargo.toml", dependency = "sia_sdk" },
+    { path = "Cargo.lock", dependency = "sia_sdk" }
 ]
 changelog = "sia_sdk/CHANGELOG.md"
 
 [packages.sia_sdk_derive]
 versioned_files = [
     "sia_derive/Cargo.toml",
-    { path = "sia_sdk/Cargo.toml", dependency = "sia-sdk-derive" }
+    { path = "sia_sdk/Cargo.toml", dependency = "sia-sdk-derive" },
+    { path = "Cargo.lock", dependency = "sia-sdk-derive" }
 ]
 changelog = "sia_derive/CHANGELOG.md"
 
 [packages.indexd]
 versioned_files = [
     "indexd/Cargo.toml",
-    { path = "indexd_ffi/Cargo.toml", dependency = "indexd" }
+    { path = "indexd_ffi/Cargo.toml", dependency = "indexd" },
+    { path = "Cargo.lock", dependency = "indexd" }
 ]
 changelog = "indexd/CHANGELOG.md"
 
 [packages.indexd_ffi]
-versioned_files = ["indexd_ffi/Cargo.toml"]
+versioned_files = [
+    "indexd_ffi/Cargo.toml",
+    { path = "Cargo.lock", dependency = "indexd_ffi" }
+]
 changelog = "indexd_ffi/CHANGELOG.md"
 
 [[workflows]]
