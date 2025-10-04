@@ -24,6 +24,7 @@ jobs:
       - name: Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_API_KEY }}
         run: |
           knope release
-          cargo publish --workspace
+          cargo publish --workspace --registry crates-io
