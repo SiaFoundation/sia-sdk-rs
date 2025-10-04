@@ -1,3 +1,13 @@
+## 0.2.1 (2025-10-04)
+
+### Features
+
+- Add JSON serialization to ChainState
+
+### Fixes
+
+- Fix path dependency versions.
+
 ## 0.2.0 (2025-10-04)
 
 ### Breaking Changes
