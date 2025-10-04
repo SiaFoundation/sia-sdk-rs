@@ -21,7 +21,4 @@ jobs:
       - name: Release
         run: |
           knope release
-          cargo publish -p sia_sdk_derive
-          cargo publish -p sia_sdk
-          cargo publish -p indexd
-          cargo publish -p indexd_ffi
+          cargo publish --workspace
