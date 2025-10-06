@@ -104,7 +104,7 @@ pub enum SealedObjectError {
 }
 
 #[serde_as]
-#[derive(Debug, Deserialize, Serialize, SiaEncode, SiaDecode, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, SiaEncode, SiaDecode, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SealedObject {
     #[serde_as(as = "Base64")]
@@ -166,6 +166,17 @@ impl SealedObject {
             updated_at: self.updated_at,
         })
     }
+}
+
+/// An ObjectEvent represents an object and whether it was deleted or not.
+#[serde_as]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectEvent {
+    pub key: Hash256,
+    pub deleted: bool,
+    pub updated_at: DateTime<Utc>,
+    pub object: Option<SealedObject>,
 }
 
 // An Object represents a file stored on the Sia network, consisting of multiple slabs and

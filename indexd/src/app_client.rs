@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::{DecryptError, open_metadata};
 use crate::slabs::Sector;
-use crate::{Object, PinnedSlab, SealedObject, SharedObject, Slab, SlabSlice};
+use crate::{Object, ObjectEvent, PinnedSlab, SealedObject, SharedObject, Slab, SlabSlice};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 
@@ -254,7 +254,7 @@ impl Client {
         &self,
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
-    ) -> Result<Vec<SealedObject>> {
+    ) -> Result<Vec<ObjectEvent>> {
         let mut query_params = Vec::new();
         if let Some(limit) = limit {
             query_params.push(("limit", limit.to_string()));
@@ -1054,23 +1054,28 @@ mod tests {
 
         const TEST_OBJECTS_JSON: &str = r#"
         [{
-          "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
-          "slabs": [
-           {
-            "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
-            "offset": 0,
-            "length": 256
-           },
-           {
-            "slabID": "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405",
-            "offset": 256,
-            "length": 512
-           }
-          ],
-          "encryptedMetadata": "aGVsbG8gd29ybGQh",
-          "signature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
-          "createdAt": "2025-09-09T16:10:46.898399-07:00",
-          "updatedAt": "2025-09-09T16:10:46.898399-07:00"
+          "key": "3a707a322387c9f0f7549f35be78bf58cd2742b809f65d37b41ebba48226f5cf",
+          "deleted": false,
+          "updatedAt": "2025-09-09T16:10:46.898399-07:00",
+          "object": {
+              "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+              "slabs": [
+               {
+                "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
+                "offset": 0,
+                "length": 256
+               },
+               {
+                "slabID": "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405",
+                "offset": 256,
+                "length": 512
+               }
+              ],
+              "encryptedMetadata": "aGVsbG8gd29ybGQh",
+              "signature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+              "createdAt": "2025-09-09T16:10:46.898399-07:00",
+              "updatedAt": "2025-09-09T16:10:46.898399-07:00"
+          }
          }]
         "#;
 
@@ -1095,7 +1100,9 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        let client = Client::new(server.url("/").to_string(), app_key.clone()).unwrap();
+
+        // println!("AAAA: {}", object.clone().open(&app_key).unwrap().id());
         assert_eq!(
             client
                 .objects(
@@ -1107,7 +1114,12 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-            vec![object]
+            vec![ObjectEvent {
+                key: hash_256!("3a707a322387c9f0f7549f35be78bf58cd2742b809f65d37b41ebba48226f5cf"),
+                deleted: false,
+                updated_at: object.updated_at,
+                object: Some(object),
+            }]
         );
     }
 
