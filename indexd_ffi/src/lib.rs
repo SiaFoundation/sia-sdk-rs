@@ -984,17 +984,13 @@ impl SDK {
         let objects = objects
             .into_iter()
             .filter_map(|event| {
-                if event.deleted {
-                    None
-                } else {
-                    event.object.map(|sealed| {
-                        sealed.open(&self.app_key).map(|obj| {
-                            Arc::new(PinnedObject {
-                                inner: Arc::new(Mutex::new(obj)),
-                            })
+                event.object.map(|sealed| {
+                    sealed.open(&self.app_key).map(|obj| {
+                        Arc::new(PinnedObject {
+                            inner: Arc::new(Mutex::new(obj)),
                         })
                     })
-                }
+                })
             })
             .collect::<Result<Vec<Arc<PinnedObject>>, SealedObjectError>>()?;
         Ok(objects)

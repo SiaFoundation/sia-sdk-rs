@@ -272,13 +272,7 @@ impl SDK<ConnectedState> {
 
         let objs = events
             .into_iter()
-            .filter_map(|event| {
-                if event.deleted {
-                    None
-                } else {
-                    event.object.map(|sealed| sealed.open(&self.state.app_key))
-                }
-            })
+            .filter_map(|event| event.object.map(|sealed| sealed.open(&self.state.app_key)))
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(objs)
