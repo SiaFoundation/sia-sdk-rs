@@ -1100,7 +1100,7 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key.clone()).unwrap();
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
 
         assert_eq!(
             client
