@@ -12,11 +12,13 @@ use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, BufReader};
+use tokio::select;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::{JoinHandle, JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
 use tokio::time::{sleep, timeout};
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::app_client::{Client as AppClient, SlabPinParams};
@@ -56,6 +58,9 @@ pub enum UploadError {
 
     #[error("slab id mismatch")]
     InvalidSlabId,
+
+    #[error("upload cancelled")]
+    Cancelled,
 }
 
 pub struct Uploader {
@@ -196,6 +201,7 @@ impl Uploader {
     /// An object representing the uploaded data.
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
+        cancel: CancellationToken,
         r: R,
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
@@ -335,36 +341,47 @@ impl Uploader {
         });
 
         let mut slabs = Vec::new();
-        while let Some(res) = slab_rx.recv().await {
-            let (slab_index, slab) = res?;
-            debug!("uploaded slab {slab_index}");
-            // ensure the slabs vector is large enough
-            slabs.resize(
-                slabs.len().max(slab_index + 1),
-                SlabSlice {
-                    slab_id: Hash256::default(),
-                    offset: 0,
-                    length: 0,
+        loop {
+            select! {
+                _ = cancel.cancelled() => {
+                    read_slab_res.abort();
+                    return Err(UploadError::Cancelled);
                 },
-            );
-            let expected_slab_id = slab.digest();
-            let slab_id = self
-                .app_client
-                .pin_slab(SlabPinParams {
-                    encryption_key: slab.encryption_key,
-                    min_shards: slab.min_shards,
-                    sectors: slab.sectors,
-                })
-                .await?;
-            if slab_id != expected_slab_id {
-                return Err(UploadError::InvalidSlabId);
+                res = slab_rx.recv() => match res {
+                    Some(Ok((slab_index, slab))) => {
+                        debug!("uploaded slab {slab_index}");
+                        // ensure the slabs vector is large enough
+                        slabs.resize(
+                            slabs.len().max(slab_index + 1),
+                            SlabSlice {
+                                slab_id: Hash256::default(),
+                                offset: 0,
+                                length: 0,
+                            },
+                        );
+                        let expected_slab_id = slab.digest();
+                        let slab_id = self
+                            .app_client
+                            .pin_slab(SlabPinParams {
+                                encryption_key: slab.encryption_key,
+                                min_shards: slab.min_shards,
+                                sectors: slab.sectors,
+                            })
+                            .await?;
+                        if slab_id != expected_slab_id {
+                            return Err(UploadError::InvalidSlabId);
+                        }
+                        // overwrite the slab at the index
+                        slabs[slab_index] = SlabSlice {
+                            slab_id,
+                            offset: slab.offset,
+                            length: slab.length,
+                        };
+                    },
+                    Some(Err(e)) => return Err(e),
+                    None => break, // channel closed
+                },
             }
-            // overwrite the slab at the index
-            slabs[slab_index] = SlabSlice {
-                slab_id,
-                offset: slab.offset,
-                length: slab.length,
-            };
         }
         read_slab_res.await??;
 

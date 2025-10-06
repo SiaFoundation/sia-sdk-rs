@@ -13,6 +13,7 @@ use sia::types::Hash256;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
 
 pub use reqwest::{IntoUrl, Url};
 
@@ -182,10 +183,11 @@ impl SDK<RegisteredState> {
 impl SDK<ConnectedState> {
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
+        cancel: CancellationToken,
         reader: R,
         options: UploadOptions,
     ) -> Result<Object> {
-        let object = self.state.uploader.upload(reader, options).await?;
+        let object = self.state.uploader.upload(cancel, reader, options).await?;
         Ok(object)
     }
 

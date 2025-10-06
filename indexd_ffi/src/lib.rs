@@ -9,7 +9,6 @@ use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-use tokio::select;
 use tokio_util::sync::CancellationToken;
 
 use indexd::app_client::{Client as AppClient, RegisterAppRequest, SlabPinParams};
@@ -66,9 +65,6 @@ pub enum Error {
 pub enum UploadError {
     #[error("buffer closed")]
     Closed,
-
-    #[error("upload cancelled")]
-    Cancelled,
 
     #[error("upload error: {0}")]
     Upload(#[from] indexd::quic::UploadError),
@@ -874,14 +870,12 @@ impl SDK {
         };
 
         let cancel_token = CancellationToken::new();
-        let result_token = cancel_token.clone();
+        let upload_token = cancel_token.child_token();
         let result_buf = buf.clone();
         let result = tokio::spawn(async move {
-            select! {
-                _ = result_token.cancelled() => {
-                    Err(UploadError::Cancelled)
-                }
-                res = uploader.upload(
+            uploader
+                .upload(
+                    upload_token,
                     result_buf,
                     quic::UploadOptions {
                         max_inflight: options.max_inflight as usize,
@@ -890,8 +884,9 @@ impl SDK {
                         metadata: options.metadata,
                         shard_uploaded: progress_tx,
                     },
-                ) => res.map_err(|e| e.into()),
-            }
+                )
+                .await
+                .map_err(|e| e.into())
         });
         Ok(Upload {
             reader: buf.clone(),
@@ -1132,6 +1127,11 @@ impl Upload {
     pub fn cancel(&self) {
         self.cancel.cancel(); // signal cancellation
         let _ = self.reader.close(); // ignore error
+
+        let result = self.result.lock().unwrap().take();
+        if let Some(result) = result {
+            result.abort();
+        }
     }
 
     /// Waits for all chunks of data to be pinned to the indexer and
