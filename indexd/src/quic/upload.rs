@@ -126,6 +126,10 @@ impl Uploader {
         Ok(Sector { root, host_key })
     }
 
+    fn upload_timeout(attempts: usize) -> Duration {
+        Duration::from_secs((15 + (attempts as u64 * 2)).max(120))
+    }
+
     async fn upload_slab_shard(
         permit: OwnedSemaphorePermit,
         client: Client,
@@ -136,7 +140,7 @@ impl Uploader {
         progress_callback: Option<UnboundedSender<()>>,
     ) -> Result<(usize, Sector), UploadError> {
         let (host_key, attempts) = hosts.pop_front()?;
-        let write_timeout = Duration::from_millis(2500 + (attempts as u64 * 1000));
+        let mut write_timeout = Self::upload_timeout(attempts); // mutable so that it can be adjusted on retries
         let mut tasks = JoinSet::new();
         tasks.spawn(Self::upload_shard(
             client.clone(),
@@ -146,7 +150,6 @@ impl Uploader {
             data.clone(),
             write_timeout,
         ));
-        let mut write_timeout = write_timeout;
         let semaphore = permit.semaphore();
         loop {
             let hosts = hosts.clone();
@@ -164,7 +167,7 @@ impl Uploader {
                             debug!("shard {shard_index} upload failed {e:?}");
                             if tasks.is_empty() {
                                 let (host_key, attempts) = hosts.pop_front()?;
-                                write_timeout = Duration::from_millis(2500 + (attempts as u64 * 1000));
+                                write_timeout = Self::upload_timeout(attempts);
                                 tasks.spawn(Self::upload_shard(client.clone(), hosts.clone(), host_key, account_key.clone(), data.clone(), write_timeout));
                             }
                         }
@@ -180,7 +183,7 @@ impl Uploader {
                             let _racer = racer; // hold the permit until the task completes
                             debug!("racing slow host for shard {shard_index}");
                             let (host_key, attempts) = hosts.pop_front()?;
-                            let write_timeout = Duration::from_millis(500 + attempts as u64 * 10);
+                            let write_timeout = Self::upload_timeout(attempts);
                             Self::upload_shard(client.clone(), hosts.clone(), host_key, account_key, data, write_timeout).await
                         });
                     }
