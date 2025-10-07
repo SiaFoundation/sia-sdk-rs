@@ -1,3 +1,9 @@
+## 0.2.3 (2025-10-07)
+
+### Fixes
+
+- Update object listing endpoints to use events
+
 ## 0.2.2 (2025-10-04)
 
 ### Features
