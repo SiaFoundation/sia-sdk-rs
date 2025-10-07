@@ -457,6 +457,14 @@ impl TryInto<indexd::SealedObject> for SealedObject {
     }
 }
 
+/// An ObjectEvent represents an object and whether it was deleted or not.
+#[derive(uniffi::Record)]
+pub struct ObjectEvent {
+    pub key: String,
+    pub deleted: bool,
+    pub object: Option<Arc<PinnedObject>>,
+}
+
 /// An object that has been shared from an indexer. Shared objects
 /// are read-only and cannot be modified. They can be downloaded
 /// using [Sdk.download_shared] or pinned using [Sdk.pin_shared].
@@ -968,7 +976,7 @@ impl SDK {
         &self,
         cursor: Option<ObjectsCursor>,
         limit: u32,
-    ) -> Result<Vec<Arc<PinnedObject>>, Error> {
+    ) -> Result<Vec<ObjectEvent>, Error> {
         let cursor = match cursor {
             Some(c) => Some(indexd::app_client::ObjectsCursor {
                 after: c.after.into(),
@@ -976,6 +984,7 @@ impl SDK {
             }),
             None => None,
         };
+
         let objects = self
             .app_client
             .objects(cursor, Some(limit as usize))
@@ -983,14 +992,22 @@ impl SDK {
 
         let objects = objects
             .into_iter()
-            .map(|o| {
-                o.open(&self.app_key).map(|obj| {
-                    Arc::new(PinnedObject {
-                        inner: Arc::new(Mutex::new(obj)),
-                    })
+            .map(|event| {
+                let object = match event.object {
+                    Some(sealed) => Some(Arc::new(PinnedObject {
+                        inner: Arc::new(Mutex::new(sealed.open(&self.app_key)?)),
+                    })),
+                    None => None,
+                };
+
+                Ok(ObjectEvent {
+                    key: event.key.to_string(),
+                    deleted: event.deleted,
+                    object,
                 })
             })
-            .collect::<Result<Vec<Arc<PinnedObject>>, SealedObjectError>>()?;
+            .collect::<Result<Vec<ObjectEvent>, SealedObjectError>>()?;
+
         Ok(objects)
     }
 

@@ -263,17 +263,18 @@ impl SDK<ConnectedState> {
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
     ) -> Result<Vec<Object>> {
-        let sealed = self
+        let events = self
             .state
             .app
             .objects(cursor, limit)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
-        let objs = sealed
+        let objs = events
             .into_iter()
-            .map(|s| s.open(&self.state.app_key))
+            .filter_map(|event| event.object.map(|sealed| sealed.open(&self.state.app_key)))
             .collect::<std::result::Result<Vec<_>, _>>()?;
+
         Ok(objs)
     }
 
