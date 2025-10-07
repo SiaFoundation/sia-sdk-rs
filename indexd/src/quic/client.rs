@@ -462,15 +462,19 @@ impl ClientInner {
 
     async fn host_stream(&self, host: PublicKey) -> Result<Stream, Error> {
         let conn = if let Some(conn) = self.existing_conn(host) {
+            debug!("reusing existing connection to {host}");
             conn
         } else {
             let new_conn = timeout(Duration::from_secs(30), self.new_conn(host)).await??;
             let open_conns = &mut self.open_conns.lock().unwrap();
             open_conns.insert(host, new_conn.clone());
+            debug!("established new connection to {host}");
             new_conn
         };
 
-        let (send, recv) = conn.open_bi().await?;
+        let (send, recv) = conn.open_bi().await.inspect_err(|_| {
+            self.open_conns.lock().unwrap().remove(&host);
+        })?;
         Ok(Stream { send, recv })
     }
 
