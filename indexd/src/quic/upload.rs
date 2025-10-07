@@ -152,6 +152,7 @@ impl Uploader {
         ));
         let semaphore = permit.semaphore();
         loop {
+            let active = tasks.len();
             let hosts = hosts.clone();
             tokio::select! {
                 biased;
@@ -173,7 +174,7 @@ impl Uploader {
                         }
                     }
                 },
-                _ = sleep(write_timeout/2) => {
+                _ = sleep(Duration::from_secs(active as u64)) => {
                     if let Ok(racer) = semaphore.clone().try_acquire_owned() {
                         // only race if there's an empty slot
                         let client = client.clone();

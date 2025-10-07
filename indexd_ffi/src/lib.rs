@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+use tokio::select;
 use tokio_util::sync::CancellationToken;
 
 use indexd::app_client::{Client as AppClient, RegisterAppRequest, SlabPinParams};
@@ -93,6 +94,9 @@ pub enum DownloadError {
 
     #[error("not connected")]
     NotConnected,
+
+    #[error("cancelled")]
+    Cancelled,
 
     #[error("custom error: {0}")]
     Custom(String),
@@ -907,11 +911,12 @@ impl SDK {
     ///
     /// # Returns
     /// A [Download] object that can be used to read the data in chunks
-    pub fn download(
+    pub async fn download(
         &self,
         object: Arc<PinnedObject>,
         options: DownloadOptions,
     ) -> Result<Download, DownloadError> {
+        const CHUNK_SIZE: usize = 1 << 19; // 512KiB
         let downloader = match self.downloader.get() {
             Some(downloader) => downloader.clone(),
             None => return Err(DownloadError::NotConnected),
@@ -919,43 +924,100 @@ impl SDK {
         let object = object.object();
         let object_size = object.size();
         let slabs = SlabFetcher::new(self.app_client.clone(), object.slabs.clone());
+        let offset = options.offset as usize;
+        let total_length = options.length.unwrap_or(object_size) as usize;
+        let max_inflight = options.max_inflight;
+        let (chunk_tx, chunk_rx) = mpsc::channel(8); // 4MiB buffer
+        let cancel_token = CancellationToken::new();
+        let future_token = cancel_token.child_token();
+        tokio::spawn(async move {
+            for offset in (offset..total_length).step_by(CHUNK_SIZE) {
+                let mut buf = Vec::with_capacity(CHUNK_SIZE);
+                let mut w = object.writer(&mut buf, offset);
+                let future = downloader.download_slabs(
+                    &mut w,
+                    slabs.clone(),
+                    quic::DownloadOptions {
+                        offset,
+                        length: Some(total_length.min(CHUNK_SIZE)),
+                        max_inflight: max_inflight as usize,
+                    },
+                );
+                select! {
+                    _ = future_token.cancelled() => {
+                        chunk_tx.send(Err(DownloadError::Cancelled)).await.ok();
+                        return;
+                    },
+                    result = future => {
+                        debug!("downloaded chunk {}-{}", offset, offset+buf.len());
+                        let result = result
+                            .map(|_| buf)
+                            .map_err(DownloadError::from);
+                        chunk_tx.send(result).await.ok();
+                    }
+                }
+            }
+        });
         Ok(Download {
-            object,
-            slabs,
-            state: Arc::new(Mutex::new(DownloadState {
-                offset: options.offset,
-                length: options.length.unwrap_or(object_size),
-                max_inflight: options.max_inflight,
-            })),
-            downloader,
+            cancel_token,
+            rx: tokio::sync::Mutex::new(chunk_rx),
         })
     }
 
-    /// Initiates a download of all data in the shared object.
+    /// Initiates a download of the data referenced by the shared object, starting at `offset` and reading `length` bytes.
     ///
     /// # Returns
-    /// A [`DownloadShared`] object that can be used to read the data in chunks
-    pub fn download_shared(
+    /// A [`Download`] object that can be used to read the data in chunks
+    pub async fn download_shared(
         &self,
         shared_object: Arc<SharedObject>,
         options: DownloadOptions,
-    ) -> Result<DownloadShared, DownloadError> {
+    ) -> Result<Download, DownloadError> {
+        const CHUNK_SIZE: usize = 1 << 19; // 512KiB
         let downloader = match self.downloader.get() {
             Some(downloader) => downloader.clone(),
             None => return Err(DownloadError::NotConnected),
         };
-        let object_size = shared_object.0.size();
-        let slabs = shared_object.0.slabs().clone();
+        let shared_object = shared_object.0.clone();
+        let object_size = shared_object.size();
+        let slabs = shared_object.slabs().clone();
         let slab_iterator = VecDeque::from(slabs);
-        Ok(DownloadShared {
-            shared_object: shared_object.0.clone(),
-            slabs: slab_iterator,
-            state: Arc::new(Mutex::new(DownloadState {
-                offset: options.offset,
-                length: options.length.unwrap_or(object_size),
-                max_inflight: options.max_inflight,
-            })),
-            downloader,
+        let offset = options.offset as usize;
+        let total_length = options.length.unwrap_or(object_size) as usize;
+        let max_inflight = options.max_inflight;
+        let (chunk_tx, chunk_rx) = mpsc::channel(8); // 4MiB buffer
+        let cancel_token = CancellationToken::new();
+        let future_token = cancel_token.child_token();
+        tokio::spawn(async move {
+            for offset in (offset..total_length).step_by(CHUNK_SIZE) {
+                let mut buf = Vec::with_capacity(CHUNK_SIZE);
+                let mut w = shared_object.writer(&mut buf, offset);
+                let future = downloader.download_slabs(
+                    &mut w,
+                    slab_iterator.clone(),
+                    quic::DownloadOptions {
+                        offset,
+                        length: Some(total_length.min(CHUNK_SIZE)),
+                        max_inflight: max_inflight as usize,
+                    },
+                );
+                select! {
+                    _ = future_token.cancelled() => {
+                        chunk_tx.send(Err(DownloadError::Cancelled)).await.ok();
+                        return;
+                    },
+                    result = future => {
+                        let result = result
+                            .map(|_| buf)
+                            .map_err(DownloadError::from);
+                        chunk_tx.send(result).await.ok();
+                    }
+                }
+            }
+        });
+        Ok(Download {
+            cancel_token,
+            rx: tokio::sync::Mutex::new(chunk_rx),
         })
     }
 
@@ -1175,39 +1237,26 @@ impl Upload {
     }
 }
 
-#[derive(Clone, uniffi::Object)]
-struct DownloadState {
-    offset: u64,
-    length: u64,
-    max_inflight: u8,
-}
-
 /// Downloads data from the Sia network. It does so in chunks to support large files in
 /// arbitrary languages.
 ///
 /// Language bindings should provide a higher-level implementation that wraps a stream.
 #[derive(uniffi::Object)]
 pub struct Download {
-    object: indexd::Object,
-    slabs: SlabFetcher,
-    state: Arc<Mutex<DownloadState>>,
-    downloader: Arc<Downloader>,
+    cancel_token: CancellationToken,
+    rx: tokio::sync::Mutex<Receiver<Result<Vec<u8>, DownloadError>>>,
+}
+
+impl Drop for Download {
+    fn drop(&mut self) {
+        self.cancel();
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Download {
-    fn rem(&self) -> u64 {
-        let state = self.state.lock().unwrap();
-        state.length.saturating_sub(state.offset)
-    }
-
-    fn update(&self, n: u64) {
-        let mut state = self.state.lock().unwrap();
-        state.offset += n;
-    }
-
-    fn params(&self) -> DownloadState {
-        self.state.lock().unwrap().clone()
+    pub fn cancel(&self) {
+        self.cancel_token.cancel();
     }
 
     /// Reads a chunk of data from the Sia network.
@@ -1215,31 +1264,14 @@ impl Download {
     /// # Returns
     /// A vector containing the chunk of data read. If the vector is empty, the end of the download has been reached.
     pub async fn read_chunk(&self) -> Result<Vec<u8>, DownloadError> {
-        const DOWNLOAD_CHUNK_SIZE: u64 = 1 << 19; // 512 KiB
-
-        let state = self.params();
-        let rem = state
-            .length
-            .saturating_sub(state.offset)
-            .min(DOWNLOAD_CHUNK_SIZE);
-        if rem == 0 {
-            return Ok(Vec::with_capacity(0));
+        if self.cancel_token.is_cancelled() {
+            return Err(DownloadError::Cancelled);
         }
-        let mut buf = Vec::with_capacity(rem as usize);
-        let mut w = self.object.writer(&mut buf, state.offset as usize);
-        self.downloader
-            .download_slabs(
-                &mut w,
-                self.slabs.clone(),
-                quic::DownloadOptions {
-                    offset: state.offset as usize,
-                    length: Some(rem as usize),
-                    max_inflight: state.max_inflight as usize,
-                },
-            )
-            .await?;
-        self.update(buf.len() as u64);
-        Ok(buf)
+        let mut rx = self.rx.lock().await;
+        match rx.recv().await {
+            Some(res) => res,
+            None => Ok(Vec::with_capacity(0)),
+        }
     }
 }
 
@@ -1250,65 +1282,4 @@ pub fn encoded_size(size: u64, data_shards: u8, parity_shards: u8) -> u64 {
     let slab_size = total_shards * SECTOR_SIZE as u64;
     let slabs = size.div_ceil(data_shards as u64 * SECTOR_SIZE as u64);
     slabs * slab_size
-}
-
-/// Downloads data from the Sia network. It does so in chunks to support large files in
-/// arbitrary languages.
-///
-/// Language bindings should provide a higher-level implementation that wraps a stream.
-#[derive(uniffi::Object)]
-pub struct DownloadShared {
-    shared_object: indexd::SharedObject,
-    slabs: VecDeque<indexd::Slab>,
-    state: Arc<Mutex<DownloadState>>,
-    downloader: Arc<Downloader>,
-}
-
-#[uniffi::export(async_runtime = "tokio")]
-impl DownloadShared {
-    fn rem(&self) -> u64 {
-        let state = self.state.lock().unwrap();
-        state.length.saturating_sub(state.offset)
-    }
-
-    fn update(&self, n: u64) {
-        let mut state = self.state.lock().unwrap();
-        state.offset += n;
-    }
-
-    fn params(&self) -> DownloadState {
-        self.state.lock().unwrap().clone()
-    }
-
-    /// Reads a chunk of data from the Sia network.
-    ///
-    /// # Returns
-    /// A vector containing the chunk of data read. If the vector is empty, the end of the download has been reached.
-    pub async fn read_chunk(&self) -> Result<Vec<u8>, DownloadError> {
-        const DOWNLOAD_CHUNK_SIZE: u64 = 1 << 19; // 512 KiB
-
-        let state = self.params();
-        let rem = state
-            .length
-            .saturating_sub(state.offset)
-            .min(DOWNLOAD_CHUNK_SIZE);
-        if rem == 0 {
-            return Ok(Vec::with_capacity(0));
-        }
-        let mut buf = Vec::with_capacity(rem as usize);
-        let mut w = self.shared_object.writer(&mut buf, state.offset as usize);
-        self.downloader
-            .download_slabs(
-                &mut w,
-                self.slabs.clone(),
-                quic::DownloadOptions {
-                    offset: state.offset as usize,
-                    length: Some(rem as usize),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        self.update(buf.len() as u64);
-        Ok(buf)
-    }
 }

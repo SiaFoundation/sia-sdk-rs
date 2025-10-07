@@ -11,7 +11,7 @@ use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
 use tokio::time::sleep;
@@ -178,14 +178,13 @@ impl DownloaderInner {
     // preserve ordering and doesn't play nice with closures.
     async fn try_download_sector(
         self: Arc<Self>,
-        semaphore: Arc<Semaphore>,
+        _permit: OwnedSemaphorePermit,
         host_key: PublicKey,
         root: Hash256,
         offset: usize,
         limit: usize,
         index: usize,
     ) -> Result<(usize, Vec<u8>), DownloadError> {
-        let _permit = semaphore.acquire().await?;
         let data = self
             .host_client
             .read_sector(host_key, &self.account_key, root, offset, limit)
@@ -230,8 +229,9 @@ impl Downloader {
         let mut download_tasks = JoinSet::new();
         for (i, sector) in data_shards.iter().enumerate() {
             let inner = self.inner.clone();
+            let permit = semaphore.clone().acquire_owned().await?;
             download_tasks.spawn(inner.try_download_sector(
-                semaphore.clone(),
+                permit,
                 sector.host_key,
                 sector.root,
                 offset,
@@ -272,12 +272,13 @@ impl Downloader {
                             if rem == 0 {
                                 return Ok(shards); // sanity check
                             } else if download_tasks.len() <= rem as usize && let Some((i, sector)) = parity_shards.pop_front() {
+                                let permit = semaphore.clone().acquire_owned().await?;
                                 // only spawn additional download tasks if there are not
                                 // enough to satisfy the required number of shards. The
                                 // sleep arm will handle slow hosts.
                                 let inner = self.inner.clone();
                                 download_tasks.spawn(inner.try_download_sector(
-                                    semaphore.clone(),
+                                    permit,
                                     sector.host_key,
                                     sector.root,
                                     offset,
@@ -294,12 +295,13 @@ impl Downloader {
                             if rem == 0 {
                                 return Ok(shards); // sanity check
                             } else if download_tasks.len() <= rem as usize && let Some((i, sector)) = parity_shards.pop_front() {
+                                let permit = semaphore.clone().acquire_owned().await?;
                                 // only spawn additional download tasks if there are not
                                 // enough to satisfy the required number of shards. The
                                 // sleep arm will handle slow hosts.
                                 let inner = self.inner.clone();
                                 download_tasks.spawn(inner.try_download_sector(
-                                    semaphore.clone(),
+                                    permit,
                                     sector.host_key,
                                     sector.root,
                                     offset,
@@ -312,18 +314,19 @@ impl Downloader {
                         }
                     }
                 },
-                _ = sleep(Duration::from_secs(4)) => {
-                    if let Some((i, sector)) = parity_shards.pop_front(){
-                        let inner = self.inner.clone();
-                        download_tasks.spawn(inner.try_download_sector(
-                            semaphore.clone(),
-                            sector.host_key,
-                            sector.root,
-                            offset,
-                            limit,
-                            i,
-                        ));
-                    }
+                _ = sleep(Duration::from_secs(1)) => {
+                    if let Ok(racer_permit) = semaphore.clone().try_acquire_owned()
+                        && let Some((i, sector)) = parity_shards.pop_front() {
+                            let inner = self.inner.clone();
+                            download_tasks.spawn(inner.try_download_sector(
+                                racer_permit,
+                                sector.host_key,
+                                sector.root,
+                                offset,
+                                limit,
+                                i,
+                            ));
+                        }
                 }
             }
         }
