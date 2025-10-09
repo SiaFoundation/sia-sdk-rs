@@ -674,7 +674,7 @@ impl From<indexd::app_client::Account> for Account {
             service_account: a.service_account,
             max_pinned_data: a.max_pinned_data,
             pinned_data: a.pinned_data,
-            description: a.description,
+            description: a.description.unwrap_or_default(),
             logo_url: a.logo_url,
             service_url: a.service_url,
         }

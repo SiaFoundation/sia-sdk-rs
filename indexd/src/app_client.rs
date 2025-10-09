@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use blake2::Digest;
 use chrono::{DateTime, Utc};
+use log::debug;
 use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
 use serde_with::base64::Base64;
@@ -103,11 +104,12 @@ pub struct Account {
     pub service_account: bool,
     pub max_pinned_data: u64,
     pub pinned_data: u64,
-    pub description: String,
+    pub description: Option<String>,
     #[serde(rename = "logoURL")]
     pub logo_url: Option<String>,
     #[serde(rename = "serviceURL")]
     pub service_url: Option<String>,
+    pub last_used: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -332,7 +334,7 @@ impl Client {
 
     /// Account returns the current account.
     pub async fn account(&self) -> Result<Account> {
-        self.get_json::<_, ()>("account", None).await
+        self.get_json::<_, ()>("account", None).await.inspect_err(|e| debug!("{e:?}"))
     }
 
     /// Helper to send a signed DELETE request.

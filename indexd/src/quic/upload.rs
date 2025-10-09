@@ -127,7 +127,7 @@ impl Uploader {
     }
 
     fn upload_timeout(attempts: usize) -> Duration {
-        Duration::from_secs((15 + (attempts as u64 * 2)).max(120))
+        Duration::from_secs((60 * (attempts as u64)).max(120))
     }
 
     async fn upload_slab_shard(
