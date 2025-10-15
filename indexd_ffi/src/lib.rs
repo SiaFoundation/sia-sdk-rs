@@ -5,6 +5,7 @@ use rand::TryRngCore;
 use rand::rngs::OsRng;
 use sia::blake2::{Blake2b256, Digest};
 use sia::seed::{Seed, SeedError};
+use tokio::runtime::{Builder, Runtime};
 use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -24,7 +25,6 @@ use sia::types::{self, Hash256, HexParseError};
 use sia::{encoding, encryption};
 use thiserror::Error;
 use tokio::io::AsyncRead;
-use tokio::sync::OnceCell;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinHandle;
 
@@ -57,6 +57,19 @@ pub enum Error {
     #[error("sealed object error: {0}")]
     SealedObject(#[from] SealedObjectError),
 
+    #[error("error: {0}")]
+    Custom(String),
+}
+
+#[derive(Debug, Error, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum ConnectError {
+    #[error("not connected")]
+    NotConnected,
+    #[error("already connected")]
+    AlreadyConnected,
+    #[error("app client error: {0}")]
+    AppClient(#[from] indexd::app_client::Error),
     #[error("error: {0}")]
     Custom(String),
 }
@@ -720,11 +733,14 @@ pub struct DownloadOptions {
 pub struct SDK {
     app_key: PrivateKey,
     app_client: AppClient,
-    downloader: OnceCell<Arc<Downloader>>,
-    uploader: OnceCell<Arc<Uploader>>,
+    runtime: Runtime,
+    downloader: Arc<Downloader>,
+    uploader: Arc<Uploader>,
+
+    connected: Arc<Mutex<bool>>,
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl SDK {
     /// Creates a new SDK instance.
     ///
@@ -737,55 +753,74 @@ impl SDK {
     #[uniffi::constructor]
     pub fn new(indexer_url: String, app_key: Arc<AppKey>) -> Result<Self, Error> {
         let app_client = AppClient::new(indexer_url, app_key.0.clone())?;
+        let rt = Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::Custom(e.to_string()))?;
+
+        let app_key = app_key.0.clone();
+        let (uploader, downloader) = rt.block_on(async {
+            // install crypto provider
+            if rustls::crypto::CryptoProvider::get_default().is_none() {
+                rustls::crypto::ring::default_provider()
+                    .install_default()
+                    .map_err(|e| Error::Crypto(format!("{:?}", e)))?;
+            }
+
+            // load root certs
+            let rustls_config =
+                ClientConfig::with_platform_verifier().map_err(|e| Error::Custom(e.to_string()))?;
+            let host_client = HostClient::new(rustls_config)?;
+
+            let uploader =Arc::new(Uploader::new(
+                app_client.clone(),
+                host_client.clone(),
+                app_key.clone(),
+            ));
+
+            let downloader = Arc::new(Downloader::new(
+                app_client.clone(),
+                host_client.clone(),
+                app_key.clone(),
+            ));
+            Ok::<(Arc<Uploader>, Arc<Downloader>), Error>((uploader, downloader))
+        })?;
 
         Ok(Self {
-            app_key: app_key.0.clone(),
+            app_key: app_key.clone(),
             app_client: app_client.clone(),
-            downloader: OnceCell::new(),
-            uploader: OnceCell::new(),
+            runtime: rt,
+            downloader: downloader,
+            uploader: uploader,
+            connected: Arc::new(Mutex::new(false)),
         })
     }
 
     /// Returns true if the app key is authorized, returns false otherwise
-    pub async fn connect(&self) -> Result<bool, Error> {
-        let connected = self.app_client.check_app_authenticated().await?;
-        if self.downloader.initialized() {
-            return Ok(connected);
+    pub async fn connected(&self) -> bool {
+        let connected = {
+            let lock = self.connected.lock().unwrap();
+            *lock
+        };
+        if connected {
+            return true;
         }
 
-        // install crypto provider
-        if rustls::crypto::CryptoProvider::get_default().is_none() {
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .map_err(|e| Error::Crypto(format!("{:?}", e)))?;
-        }
-
-        // load root certs
-        let rustls_config =
-            ClientConfig::with_platform_verifier().map_err(|e| Error::Custom(e.to_string()))?;
-        let host_client = HostClient::new(rustls_config)?;
-
-        self.uploader
-            .get_or_init(|| async {
-                Arc::new(Uploader::new(
-                    self.app_client.clone(),
-                    host_client.clone(),
-                    self.app_key.clone(),
-                ))
-            })
-            .await;
-
-        self.downloader
-            .get_or_init(|| async {
-                Arc::new(Downloader::new(
-                    self.app_client.clone(),
-                    host_client.clone(),
-                    self.app_key.clone(),
-                ))
-            })
-            .await;
-
-        Ok(connected)
+        let is_connected = self.connected.clone();
+        let app_client = self.app_client.clone();
+        self.runtime.spawn(async move {
+            match app_client.check_app_authenticated().await {
+                Ok(authenticated) => {
+                    let mut lock = is_connected.lock().unwrap();
+                    *lock = authenticated;
+                    return authenticated;
+                }
+                Err(e) => {
+                    debug!("failed to check app authentication: {}", e);
+                    return false;
+                }
+            }
+        }).await.unwrap()
     }
 
     /// Requests permission for the app to connect to the indexer.
@@ -795,59 +830,75 @@ impl SDK {
     pub async fn request_app_connection(
         &self,
         meta: AppMeta,
-    ) -> Result<RequestAuthResponse, Error> {
-        let resp = self
-            .app_client
-            .request_app_connection(&RegisterAppRequest {
-                name: meta.name,
-                description: meta.description,
-                service_url: meta
-                    .service_url
-                    .parse()
-                    .map_err(|_| Error::Custom("invalid service URL".into()))?,
-                logo_url: meta
-                    .logo_url
-                    .map(|u| u.parse())
-                    .transpose()
-                    .map_err(|_| Error::Custom("invalid logo URL".into()))?,
-                callback_url: meta
-                    .callback_url
-                    .map(|u| u.parse())
-                    .transpose()
-                    .map_err(|_| Error::Custom("invalid callback URL".into()))?,
-            })
-            .await?;
+    ) -> Result<RequestAuthResponse, ConnectError> {
+        if self.connected().await {
+            return Err(ConnectError::AlreadyConnected);
+        }
 
-        Ok(RequestAuthResponse {
-            response_url: resp.response_url,
-            status_url: resp.status_url,
-        })
+        let app_client = self.app_client.clone();
+        self.runtime.spawn(async move {
+            let resp = app_client
+                .request_app_connection(&RegisterAppRequest {
+                    name: meta.name,
+                    description: meta.description,
+                    service_url: meta
+                        .service_url
+                        .parse()
+                        .map_err(|_| ConnectError::Custom("invalid service URL".into()))?,
+                    logo_url: meta
+                        .logo_url
+                        .map(|u| u.parse())
+                        .transpose()
+                        .map_err(|_| ConnectError::Custom("invalid logo URL".into()))?,
+                    callback_url: meta
+                        .callback_url
+                        .map(|u| u.parse())
+                        .transpose()
+                        .map_err(|_| ConnectError::Custom("invalid callback URL".into()))?,
+                })
+                .await?;
+
+            Ok(RequestAuthResponse {
+                response_url: resp.response_url,
+                status_url: resp.status_url,
+            })
+        }).await.unwrap()
     }
 
     /// Waits for the user to authorize or reject the app.
     ///
     /// # Returns
     /// True if the app was authorized, false if it was rejected.
-    pub async fn wait_for_connect(&self, resp: &RequestAuthResponse) -> Result<bool, Error> {
+    pub async fn wait_for_connect(&self, resp: &RequestAuthResponse) -> Result<bool, ConnectError> {
+        if self.connected().await {
+            return Err(ConnectError::AlreadyConnected);
+        }
+
         let status_url: Url = resp
             .status_url
             .parse()
-            .map_err(|_| Error::Custom("invalid status URL".into()))?;
+            .map_err(|_| ConnectError::Custom("invalid status URL".into()))?;
 
-        for _ in 0..100 {
-            // wait up to 5 minutes
-            if self
-                .app_client
-                .check_request_status(status_url.clone())
-                .await?
-            {
-                break;
+        let app_client = self.app_client.clone();
+        let connected = self.runtime.spawn(async move {
+            for _ in 0..100 {
+                // wait up to 5 minutes
+                if app_client
+                    .check_request_status(status_url.clone())
+                    .await?
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                debug!("waiting for user to authorize app");
             }
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            debug!("waiting for user to authorize app");
+            app_client.check_app_authenticated().await
+        }).await.unwrap()?;
+        if !connected {
+            return Ok(false);
         }
-        let resp = self.app_client.check_app_authenticated().await?;
-        Ok(resp)
+        // update connected state
+        Ok(self.connected().await)
     }
 
     /// Uploads data to the Sia network and pins it to the indexer
@@ -859,53 +910,55 @@ impl SDK {
     /// # Returns
     /// An object representing the uploaded data.
     pub async fn upload(&self, options: UploadOptions) -> Result<Upload, UploadError> {
-        let uploader = match self.uploader.get() {
-            Some(uploader) => uploader.clone(),
-            None => return Err(UploadError::NotConnected),
-        };
-        let buf = ChunkedWriter::default();
-        let progress_tx = if let Some(callback) = options.progress_callback {
-            let total_shards = options.data_shards as u64 + options.parity_shards as u64;
-            let slab_size = total_shards * SECTOR_SIZE as u64;
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            tokio::spawn(async move {
-                let mut sectors: u64 = 0;
-                while rx.recv().await.is_some() {
-                    sectors += 1;
-                    let size = sectors * SECTOR_SIZE as u64;
-                    let slabs_size = sectors.div_ceil(total_shards) * slab_size;
-                    callback.progress(size, slabs_size);
-                }
-            });
-            Some(tx)
-        } else {
-            None
-        };
+        if !self.connected().await {
+            return Err(UploadError::NotConnected);
+        }
+        let uploader = self.uploader.clone();
+        self.runtime.spawn(async move {
+            let buf = ChunkedWriter::default();
+            let progress_tx = if let Some(callback) = options.progress_callback {
+                let total_shards = options.data_shards as u64 + options.parity_shards as u64;
+                let slab_size = total_shards * SECTOR_SIZE as u64;
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                tokio::spawn(async move {
+                    let mut sectors: u64 = 0;
+                    while rx.recv().await.is_some() {
+                        sectors += 1;
+                        let size = sectors * SECTOR_SIZE as u64;
+                        let slabs_size = sectors.div_ceil(total_shards) * slab_size;
+                        callback.progress(size, slabs_size);
+                    }
+                });
+                Some(tx)
+            } else {
+                None
+            };
 
-        let cancel_token = CancellationToken::new();
-        let upload_token = cancel_token.child_token();
-        let result_buf = buf.clone();
-        let result = tokio::spawn(async move {
-            uploader
-                .upload(
-                    upload_token,
-                    result_buf,
-                    quic::UploadOptions {
-                        max_inflight: options.max_inflight as usize,
-                        data_shards: options.data_shards,
-                        parity_shards: options.parity_shards,
-                        metadata: options.metadata,
-                        shard_uploaded: progress_tx,
-                    },
-                )
-                .await
-                .map_err(|e| e.into())
-        });
-        Ok(Upload {
-            reader: buf.clone(),
-            result: Mutex::new(Some(result)),
-            cancel: cancel_token,
-        })
+            let cancel_token = CancellationToken::new();
+            let upload_token = cancel_token.child_token();
+            let result_buf = buf.clone();
+            let result = tokio::spawn(async move {
+                uploader
+                    .upload(
+                        upload_token,
+                        result_buf,
+                        quic::UploadOptions {
+                            max_inflight: options.max_inflight as usize,
+                            data_shards: options.data_shards,
+                            parity_shards: options.parity_shards,
+                            metadata: options.metadata,
+                            shard_uploaded: progress_tx,
+                        },
+                    )
+                    .await
+                    .map_err(|e| e.into())
+            });
+            Ok(Upload {
+                reader: buf.clone(),
+                result: Mutex::new(Some(result)),
+                cancel: cancel_token,
+            })
+        }).await.unwrap()
     }
 
     /// Initiates a download of the data referenced by the object, starting at `offset` and reading `length` bytes.
@@ -917,21 +970,22 @@ impl SDK {
         object: Arc<PinnedObject>,
         options: DownloadOptions,
     ) -> Result<Download, DownloadError> {
+        if !self.connected().await {
+            return Err(DownloadError::NotConnected);
+        }
+
         const CHUNK_SIZE: usize = 1 << 19; // 512KiB
-        let downloader = match self.downloader.get() {
-            Some(downloader) => downloader.clone(),
-            None => return Err(DownloadError::NotConnected),
-        };
+        let downloader = self.downloader.clone();
         let object = object.object();
-        let object_size = object.size();
         let slabs = SlabFetcher::new(self.app_client.clone(), object.slabs.clone());
+        let object_size = object.size();
         let offset = options.offset as usize;
         let total_length = options.length.unwrap_or(object_size) as usize;
         let max_inflight = options.max_inflight;
         let (chunk_tx, chunk_rx) = mpsc::channel(8); // 4MiB buffer
         let cancel_token = CancellationToken::new();
         let future_token = cancel_token.child_token();
-        tokio::spawn(async move {
+        self.runtime.spawn(async move {
             for offset in (offset..total_length).step_by(CHUNK_SIZE) {
                 let mut buf = Vec::with_capacity(CHUNK_SIZE);
                 let mut w = object.writer(&mut buf, offset);
@@ -974,11 +1028,11 @@ impl SDK {
         shared_object: Arc<SharedObject>,
         options: DownloadOptions,
     ) -> Result<Download, DownloadError> {
+        if !self.connected().await {
+            return Err(DownloadError::NotConnected);
+        }
         const CHUNK_SIZE: usize = 1 << 19; // 512KiB
-        let downloader = match self.downloader.get() {
-            Some(downloader) => downloader.clone(),
-            None => return Err(DownloadError::NotConnected),
-        };
+        let downloader = self.downloader.clone();
         let shared_object = shared_object.0.clone();
         let object_size = shared_object.size();
         let slabs = shared_object.slabs().clone();
@@ -989,7 +1043,7 @@ impl SDK {
         let (chunk_tx, chunk_rx) = mpsc::channel(8); // 4MiB buffer
         let cancel_token = CancellationToken::new();
         let future_token = cancel_token.child_token();
-        tokio::spawn(async move {
+        self.runtime.spawn(async move {
             for offset in (offset..total_length).step_by(CHUNK_SIZE) {
                 let mut buf = Vec::with_capacity(CHUNK_SIZE);
                 let mut w = shared_object.writer(&mut buf, offset);
@@ -1024,8 +1078,14 @@ impl SDK {
 
     /// Returns a list of all usable hosts.
     pub async fn hosts(&self) -> Result<Vec<Host>, Error> {
-        let hosts = self.app_client.hosts().await?;
-        Ok(hosts.into_iter().map(|h| h.into()).collect())
+        if !self.connected().await {
+            return Err(Error::NotConnected);
+        }
+        let app_client = self.app_client.clone();
+        self.runtime.spawn(async move {
+            let hosts = app_client.hosts().await?;
+            Ok(hosts.into_iter().map(|h| h.into()).collect())
+        }).await.unwrap()
     }
 
     /// Returns objects stored in the indexer. When syncing, the caller should
@@ -1040,6 +1100,9 @@ impl SDK {
         cursor: Option<ObjectsCursor>,
         limit: u32,
     ) -> Result<Vec<ObjectEvent>, Error> {
+        if !self.connected().await {
+            return Err(Error::NotConnected);
+        }
         let cursor = match cursor {
             Some(c) => Some(indexd::app_client::ObjectsCursor {
                 after: c.after.into(),
@@ -1047,77 +1110,120 @@ impl SDK {
             }),
             None => None,
         };
+        let app_client = self.app_client.clone();
+        let app_key = self.app_key.clone();
+        self.runtime.spawn(async move {
+            let objects = app_client.objects(cursor, Some(limit as usize))
+                .await?
+                .into_iter()
+                .map(|event| {
+                    let object = match event.object {
+                        Some(sealed) => Some(Arc::new(PinnedObject {
+                            inner: Arc::new(Mutex::new(sealed.open(&app_key)?)),
+                        })),
+                        None => None,
+                    };
 
-        let objects = self
-            .app_client
-            .objects(cursor, Some(limit as usize))
-            .await?;
-
-        let objects = objects
-            .into_iter()
-            .map(|event| {
-                let object = match event.object {
-                    Some(sealed) => Some(Arc::new(PinnedObject {
-                        inner: Arc::new(Mutex::new(sealed.open(&self.app_key)?)),
-                    })),
-                    None => None,
-                };
-
-                Ok(ObjectEvent {
-                    key: event.key.to_string(),
-                    deleted: event.deleted,
-                    updated_at: event.updated_at.into(),
-                    object,
+                    Ok(ObjectEvent {
+                        key: event.key.to_string(),
+                        deleted: event.deleted,
+                        updated_at: event.updated_at.into(),
+                        object,
+                    })
                 })
-            })
-            .collect::<Result<Vec<ObjectEvent>, SealedObjectError>>()?;
-
-        Ok(objects)
+                .collect::<Result<Vec<ObjectEvent>, SealedObjectError>>()?;
+            Ok(objects)
+        }).await.unwrap()
     }
 
     /// Saves an object to the indexer.
     pub async fn save_object(&self, object: Arc<PinnedObject>) -> Result<(), Error> {
+        if !self.connected().await {
+            return Err(Error::NotConnected);
+        }
+
         let object = object.object();
-        self.app_client
-            .save_object(&object.seal(&self.app_key))
-            .await?;
-        Ok(())
+        let app_client = self.app_client.clone();
+        let app_key = self.app_key.clone();
+        self.runtime.spawn(async move {
+            app_client
+                .save_object(&object.seal(&app_key))
+                .await?;
+            Ok(())
+        }).await.unwrap()
     }
 
     /// Deletes an object from the indexer.
     pub async fn delete_object(&self, key: String) -> Result<(), Error> {
+        if !self.connected().await {
+            return Err(Error::NotConnected);
+        }
+
         let key = Hash256::from_str(key.as_str())?;
-        self.app_client.delete_object(&key).await?;
-        Ok(())
+        let app_client = self.app_client.clone();
+        self.runtime.spawn(async move {
+            app_client.delete_object(&key).await?;
+            Ok(())
+        }).await.unwrap()
     }
 
     /// Returns metadata about a specific object stored in the indexer.
     pub async fn object(&self, key: String) -> Result<PinnedObject, Error> {
+        if !self.connected().await {
+            return Err(Error::NotConnected);
+        }
+
         let key = Hash256::from_str(key.as_str())?;
-        let obj = self.app_client.object(&key).await?;
-        let obj = obj.open(&self.app_key)?;
-        Ok(PinnedObject {
-            inner: Arc::new(Mutex::new(obj)),
-        })
+        let app_client = self.app_client.clone();
+        let app_key = self.app_key.clone();
+        self.runtime.spawn(async move {
+            let obj = app_client.object(&key)
+                .await?
+                .open(&app_key)?;
+            Ok(PinnedObject {
+                inner: Arc::new(Mutex::new(obj)),
+            })
+        }).await.unwrap()
     }
 
     /// Returns metadata about a slab stored in the indexer.
     pub async fn slab(&self, slab_id: String) -> Result<PinnedSlab, Error> {
+        if !self.connected().await {
+            return Err(Error::NotConnected);
+        }
+
         let slab_id = Hash256::from_str(slab_id.as_str())?;
-        let slab = self.app_client.slab(&slab_id).await?;
-        Ok(slab.into())
+        let app_client = self.app_client.clone();
+        self.runtime.spawn(async move {
+            let slab = app_client.slab(&slab_id).await?;
+            Ok(slab.into())
+        }).await.unwrap()
     }
 
     /// Unpins slabs not used by any object on the account.
     pub async fn prune_slabs(&self) -> Result<(), Error> {
-        self.app_client.prune_slabs().await?;
-        Ok(())
+        if !self.connected().await {
+            return Err(Error::NotConnected);
+        }
+
+        let app_client = self.app_client.clone();
+        self.runtime.spawn(async move {
+            app_client.prune_slabs().await?;
+            Ok(())
+        }).await.unwrap()
     }
 
     /// Returns the current account.
     pub async fn account(&self) -> Result<Account, Error> {
-        let account = self.app_client.account().await?;
-        Ok(account.into())
+        if !self.connected().await {
+            return Err(Error::NotConnected);
+        }
+
+        let app_client = self.app_client.clone();
+        self.runtime.spawn(async move {
+            let account = app_client.account().await?;
+            Ok(account.into())
+        }).await.unwrap()
     }
 
     /// Creates a signed URL that can be used to share object metadata
@@ -1135,20 +1241,25 @@ impl SDK {
 
     /// Retrieves a shared object from a signed URL.
     pub async fn shared_object(&self, shared_url: &str) -> Result<SharedObject, Error> {
-        let shared_object = self
-            .app_client
-            .shared_object(
-                shared_url
-                    .parse()
-                    .map_err(|e| Error::Custom(format!("{e}")))?,
-            )
-            .await?;
-        Ok(SharedObject(shared_object))
+        if !self.connected().await {
+            return Err(Error::NotConnected);
+        }
+        let app_client = self.app_client.clone();
+        let shared_url: Url = shared_url.parse().map_err(|e| Error::Custom(format!("{e}")))?;
+        self.runtime.spawn(async move {
+            let shared_object = app_client.shared_object(shared_url).await?;
+            Ok(SharedObject(shared_object))
+        }).await.unwrap()
     }
 
     /// Pins a shared object to the indexer and returns a [PinnedObject].
     pub async fn pin_shared(&self, shared: Arc<SharedObject>) -> Result<PinnedObject, Error> {
+        if !self.connected().await {
+            return Err(Error::NotConnected);
+        }
         let shared_object = shared.0.clone();
+        let app_client = self.app_client.clone();
+        let app_key = self.app_key.clone();
 
         let slabs = shared_object
             .slabs()
@@ -1159,15 +1270,16 @@ impl SDK {
                 sectors: s.sectors.clone(),
             })
             .collect();
-
-        self.app_client.pin_slabs(slabs).await?;
-
-        let object: Object = shared_object.into();
-        let sealed_object: indexd::SealedObject = object.seal(&self.app_key);
-        self.app_client.save_object(&sealed_object).await?;
-        Ok(PinnedObject {
-            inner: Arc::new(Mutex::new(object)),
-        })
+        
+        self.runtime.spawn(async move {
+            app_client.pin_slabs(slabs).await?;
+            let object: Object = shared_object.into();
+            let sealed_object: indexd::SealedObject = object.seal(&app_key);
+            app_client.save_object(&sealed_object).await?;
+            Ok(PinnedObject {
+                inner: Arc::new(Mutex::new(object)),
+            })
+        }).await.unwrap()
     }
 }
 
@@ -1193,7 +1305,7 @@ impl Drop for Upload {
     }
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl Upload {
     /// Writes a chunk of data to the Sia network. The data will be
     /// erasure-coded and encrypted before upload.
@@ -1255,7 +1367,7 @@ impl Drop for Download {
     }
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl Download {
     pub fn cancel(&self) {
         self.cancel_token.cancel();
