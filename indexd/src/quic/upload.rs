@@ -17,7 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::{JoinHandle, JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
-use tokio::time::{sleep, timeout};
+use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -112,15 +112,24 @@ impl Uploader {
         data: Bytes,
         write_timeout: Duration,
     ) -> Result<Sector, UploadError> {
+        let now = Instant::now();
         let root = timeout(
             write_timeout,
             client.write_sector(host_key, &account_key, data),
         )
         .await
-        .inspect_err(|_| {
+        .inspect_err(|e| {
+            debug!(
+                "upload to host {host_key} timed out after {:?} {e}",
+                now.elapsed()
+            );
             let _ = hosts.retry(host_key);
         })?
-        .inspect_err(|_| {
+        .inspect_err(|e| {
+            debug!(
+                "upload to host {host_key} failed after {:?} {e}",
+                now.elapsed()
+            );
             let _ = hosts.retry(host_key);
         })?;
         Ok(Sector { root, host_key })

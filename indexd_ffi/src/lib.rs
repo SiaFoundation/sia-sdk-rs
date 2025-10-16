@@ -5,11 +5,11 @@ use rand::TryRngCore;
 use rand::rngs::OsRng;
 use sia::blake2::{Blake2b256, Digest};
 use sia::seed::{Seed, SeedError};
-use tokio::runtime::{Builder, Runtime};
 use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+use tokio::runtime::{Builder, Runtime};
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 
@@ -771,7 +771,7 @@ impl SDK {
                 ClientConfig::with_platform_verifier().map_err(|e| Error::Custom(e.to_string()))?;
             let host_client = HostClient::new(rustls_config)?;
 
-            let uploader =Arc::new(Uploader::new(
+            let uploader = Arc::new(Uploader::new(
                 app_client.clone(),
                 host_client.clone(),
                 app_key.clone(),
@@ -789,8 +789,8 @@ impl SDK {
             app_key: app_key.clone(),
             app_client: app_client.clone(),
             runtime: rt,
-            downloader: downloader,
-            uploader: uploader,
+            downloader,
+            uploader,
             connected: Arc::new(Mutex::new(false)),
         })
     }
@@ -807,19 +807,22 @@ impl SDK {
 
         let is_connected = self.connected.clone();
         let app_client = self.app_client.clone();
-        self.runtime.spawn(async move {
-            match app_client.check_app_authenticated().await {
-                Ok(authenticated) => {
-                    let mut lock = is_connected.lock().unwrap();
-                    *lock = authenticated;
-                    return authenticated;
+        self.runtime
+            .spawn(async move {
+                match app_client.check_app_authenticated().await {
+                    Ok(authenticated) => {
+                        let mut lock = is_connected.lock().unwrap();
+                        *lock = authenticated;
+                        authenticated
+                    }
+                    Err(e) => {
+                        debug!("failed to check app authentication: {}", e);
+                        false
+                    }
                 }
-                Err(e) => {
-                    debug!("failed to check app authentication: {}", e);
-                    return false;
-                }
-            }
-        }).await.unwrap()
+            })
+            .await
+            .unwrap()
     }
 
     /// Requests permission for the app to connect to the indexer.
@@ -835,33 +838,36 @@ impl SDK {
         }
 
         let app_client = self.app_client.clone();
-        self.runtime.spawn(async move {
-            let resp = app_client
-                .request_app_connection(&RegisterAppRequest {
-                    name: meta.name,
-                    description: meta.description,
-                    service_url: meta
-                        .service_url
-                        .parse()
-                        .map_err(|_| ConnectError::Custom("invalid service URL".into()))?,
-                    logo_url: meta
-                        .logo_url
-                        .map(|u| u.parse())
-                        .transpose()
-                        .map_err(|_| ConnectError::Custom("invalid logo URL".into()))?,
-                    callback_url: meta
-                        .callback_url
-                        .map(|u| u.parse())
-                        .transpose()
-                        .map_err(|_| ConnectError::Custom("invalid callback URL".into()))?,
-                })
-                .await?;
+        self.runtime
+            .spawn(async move {
+                let resp = app_client
+                    .request_app_connection(&RegisterAppRequest {
+                        name: meta.name,
+                        description: meta.description,
+                        service_url: meta
+                            .service_url
+                            .parse()
+                            .map_err(|_| ConnectError::Custom("invalid service URL".into()))?,
+                        logo_url: meta
+                            .logo_url
+                            .map(|u| u.parse())
+                            .transpose()
+                            .map_err(|_| ConnectError::Custom("invalid logo URL".into()))?,
+                        callback_url: meta
+                            .callback_url
+                            .map(|u| u.parse())
+                            .transpose()
+                            .map_err(|_| ConnectError::Custom("invalid callback URL".into()))?,
+                    })
+                    .await?;
 
-            Ok(RequestAuthResponse {
-                response_url: resp.response_url,
-                status_url: resp.status_url,
+                Ok(RequestAuthResponse {
+                    response_url: resp.response_url,
+                    status_url: resp.status_url,
+                })
             })
-        }).await.unwrap()
+            .await
+            .unwrap()
     }
 
     /// Waits for the user to authorize or reject the app.
@@ -879,20 +885,21 @@ impl SDK {
             .map_err(|_| ConnectError::Custom("invalid status URL".into()))?;
 
         let app_client = self.app_client.clone();
-        let connected = self.runtime.spawn(async move {
-            for _ in 0..100 {
-                // wait up to 5 minutes
-                if app_client
-                    .check_request_status(status_url.clone())
-                    .await?
-                {
-                    break;
+        let connected = self
+            .runtime
+            .spawn(async move {
+                for _ in 0..100 {
+                    // wait up to 5 minutes
+                    if app_client.check_request_status(status_url.clone()).await? {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    debug!("waiting for user to authorize app");
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                debug!("waiting for user to authorize app");
-            }
-            app_client.check_app_authenticated().await
-        }).await.unwrap()?;
+                app_client.check_app_authenticated().await
+            })
+            .await
+            .unwrap()?;
         if !connected {
             return Ok(false);
         }
@@ -913,51 +920,54 @@ impl SDK {
             return Err(UploadError::NotConnected);
         }
         let uploader = self.uploader.clone();
-        self.runtime.spawn(async move {
-            let buf = ChunkedWriter::default();
-            let progress_tx = if let Some(callback) = options.progress_callback {
-                let total_shards = options.data_shards as u64 + options.parity_shards as u64;
-                let slab_size = total_shards * SECTOR_SIZE as u64;
-                let (tx, mut rx) = mpsc::unbounded_channel();
-                tokio::spawn(async move {
-                    let mut sectors: u64 = 0;
-                    while rx.recv().await.is_some() {
-                        sectors += 1;
-                        let size = sectors * SECTOR_SIZE as u64;
-                        let slabs_size = sectors.div_ceil(total_shards) * slab_size;
-                        callback.progress(size, slabs_size);
-                    }
-                });
-                Some(tx)
-            } else {
-                None
-            };
+        self.runtime
+            .spawn(async move {
+                let buf = ChunkedWriter::default();
+                let progress_tx = if let Some(callback) = options.progress_callback {
+                    let total_shards = options.data_shards as u64 + options.parity_shards as u64;
+                    let slab_size = total_shards * SECTOR_SIZE as u64;
+                    let (tx, mut rx) = mpsc::unbounded_channel();
+                    tokio::spawn(async move {
+                        let mut sectors: u64 = 0;
+                        while rx.recv().await.is_some() {
+                            sectors += 1;
+                            let size = sectors * SECTOR_SIZE as u64;
+                            let slabs_size = sectors.div_ceil(total_shards) * slab_size;
+                            callback.progress(size, slabs_size);
+                        }
+                    });
+                    Some(tx)
+                } else {
+                    None
+                };
 
-            let cancel_token = CancellationToken::new();
-            let upload_token = cancel_token.child_token();
-            let result_buf = buf.clone();
-            let result = tokio::spawn(async move {
-                uploader
-                    .upload(
-                        upload_token,
-                        result_buf,
-                        quic::UploadOptions {
-                            max_inflight: options.max_inflight as usize,
-                            data_shards: options.data_shards,
-                            parity_shards: options.parity_shards,
-                            metadata: options.metadata,
-                            shard_uploaded: progress_tx,
-                        },
-                    )
-                    .await
-                    .map_err(|e| e.into())
-            });
-            Ok(Upload {
-                reader: buf.clone(),
-                result: Mutex::new(Some(result)),
-                cancel: cancel_token,
+                let cancel_token = CancellationToken::new();
+                let upload_token = cancel_token.child_token();
+                let result_buf = buf.clone();
+                let result = tokio::spawn(async move {
+                    uploader
+                        .upload(
+                            upload_token,
+                            result_buf,
+                            quic::UploadOptions {
+                                max_inflight: options.max_inflight as usize,
+                                data_shards: options.data_shards,
+                                parity_shards: options.parity_shards,
+                                metadata: options.metadata,
+                                shard_uploaded: progress_tx,
+                            },
+                        )
+                        .await
+                        .map_err(|e| e.into())
+                });
+                Ok(Upload {
+                    reader: buf.clone(),
+                    result: Mutex::new(Some(result)),
+                    cancel: cancel_token,
+                })
             })
-        }).await.unwrap()
+            .await
+            .unwrap()
     }
 
     /// Initiates a download of the data referenced by the object, starting at `offset` and reading `length` bytes.
@@ -1081,10 +1091,13 @@ impl SDK {
             return Err(Error::NotConnected);
         }
         let app_client = self.app_client.clone();
-        self.runtime.spawn(async move {
-            let hosts = app_client.hosts().await?;
-            Ok(hosts.into_iter().map(|h| h.into()).collect())
-        }).await.unwrap()
+        self.runtime
+            .spawn(async move {
+                let hosts = app_client.hosts().await?;
+                Ok(hosts.into_iter().map(|h| h.into()).collect())
+            })
+            .await
+            .unwrap()
     }
 
     /// Returns objects stored in the indexer. When syncing, the caller should
@@ -1111,27 +1124,31 @@ impl SDK {
         };
         let app_client = self.app_client.clone();
         let app_key = self.app_key.clone();
-        self.runtime.spawn(async move {
-            let objects = app_client.objects(cursor, Some(limit as usize))
-                .await?
-                .into_iter()
-                .map(|event| {
-                    let object = match event.object {
-                        Some(sealed) => Some(Arc::new(PinnedObject {
-                            inner: Arc::new(Mutex::new(sealed.open(&app_key)?)),
-                        })),
-                        None => None,
-                    };
+        self.runtime
+            .spawn(async move {
+                let objects = app_client
+                    .objects(cursor, Some(limit as usize))
+                    .await?
+                    .into_iter()
+                    .map(|event| {
+                        let object = match event.object {
+                            Some(sealed) => Some(Arc::new(PinnedObject {
+                                inner: Arc::new(Mutex::new(sealed.open(&app_key)?)),
+                            })),
+                            None => None,
+                        };
 
-                    Ok(ObjectEvent {
-                        key: event.key.to_string(),
-                        deleted: event.deleted,
-                        object,
+                        Ok(ObjectEvent {
+                            key: event.key.to_string(),
+                            deleted: event.deleted,
+                            object,
+                        })
                     })
-                })
-                .collect::<Result<Vec<ObjectEvent>, SealedObjectError>>()?;
-            Ok(objects)
-        }).await.unwrap()
+                    .collect::<Result<Vec<ObjectEvent>, SealedObjectError>>()?;
+                Ok(objects)
+            })
+            .await
+            .unwrap()
     }
 
     /// Saves an object to the indexer.
@@ -1143,12 +1160,13 @@ impl SDK {
         let object = object.object();
         let app_client = self.app_client.clone();
         let app_key = self.app_key.clone();
-        self.runtime.spawn(async move {
-            app_client
-                .save_object(&object.seal(&app_key))
-                .await?;
-            Ok(())
-        }).await.unwrap()
+        self.runtime
+            .spawn(async move {
+                app_client.save_object(&object.seal(&app_key)).await?;
+                Ok(())
+            })
+            .await
+            .unwrap()
     }
 
     /// Deletes an object from the indexer.
@@ -1159,10 +1177,13 @@ impl SDK {
 
         let key = Hash256::from_str(key.as_str())?;
         let app_client = self.app_client.clone();
-        self.runtime.spawn(async move {
-            app_client.delete_object(&key).await?;
-            Ok(())
-        }).await.unwrap()
+        self.runtime
+            .spawn(async move {
+                app_client.delete_object(&key).await?;
+                Ok(())
+            })
+            .await
+            .unwrap()
     }
 
     /// Returns metadata about a specific object stored in the indexer.
@@ -1174,14 +1195,15 @@ impl SDK {
         let key = Hash256::from_str(key.as_str())?;
         let app_client = self.app_client.clone();
         let app_key = self.app_key.clone();
-        self.runtime.spawn(async move {
-            let obj = app_client.object(&key)
-                .await?
-                .open(&app_key)?;
-            Ok(PinnedObject {
-                inner: Arc::new(Mutex::new(obj)),
+        self.runtime
+            .spawn(async move {
+                let obj = app_client.object(&key).await?.open(&app_key)?;
+                Ok(PinnedObject {
+                    inner: Arc::new(Mutex::new(obj)),
+                })
             })
-        }).await.unwrap()
+            .await
+            .unwrap()
     }
 
     /// Returns metadata about a slab stored in the indexer.
@@ -1192,10 +1214,13 @@ impl SDK {
 
         let slab_id = Hash256::from_str(slab_id.as_str())?;
         let app_client = self.app_client.clone();
-        self.runtime.spawn(async move {
-            let slab = app_client.slab(&slab_id).await?;
-            Ok(slab.into())
-        }).await.unwrap()
+        self.runtime
+            .spawn(async move {
+                let slab = app_client.slab(&slab_id).await?;
+                Ok(slab.into())
+            })
+            .await
+            .unwrap()
     }
 
     /// Unpins slabs not used by any object on the account.
@@ -1205,10 +1230,13 @@ impl SDK {
         }
 
         let app_client = self.app_client.clone();
-        self.runtime.spawn(async move {
-            app_client.prune_slabs().await?;
-            Ok(())
-        }).await.unwrap()
+        self.runtime
+            .spawn(async move {
+                app_client.prune_slabs().await?;
+                Ok(())
+            })
+            .await
+            .unwrap()
     }
 
     /// Returns the current account.
@@ -1218,10 +1246,13 @@ impl SDK {
         }
 
         let app_client = self.app_client.clone();
-        self.runtime.spawn(async move {
-            let account = app_client.account().await?;
-            Ok(account.into())
-        }).await.unwrap()
+        self.runtime
+            .spawn(async move {
+                let account = app_client.account().await?;
+                Ok(account.into())
+            })
+            .await
+            .unwrap()
     }
 
     /// Creates a signed URL that can be used to share object metadata
@@ -1243,11 +1274,16 @@ impl SDK {
             return Err(Error::NotConnected);
         }
         let app_client = self.app_client.clone();
-        let shared_url: Url = shared_url.parse().map_err(|e| Error::Custom(format!("{e}")))?;
-        self.runtime.spawn(async move {
-            let shared_object = app_client.shared_object(shared_url).await?;
-            Ok(SharedObject(shared_object))
-        }).await.unwrap()
+        let shared_url: Url = shared_url
+            .parse()
+            .map_err(|e| Error::Custom(format!("{e}")))?;
+        self.runtime
+            .spawn(async move {
+                let shared_object = app_client.shared_object(shared_url).await?;
+                Ok(SharedObject(shared_object))
+            })
+            .await
+            .unwrap()
     }
 
     /// Pins a shared object to the indexer and returns a [PinnedObject].
@@ -1268,16 +1304,19 @@ impl SDK {
                 sectors: s.sectors.clone(),
             })
             .collect();
-        
-        self.runtime.spawn(async move {
-            app_client.pin_slabs(slabs).await?;
-            let object: Object = shared_object.into();
-            let sealed_object: indexd::SealedObject = object.seal(&app_key);
-            app_client.save_object(&sealed_object).await?;
-            Ok(PinnedObject {
-                inner: Arc::new(Mutex::new(object)),
+
+        self.runtime
+            .spawn(async move {
+                app_client.pin_slabs(slabs).await?;
+                let object: Object = shared_object.into();
+                let sealed_object: indexd::SealedObject = object.seal(&app_key);
+                app_client.save_object(&sealed_object).await?;
+                Ok(PinnedObject {
+                    inner: Arc::new(Mutex::new(object)),
+                })
             })
-        }).await.unwrap()
+            .await
+            .unwrap()
     }
 }
 
