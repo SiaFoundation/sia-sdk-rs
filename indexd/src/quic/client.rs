@@ -39,7 +39,19 @@ pub enum ConnectError {
     Connection(#[from] quinn::ConnectionError),
 
     #[error("invalid address: {0}")]
-    InvalidAddress(SocketAddr),
+    InvalidAddress(String),
+
+    #[error("timeout error: {0}")]
+    Elapsed(#[from] Elapsed),
+
+    #[error("unknown host: {0}")]
+    UnknownHost(PublicKey),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("invalid port: {0}")]
+    InvalidPort(#[from] ParseIntError),
 
     #[error("no endpoint")]
     NoEndpoint,
@@ -52,18 +64,6 @@ pub enum Error {
 
     #[error("connect error: {0}")]
     Connect(#[from] ConnectError),
-
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("invalid port: {0}")]
-    InvalidPort(#[from] ParseIntError),
-
-    #[error("invalid address: {0}")]
-    InvalidAddress(String),
-
-    #[error("unknown host: {0}")]
-    UnknownHost(PublicKey),
 
     #[error("encoding error: {0}")]
     Encoding(#[from] encoding::Error),
@@ -378,10 +378,17 @@ impl ClientInner {
             endpoint_v4.clone().map(|e| e.local_addr()),
             endpoint_v6.clone().map(|e| e.local_addr())
         );
+
+        // reset the endpoints, clear open connections, and reset failure count
+        let mut open_conns = self.open_conns.lock().unwrap();
+        open_conns.clear();
+
         let mut endpoint_v4_lock = self.endpoint_v4.lock().unwrap();
-        let mut endpoint_v6_lock = self.endpoint_v6.lock().unwrap();
         *endpoint_v4_lock = endpoint_v4;
+        let mut endpoint_v6_lock = self.endpoint_v6.lock().unwrap();
         *endpoint_v6_lock = endpoint_v6;
+
+        self.consecutive_failures.store(0, Ordering::Relaxed);
         Ok(())
     }
 
@@ -560,13 +567,16 @@ impl ClientInner {
         } else if socket_addr.is_ipv4() {
             return self.connect_v4(socket_addr, server_name).await;
         }
-        Err(ConnectError::InvalidAddress(socket_addr))
+        Err(ConnectError::InvalidAddress(socket_addr.to_string()))
     }
 
-    async fn new_conn(&self, host: PublicKey) -> Result<Connection, Error> {
+    async fn new_conn(&self, host: PublicKey) -> Result<Connection, ConnectError> {
         let addresses = {
             let hosts = self.hosts.lock().unwrap();
-            hosts.get(&host).cloned().ok_or(Error::UnknownHost(host))?
+            hosts
+                .get(&host)
+                .cloned()
+                .ok_or(ConnectError::UnknownHost(host))?
         };
         for addr in addresses {
             if addr.protocol != Protocol::QUIC {
@@ -575,7 +585,7 @@ impl ClientInner {
             let (addr, port_str) = addr
                 .address
                 .rsplit_once(':')
-                .ok_or(Error::InvalidAddress(addr.address.clone()))?;
+                .ok_or(ConnectError::InvalidAddress(addr.address.clone()))?;
             let port: u16 = port_str.parse()?;
             let resolved_addrs = lookup_host((addr, port)).await?;
             for socket in resolved_addrs {
@@ -586,10 +596,10 @@ impl ClientInner {
                 }
             }
         }
-        Err(Error::FailedToConnect)
+        Err(ConnectError::NoEndpoint)
     }
 
-    async fn host_stream(&self, host: PublicKey) -> Result<Stream, Error> {
+    async fn host_stream(&self, host: PublicKey) -> Result<Stream, ConnectError> {
         let conn = if let Some(conn) = self.existing_conn(host) {
             debug!("reusing existing connection to {host}");
             conn
@@ -609,13 +619,9 @@ impl ClientInner {
             new_conn
         };
 
-        let (send, recv) = conn
-            .open_bi()
-            .await
-            .inspect_err(|_| {
-                self.open_conns.lock().unwrap().remove(&host);
-            })
-            .unwrap();
+        let (send, recv) = conn.open_bi().await.inspect_err(|_| {
+            self.open_conns.lock().unwrap().remove(&host);
+        })?;
         Ok(Stream { send, recv })
     }
 
