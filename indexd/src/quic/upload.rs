@@ -136,7 +136,7 @@ impl Uploader {
     }
 
     fn upload_timeout(attempts: usize) -> Duration {
-        Duration::from_secs((15 + (attempts as u64 * 2)).max(120))
+        Duration::from_secs((15 + (attempts as u64 * 2)).max(300))
     }
 
     async fn upload_slab_shard(
@@ -202,22 +202,12 @@ impl Uploader {
         }
     }
 
-    /// Reads until EOF and uploads all slabs.
-    /// The data will be erasure coded, encrypted,
-    /// and uploaded using the uploader's parameters.
-    ///
-    /// # Warnings
-    /// * The `encryption_key` must be unique for every upload. Reusing an
-    ///   encryption key will compromise the security of the data.
-    ///
-    /// # Returns
-    /// An object representing the uploaded data.
-    pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
+    async fn upload_slabs<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
+        mut r: R,
         cancel: CancellationToken,
-        r: R,
         options: UploadOptions,
-    ) -> Result<Object, UploadError> {
+    ) -> Result<Vec<SlabSlice>, UploadError> {
         if self.client.hosts().is_empty() {
             let hosts = self.app_client.hosts().await?;
             self.client.update_hosts(hosts);
@@ -228,16 +218,10 @@ impl Uploader {
         let semaphore = Arc::new(Semaphore::new(options.max_inflight));
         let host_client = self.client.clone();
         let account_key = self.account_key.clone();
-        let mut object = Object::default();
-        if let Some(metadata) = options.metadata {
-            object.metadata = metadata;
-        }
 
-        // use a buffered reader since the erasure coder reads 64 bytes at a time.
-        let mut r = object.reader(BufReader::new(r), 0);
         let read_slab_res: JoinHandle<Result<(), UploadError>> = tokio::spawn(async move {
-            let mut slab_index: usize = 0;
-            let slab_upload_tasks = TaskTracker::new();
+        let mut slab_index: usize = 0;
+        let slab_upload_tasks = TaskTracker::new();
             loop {
                 let rs = ErasureCoder::new(data_shards, parity_shards).unwrap();
                 let (mut shards, length) = rs.read_shards(&mut r).await?;
@@ -397,10 +381,52 @@ impl Uploader {
             }
         }
         read_slab_res.await??;
+        Ok(slabs)
+    }
+
+    /// Reads until EOF and uploads all slabs.
+    /// The data will be erasure coded, encrypted,
+    /// and uploaded using the uploader's parameters.
+    ///
+    /// # Warnings
+    /// * The `encryption_key` must be unique for every upload. Reusing an
+    ///   encryption key will compromise the security of the data.
+    ///
+    /// # Returns
+    /// An object representing the uploaded data.
+    pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
+        &self,
+        cancel: CancellationToken,
+        r: R,
+        options: UploadOptions,
+    ) -> Result<Object, UploadError> {
+        let mut object = Object::default();
+        if let Some(metadata) = options.metadata.clone() {
+            object.metadata = metadata;
+        }
+
+        // use a buffered reader since the erasure coder reads 64 bytes at a time.
+        let r = object.reader(BufReader::new(r), 0);
+        let slabs = self.upload_slabs(r, cancel, options).await?;
 
         object.slabs = slabs;
         let sealed = object.seal(&self.account_key);
         self.app_client.save_object(&sealed).await?;
         Ok(object)
     }
+}
+
+pub struct PackedObjectResult {
+    object: Object,
+    length: usize,
+}
+
+struct PackedUploadInner {
+    uploader: Uploader,
+    slab_buffer: Vec<u8>,
+}
+
+pub struct PackedUpload {
+    inner: Arc<PackedUploadInner>,
+    options: UploadOptions,
 }
