@@ -57,6 +57,9 @@ pub enum Error {
     #[error("sealed object error: {0}")]
     SealedObject(#[from] SealedObjectError),
 
+    #[error("task error: {0}")]
+    JoinError(#[from] tokio::task::JoinError),
+
     #[error("error: {0}")]
     Custom(String),
 }
@@ -70,6 +73,8 @@ pub enum ConnectError {
     AlreadyConnected,
     #[error("app client error: {0}")]
     AppClient(#[from] indexd::app_client::Error),
+    #[error("task error: {0}")]
+    JoinError(#[from] tokio::task::JoinError),
     #[error("error: {0}")]
     Custom(String),
 }
@@ -88,6 +93,9 @@ pub enum UploadError {
 
     #[error("not connected")]
     NotConnected,
+
+    #[error("task error: {0}")]
+    JoinError(#[from] tokio::task::JoinError),
 
     #[error("custom error: {0}")]
     Custom(String),
@@ -110,6 +118,9 @@ pub enum DownloadError {
 
     #[error("cancelled")]
     Cancelled,
+
+    #[error("task error: {0}")]
+    JoinError(#[from] tokio::task::JoinError),
 
     #[error("custom error: {0}")]
     Custom(String),
@@ -823,7 +834,7 @@ impl SDK {
                 }
             })
             .await
-            .unwrap()
+            .expect("failed to join task")
     }
 
     /// Requests permission for the app to connect to the indexer.
@@ -867,8 +878,7 @@ impl SDK {
                     status_url: resp.status_url,
                 })
             })
-            .await
-            .unwrap()
+            .await?
     }
 
     /// Waits for the user to authorize or reject the app.
@@ -899,8 +909,7 @@ impl SDK {
                 }
                 app_client.check_app_authenticated().await
             })
-            .await
-            .unwrap()?;
+            .await??;
         if !connected {
             return Ok(false);
         }
@@ -967,8 +976,7 @@ impl SDK {
                     cancel: cancel_token,
                 })
             })
-            .await
-            .unwrap()
+            .await?
     }
 
     /// Initiates a download of the data referenced by the object, starting at `offset` and reading `length` bytes.
@@ -1098,8 +1106,7 @@ impl SDK {
                 let hosts = app_client.hosts().await?;
                 Ok(hosts.into_iter().map(|h| h.into()).collect())
             })
-            .await
-            .unwrap()
+            .await?
     }
 
     /// Returns objects stored in the indexer. When syncing, the caller should
@@ -1150,8 +1157,7 @@ impl SDK {
                     .collect::<Result<Vec<ObjectEvent>, SealedObjectError>>()?;
                 Ok(objects)
             })
-            .await
-            .unwrap()
+            .await?
     }
 
     /// Saves an object to the indexer.
@@ -1168,8 +1174,7 @@ impl SDK {
                 app_client.save_object(&object.seal(&app_key)).await?;
                 Ok(())
             })
-            .await
-            .unwrap()
+            .await?
     }
 
     /// Deletes an object from the indexer.
@@ -1185,8 +1190,7 @@ impl SDK {
                 app_client.delete_object(&key).await?;
                 Ok(())
             })
-            .await
-            .unwrap()
+            .await?
     }
 
     /// Returns metadata about a specific object stored in the indexer.
@@ -1205,8 +1209,7 @@ impl SDK {
                     inner: Arc::new(Mutex::new(obj)),
                 })
             })
-            .await
-            .unwrap()
+            .await?
     }
 
     /// Returns metadata about a slab stored in the indexer.
@@ -1222,8 +1225,7 @@ impl SDK {
                 let slab = app_client.slab(&slab_id).await?;
                 Ok(slab.into())
             })
-            .await
-            .unwrap()
+            .await?
     }
 
     /// Unpins slabs not used by any object on the account.
@@ -1238,8 +1240,7 @@ impl SDK {
                 app_client.prune_slabs().await?;
                 Ok(())
             })
-            .await
-            .unwrap()
+            .await?
     }
 
     /// Returns the current account.
@@ -1254,8 +1255,7 @@ impl SDK {
                 let account = app_client.account().await?;
                 Ok(account.into())
             })
-            .await
-            .unwrap()
+            .await?
     }
 
     /// Creates a signed URL that can be used to share object metadata
@@ -1285,8 +1285,7 @@ impl SDK {
                 let shared_object = app_client.shared_object(shared_url).await?;
                 Ok(SharedObject(shared_object))
             })
-            .await
-            .unwrap()
+            .await?
     }
 
     /// Pins a shared object to the indexer and returns a [PinnedObject].
@@ -1318,8 +1317,7 @@ impl SDK {
                     inner: Arc::new(Mutex::new(object)),
                 })
             })
-            .await
-            .unwrap()
+            .await?
     }
 }
 
@@ -1381,7 +1379,7 @@ impl Upload {
         };
         match result {
             Some(result) => {
-                let object = result.await.unwrap()?;
+                let object = result.await??;
                 Ok(PinnedObject {
                     inner: Arc::new(Mutex::new(object)),
                 })
