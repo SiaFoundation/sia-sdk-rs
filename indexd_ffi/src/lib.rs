@@ -1013,10 +1013,11 @@ impl SDK {
                         return;
                     },
                     result = future => {
-                        debug!("downloaded chunk {}-{}", offset, offset+buf.len());
+                        let n = buf.len();
                         let result = result
                             .map(|_| buf)
-                            .map_err(DownloadError::from);
+                            .map_err(DownloadError::from)
+                            .inspect(|_| { debug!("downloaded chunk {}-{}", offset, offset+n) });
                         chunk_tx.send(result).await.ok();
                     }
                 }
