@@ -1,20 +1,20 @@
 use bytes::Bytes;
 use chrono::Utc;
+use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use log::debug;
 use priority_queue::PriorityQueue;
 use quinn::crypto::rustls::QuicClientConfig;
-use rustls::ClientConfig;
 use std::collections::{HashMap, VecDeque};
-use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::ParseIntError;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::{self, Error};
 use tokio::net::lookup_host;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 
-use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
+use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, VarInt};
 use sia::encoding;
 use sia::encoding_async::AsyncDecoder;
 use sia::rhp::{
@@ -31,12 +31,21 @@ struct Stream {
 }
 
 #[derive(Debug, Error)]
-pub enum Error {
-    #[error("failed to connect")]
-    FailedToConnect,
+pub enum ConnectError {
+    #[error("connect error: {0}")]
+    Connect(#[from] quinn::ConnectError),
 
     #[error("connection error: {0}")]
     Connection(#[from] quinn::ConnectionError),
+
+    #[error("invalid address: {0}")]
+    InvalidAddress(String),
+
+    #[error("timeout error: {0}")]
+    Elapsed(#[from] Elapsed),
+
+    #[error("unknown host: {0}")]
+    UnknownHost(PublicKey),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -44,11 +53,17 @@ pub enum Error {
     #[error("invalid port: {0}")]
     InvalidPort(#[from] ParseIntError),
 
-    #[error("invalid address: {0}")]
-    InvalidAddress(String),
+    #[error("no endpoint")]
+    NoEndpoint,
+}
 
-    #[error("unknown host: {0}")]
-    UnknownHost(PublicKey),
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("failed to connect")]
+    FailedToConnect,
+
+    #[error("connect error: {0}")]
+    Connect(#[from] ConnectError),
 
     #[error("encoding error: {0}")]
     Encoding(#[from] encoding::Error),
@@ -114,7 +129,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(client_config: ClientConfig) -> Result<Self, Error> {
+    pub fn new(client_config: rustls::ClientConfig) -> Result<Self, Error> {
         let inner = ClientInner::new(client_config)?;
         Ok(Client {
             inner: Arc::new(inner),
@@ -317,8 +332,11 @@ struct ClientInner {
         non-ideal fallback behavior when dual-stack is not supported. This effectively treats every platform as
         single-stack instead since IPv4 is the preferred fallback.
     */
-    endpoint_v4: Option<Endpoint>,
-    endpoint_v6: Option<Endpoint>,
+    endpoint_v4: Mutex<Option<Arc<Endpoint>>>,
+    endpoint_v6: Mutex<Option<Arc<Endpoint>>>,
+    consecutive_failures: AtomicU16,
+
+    client_config: ClientConfig,
 
     hosts: Mutex<HashMap<PublicKey, Vec<NetAddress>>>,
     preferred_hosts: Mutex<PriorityQueue<PublicKey, HostMetric>>,
@@ -328,28 +346,13 @@ struct ClientInner {
 }
 
 impl ClientInner {
-    fn new(mut client_config: ClientConfig) -> Result<Self, Error> {
-        const MAX_STREAM_BANDWIDTH: u64 = 1024 * 1024 * 1024; // 1 GiB/s
-        const EXPECTED_RTT: u64 = 100; // ms
-        client_config.enable_early_data = true;
-        client_config.alpn_protocols = vec![b"sia/rhp4".to_vec()];
+    const MAX_CONSECUTIVE_FAILURES: u16 = 5;
 
-        let mut transport_config = quinn::TransportConfig::default();
-        transport_config.max_concurrent_bidi_streams(VarInt::from_u32(0));
-        transport_config.max_concurrent_uni_streams(VarInt::from_u32(0));
-        transport_config.max_idle_timeout(Some(VarInt::from_u32(30_000).into()));
-        transport_config.keep_alive_interval(Some(Duration::from_secs(10)));
-        transport_config
-            .stream_receive_window(VarInt::from_u64(MAX_STREAM_BANDWIDTH * EXPECTED_RTT).unwrap());
-
-        let client_config = QuicClientConfig::try_from(client_config).unwrap();
-        let mut client_config = quinn::ClientConfig::new(Arc::new(client_config));
-        client_config.transport_config(Arc::new(transport_config));
-
+    fn init_quic_endpoints(&self) -> Result<(), ConnectError> {
         let endpoint_v4 = match quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into()) {
             Ok(mut endpoint) => {
-                endpoint.set_default_client_config(client_config.clone());
-                Some(endpoint)
+                endpoint.set_default_client_config(self.client_config.clone());
+                Some(Arc::new(endpoint))
             }
             Err(e) => {
                 debug!("error opening IPv4 endpoint {:?}", e);
@@ -358,8 +361,8 @@ impl ClientInner {
         };
         let endpoint_v6 = match quinn::Endpoint::client((Ipv6Addr::UNSPECIFIED, 0).into()) {
             Ok(mut endpoint) => {
-                endpoint.set_default_client_config(client_config);
-                Some(endpoint)
+                endpoint.set_default_client_config(self.client_config.clone());
+                Some(Arc::new(endpoint))
             }
             Err(e) => {
                 debug!("error opening IPv6 endpoint {:?}", e);
@@ -368,18 +371,148 @@ impl ClientInner {
         };
 
         if endpoint_v4.is_none() && endpoint_v6.is_none() {
-            return Err(Error::NoEndpoint);
+            return Err(ConnectError::NoEndpoint);
         }
+        debug!(
+            "initialized QUIC endpoints: v4={:?}, v6={:?}",
+            endpoint_v4.clone().map(|e| e.local_addr()),
+            endpoint_v6.clone().map(|e| e.local_addr())
+        );
 
-        Ok(Self {
-            endpoint_v4,
-            endpoint_v6,
+        // reset the endpoints, clear open connections, and reset failure count
+        let mut open_conns = self.open_conns.lock().unwrap();
+        open_conns.clear();
+
+        let mut endpoint_v4_lock = self.endpoint_v4.lock().unwrap();
+        *endpoint_v4_lock = endpoint_v4;
+        let mut endpoint_v6_lock = self.endpoint_v6.lock().unwrap();
+        *endpoint_v6_lock = endpoint_v6;
+
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn new(mut client_config: rustls::ClientConfig) -> Result<Self, Error> {
+        const MAX_STREAM_BANDWIDTH: u64 = 1024 * 1024 * 1024; // 1 GiB/s
+        const EXPECTED_RTT: u64 = 100; // ms
+        client_config.enable_early_data = true;
+        client_config.alpn_protocols = vec![b"sia/rhp4".to_vec()];
+
+        let mut transport_config = quinn::TransportConfig::default();
+        transport_config.max_concurrent_bidi_streams(VarInt::from_u32(0));
+        transport_config.max_concurrent_uni_streams(VarInt::from_u32(0));
+        transport_config.max_idle_timeout(Some(Duration::from_secs(15).try_into().unwrap()));
+        transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
+        transport_config
+            .stream_receive_window(VarInt::from_u64(MAX_STREAM_BANDWIDTH * EXPECTED_RTT).unwrap());
+
+        let client_config = QuicClientConfig::try_from(client_config).unwrap();
+        let mut client_config = quinn::ClientConfig::new(Arc::new(client_config));
+        client_config.transport_config(Arc::new(transport_config));
+
+        let client = Self {
+            endpoint_v4: Mutex::new(None),
+            endpoint_v6: Mutex::new(None),
+            client_config,
+            consecutive_failures: AtomicU16::new(0),
+
             hosts: Mutex::new(HashMap::new()),
             preferred_hosts: Mutex::new(PriorityQueue::new()),
             open_conns: Mutex::new(HashMap::new()),
             cached_prices: Mutex::new(HashMap::new()),
             cached_tokens: Mutex::new(HashMap::new()),
-        })
+        };
+        client.init_quic_endpoints()?;
+        Ok(client)
+    }
+
+    async fn connect_v4(
+        &self,
+        socket_addr: SocketAddr,
+        server_name: &str,
+    ) -> Result<Connection, ConnectError> {
+        if self.consecutive_failures.load(Ordering::Relaxed) > Self::MAX_CONSECUTIVE_FAILURES {
+            // The endpoint does not recover after resuming on some platforms (iOS). Effectively
+            // re-binds the socket if more than MAX_CONSECUTIVE_FAILURES failures occur.
+            self.init_quic_endpoints()?;
+        }
+        let endpoint = {
+            let endpoint = self.endpoint_v4.lock().unwrap();
+            match endpoint.as_ref() {
+                None => return Err(ConnectError::NoEndpoint),
+                Some(endpoint) => endpoint.clone(),
+            }
+        };
+
+        let conn = endpoint
+            .connect(socket_addr, server_name)
+            .inspect_err(|e| {
+                self.consecutive_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                debug!(
+                    "failed to connect to {server_name} via {:?}: {e}",
+                    endpoint.local_addr()
+                );
+            })?
+            .await
+            .inspect_err(|e| {
+                self.consecutive_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                debug!(
+                    "failed to establish connection to {server_name} via {:?}: {e}",
+                    endpoint.local_addr()
+                );
+            })?;
+        debug!(
+            "established connection to {server_name} via {:?}",
+            endpoint.local_addr()
+        );
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        Ok(conn)
+    }
+
+    async fn connect_v6(
+        &self,
+        socket_addr: SocketAddr,
+        server_name: &str,
+    ) -> Result<Connection, ConnectError> {
+        if self.consecutive_failures.load(Ordering::Relaxed) > Self::MAX_CONSECUTIVE_FAILURES {
+            // The endpoint does not recover after resuming on some platforms (iOS). Effectively
+            // re-binds the socket if more than MAX_CONSECUTIVE_FAILURES failures occur.
+            self.init_quic_endpoints()?;
+        }
+        let endpoint = {
+            let endpoint = self.endpoint_v6.lock().unwrap();
+            match endpoint.as_ref() {
+                None => return Err(ConnectError::NoEndpoint),
+                Some(endpoint) => endpoint.clone(),
+            }
+        };
+        let conn = endpoint
+            .connect(socket_addr, server_name)
+            .inspect_err(|e| {
+                self.consecutive_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                debug!(
+                    "failed to connect to {server_name} via {:?}: {e}",
+                    endpoint.local_addr()
+                );
+            })?
+            .await
+            .inspect_err(|e| {
+                self.consecutive_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                debug!(
+                    "failed to establish connection to {server_name} via {:?}: {e}",
+                    endpoint.local_addr()
+                );
+            })?;
+        debug!(
+            "established connection to {server_name} via {:?}",
+            endpoint.local_addr()
+        );
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        Ok(conn)
     }
 
     fn get_token(&self, host_key: &PublicKey, account_key: &PrivateKey) -> AccountToken {
@@ -424,10 +557,26 @@ impl ClientInner {
         None
     }
 
-    async fn new_conn(&self, host: PublicKey) -> Result<Connection, Error> {
+    async fn connect_to_host(
+        &self,
+        socket_addr: SocketAddr,
+        server_name: &str,
+    ) -> Result<Connection, ConnectError> {
+        if socket_addr.is_ipv6() {
+            return self.connect_v6(socket_addr, server_name).await;
+        } else if socket_addr.is_ipv4() {
+            return self.connect_v4(socket_addr, server_name).await;
+        }
+        Err(ConnectError::InvalidAddress(socket_addr.to_string()))
+    }
+
+    async fn new_conn(&self, host: PublicKey) -> Result<Connection, ConnectError> {
         let addresses = {
             let hosts = self.hosts.lock().unwrap();
-            hosts.get(&host).cloned().ok_or(Error::UnknownHost(host))?
+            hosts
+                .get(&host)
+                .cloned()
+                .ok_or(ConnectError::UnknownHost(host))?
         };
         for addr in addresses {
             if addr.protocol != Protocol::QUIC {
@@ -436,36 +585,34 @@ impl ClientInner {
             let (addr, port_str) = addr
                 .address
                 .rsplit_once(':')
-                .ok_or(Error::InvalidAddress(addr.address.clone()))?;
+                .ok_or(ConnectError::InvalidAddress(addr.address.clone()))?;
             let port: u16 = port_str.parse()?;
             let resolved_addrs = lookup_host((addr, port)).await?;
             for socket in resolved_addrs {
-                if socket.is_ipv6()
-                    && let Some(endpoint) = &self.endpoint_v6
-                {
-                    let conn = endpoint.connect(socket, addr).unwrap().await.ok();
-                    if let Some(conn) = conn {
-                        return Ok(conn);
-                    }
-                } else if socket.is_ipv4()
-                    && let Some(endpoint) = &self.endpoint_v4
-                {
-                    let conn = endpoint.connect(socket, addr).unwrap().await.ok();
-                    if let Some(conn) = conn {
-                        return Ok(conn);
-                    }
+                if let Ok(conn) = self.connect_to_host(socket, addr).await.inspect_err(|e| {
+                    debug!("failed to connect to {addr}:{port} ({socket}) : {e}");
+                }) {
+                    return Ok(conn);
                 }
             }
         }
-        Err(Error::FailedToConnect)
+        Err(ConnectError::NoEndpoint)
     }
 
-    async fn host_stream(&self, host: PublicKey) -> Result<Stream, Error> {
+    async fn host_stream(&self, host: PublicKey) -> Result<Stream, ConnectError> {
         let conn = if let Some(conn) = self.existing_conn(host) {
             debug!("reusing existing connection to {host}");
             conn
         } else {
-            let new_conn = timeout(Duration::from_secs(30), self.new_conn(host)).await??;
+            let now = Instant::now();
+            let new_conn = timeout(Duration::from_secs(30), self.new_conn(host))
+                .await
+                .inspect_err(|e| {
+                    debug!(
+                        "new connection to {host} timed out in {:?}ms {e}",
+                        now.elapsed().as_millis()
+                    );
+                })??;
             let open_conns = &mut self.open_conns.lock().unwrap();
             open_conns.insert(host, new_conn.clone());
             debug!("established new connection to {host}");
@@ -498,7 +645,7 @@ impl ClientInner {
         if !refresh && let Some(prices) = self.get_cached_prices(&host_key) {
             return Ok(prices);
         }
-        let prices = timeout(Duration::from_millis(750), self.fetch_prices(host_key)).await??;
+        let prices = self.fetch_prices(host_key).await?;
         self.set_cached_prices(&host_key, prices.clone());
         Ok(prices)
     }

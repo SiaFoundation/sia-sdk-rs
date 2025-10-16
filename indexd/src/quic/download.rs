@@ -360,12 +360,8 @@ impl Downloader {
 
         let max_length = slabs.max_length();
         let mut offset = options.offset;
-        let mut length = options
-            .length
-            .unwrap_or_else(|| slabs.max_length() - offset);
-        if offset + length > max_length {
-            return Err(DownloadError::OutOfRange(offset, length));
-        } else if length == 0 {
+        let mut length = options.length.unwrap_or(max_length);
+        if offset > max_length || length == 0 {
             return Ok(());
         }
         loop {
