@@ -347,7 +347,7 @@ impl PinnedObject {
                 .into_iter()
                 .map(|s| s.try_into().unwrap())
                 .collect(),
-            encrypted_metadata: sealed.encrypted_metadata,
+            encrypted_metadata: Some(sealed.encrypted_metadata),
             signature: Signature::try_from(sealed.signature.as_ref())?,
             created_at: sealed.created_at.into(),
             updated_at: sealed.updated_at.into(),
@@ -417,7 +417,7 @@ pub struct SealedObject {
     pub id: String,
     pub encrypted_master_key: Vec<u8>,
     pub slabs: Vec<Slab>,
-    pub encrypted_metadata: Option<Vec<u8>>,
+    pub encrypted_metadata: Vec<u8>,
     pub signature: Vec<u8>,
 
     pub created_at: SystemTime,
@@ -430,7 +430,7 @@ impl From<indexd::SealedObject> for SealedObject {
             id: o.id().to_string(),
             encrypted_master_key: o.encrypted_master_key,
             slabs: o.slabs.into_iter().map(|s| s.into()).collect(),
-            encrypted_metadata: o.encrypted_metadata,
+            encrypted_metadata: o.encrypted_metadata.unwrap_or_default(),
             signature: o.signature.as_ref().to_vec(),
             created_at: o.created_at.into(),
             updated_at: o.updated_at.into(),
@@ -449,7 +449,7 @@ impl TryInto<indexd::SealedObject> for SealedObject {
                 .into_iter()
                 .map(|s| s.try_into().unwrap())
                 .collect(),
-            encrypted_metadata: self.encrypted_metadata,
+            encrypted_metadata: Some(self.encrypted_metadata),
             signature: Signature::try_from(self.signature.as_ref())?,
             created_at: self.created_at.into(),
             updated_at: self.updated_at.into(),
