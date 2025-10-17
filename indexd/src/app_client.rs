@@ -945,7 +945,7 @@ mod tests {
     async fn test_object() {
         let object = SealedObject {
             encrypted_master_key: vec![1u8; 72],
-            encrypted_metadata: b"hello world!".to_vec(),
+            encrypted_metadata: Some(b"hello world!".to_vec()),
             signature: Signature::from([2u8; 64]),
             slabs: vec![
                 SlabSlice {
@@ -1038,7 +1038,7 @@ mod tests {
                     length: 512,
                 },
             ],
-            encrypted_metadata: b"hello world!".to_vec(),
+            encrypted_metadata: Some(b"hello world!".to_vec()),
             signature: Signature::from([2u8; 64]),
             created_at: DateTime::<FixedOffset>::parse_from_rfc3339(
                 "2025-09-09T16:10:46.898399-07:00",

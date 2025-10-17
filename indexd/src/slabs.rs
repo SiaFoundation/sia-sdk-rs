@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 use sia::blake2::{Blake2b256, Digest};
-use sia::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
+use sia::encoding::{self, SiaDecodable, SiaEncodable};
 use sia::encryption::{CipherReader, CipherWriter, EncryptionKey};
 use sia::signing::{PrivateKey, PublicKey, Signature};
 use sia::types::Hash256;
@@ -101,21 +101,43 @@ pub enum SealedObjectError {
     Encoding(#[from] encoding::Error),
     #[error("invalid signature")]
     InvalidSignature,
+    #[error("error: {0}")]
+    Custom(String),
 }
 
 #[serde_as]
-#[derive(Debug, Clone, Deserialize, Serialize, SiaEncode, SiaDecode, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SealedObject {
     #[serde_as(as = "Base64")]
     pub encrypted_master_key: Vec<u8>,
     pub slabs: Vec<SlabSlice>,
-    #[serde_as(as = "Base64")]
-    pub encrypted_metadata: Vec<u8>,
+    #[serde_as(as = "Option<Base64>")]
+    pub encrypted_metadata: Option<Vec<u8>>,
     pub signature: Signature,
 
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl SiaDecodable for SealedObject {
+    fn decode<R: std::io::Read>(r: &mut R) -> encoding::Result<Self> {
+        let encrypted_master_key = Vec::<u8>::decode(r)?;
+        let slabs = Vec::<SlabSlice>::decode(r)?;
+        let encrypted_metadata = Vec::<u8>::decode(r)?;
+        let signature = Signature::decode(r)?;
+        let created_at = DateTime::<Utc>::decode(r)?;
+        let updated_at = DateTime::<Utc>::decode(r)?;
+
+        Ok(Self {
+            encrypted_master_key,
+            slabs,
+            encrypted_metadata: Some(encrypted_metadata),
+            signature,
+            created_at,
+            updated_at,
+        })
+    }
 }
 
 impl SealedObject {
@@ -142,11 +164,10 @@ impl SealedObject {
     pub fn open(self, app_key: &PrivateKey) -> Result<Object, SealedObjectError> {
         let object_id = self.id();
 
-        let sig_hash = Self::sig_hash(
-            &object_id,
-            &self.encrypted_master_key,
-            &self.encrypted_metadata,
-        );
+        let encrypted_metadata = self.encrypted_metadata.ok_or(SealedObjectError::Custom(
+            "no encrypted metadata found".to_string(),
+        ))?;
+        let sig_hash = Self::sig_hash(&object_id, &self.encrypted_master_key, &encrypted_metadata);
         if !app_key
             .public_key()
             .verify(sig_hash.as_ref(), &self.signature)
@@ -156,7 +177,7 @@ impl SealedObject {
 
         let master_encryption_key =
             open_encryption_key(app_key, &object_id, &self.encrypted_master_key)?;
-        let metadata = open_metadata(&master_encryption_key, &object_id, &self.encrypted_metadata)?;
+        let metadata = open_metadata(&master_encryption_key, &object_id, &encrypted_metadata)?;
 
         Ok(Object {
             encryption_key: master_encryption_key,
@@ -251,7 +272,7 @@ impl Object {
         SealedObject {
             encrypted_master_key,
             slabs: self.slabs.clone(),
-            encrypted_metadata,
+            encrypted_metadata: Some(encrypted_metadata),
             signature,
 
             created_at: self.created_at,
