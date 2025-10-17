@@ -101,8 +101,6 @@ pub enum SealedObjectError {
     Encoding(#[from] encoding::Error),
     #[error("invalid signature")]
     InvalidSignature,
-    #[error("error: {0}")]
-    Custom(String),
 }
 
 #[serde_as]
@@ -164,9 +162,7 @@ impl SealedObject {
     pub fn open(self, app_key: &PrivateKey) -> Result<Object, SealedObjectError> {
         let object_id = self.id();
 
-        let encrypted_metadata = self.encrypted_metadata.ok_or(SealedObjectError::Custom(
-            "no encrypted metadata found".to_string(),
-        ))?;
+        let encrypted_metadata = self.encrypted_metadata.unwrap_or_default();
         let sig_hash = Self::sig_hash(&object_id, &self.encrypted_master_key, &encrypted_metadata);
         if !app_key
             .public_key()
