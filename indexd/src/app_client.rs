@@ -96,6 +96,12 @@ pub struct ObjectsCursor {
     pub key: Hash256,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GeoLocation {
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -239,7 +245,26 @@ impl Client {
 
     /// Returns all usable hosts.
     pub async fn hosts(&self) -> Result<Vec<Host>> {
-        self.get_json::<_, ()>("hosts", None).await
+        self.hosts_with_location(None).await
+    }
+
+    /// Returns usable hosts, optionally sorted by distance to the provided
+    /// geolocation.
+    pub async fn hosts_with_location(&self, location: Option<GeoLocation>) -> Result<Vec<Host>> {
+        if let Some(location) = location {
+            #[derive(Serialize)]
+            struct HostsQuery<'a> {
+                location: &'a str,
+            }
+
+            let location = format!("({:.6},{:.6})", location.latitude, location.longitude);
+            let params = HostsQuery {
+                location: &location,
+            };
+            self.get_json("hosts", Some(&params)).await
+        } else {
+            self.get_json::<_, ()>("hosts", None).await
+        }
     }
 
     /// Retrieves an object from the indexer by its key.
@@ -633,6 +658,34 @@ mod tests {
         let _: Result<()> = client.get_json::<_, ()>("", None).await;
         let _: Result<()> = client.post_json::<(), ()>("", None).await;
         let _: Result<()> = client.delete("").await;
+    }
+
+    #[tokio::test]
+    async fn test_hosts_with_location_query() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/hosts"),
+                request::query(url_decoded(contains(("location", "(51.209300,3.224700)",))))
+            ])
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body("[]")
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        let hosts = client
+            .hosts_with_location(Some(GeoLocation {
+                latitude: 51.2093,
+                longitude: 3.2247,
+            }))
+            .await
+            .unwrap();
+        assert!(hosts.is_empty());
     }
 
     #[tokio::test]

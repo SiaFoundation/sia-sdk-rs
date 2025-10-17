@@ -138,10 +138,15 @@ impl Client {
         let mut hosts_map = self.inner.hosts.lock().unwrap();
         let mut priority_queue = self.inner.preferred_hosts.lock().unwrap();
         hosts_map.clear();
-        for host in hosts {
+        for (idx, host) in hosts.into_iter().enumerate() {
             hosts_map.insert(host.public_key, host.addresses);
+            let bias = -(idx as i64);
             if !priority_queue.contains(&host.public_key) {
-                priority_queue.push(host.public_key, HostMetric::default());
+                priority_queue.push(host.public_key, HostMetric::with_bias(bias));
+            } else {
+                priority_queue.change_priority_by(&host.public_key, |metric| {
+                    metric.bias = bias;
+                });
             }
         }
     }
@@ -267,9 +272,17 @@ struct HostMetric {
     rpc_write_avg: RPCAverage,
     rpc_read_avg: RPCAverage,
     successful: i64, // negative values indicate failures
+    bias: i64,       // higher values indicate preferred hosts
 }
 
 impl HostMetric {
+    fn with_bias(bias: i64) -> Self {
+        Self {
+            bias,
+            ..Default::default()
+        }
+    }
+
     fn add_write_sample(&mut self, d: Duration) {
         self.rpc_write_avg.add_sample(d.as_millis());
         self.successful = self.successful.saturating_add(1);
@@ -298,7 +311,10 @@ impl Ord for HostMetric {
             .saturating_add(other.rpc_read_avg.avg()))
             / 2;
         match avg_other.cmp(&avg_self) {
-            std::cmp::Ordering::Equal => self.successful.cmp(&other.successful), // more successful RPCs is higher priority
+            std::cmp::Ordering::Equal => match self.successful.cmp(&other.successful) {
+                std::cmp::Ordering::Equal => self.bias.cmp(&other.bias), // higher bias is higher priority
+                ord => ord, // more successful RPCs is higher priority
+            },
             ord => ord, // lower average speed is higher priority
         }
     }

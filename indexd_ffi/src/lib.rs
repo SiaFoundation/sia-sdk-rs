@@ -12,7 +12,9 @@ use std::time::SystemTime;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 
-use indexd::app_client::{Client as AppClient, RegisterAppRequest, SlabPinParams};
+use indexd::app_client::{
+    Client as AppClient, GeoLocation as SdkGeoLocation, RegisterAppRequest, SlabPinParams,
+};
 use indexd::quic::{Client as HostClient, Downloader, SlabFetcher, Uploader};
 use indexd::{Object, SealedObjectError, SlabSlice, Url, quic};
 use log::debug;
@@ -681,6 +683,13 @@ impl From<indexd::app_client::Account> for Account {
     }
 }
 
+/// Represents a geographical location used to prioritize hosts.
+#[derive(uniffi::Record, Clone, Copy)]
+pub struct GeoLocation {
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
 /// Provides options for an upload operation.
 #[derive(uniffi::Record)]
 pub struct UploadOptions {
@@ -905,6 +914,26 @@ impl SDK {
             result: Mutex::new(Some(result)),
             cancel: cancel_token,
         })
+    }
+
+    /// Configures the preferred host location used for uploads and downloads.
+    pub async fn set_location(&self, location: Option<GeoLocation>) -> Result<(), Error> {
+        let uploader = self.uploader.get().ok_or(Error::NotConnected)?.clone();
+        let downloader = self.downloader.get().ok_or(Error::NotConnected)?.clone();
+        let sdk_location = location.map(|loc| SdkGeoLocation {
+            latitude: loc.latitude,
+            longitude: loc.longitude,
+        });
+
+        uploader
+            .set_location(sdk_location)
+            .await
+            .map_err(|e| Error::Custom(format!("{e}")))?;
+        downloader
+            .set_location(sdk_location)
+            .await
+            .map_err(|e| Error::Custom(format!("{e}")))?;
+        Ok(())
     }
 
     /// Initiates a download of the data referenced by the object, starting at `offset` and reading `length` bytes.
