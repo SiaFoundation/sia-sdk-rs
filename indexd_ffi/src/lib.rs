@@ -417,7 +417,7 @@ pub struct SealedObject {
     pub id: String,
     pub encrypted_master_key: Vec<u8>,
     pub slabs: Vec<Slab>,
-    pub encrypted_metadata: Vec<u8>,
+    pub encrypted_metadata: Option<Vec<u8>>,
     pub signature: Vec<u8>,
 
     pub created_at: SystemTime,
