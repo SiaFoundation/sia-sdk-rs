@@ -5,7 +5,7 @@ use crate::quic::{
     DownloadError, DownloadOptions, Downloader, UploadError, UploadOptions, Uploader,
 };
 
-use crate::app_client::{Account, Client, ObjectsCursor, RegisterAppRequest};
+use crate::app_client::{Account, Client, GeoLocation, ObjectsCursor, RegisterAppRequest};
 use log::debug;
 use sia::rhp::Host;
 use sia::signing::PrivateKey;
@@ -181,6 +181,16 @@ impl SDK<RegisteredState> {
 }
 
 impl SDK<ConnectedState> {
+    pub async fn set_client_location(&self, location: Option<GeoLocation>) -> Result<()> {
+        let (upload_res, download_res) = tokio::join!(
+            self.state.uploader.set_location(location),
+            self.state.downloader.set_location(location),
+        );
+        upload_res?;
+        download_res?;
+        Ok(())
+    }
+
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
         cancel: CancellationToken,

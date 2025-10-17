@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -21,7 +21,7 @@ use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::app_client::{Client as AppClient, SlabPinParams};
+use crate::app_client::{self, Client as AppClient, GeoLocation, SlabPinParams};
 use crate::quic::client::{Client, HostQueue};
 use crate::quic::{self, QueueError};
 use crate::{Object, Sector, Slab, SlabSlice};
@@ -68,6 +68,7 @@ pub struct Uploader {
     account_key: PrivateKey,
 
     client: Client,
+    location: Mutex<Option<GeoLocation>>,
 }
 
 pub struct UploadOptions {
@@ -101,7 +102,44 @@ impl Uploader {
             app_client,
             account_key,
             client: host_client,
+            location: Mutex::new(None),
         }
+    }
+
+    pub async fn set_location(&self, location: Option<GeoLocation>) -> Result<(), UploadError> {
+        self.set_location_internal(location).await?;
+        Ok(())
+    }
+
+    async fn set_location_internal(
+        &self,
+        location: Option<GeoLocation>,
+    ) -> Result<(), app_client::Error> {
+        let changed = {
+            let mut current = self.location.lock().unwrap();
+            let changed = *current != location;
+            *current = location;
+            changed
+        };
+
+        if changed || self.client.hosts().is_empty() {
+            self.refresh_hosts().await?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_hosts(&self) -> Result<(), app_client::Error> {
+        if self.client.hosts().is_empty() {
+            self.refresh_hosts().await?;
+        }
+        Ok(())
+    }
+
+    async fn refresh_hosts(&self) -> Result<(), app_client::Error> {
+        let location = *self.location.lock().unwrap();
+        let hosts = self.app_client.hosts_with_location(location).await?;
+        self.client.update_hosts(hosts);
+        Ok(())
     }
 
     async fn upload_shard(
@@ -209,10 +247,7 @@ impl Uploader {
         r: R,
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
-        if self.client.hosts().is_empty() {
-            let hosts = self.app_client.hosts().await?;
-            self.client.update_hosts(hosts);
-        }
+        self.ensure_hosts().await?;
         let data_shards = options.data_shards as usize;
         let parity_shards = options.parity_shards as usize;
         let (slab_tx, mut slab_rx) = mpsc::unbounded_channel();

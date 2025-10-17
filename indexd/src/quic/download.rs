@@ -16,7 +16,7 @@ use tokio::task::{JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
 use tokio::time::sleep;
 
-use crate::app_client::{self, Client as AppClient};
+use crate::app_client::{self, Client as AppClient, GeoLocation};
 use crate::quic::client::Client;
 use crate::quic::{self};
 use crate::{Object, Sector, SharedObject, Slab, SlabSlice};
@@ -170,9 +170,38 @@ pub struct DownloaderInner {
     account_key: PrivateKey,
     host_client: Client,
     app_client: AppClient,
+    location: Mutex<Option<GeoLocation>>,
 }
 
 impl DownloaderInner {
+    async fn set_location(&self, location: Option<GeoLocation>) -> Result<(), app_client::Error> {
+        let changed = {
+            let mut current = self.location.lock().unwrap();
+            let changed = *current != location;
+            *current = location;
+            changed
+        };
+
+        if changed || self.host_client.hosts().is_empty() {
+            self.refresh_hosts().await?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_hosts(&self) -> Result<(), app_client::Error> {
+        if self.host_client.hosts().is_empty() {
+            self.refresh_hosts().await?;
+        }
+        Ok(())
+    }
+
+    async fn refresh_hosts(&self) -> Result<(), app_client::Error> {
+        let location = *self.location.lock().unwrap();
+        let hosts = self.app_client.hosts_with_location(location).await?;
+        self.host_client.update_hosts(hosts);
+        Ok(())
+    }
+
     // helper to pair a sector with its erasure-coded index.
     // Required because [FuturesUnordered.push] does not
     // preserve ordering and doesn't play nice with closures.
@@ -204,8 +233,14 @@ impl Downloader {
                 account_key,
                 host_client,
                 app_client,
+                location: Mutex::new(None),
             }),
         }
+    }
+
+    pub async fn set_location(&self, location: Option<GeoLocation>) -> Result<(), DownloadError> {
+        self.inner.set_location(location).await?;
+        Ok(())
     }
 
     /// Downloads the shards of an erasure-coded slab.
@@ -353,10 +388,7 @@ impl Downloader {
         mut slabs: S,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
-        if self.inner.host_client.hosts().is_empty() {
-            let hosts = self.inner.app_client.hosts().await?;
-            self.inner.host_client.update_hosts(hosts);
-        }
+        self.inner.ensure_hosts().await?;
 
         let max_length = slabs.max_length();
         let mut offset = options.offset;

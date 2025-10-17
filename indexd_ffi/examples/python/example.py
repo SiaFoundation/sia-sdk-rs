@@ -29,6 +29,8 @@ async def main():
     app_id = b'\x01' * 32
     app_key = AppKey(mnemonic, app_id)
     sdk = Sdk("https://app.sia.storage", app_key)
+    # Optionally bias host selection toward your location
+    # await sdk.set_location(51.2093, 3.2247)
     if not await sdk.connect():
         print("App not connected")
         resp = await sdk.request_app_connection(AppMeta(
