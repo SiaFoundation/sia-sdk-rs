@@ -466,6 +466,7 @@ impl TryInto<indexd::SealedObject> for SealedObject {
 pub struct ObjectEvent {
     pub key: String,
     pub deleted: bool,
+    pub updated_at: SystemTime,
     pub object: Option<Arc<PinnedObject>>,
 }
 
@@ -1065,6 +1066,7 @@ impl SDK {
                 Ok(ObjectEvent {
                     key: event.key.to_string(),
                     deleted: event.deleted,
+                    updated_at: event.updated_at.into(),
                     object,
                 })
             })
