@@ -7,7 +7,7 @@ use sia::blake2::{Blake2b256, Digest};
 use sia::seed::{Seed, SeedError};
 use std::collections::VecDeque;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 use tokio::runtime::{Builder, Runtime};
 use tokio::select;
@@ -30,6 +30,13 @@ use tokio::task::JoinHandle;
 
 mod logging;
 pub use logging::*;
+
+static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
+    Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to create global runtime")
+});
 
 #[uniffi::export(with_foreign)]
 pub trait UploadProgressCallback: Send + Sync {
@@ -744,7 +751,6 @@ pub struct DownloadOptions {
 pub struct SDK {
     app_key: PrivateKey,
     app_client: AppClient,
-    runtime: Runtime,
     downloader: Arc<Downloader>,
     uploader: Arc<Uploader>,
 
@@ -764,13 +770,9 @@ impl SDK {
     #[uniffi::constructor]
     pub fn new(indexer_url: String, app_key: Arc<AppKey>) -> Result<Self, Error> {
         let app_client = AppClient::new(indexer_url, app_key.0.clone())?;
-        let rt = Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| Error::Custom(e.to_string()))?;
 
         let app_key = app_key.0.clone();
-        let (uploader, downloader) = rt.block_on(async {
+        let (uploader, downloader) = RUNTIME.block_on(async {
             // install crypto provider
             if rustls::crypto::CryptoProvider::get_default().is_none() {
                 rustls::crypto::ring::default_provider()
@@ -800,7 +802,6 @@ impl SDK {
         Ok(Self {
             app_key: app_key.clone(),
             app_client: app_client.clone(),
-            runtime: rt,
             downloader,
             uploader,
             connected: Arc::new(Mutex::new(false)),
@@ -819,7 +820,7 @@ impl SDK {
 
         let is_connected = self.connected.clone();
         let app_client = self.app_client.clone();
-        self.runtime
+        RUNTIME
             .spawn(async move {
                 match app_client.check_app_authenticated().await {
                     Ok(authenticated) => {
@@ -850,7 +851,7 @@ impl SDK {
         }
 
         let app_client = self.app_client.clone();
-        self.runtime
+        RUNTIME
             .spawn(async move {
                 let resp = app_client
                     .request_app_connection(&RegisterAppRequest {
@@ -896,8 +897,7 @@ impl SDK {
             .map_err(|_| ConnectError::Custom("invalid status URL".into()))?;
 
         let app_client = self.app_client.clone();
-        let connected = self
-            .runtime
+        let connected = RUNTIME
             .spawn(async move {
                 for _ in 0..100 {
                     // wait up to 5 minutes
@@ -930,7 +930,7 @@ impl SDK {
             return Err(UploadError::NotConnected);
         }
         let uploader = self.uploader.clone();
-        self.runtime
+        RUNTIME
             .spawn(async move {
                 let buf = ChunkedWriter::default();
                 let progress_tx = if let Some(callback) = options.progress_callback {
@@ -1003,7 +1003,7 @@ impl SDK {
         let (chunk_tx, chunk_rx) = mpsc::channel(8); // 4MiB buffer
         let cancel_token = CancellationToken::new();
         let future_token = cancel_token.child_token();
-        self.runtime.spawn(async move {
+        RUNTIME.spawn(async move {
             for offset in (offset..total_length).step_by(CHUNK_SIZE) {
                 let mut buf = Vec::with_capacity(CHUNK_SIZE);
                 let mut w = object.writer(&mut buf, offset);
@@ -1062,7 +1062,7 @@ impl SDK {
         let (chunk_tx, chunk_rx) = mpsc::channel(8); // 4MiB buffer
         let cancel_token = CancellationToken::new();
         let future_token = cancel_token.child_token();
-        self.runtime.spawn(async move {
+        RUNTIME.spawn(async move {
             for offset in (offset..total_length).step_by(CHUNK_SIZE) {
                 let mut buf = Vec::with_capacity(CHUNK_SIZE);
                 let mut w = shared_object.writer(&mut buf, offset);
@@ -1101,7 +1101,7 @@ impl SDK {
             return Err(Error::NotConnected);
         }
         let app_client = self.app_client.clone();
-        self.runtime
+        RUNTIME
             .spawn(async move {
                 let hosts = app_client.hosts().await?;
                 Ok(hosts.into_iter().map(|h| h.into()).collect())
@@ -1133,7 +1133,7 @@ impl SDK {
         };
         let app_client = self.app_client.clone();
         let app_key = self.app_key.clone();
-        self.runtime
+        RUNTIME
             .spawn(async move {
                 let objects = app_client
                     .objects(cursor, Some(limit as usize))
@@ -1169,7 +1169,7 @@ impl SDK {
         let object = object.object();
         let app_client = self.app_client.clone();
         let app_key = self.app_key.clone();
-        self.runtime
+        RUNTIME
             .spawn(async move {
                 app_client.save_object(&object.seal(&app_key)).await?;
                 Ok(())
@@ -1185,7 +1185,7 @@ impl SDK {
 
         let key = Hash256::from_str(key.as_str())?;
         let app_client = self.app_client.clone();
-        self.runtime
+        RUNTIME
             .spawn(async move {
                 app_client.delete_object(&key).await?;
                 Ok(())
@@ -1202,7 +1202,7 @@ impl SDK {
         let key = Hash256::from_str(key.as_str())?;
         let app_client = self.app_client.clone();
         let app_key = self.app_key.clone();
-        self.runtime
+        RUNTIME
             .spawn(async move {
                 let obj = app_client.object(&key).await?.open(&app_key)?;
                 Ok(PinnedObject {
@@ -1220,7 +1220,7 @@ impl SDK {
 
         let slab_id = Hash256::from_str(slab_id.as_str())?;
         let app_client = self.app_client.clone();
-        self.runtime
+        RUNTIME
             .spawn(async move {
                 let slab = app_client.slab(&slab_id).await?;
                 Ok(slab.into())
@@ -1235,7 +1235,7 @@ impl SDK {
         }
 
         let app_client = self.app_client.clone();
-        self.runtime
+        RUNTIME
             .spawn(async move {
                 app_client.prune_slabs().await?;
                 Ok(())
@@ -1250,7 +1250,7 @@ impl SDK {
         }
 
         let app_client = self.app_client.clone();
-        self.runtime
+        RUNTIME
             .spawn(async move {
                 let account = app_client.account().await?;
                 Ok(account.into())
@@ -1280,7 +1280,7 @@ impl SDK {
         let shared_url: Url = shared_url
             .parse()
             .map_err(|e| Error::Custom(format!("{e}")))?;
-        self.runtime
+        RUNTIME
             .spawn(async move {
                 let shared_object = app_client.shared_object(shared_url).await?;
                 Ok(SharedObject(shared_object))
@@ -1307,7 +1307,7 @@ impl SDK {
             })
             .collect();
 
-        self.runtime
+        RUNTIME
             .spawn(async move {
                 app_client.pin_slabs(slabs).await?;
                 let object: Object = shared_object.into();
