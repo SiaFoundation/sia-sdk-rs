@@ -1103,7 +1103,7 @@ impl SDK {
         let app_client = self.app_client.clone();
         RUNTIME
             .spawn(async move {
-                let hosts = app_client.hosts().await?;
+                let hosts = app_client.hosts(Default::default()).await?;
                 Ok(hosts.into_iter().map(|h| h.into()).collect())
             })
             .await?

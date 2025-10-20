@@ -378,7 +378,7 @@ impl Downloader {
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
         if self.inner.host_client.hosts().is_empty() {
-            let hosts = self.inner.app_client.hosts().await?;
+            let hosts = self.inner.app_client.hosts(Default::default()).await?;
             self.inner.host_client.update_hosts(hosts);
         }
 

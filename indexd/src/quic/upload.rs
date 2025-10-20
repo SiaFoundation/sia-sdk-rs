@@ -219,7 +219,7 @@ impl Uploader {
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
         if self.client.hosts().is_empty() {
-            let hosts = self.app_client.hosts().await?;
+            let hosts = self.app_client.hosts(Default::default()).await?;
             self.client.update_hosts(hosts);
         }
         let data_shards = options.data_shards as usize;

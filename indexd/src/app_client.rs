@@ -16,6 +16,7 @@ use sia::rhp::Host;
 use thiserror::Error;
 
 use serde::de::DeserializeOwned;
+use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::{DecryptError, open_metadata};
@@ -23,6 +24,7 @@ use crate::slabs::Sector;
 use crate::{Object, ObjectEvent, PinnedSlab, SealedObject, SharedObject, Slab, SlabSlice};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
+use sia::types::v2::Protocol;
 
 pub use reqwest::{IntoUrl, Url};
 
@@ -100,6 +102,45 @@ pub struct SlabPinParams {
 pub struct ObjectsCursor {
     pub after: DateTime<Utc>,
     pub key: Hash256,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeoLocation {
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+impl Serialize for GeoLocation {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let formatted = format!("({:.6},{:.6})", self.latitude, self.longitude);
+        serializer.serialize_str(&formatted)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HostSort {
+    Distance(GeoLocation),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct HostQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<GeoLocation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    #[serde(rename = "serviceaccount", skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<Protocol>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -244,8 +285,11 @@ impl Client {
     }
 
     /// Returns all usable hosts.
-    pub async fn hosts(&self) -> Result<Vec<Host>> {
-        self.get_json::<_, ()>("hosts", None).await
+    ///
+    /// # Arguments
+    /// * `query` - Parameters to control the hosts listing.
+    pub async fn hosts(&self, query: HostQuery) -> Result<Vec<Host>> {
+        self.get_json("hosts", Some(&query)).await
     }
 
     /// Retrieves an object from the indexer by its key.
@@ -657,6 +701,75 @@ mod tests {
         let _: Result<()> = client.get_json::<_, ()>("", None).await;
         let _: Result<()> = client.post_json::<(), ()>("", None).await;
         let _: Result<()> = client.delete("").await;
+    }
+
+    #[tokio::test]
+    async fn test_hosts_with_distance_sort_adds_query() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/hosts"),
+                request::query(url_decoded(contains(("location", "(51.209300,3.224700)"))))
+            ])
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body("[]")
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        let hosts = client
+            .hosts(HostQuery {
+                location: Some(GeoLocation {
+                    latitude: 51.2093,
+                    longitude: 3.2247,
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(hosts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_hosts_with_additional_filters() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/hosts"),
+                request::query(url_decoded(all_of![
+                    contains(("offset", "5")),
+                    contains(("limit", "25")),
+                    contains(("serviceaccount", "true")),
+                    contains(("protocol", "quic")),
+                    contains(("country", "us"))
+                ]))
+            ])
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body("[]")
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        let hosts = client
+            .hosts(HostQuery {
+                offset: Some(5),
+                limit: Some(25),
+                service_account: Some(true),
+                protocol: Some(Protocol::QUIC),
+                country: Some("us".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(hosts.is_empty());
     }
 
     #[tokio::test]
