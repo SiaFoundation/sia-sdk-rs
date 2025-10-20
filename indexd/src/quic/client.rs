@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use chrono::Utc;
+use core::fmt::{Debug, Display};
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use log::debug;
 use priority_queue::PriorityQueue;
@@ -149,6 +150,21 @@ impl Client {
             .collect()
     }
 
+    /// Sorts a list of hosts according to their priority in the client's
+    /// preferred hosts queue. The function `f` is used to extract the
+    /// public key from each item.
+    pub fn prioritize_hosts<H, F>(&self, hosts: &mut [H], f: F)
+    where
+        F: Fn(&H) -> &PublicKey,
+    {
+        let preferred_hosts = self.inner.preferred_hosts.lock().unwrap();
+        hosts.sort_by(|a, b| {
+            preferred_hosts
+                .get_priority(f(b))
+                .cmp(&preferred_hosts.get_priority(f(a)))
+        });
+    }
+
     pub fn update_hosts(&self, hosts: Vec<Host>) {
         let mut hosts_map = self.inner.hosts.lock().unwrap();
         let mut priority_queue = self.inner.preferred_hosts.lock().unwrap();
@@ -247,27 +263,48 @@ impl Client {
     }
 }
 
-#[derive(Debug, Default, Clone, Eq, PartialEq)]
-struct RPCAverage(u128, u64);
+#[derive(Debug, Default, Clone)]
+struct RPCAverage(Option<f64>); // exponential moving average of latency in milliseconds
 
 impl RPCAverage {
-    fn add_sample(&mut self, sample: u128) {
-        self.0 = self.0.saturating_add(sample);
-        self.1 = self.1.saturating_add(1);
+    const ALPHA: f64 = 0.2;
+    fn add_sample(&mut self, sample: Duration) {
+        match self.0 {
+            Some(avg) => {
+                self.0 =
+                    Some(Self::ALPHA * (sample.as_millis() as f64) + (1.0 - Self::ALPHA) * avg);
+            }
+            None => {
+                self.0 = Some(sample.as_millis() as f64);
+            }
+        }
     }
 
-    fn avg(&self) -> u128 {
-        if self.1 == 0 {
-            u128::MAX
-        } else {
-            self.0 / self.1 as u128
+    fn avg(&self) -> Duration {
+        match self.0 {
+            Some(avg) => Duration::from_millis(avg as u64),
+            None => Duration::from_secs(3600), // 1h if no samples
         }
     }
 }
 
+impl Display for RPCAverage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.avg().fmt(f)
+    }
+}
+
+impl PartialEq for RPCAverage {
+    fn eq(&self, other: &Self) -> bool {
+        self.avg() == other.avg()
+    }
+}
+
+impl Eq for RPCAverage {}
+
 impl Ord for RPCAverage {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.avg().cmp(&self.avg()) // lower average latency is higher priority
+        self.avg().cmp(&other.avg())
     }
 }
 
@@ -277,44 +314,101 @@ impl PartialOrd for RPCAverage {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+struct FailureRate(Option<f64>); // exponential moving average of failure rate
+
+impl FailureRate {
+    const ALPHA: f64 = 0.2;
+
+    fn add_sample(&mut self, success: bool) {
+        let sample = if success { 0.0 } else { 1.0 };
+        match self.0 {
+            Some(rate) => {
+                self.0 = Some(Self::ALPHA * sample + (1.0 - Self::ALPHA) * rate);
+            }
+            None => {
+                self.0 = Some(sample);
+            }
+        }
+    }
+
+    // Computes the failure rate as an integer percentage (0-100)
+    fn rate(&self) -> i64 {
+        match self.0 {
+            Some(rate) => (rate * 100.0).round() as i64,
+            None => 0, // presume no failures if no samples
+        }
+    }
+}
+
+impl Display for FailureRate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}%", self.rate())
+    }
+}
+
+impl PartialEq for FailureRate {
+    fn eq(&self, other: &Self) -> bool {
+        self.rate() == other.rate()
+    }
+}
+
+impl Eq for FailureRate {}
+
+impl PartialOrd for FailureRate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FailureRate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.rate().cmp(&other.rate())
+    }
+}
+
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 struct HostMetric {
     rpc_write_avg: RPCAverage,
     rpc_read_avg: RPCAverage,
-    successful: i64, // negative values indicate failures
+    failure_rate: FailureRate,
 }
 
 impl HostMetric {
     fn add_write_sample(&mut self, d: Duration) {
-        self.rpc_write_avg.add_sample(d.as_millis());
-        self.successful = self.successful.saturating_add(1);
+        self.rpc_write_avg.add_sample(d);
+        self.failure_rate.add_sample(true);
     }
 
     fn add_read_sample(&mut self, d: Duration) {
-        self.rpc_read_avg.add_sample(d.as_millis());
-        self.successful = self.successful.saturating_add(1);
+        self.rpc_read_avg.add_sample(d);
+        self.failure_rate.add_sample(true);
     }
 
     fn add_failure(&mut self) {
-        self.successful = self.successful.saturating_sub(1);
+        self.failure_rate.add_sample(false);
     }
 }
 
 impl Ord for HostMetric {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let avg_self = (self
-            .rpc_write_avg
-            .avg()
-            .saturating_add(self.rpc_read_avg.avg()))
-            / 2;
-        let avg_other = (other
-            .rpc_write_avg
-            .avg()
-            .saturating_add(other.rpc_read_avg.avg()))
-            / 2;
-        match avg_other.cmp(&avg_self) {
-            std::cmp::Ordering::Equal => self.successful.cmp(&other.successful), // more successful RPCs is higher priority
-            ord => ord, // lower average speed is higher priority
+        match other.failure_rate.cmp(&self.failure_rate) {
+            // lower failure rate is higher priority
+            std::cmp::Ordering::Equal => {
+                // use average of read and write RPC times as tiebreaker
+                let avg_self = (self
+                    .rpc_write_avg
+                    .avg()
+                    .saturating_add(self.rpc_read_avg.avg()))
+                    / 2;
+                let avg_other = (other
+                    .rpc_write_avg
+                    .avg()
+                    .saturating_add(other.rpc_read_avg.avg()))
+                    / 2;
+                avg_other.cmp(&avg_self) // lower average latency is higher priority
+            }
+            ord => ord,
         }
     }
 }
@@ -790,5 +884,154 @@ mod test {
             .await
             .expect("Failed to get host prices");
         assert_ne!(prices2, prices3);
+    }
+
+    #[test]
+    fn test_failure_rate() {
+        let mut fr = FailureRate::default();
+        assert_eq!(fr.rate(), 0, "initial failure rate should be 0%");
+        fr.add_sample(false);
+        assert_eq!(fr.rate(), 100, "initial failure should be 100%");
+
+        for _ in 0..5 {
+            fr.add_sample(true);
+        }
+        assert!(
+            fr.rate() < 100,
+            "failure rate should decrease after successes"
+        );
+
+        let mut fr2 = FailureRate::default();
+        for _ in 0..5 {
+            fr2.add_sample(true);
+        }
+        assert_eq!(
+            fr2.rate(),
+            0,
+            "failure rate should be 0% after only successes"
+        );
+        assert_eq!(
+            fr.cmp(&fr2),
+            std::cmp::Ordering::Greater,
+            "higher failure rate should be greater"
+        );
+    }
+
+    #[test]
+    fn test_rpc_average() {
+        let mut avg = RPCAverage::default();
+        avg.add_sample(Duration::from_millis(100));
+        assert_eq!(
+            avg.avg(),
+            Duration::from_millis(100),
+            "initial average should be first sample"
+        );
+
+        avg.add_sample(Duration::from_millis(200));
+        assert!(
+            avg.avg() > Duration::from_millis(100),
+            "average should increase after higher sample"
+        );
+
+        avg.add_sample(Duration::from_millis(50));
+        assert!(
+            avg.avg() < Duration::from_millis(200),
+            "average should decrease after lower sample"
+        );
+
+        let mut avg2 = RPCAverage::default();
+        avg2.add_sample(Duration::from_millis(150));
+        assert_eq!(
+            avg.cmp(&avg2),
+            std::cmp::Ordering::Less,
+            "lower average should be lesser"
+        );
+    }
+
+    #[test]
+    fn test_host_metric_ordering() {
+        let mut hosts = vec![
+            HostMetric::default(),
+            HostMetric::default(),
+            HostMetric::default(),
+        ];
+        hosts[0].failure_rate.add_sample(false);
+        hosts[1].failure_rate.add_sample(false);
+        hosts[2].failure_rate.add_sample(false);
+        for _ in 0..10 {
+            hosts[0].failure_rate.add_sample(true);
+        }
+        for _ in 0..5 {
+            hosts[1].failure_rate.add_sample(true);
+        }
+        hosts.sort();
+
+        let rates = hosts
+            .into_iter()
+            .rev()
+            .map(|h| h.failure_rate)
+            .collect::<Vec<FailureRate>>();
+        assert!(
+            rates.is_sorted(),
+            "hosts should be sorted by failure rate desc"
+        );
+
+        let mut hosts = vec![
+            HostMetric::default(),
+            HostMetric::default(),
+            HostMetric::default(),
+        ];
+        hosts[0]
+            .rpc_write_avg
+            .add_sample(Duration::from_millis(100));
+        hosts[1]
+            .rpc_write_avg
+            .add_sample(Duration::from_millis(1000));
+        hosts[2]
+            .rpc_write_avg
+            .add_sample(Duration::from_millis(500));
+        hosts.sort();
+
+        let rates = hosts
+            .into_iter()
+            .rev()
+            .map(|h| h.rpc_write_avg)
+            .collect::<Vec<RPCAverage>>();
+        assert!(
+            rates.is_sorted(),
+            "hosts should be sorted by rpc write avg desc"
+        );
+    }
+
+    #[test]
+    fn test_host_priority_queue() {
+        let mut pq = PriorityQueue::<PublicKey, HostMetric>::new();
+        let mut hosts = vec![];
+        for _ in 0..5 {
+            let pk = PrivateKey::from_seed(&rand::random()).public_key();
+            pq.push(pk, HostMetric::default());
+            hosts.push(pk);
+        }
+
+        // initially, the order is the same as insertion
+        assert_eq!(pq.peek().unwrap().0, &hosts[0]);
+
+        // fourth host has a sample, should have highest priority
+        pq.change_priority_by(&hosts[3], |metric| {
+            metric.add_write_sample(Duration::from_millis(100));
+        });
+        assert_eq!(pq.peek().unwrap().0, &hosts[3]);
+
+        // add a faster sample to second host, should have higher priority than fourth
+        pq.change_priority_by(&hosts[1], |metric| {
+            metric.add_read_sample(Duration::from_millis(50));
+        });
+        assert_eq!(pq.peek().unwrap().0, &hosts[1]);
+
+        // add a failure to the second host, should lower its priority below fourth
+        pq.change_priority_by(&hosts[1], |metric| {
+            metric.add_failure();
+        });
+        assert_eq!(pq.peek().unwrap().0, &hosts[3]);
     }
 }
