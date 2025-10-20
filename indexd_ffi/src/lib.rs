@@ -12,7 +12,7 @@ use std::time::SystemTime;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 
-use indexd::app_client::{Client as AppClient, RegisterAppRequest, SlabPinParams};
+use indexd::app_client::{Client as AppClient, HostQuery, RegisterAppRequest, SlabPinParams};
 use indexd::quic::{Client as HostClient, Downloader, SlabFetcher, Uploader};
 use indexd::{Object, SealedObjectError, SlabSlice, Url, quic};
 use log::debug;
@@ -1024,7 +1024,10 @@ impl SDK {
 
     /// Returns a list of all usable hosts.
     pub async fn hosts(&self) -> Result<Vec<Host>, Error> {
-        let hosts = self.app_client.hosts().await?;
+        let hosts = self
+            .app_client
+            .hosts(HostQuery::default())
+            .await?;
         Ok(hosts.into_iter().map(|h| h.into()).collect())
     }
 

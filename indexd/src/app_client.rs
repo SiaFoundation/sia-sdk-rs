@@ -14,6 +14,7 @@ use sia::rhp::Host;
 use thiserror::Error;
 
 use serde::de::DeserializeOwned;
+use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::{DecryptError, open_metadata};
@@ -21,6 +22,7 @@ use crate::slabs::Sector;
 use crate::{Object, ObjectEvent, PinnedSlab, SealedObject, SharedObject, Slab, SlabSlice};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
+use sia::types::v2::Protocol;
 
 pub use reqwest::{IntoUrl, Url};
 
@@ -94,6 +96,86 @@ pub struct SlabPinParams {
 pub struct ObjectsCursor {
     pub after: DateTime<Utc>,
     pub key: Hash256,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GeoLocation {
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum HostSort {
+    Distance(GeoLocation),
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct HostQuery {
+    pub sort: Option<HostSort>,
+    pub offset: Option<u64>,
+    pub limit: Option<u64>,
+    pub service_account: Option<bool>,
+    pub protocol: Option<Protocol>,
+    pub country: Option<String>,
+}
+
+impl Default for HostQuery {
+    fn default() -> Self {
+        Self {
+            sort: None,
+            offset: None,
+            limit: None,
+            service_account: None,
+            protocol: None,
+            country: None,
+        }
+    }
+}
+
+impl HostQuery {
+    fn is_empty(&self) -> bool {
+        self.sort.is_none()
+            && self.offset.is_none()
+            && self.limit.is_none()
+            && self.service_account.is_none()
+            && self.protocol.is_none()
+            && self
+                .country
+                .as_ref()
+                .map(|country| country.is_empty())
+                .unwrap_or(true)
+    }
+}
+
+impl Serialize for HostQuery {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        if let Some(offset) = self.offset {
+            map.serialize_entry("offset", &offset)?;
+        }
+        if let Some(limit) = self.limit {
+            map.serialize_entry("limit", &limit)?;
+        }
+        if let Some(service_account) = self.service_account {
+            map.serialize_entry("serviceaccount", &service_account)?;
+        }
+        if let Some(protocol) = self.protocol {
+            map.serialize_entry("protocol", &protocol)?;
+        }
+        if let Some(country) = self.country.as_ref().filter(|c| !c.is_empty()) {
+            map.serialize_entry("country", &country.to_ascii_uppercase())?;
+        }
+        if let Some(HostSort::Distance(location)) = self.sort {
+            map.serialize_entry(
+                "location",
+                &format!("({:.6},{:.6})", location.latitude, location.longitude),
+            )?;
+        }
+        map.end()
+    }
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -238,8 +320,15 @@ impl Client {
     }
 
     /// Returns all usable hosts.
-    pub async fn hosts(&self) -> Result<Vec<Host>> {
-        self.get_json::<_, ()>("hosts", None).await
+    ///
+    /// # Arguments
+    /// * `query` - Parameters to control the hosts listing.
+    pub async fn hosts(&self, query: HostQuery) -> Result<Vec<Host>> {
+        if query.is_empty() {
+            self.get_json::<_, ()>("hosts", None).await
+        } else {
+            self.get_json("hosts", Some(&query)).await
+        }
     }
 
     /// Retrieves an object from the indexer by its key.
@@ -633,6 +722,75 @@ mod tests {
         let _: Result<()> = client.get_json::<_, ()>("", None).await;
         let _: Result<()> = client.post_json::<(), ()>("", None).await;
         let _: Result<()> = client.delete("").await;
+    }
+
+    #[tokio::test]
+    async fn hosts_with_distance_sort_adds_query() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/hosts"),
+                request::query(url_decoded(contains(("location", "(51.209300,3.224700)"))))
+            ])
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body("[]")
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        let hosts = client
+            .hosts(HostQuery {
+                sort: Some(HostSort::Distance(GeoLocation {
+                    latitude: 51.2093,
+                    longitude: 3.2247,
+                })),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(hosts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hosts_with_additional_filters() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/hosts"),
+                request::query(url_decoded(all_of![
+                    contains(("offset", "5")),
+                    contains(("limit", "25")),
+                    contains(("serviceaccount", "true")),
+                    contains(("protocol", "quic")),
+                    contains(("country", "US"))
+                ]))
+            ])
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body("[]")
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        let hosts = client
+            .hosts(HostQuery {
+                offset: Some(5),
+                limit: Some(25),
+                service_account: Some(true),
+                protocol: Some(Protocol::QUIC),
+                country: Some("us".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(hosts.is_empty());
     }
 
     #[tokio::test]
