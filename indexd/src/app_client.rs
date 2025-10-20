@@ -60,7 +60,7 @@ pub struct AuthConnectStatusResponse {
     approved: bool,
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterAppRequest {
     pub name: String,

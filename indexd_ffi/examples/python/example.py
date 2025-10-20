@@ -1,7 +1,7 @@
 import asyncio
 import json
 from sys import stdin
-from indexd_ffi import generate_recovery_phrase, AppKey, AppMeta, Sdk, UploadOptions, DownloadOptions, set_logger, Logger
+from indexd_ffi import generate_recovery_phrase, AppKey, AppConnectOptions, UnauthenticatedSdk, UploadOptions, DownloadOptions, set_logger, Logger
 from logging import fatal
 from datetime import datetime, timedelta, timezone
 
@@ -28,21 +28,24 @@ async def main():
     print("mnemonic:", mnemonic)
     app_id = b'\x01' * 32
     app_key = AppKey(mnemonic, app_id)
-    sdk = Sdk("https://app.sia.storage", app_key)
-    if not await sdk.connect():
+    sdk_auth = UnauthenticatedSdk(AppConnectOptions(
+        indexer_url="https://app.sia.storage",
+        name="python example",
+        description= "an example app",
+        service_url= "https://example.com",
+        logo_url=None,
+        callback_url=None,
+        app_key=app_key,
+    ))
+    if not await sdk_auth.authorized():
         print("App not connected")
-        resp = await sdk.request_app_connection(AppMeta(
-            name="python example",
-            description= "an example app",
-            service_url= "https://example.com",
-            logo_url=None,
-            callback_url=None,
-        ))
+        resp = await sdk_auth.request_app_connection()
         print(f"Please approve connection {resp.response_url}")
-        connected = await sdk.wait_for_connect(resp)
+        connected = await sdk_auth.wait_for_authorization(resp)
         if not connected:
             fatal("user rejected connection")
 
+    sdk = await sdk_auth.sdk()
     print("Connected to indexd")
 
     writer = await sdk.upload(UploadOptions(
@@ -58,7 +61,7 @@ async def main():
     sealed = obj.seal(app_key)
     print("sealed:", sealed.id, sealed.signature)
 
-    reader = sdk.download(obj, DownloadOptions())
+    reader = await sdk.download(obj, DownloadOptions())
     read_data = b''
     while True:
         chunk = await reader.read_chunk()
@@ -68,34 +71,5 @@ async def main():
 
     if wrote_data != read_data:
         print("data mismatch", wrote_data, read_data)
-
-    shared_object_url = sdk.share_object(obj, datetime.now(timezone.utc) + timedelta(hours=1))  # Expires in 1 hour
-    shared_object = await sdk.shared_object(shared_object_url)
-    print("shared object:", shared_object.size(), shared_object.metadata().decode())
-
-    shared_reader = sdk.download_shared(shared_object, DownloadOptions())
-    read_data = b''
-    while True:
-        chunk = await shared_reader.read_chunk()
-        if not chunk:
-            break
-        read_data += chunk
-    if wrote_data != read_data:
-        print("data mismatch", wrote_data, read_data)
-
-    new_object = await sdk.pin_shared(shared_object)
-    print("pinned object:", new_object.size(), new_object.metadata().decode())
-
-    new_reader = sdk.download(new_object, DownloadOptions())
-    read_data = b''
-    while True:
-        chunk = await new_reader.read_chunk()
-        if not chunk:
-            break
-        read_data += chunk
-
-    if wrote_data != read_data:
-        print("data mismatch", wrote_data, read_data)
-
 
 asyncio.run(main())
