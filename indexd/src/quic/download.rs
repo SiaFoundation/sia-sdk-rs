@@ -18,8 +18,7 @@ use tokio::time::sleep;
 
 use crate::app_client::{self, Client as AppClient};
 use crate::quic::client::Client;
-use crate::quic::{self};
-use crate::{Object, Sector, SharedObject, Slab, SlabSlice};
+use crate::{Object, Sector, SharedObject, Slab, SlabSlice, quic};
 
 /// A SlabIterator can be used to iterate over slabs to be downloaded.
 /// This is used to abstract over different sources of slabs, such as
@@ -145,6 +144,9 @@ pub enum DownloadError {
     #[error("api error: {0}")]
     ApiError(#[from] app_client::Error),
 
+    #[error("invalid slab: {0}")]
+    InvalidSlab(String),
+
     #[error("custom error: {0}")]
     Custom(String),
 }
@@ -197,6 +199,11 @@ pub struct Downloader {
     inner: Arc<DownloaderInner>,
 }
 
+struct SectorDownloadTask {
+    sector: Sector,
+    index: usize,
+}
+
 impl Downloader {
     pub fn new(app_client: AppClient, host_client: Client, account_key: PrivateKey) -> Self {
         Self {
@@ -223,32 +230,49 @@ impl Downloader {
         limit: usize,
         max_inflight: usize,
     ) -> Result<Vec<Option<Vec<u8>>>, DownloadError> {
-        let semaphore = Arc::new(Semaphore::new(max_inflight));
-        let (data_shards, parity_shards) = sectors.split_at(min_shards as usize);
-
-        let mut download_tasks = JoinSet::new();
-        for (i, sector) in data_shards.iter().enumerate() {
-            let inner = self.inner.clone();
-            let permit = semaphore.clone().acquire_owned().await?;
-            download_tasks.spawn(inner.try_download_sector(
-                permit,
-                sector.host_key,
-                sector.root,
-                offset,
-                limit,
-                i,
-            ));
+        if sectors.len() < min_shards as usize {
+            return Err(DownloadError::InvalidSlab(format!(
+                "not enough sectors: have {}, need at least {}",
+                sectors.len(),
+                min_shards
+            )));
         }
 
-        let mut parity_shards = VecDeque::from(
-            parity_shards
-                .iter()
-                .enumerate()
-                .map(|(i, sector)| (i + data_shards.len(), sector))
-                .collect::<Vec<_>>(),
-        );
+        let semaphore = Arc::new(Semaphore::new(max_inflight));
+        let mut sectors = sectors
+            .iter()
+            .enumerate()
+            .map(|(index, s)| SectorDownloadTask {
+                sector: s.clone(),
+                index,
+            })
+            .collect::<Vec<_>>();
+        self.inner
+            .host_client
+            .prioritize_hosts(&mut sectors, |task| &task.sector.host_key);
+        let total_shards = sectors.len();
+        let mut sectors = VecDeque::from(sectors);
+        let mut download_tasks = JoinSet::new();
+        for _ in 0..min_shards {
+            match sectors.pop_front() {
+                Some(task) => {
+                    let inner = self.inner.clone();
+                    let permit = semaphore.clone().acquire_owned().await?;
+                    download_tasks.spawn(inner.try_download_sector(
+                        permit,
+                        task.sector.host_key,
+                        task.sector.root,
+                        offset,
+                        limit,
+                        task.index,
+                    ));
+                }
+                None => panic!("not enough sectors to satisfy min_shards"), // should be unreachable
+            };
+        }
+
         let mut successful: u8 = 0;
-        let mut shards = vec![None; sectors.len()];
+        let mut shards = vec![None; total_shards];
         loop {
             tokio::select! {
                 biased;
@@ -267,11 +291,11 @@ impl Downloader {
                             }
                         }
                         Ok(Err(e)) => {
-                         debug!("sector download failed {:?}", e);
+                            debug!("sector download failed {:?}", e);
                             let rem = min_shards.saturating_sub(successful);
                             if rem == 0 {
                                 return Ok(shards); // sanity check
-                            } else if download_tasks.len() <= rem as usize && let Some((i, sector)) = parity_shards.pop_front() {
+                            } else if download_tasks.len() <= rem as usize && let Some(task) = sectors.pop_front() {
                                 let permit = semaphore.clone().acquire_owned().await?;
                                 // only spawn additional download tasks if there are not
                                 // enough to satisfy the required number of shards. The
@@ -279,11 +303,11 @@ impl Downloader {
                                 let inner = self.inner.clone();
                                 download_tasks.spawn(inner.try_download_sector(
                                     permit,
-                                    sector.host_key,
-                                    sector.root,
+                                    task.sector.host_key,
+                                    task.sector.root,
                                     offset,
                                     limit,
-                                    i,
+                                    task.index,
                                 ));
                             } else if download_tasks.is_empty() && successful < min_shards {
                                 return Err(DownloadError::NotEnoughShards(successful, min_shards));
@@ -294,7 +318,7 @@ impl Downloader {
                             let rem = min_shards.saturating_sub(successful);
                             if rem == 0 {
                                 return Ok(shards); // sanity check
-                            } else if download_tasks.len() <= rem as usize && let Some((i, sector)) = parity_shards.pop_front() {
+                            } else if download_tasks.len() <= rem as usize && let Some(task) = sectors.pop_front() {
                                 let permit = semaphore.clone().acquire_owned().await?;
                                 // only spawn additional download tasks if there are not
                                 // enough to satisfy the required number of shards. The
@@ -302,11 +326,11 @@ impl Downloader {
                                 let inner = self.inner.clone();
                                 download_tasks.spawn(inner.try_download_sector(
                                     permit,
-                                    sector.host_key,
-                                    sector.root,
+                                    task.sector.host_key,
+                                    task.sector.root,
                                     offset,
                                     limit,
-                                    i,
+                                    task.index,
                                 ));
                             } else if download_tasks.is_empty() && successful < min_shards {
                                 return Err(DownloadError::NotEnoughShards(successful, min_shards));
@@ -316,15 +340,15 @@ impl Downloader {
                 },
                 _ = sleep(Duration::from_secs(1)) => {
                     if let Ok(racer_permit) = semaphore.clone().try_acquire_owned()
-                        && let Some((i, sector)) = parity_shards.pop_front() {
+                        && let Some(task) = sectors.pop_front() {
                             let inner = self.inner.clone();
                             download_tasks.spawn(inner.try_download_sector(
                                 racer_permit,
-                                sector.host_key,
-                                sector.root,
+                                task.sector.host_key,
+                                task.sector.root,
                                 offset,
                                 limit,
-                                i,
+                                task.index,
                             ));
                         }
                 }
