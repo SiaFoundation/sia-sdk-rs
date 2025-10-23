@@ -1267,7 +1267,7 @@ impl SDK {
     ) -> Result<String, Error> {
         let u = self
             .app_client
-            .object_share_url(&object.object(), valid_until.into())?;
+            .shared_object_url(&object.object(), valid_until.into())?;
         Ok(u.to_string())
     }
 

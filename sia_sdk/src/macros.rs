@@ -155,6 +155,21 @@ pub const fn decode_hex_256(input: &[u8]) -> [u8; 32] {
     result
 }
 
+#[inline]
+#[doc(hidden)]
+pub const fn decode_hex_512(input: &[u8]) -> [u8; 64] {
+    let mut result = [0u8; 64];
+    let mut i = 0;
+    while i < 128 {
+        match decode_hex_pair(input[i], input[i + 1]) {
+            Some(byte) => result[i / 2] = byte,
+            _ => panic!("invalid hex char"),
+        }
+        i += 2;
+    }
+    result
+}
+
 /// A macro to create an Address from a literal hex string. The string must be 76 characters long.
 ///
 /// The checksum is not verified.
@@ -313,6 +328,24 @@ macro_rules! public_key {
         }
 
         $crate::signing::PublicKey::new($crate::macros::decode_hex_256(&s))
+    }};
+}
+
+/// A macro to create a BlockID from a literal hex string. The string must be 64 characters long.
+///
+/// ```
+/// use sia::signing::Signature;
+/// use sia::signature;
+///
+/// const sig: Signature = signature!("458283fd707c9d170d5e1814944f35893c53c9445fd46c74a6b285bf3029bf404c9af509ea271d811726bd20d8c7d8fe4b9efdc4bebb445f18059eca886ece03");
+/// ```
+#[macro_export]
+macro_rules! signature {
+    ($text:literal) => {{
+        if $text.len() != 128 {
+            panic!("Signature must be 128 characters");
+        }
+        $crate::signing::Signature::new($crate::macros::decode_hex_512($text.as_bytes()))
     }};
 }
 
