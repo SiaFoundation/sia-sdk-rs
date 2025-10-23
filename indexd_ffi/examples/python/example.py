@@ -29,7 +29,7 @@ async def main():
     app_id = b'\x01' * 32
     app_key = AppKey(mnemonic, app_id)
     sdk = Sdk("https://app.sia.storage", app_key)
-    if not await sdk.connect():
+    if not await sdk.connected():
         print("App not connected")
         resp = await sdk.request_app_connection(AppMeta(
             name="python example",
@@ -58,7 +58,7 @@ async def main():
     sealed = obj.seal(app_key)
     print("sealed:", sealed.id, sealed.signature)
 
-    reader = sdk.download(obj, DownloadOptions())
+    reader = await sdk.download(obj, DownloadOptions())
     read_data = b''
     while True:
         chunk = await reader.read_chunk()
@@ -68,34 +68,5 @@ async def main():
 
     if wrote_data != read_data:
         print("data mismatch", wrote_data, read_data)
-
-    shared_object_url = sdk.share_object(obj, datetime.now(timezone.utc) + timedelta(hours=1))  # Expires in 1 hour
-    shared_object = await sdk.shared_object(shared_object_url)
-    print("shared object:", shared_object.size(), shared_object.metadata().decode())
-
-    shared_reader = sdk.download_shared(shared_object, DownloadOptions())
-    read_data = b''
-    while True:
-        chunk = await shared_reader.read_chunk()
-        if not chunk:
-            break
-        read_data += chunk
-    if wrote_data != read_data:
-        print("data mismatch", wrote_data, read_data)
-
-    new_object = await sdk.pin_shared(shared_object)
-    print("pinned object:", new_object.size(), new_object.metadata().decode())
-
-    new_reader = sdk.download(new_object, DownloadOptions())
-    read_data = b''
-    while True:
-        chunk = await new_reader.read_chunk()
-        if not chunk:
-            break
-        read_data += chunk
-
-    if wrote_data != read_data:
-        print("data mismatch", wrote_data, read_data)
-
 
 asyncio.run(main())
