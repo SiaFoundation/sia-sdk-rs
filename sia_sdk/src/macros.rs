@@ -141,10 +141,10 @@ pub(crate) const fn decode_hex_pair(hi: u8, lo: u8) -> Option<u8> {
 }
 
 /// Decode a hex string of length 64 into a 32-byte array.
-/// 
-/// # Panics 
+///
+/// # Panics
 /// if the input is not valid hex.
-/// 
+///
 /// # Safety
 /// This function is intended to be used in const contexts, such as macros.
 #[inline]
@@ -164,10 +164,10 @@ pub const fn decode_hex_256(input: &[u8]) -> [u8; 32] {
 }
 
 /// Decode a hex string of length 128 into a 64-byte array.
-/// 
-/// # Panics 
+///
+/// # Panics
 /// if the input is not valid hex.
-/// 
+///
 /// # Safety
 /// This function is intended to be used in const contexts, such as macros.
 #[inline]
