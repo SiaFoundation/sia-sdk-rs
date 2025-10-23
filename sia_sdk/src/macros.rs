@@ -140,9 +140,17 @@ pub(crate) const fn decode_hex_pair(hi: u8, lo: u8) -> Option<u8> {
     }
 }
 
+/// Decode a hex string of length 64 into a 32-byte array.
+/// 
+/// # Panics 
+/// if the input is not valid hex.
+/// 
+/// # Safety
+/// This function is intended to be used in const contexts, such as macros.
 #[inline]
 #[doc(hidden)]
 pub const fn decode_hex_256(input: &[u8]) -> [u8; 32] {
+    // note: this must be public to be used in macros
     let mut result = [0u8; 32];
     let mut i = 0;
     while i < 64 {
@@ -155,9 +163,17 @@ pub const fn decode_hex_256(input: &[u8]) -> [u8; 32] {
     result
 }
 
+/// Decode a hex string of length 128 into a 64-byte array.
+/// 
+/// # Panics 
+/// if the input is not valid hex.
+/// 
+/// # Safety
+/// This function is intended to be used in const contexts, such as macros.
 #[inline]
 #[doc(hidden)]
 pub const fn decode_hex_512(input: &[u8]) -> [u8; 64] {
+    // note: this must be public to be used in macros
     let mut result = [0u8; 64];
     let mut i = 0;
     while i < 128 {
@@ -170,7 +186,7 @@ pub const fn decode_hex_512(input: &[u8]) -> [u8; 64] {
     result
 }
 
-/// A macro to create an Address from a literal hex string. The string must be 76 characters long.
+/// A macro to create an [sia::types::Address] from a literal hex string. The string must be 76 characters long.
 ///
 /// The checksum is not verified.
 /// ```
@@ -189,7 +205,7 @@ macro_rules! address {
     }};
 }
 
-/// A macro to create a Hash256 from a literal hex string. The string must be 64 characters long.
+/// A macro to create a [sia::types::Hash256] from a literal hex string. The string must be 64 characters long.
 ///
 /// ```
 /// use sia::types::Hash256;
@@ -207,7 +223,7 @@ macro_rules! hash_256 {
     }};
 }
 
-/// A macro to create a SiacoinOutputID from a literal hex string. The string must be 64 characters long.
+/// A macro to create a [sia::types::SiacoinOutputID] from a literal hex string. The string must be 64 characters long.
 ///
 ///```
 /// use sia::types::SiacoinOutputID;
@@ -225,7 +241,7 @@ macro_rules! siacoin_id {
     }};
 }
 
-/// A macro to create a SiafundOutputID from a literal hex string. The string must be 64 characters long.
+/// A macro to create a [sia::types::SiafundOutputID] from a literal hex string. The string must be 64 characters long.
 ///
 /// ```
 /// use sia::types::SiafundOutputID;
@@ -243,7 +259,7 @@ macro_rules! siafund_id {
     }};
 }
 
-/// A macro to create a FileContractID from a literal hex string. The string must be 64 characters long.
+/// A macro to create a [sia::types::FileContractID] from a literal hex string. The string must be 64 characters long.
 ///
 /// ```
 /// use sia::types::FileContractID;
@@ -261,7 +277,7 @@ macro_rules! contract_id {
     }};
 }
 
-/// A macro to create a TransactionID from a literal hex string. The string must be 64 characters long.
+/// A macro to create a [sia::types::TransactionID] from a literal hex string. The string must be 64 characters long.
 ///
 /// ```
 /// use sia::types::TransactionID;
@@ -279,7 +295,7 @@ macro_rules! transaction_id {
     }};
 }
 
-/// A macro to create a BlockID from a literal hex string. The string must be 64 characters long.
+/// A macro to create a [sia::types::BlockID] from a literal hex string. The string must be 64 characters long.
 ///
 /// ```
 /// use sia::types::BlockID;
@@ -297,7 +313,7 @@ macro_rules! block_id {
     }};
 }
 
-/// A macro to create a PublicKey from a literal hex string. The string must be 72 characters long and start with "ed25519:".
+/// A macro to create a [sia::signing::PublicKey] from a literal hex string. The string must be 72 characters long and start with "ed25519:".
 ///
 /// ```
 /// use sia::signing::PublicKey;
@@ -331,7 +347,7 @@ macro_rules! public_key {
     }};
 }
 
-/// A macro to create a BlockID from a literal hex string. The string must be 64 characters long.
+/// A macro to create a [sia::signing::Signature] from a literal hex string. The string must be 128 characters long.
 ///
 /// ```
 /// use sia::signing::Signature;
