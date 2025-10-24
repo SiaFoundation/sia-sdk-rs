@@ -1,3 +1,21 @@
+## 0.3.0 (2025-10-24)
+
+### Breaking Changes
+
+- Reduced size of shared object URLs by using base64 URL encoding for the encryption key.
+- Reduced size of signed urls by shortening query parameter names and using base64 URL encoding instead of hex.
+
+### Features
+
+- Track RPC failure rate when selecting hosts rather than raw RPCs.
+
+### Fixes
+
+- Added missing updated_at field.
+- Fix decoding failing when encrypted metadata is null or missing
+- Fixed an issue with uploads stalling after resuming on some platforms.
+- Update object listing endpoints to use events
+
 ## 0.2.2 (2025-10-04)
 
 ### Features
