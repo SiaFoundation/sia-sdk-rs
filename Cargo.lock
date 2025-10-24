@@ -1439,6 +1439,7 @@ dependencies = [
 name = "indexd"
 version = "0.1.2"
 dependencies = [
+ "base64",
  "blake2",
  "blake2b_simd",
  "bytes",

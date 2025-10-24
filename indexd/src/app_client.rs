@@ -1,4 +1,6 @@
 use std::time::Duration;
+use base64::prelude::*;
+use base64::{engine::general_purpose::URL_SAFE};
 
 use blake2::Digest;
 use chrono::{DateTime, Utc};
@@ -23,6 +25,10 @@ use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 
 pub use reqwest::{IntoUrl, Url};
+
+const QUERY_PARAM_VALID_UNTIL: &str = "sv";
+const QUERY_PARAM_CREDENTIAL: &str = "sc";
+const QUERY_PARAM_SIGNATURE: &str = "ss";
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -436,10 +442,9 @@ impl Client {
     /// link does not necessarily remove access to an object.
     ///
     /// # Arguments
-    /// - `object_key` the key of the object
-    /// - `encryption_key` the key used to encrypt the metadata
+    /// - `object` the object to create the link for
     /// - `valid_until` the time the link expires
-    pub fn object_share_url(&self, object: &Object, valid_until: DateTime<Utc>) -> Result<Url> {
+    pub fn shared_object_url(&self, object: &Object, valid_until: DateTime<Utc>) -> Result<Url> {
         let mut url = self
             .url
             .join(format!("objects/{}/shared", object.id()).as_str())?;
@@ -448,7 +453,7 @@ impl Client {
         url.set_fragment(Some(
             format!(
                 "encryption_key={}",
-                hex::encode(object.encryption_key().as_ref())
+                URL_SAFE.encode(object.encryption_key().as_ref())
             )
             .as_str(),
         ));
@@ -477,7 +482,7 @@ impl Client {
                     None => Err(Error::Format("missing encryption_key".into())),
                 }?;
                 let mut out = [0u8; 32];
-                hex::decode_to_slice(fragment, &mut out).map_err(|_| {
+                URL_SAFE.decode_slice(fragment, &mut out).map_err(|_| {
                     Error::Format("encryption key must be 32 hex-encoded bytes".into())
                 })?;
                 Ok(EncryptionKey::from(out))
@@ -517,12 +522,14 @@ impl Client {
         valid_until: DateTime<Utc>,
     ) -> [(&'static str, String); 3] {
         let hash = Self::request_hash(url, method, body, valid_until);
+        let public_key = self.app_key.public_key();
+        let signature = self.app_key.sign(hash.as_ref());
         [
-            ("SiaIdx-ValidUntil", valid_until.timestamp().to_string()),
-            ("SiaIdx-Credential", self.app_key.public_key().to_string()),
+            (QUERY_PARAM_VALID_UNTIL, valid_until.timestamp().to_string()),
+            (QUERY_PARAM_CREDENTIAL, URL_SAFE.encode(&public_key)),
             (
-                "SiaIdx-Signature",
-                self.app_key.sign(hash.as_ref()).to_string(),
+                QUERY_PARAM_SIGNATURE,
+                URL_SAFE.encode(signature.as_ref()),
             ),
         ]
     }
@@ -530,14 +537,26 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    use base64::prelude::*;
+    use base64::{engine::general_purpose::URL_SAFE};
     use chrono::FixedOffset;
     use sia::signing::Signature;
-    use sia::{hash_256, public_key};
+    use sia::{hash_256, public_key, signature};
 
     use super::*;
     use httptest::http::Response;
     use httptest::matchers::*;
     use httptest::{Expectation, Server};
+
+    /// Ensures that our base64 url encoding is compatible with our Go implementation.
+    #[test]
+    fn test_base64_url() {
+        const DATA: &[u8] = b"hello, world!";
+        const ENCODED_DATA: &str = "aGVsbG8sIHdvcmxkIQ==";
+
+        let encoded = URL_SAFE.encode(DATA);
+        assert_eq!(encoded, ENCODED_DATA);
+    }
 
     #[test]
     fn test_request_hash() {
@@ -564,21 +583,19 @@ mod tests {
             Some("{}".as_bytes()),
             DateTime::from_timestamp_secs(123).unwrap() + Duration::from_secs(60),
         );
-        assert_eq!(params[0], ("SiaIdx-ValidUntil", "183".to_string()));
+        assert_eq!(params[0], (QUERY_PARAM_VALID_UNTIL, "183".to_string()));
         assert_eq!(
             params[1],
             (
-                "SiaIdx-Credential",
-                "ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
-                    .to_string()
+                QUERY_PARAM_CREDENTIAL,
+                URL_SAFE.encode(public_key!("ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29")),
             )
         );
         assert_eq!(
             params[2],
             (
-                "SiaIdx-Signature",
-                "458283fd707c9d170d5e1814944f35893c53c9445fd46c74a6b285bf3029bf404c9af509ea271d811726bd20d8c7d8fe4b9efdc4bebb445f18059eca886ece03"
-                    .to_string()
+                QUERY_PARAM_SIGNATURE,
+                URL_SAFE.encode(signature!("458283fd707c9d170d5e1814944f35893c53c9445fd46c74a6b285bf3029bf404c9af509ea271d811726bd20d8c7d8fe4b9efdc4bebb445f18059eca886ece03").as_ref()),
             )
         );
 
@@ -589,21 +606,24 @@ mod tests {
             None,
             DateTime::from_timestamp_secs(123).unwrap() + Duration::from_secs(60),
         );
-        assert_eq!(params[0], ("SiaIdx-ValidUntil", "183".to_string()));
+        assert_eq!(params[0], (QUERY_PARAM_VALID_UNTIL, "183".to_string()));
         assert_eq!(
             params[1],
             (
-                "SiaIdx-Credential",
-                "ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
-                    .to_string()
+                QUERY_PARAM_CREDENTIAL,
+                URL_SAFE.encode(
+                    public_key!(
+                        "ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
+                    )
+                    .as_ref()
+                )
             )
         );
         assert_eq!(
             params[2],
             (
-                "SiaIdx-Signature",
-                "7411fc80f920cb098690498133be075cd43bf6385fc8348fe1946e29d909891680d45651dfb0a6fd9f7196a971816c21441852362680f2fe4cb935de8f90380b"
-                    .to_string()
+                QUERY_PARAM_SIGNATURE,
+                URL_SAFE.encode(signature!("7411fc80f920cb098690498133be075cd43bf6385fc8348fe1946e29d909891680d45651dfb0a6fd9f7196a971816c21441852362680f2fe4cb935de8f90380b").as_ref()),
             )
         );
     }
@@ -615,9 +635,9 @@ mod tests {
         // expect 1 authenticated get and 1 authenticated post request
         server.expect(
             Expectation::matching(request::query(url_decoded(all_of![
-                contains(("SiaIdx-ValidUntil", any())),
-                contains(("SiaIdx-Credential", any())),
-                contains(("SiaIdx-Signature", any()))
+                contains((QUERY_PARAM_VALID_UNTIL, any())),
+                contains((QUERY_PARAM_CREDENTIAL, any())),
+                contains((QUERY_PARAM_SIGNATURE, any()))
             ])))
             .times(3)
             .respond_with(
