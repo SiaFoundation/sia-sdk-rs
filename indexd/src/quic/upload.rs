@@ -21,7 +21,7 @@ use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::app_client::{Client as AppClient, SlabPinParams};
+use crate::app_client::{Client as AppClient, HostQuery, SlabPinParams};
 use crate::quic::client::{Client, HostQueue};
 use crate::quic::{self, QueueError};
 use crate::{Object, Sector, Slab, SlabSlice};
@@ -219,7 +219,7 @@ impl Uploader {
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
         if self.client.hosts().is_empty() {
-            let hosts = self.app_client.hosts().await?;
+            let hosts = self.app_client.hosts(HostQuery::default()).await?;
             self.client.update_hosts(hosts);
         }
         let data_shards = options.data_shards as usize;
