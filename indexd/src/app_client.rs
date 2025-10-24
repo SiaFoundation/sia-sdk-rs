@@ -1,6 +1,6 @@
-use std::time::Duration;
+use base64::engine::general_purpose::URL_SAFE;
 use base64::prelude::*;
-use base64::{engine::general_purpose::URL_SAFE};
+use std::time::Duration;
 
 use blake2::Digest;
 use chrono::{DateTime, Utc};
@@ -526,19 +526,16 @@ impl Client {
         let signature = self.app_key.sign(hash.as_ref());
         [
             (QUERY_PARAM_VALID_UNTIL, valid_until.timestamp().to_string()),
-            (QUERY_PARAM_CREDENTIAL, URL_SAFE.encode(&public_key)),
-            (
-                QUERY_PARAM_SIGNATURE,
-                URL_SAFE.encode(signature.as_ref()),
-            ),
+            (QUERY_PARAM_CREDENTIAL, URL_SAFE.encode(public_key)),
+            (QUERY_PARAM_SIGNATURE, URL_SAFE.encode(signature.as_ref())),
         ]
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use base64::engine::general_purpose::URL_SAFE;
     use base64::prelude::*;
-    use base64::{engine::general_purpose::URL_SAFE};
     use chrono::FixedOffset;
     use sia::signing::Signature;
     use sia::{hash_256, public_key, signature};
@@ -588,7 +585,9 @@ mod tests {
             params[1],
             (
                 QUERY_PARAM_CREDENTIAL,
-                URL_SAFE.encode(public_key!("ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29")),
+                URL_SAFE.encode(public_key!(
+                    "ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
+                )),
             )
         );
         assert_eq!(
