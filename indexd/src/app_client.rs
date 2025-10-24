@@ -109,7 +109,7 @@ pub enum HostSort {
     Distance(GeoLocation),
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct HostQuery {
     pub sort: Option<HostSort>,
     pub offset: Option<u64>,
@@ -117,19 +117,6 @@ pub struct HostQuery {
     pub service_account: Option<bool>,
     pub protocol: Option<Protocol>,
     pub country: Option<String>,
-}
-
-impl Default for HostQuery {
-    fn default() -> Self {
-        Self {
-            sort: None,
-            offset: None,
-            limit: None,
-            service_account: None,
-            protocol: None,
-            country: None,
-        }
-    }
 }
 
 impl HostQuery {
