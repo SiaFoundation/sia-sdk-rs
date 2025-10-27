@@ -15,7 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 reqwest = { version = "0.12.24", features = ["json"] }
-rustls = { version = "0.23.33", features = ["ring"] }
+rustls = { version = "0.23.34", features = ["ring"] }
 serde = "1.0.228"
 serde_json = "1.0.145"
 thiserror = "2.0.17"
@@ -30,7 +30,7 @@ bytes = "1.10.1"
 futures = "0.3.31"
 tokio-util = { version = "0.7.16", features = ["rt"] }
 priority-queue = "2.7.0"
-serde_with = {version = "3.15.0", features = ["base64"]}
+serde_with = {version = "3.15.1", features = ["base64"]}
 hex = "0.4.3"
 chacha20poly1305 = "0.10.1"
 chrono = { version = "0.4.42", features = ["serde"] }
@@ -40,5 +40,5 @@ base64 = "0.22.1"
 
 [dev-dependencies]
 httptest = "0.16.3"
-rustls-platform-verifier = "0.6.1"
+rustls-platform-verifier = "0.6.2"
 tokio = { version = "1.48.0", features = ["macros"] }
