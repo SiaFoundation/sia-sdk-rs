@@ -1,11 +1,18 @@
 pub mod app_client;
 
 pub mod quic;
+use crate::app_client::HostQuery;
 use crate::quic::{
     DownloadError, DownloadOptions, Downloader, UploadError, UploadOptions, Uploader,
 };
 
-use crate::app_client::{Account, Client, HostQuery, ObjectsCursor, RegisterAppRequest};
+mod slabs;
+pub use slabs::*;
+
+mod hosts;
+pub use hosts::*;
+
+use crate::app_client::{Account, Client, ObjectsCursor, RegisterAppRequest};
 use log::debug;
 use sia::rhp::Host;
 use sia::signing::PrivateKey;
@@ -16,9 +23,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 pub use reqwest::{IntoUrl, Url};
-
-mod slabs;
-pub use slabs::*;
 
 mod object_encryption;
 
