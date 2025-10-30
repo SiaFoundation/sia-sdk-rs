@@ -426,9 +426,14 @@ impl Client {
         body: Option<&[u8]>,
         valid_until: DateTime<Utc>,
     ) -> Hash256 {
+        let host_port = url
+            .port()
+            .map_or(url.host_str().unwrap_or("localhost").to_string(), |port| {
+                format!("{}:{}", url.host_str().unwrap_or("localhost"), port)
+            });
         let mut state = Blake2b256::new();
         state.update(method.as_str().as_bytes());
-        state.update(url.host_str().unwrap_or("").as_bytes());
+        state.update(host_port.as_bytes());
         state.update(url.path().as_bytes());
         state.update(valid_until.timestamp().to_le_bytes());
         if let Some(body) = body {
