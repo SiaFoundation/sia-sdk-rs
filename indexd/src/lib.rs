@@ -5,7 +5,7 @@ use crate::quic::{
     DownloadError, DownloadOptions, Downloader, UploadError, UploadOptions, Uploader,
 };
 
-use crate::app_client::{Account, Client, ObjectsCursor, RegisterAppRequest};
+use crate::app_client::{Account, Client, HostQuery, ObjectsCursor, RegisterAppRequest};
 use log::debug;
 use sia::rhp::Host;
 use sia::signing::PrivateKey;
@@ -152,7 +152,7 @@ impl SDK<RegisteredState> {
         let hosts = self
             .state
             .app
-            .hosts()
+            .hosts(HostQuery::default())
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         let dialer = quic::Client::new(tls_config).map_err(|e| Error::Tls(format!("{e:?}")))?;
@@ -214,10 +214,10 @@ impl SDK<ConnectedState> {
         Ok(())
     }
 
-    pub async fn hosts(&self) -> Result<Vec<Host>> {
+    pub async fn hosts(&self, query: HostQuery) -> Result<Vec<Host>> {
         self.state
             .app
-            .hosts()
+            .hosts(query)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }
