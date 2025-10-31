@@ -16,7 +16,7 @@ use tokio::task::{JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
 use tokio::time::sleep;
 
-use crate::app_client::{self, Client as AppClient};
+use crate::app_client::{self, Client as AppClient, HostQuery};
 use crate::quic::client::Client;
 use crate::{Object, Sector, SharedObject, Slab, SlabSlice, quic};
 
@@ -377,8 +377,8 @@ impl Downloader {
         mut slabs: S,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
-        if self.inner.host_client.hosts().is_empty() {
-            let hosts = self.inner.app_client.hosts(Default::default()).await?;
+        if self.inner.host_client.available_hosts() == 0 {
+            let hosts = self.inner.app_client.hosts(HostQuery::default()).await?;
             self.inner.host_client.update_hosts(hosts);
         }
 
