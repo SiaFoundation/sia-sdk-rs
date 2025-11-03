@@ -22,7 +22,7 @@ rustls-platform-verifier = "0.6.2"
 sia_sdk = { version = "0.1.1", path = "../sia_sdk" }
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "sync"] }
-tokio-util = "0.7.16"
+tokio-util = "0.7.17"
 uniffi = { version = "0.29.4", features = ["cli", "tokio"] }
 zeroize = "1.8.1"
 
