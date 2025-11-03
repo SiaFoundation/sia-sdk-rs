@@ -21,9 +21,10 @@ use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::app_client::{Client as AppClient, SlabPinParams};
-use crate::quic::client::{Client, HostQueue};
-use crate::quic::{self, QueueError};
+use crate::app_client::{Client as AppClient, HostQuery, SlabPinParams};
+use crate::hosts::{HostQueue, QueueError};
+use crate::quic::client::Client;
+use crate::quic::{self};
 use crate::{Object, Sector, Slab, SlabSlice};
 
 #[derive(Debug, Error)]
@@ -218,8 +219,8 @@ impl Uploader {
         r: R,
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
-        if self.client.hosts().is_empty() {
-            let hosts = self.app_client.hosts(Default::default()).await?;
+        if self.client.available_hosts() == 0 {
+            let hosts = self.app_client.hosts(HostQuery::default()).await?;
             self.client.update_hosts(hosts);
         }
         let data_shards = options.data_shards as usize;
@@ -262,7 +263,7 @@ impl Uploader {
                 .await?;
 
                 let mut shard_upload_tasks = JoinSet::new();
-                let hosts = HostQueue::new(host_client.hosts());
+                let hosts = host_client.host_queue();
                 for (shard_index, shard) in encrypted_data_shards.into_iter().enumerate() {
                     let permit = semaphore.clone().acquire_owned().await?;
                     shard_upload_tasks.spawn(Self::upload_slab_shard(
