@@ -25,7 +25,7 @@ rand = "0.9.2"
 blake2b_simd = "1.0.3"
 url = "2.5.7"
 log = "0.4.28"
-quinn = "0.11.9"
+quinn = { version = "0.11.9", default-features = false, features = ["bloom", "log", "runtime-tokio", "rustls-ring"] }
 bytes = "1.10.1"
 futures = "0.3.31"
 tokio-util = { version = "0.7.16", features = ["rt"] }
