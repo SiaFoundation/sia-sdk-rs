@@ -17,8 +17,6 @@ use indexd::app_client::{Client as AppClient, RegisterAppRequest, SlabPinParams}
 use indexd::quic::{Client as HostClient, Downloader, SlabFetcher, Uploader};
 use indexd::{Object, SealedObjectError, SlabSlice, Url, quic};
 use log::debug;
-use rustls::ClientConfig;
-use rustls_platform_verifier::ConfigVerifierExt;
 use sia::rhp::SECTOR_SIZE;
 use sia::signing::{self, PrivateKey, PublicKey, Signature};
 use sia::types::{self, Hash256, HexParseError};
@@ -27,6 +25,8 @@ use thiserror::Error;
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinHandle;
+
+mod tls;
 
 mod logging;
 pub use logging::*;
@@ -781,8 +781,7 @@ impl SDK {
             }
 
             // load root certs
-            let rustls_config =
-                ClientConfig::with_platform_verifier().map_err(|e| Error::Custom(e.to_string()))?;
+            let rustls_config = tls::tls_config();
             let host_client = HostClient::new(rustls_config)?;
 
             let uploader = Arc::new(Uploader::new(

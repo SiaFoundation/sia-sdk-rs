@@ -50,9 +50,10 @@ pub(crate) fn open_encryption_key(
         derive_encryption_key(app_key.as_ref(), object_id.as_ref(), b"master");
     let encryption_key_cipher = XChaCha20Poly1305::new(master_encryption_key.as_ref().into());
     let (nonce_bytes, ciphertext) = encrypted_master_key.split_at(NONCE_SIZE);
-    let nonce = chacha20poly1305::XNonce::from_slice(nonce_bytes);
+    let nonce_bytes: [u8; 24] = nonce_bytes.try_into().unwrap(); // safe due to length check above
+    let nonce = chacha20poly1305::XNonce::from(nonce_bytes);
     let decrypted_master_key = encryption_key_cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|_| DecryptError::Decryption)?;
     EncryptionKey::try_from(decrypted_master_key.as_ref()).map_err(|_| DecryptError::KeyLength)
 }
@@ -84,9 +85,10 @@ pub(crate) fn open_metadata(
         derive_encryption_key(master_key.as_ref(), object_id.as_ref(), b"metadata");
     let metadata_cipher = XChaCha20Poly1305::new(metadata_encryption_key.as_ref().into());
     let (nonce_bytes, ciphertext) = encrypted_metadata.split_at(NONCE_SIZE);
-    let nonce = chacha20poly1305::XNonce::from_slice(nonce_bytes);
+    let nonce_bytes: [u8; 24] = nonce_bytes.try_into().unwrap(); // safe due to length check above
+    let nonce = chacha20poly1305::XNonce::from(nonce_bytes);
     let decrypted_metadata = metadata_cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|_| DecryptError::Decryption)?;
     Ok(decrypted_metadata)
 }

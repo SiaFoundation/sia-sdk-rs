@@ -17,6 +17,6 @@ mod test {
         let expected =
             hex::decode("480a927c7e3f9430f03141250f1def67380fec3943accb4575e568750a103638")
                 .unwrap();
-        assert_eq!(result.as_slice(), expected.as_slice());
+        assert_eq!(result.to_vec(), expected);
     }
 }
