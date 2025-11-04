@@ -13,7 +13,6 @@ use sia::types::Hash256;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::select;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::{JoinHandle, JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
@@ -147,7 +146,6 @@ impl Uploader {
         account_key: PrivateKey,
         data: Bytes,
         shard_index: usize,
-        progress_callback: Option<UnboundedSender<()>>,
     ) -> Result<(usize, Sector), UploadError> {
         let (host_key, attempts) = hosts.pop_front()?;
         let mut write_timeout = Self::upload_timeout(attempts); // mutable so that it can be adjusted on retries
@@ -169,9 +167,6 @@ impl Uploader {
                 Some(res) = tasks.join_next() => {
                     match res.unwrap() {
                         Ok(sector) => {
-                            if let Some(cb) = &progress_callback {
-                                let _ = cb.send(());
-                            }
                             return Ok((shard_index, sector));
                         }
                         Err(e) => {
@@ -273,7 +268,6 @@ impl Uploader {
                         account_key.clone(),
                         shard.into(),
                         shard_index,
-                        options.shard_uploaded.clone(),
                     ));
                 }
 
@@ -299,7 +293,6 @@ impl Uploader {
                         account_key.clone(),
                         shard.into(),
                         shard_index,
-                        options.shard_uploaded.clone(),
                     ));
                 }
 
