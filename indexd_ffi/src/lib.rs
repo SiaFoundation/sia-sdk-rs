@@ -4,7 +4,7 @@ use base64::prelude::*;
 use rand::TryRngCore;
 use rand::rngs::OsRng;
 use sia::blake2::{Blake2b256, Digest};
-use sia::seed::{Seed, SeedError};
+use sia::seed::Seed;
 use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -284,13 +284,18 @@ impl From<encryption::EncryptionKey> for EncryptionKey {
 }
 
 #[derive(Debug, Error, uniffi::Error)]
-#[uniffi(flat_error)]
 pub enum AppKeyError {
-    #[error("seed error: {0}")]
-    RecoveryPhrase(#[from] SeedError),
+    #[error("recovery phrase error: {0}")]
+    RecoveryPhrase(String),
 
     #[error("invalid app ID length: {0}, expected 32 bytes")]
-    AppIdLength(usize),
+    AppIdLength(u32),
+}
+
+#[derive(uniffi::Error, Debug, Error)]
+pub enum SeedError {
+    #[error("invalid mnemonic: {0}")]
+    InvalidMnemonic(String),
 }
 
 /// An AppKey is used to sign requests to the indexer.
@@ -306,6 +311,13 @@ pub fn generate_recovery_phrase() -> String {
     seed.to_mnemonic()
 }
 
+/// Validates a BIP-32 recovery phrase.
+#[uniffi::export]
+pub fn validate_recovery_phrase(phrase: &str) -> Result<(), SeedError> {
+    Seed::from_mnemonic(phrase).map_err(|e| SeedError::InvalidMnemonic(e.to_string()))?;
+    Ok(())
+}
+
 #[uniffi::export]
 impl AppKey {
     /// Creates a new AppKey from a recovery phrase and a unique app ID.
@@ -314,9 +326,9 @@ impl AppKey {
     #[uniffi::constructor]
     pub fn new(recovery_phrase: String, app_id: Vec<u8>) -> Result<Self, AppKeyError> {
         if app_id.len() != 32 {
-            return Err(AppKeyError::AppIdLength(app_id.len()));
+            return Err(AppKeyError::AppIdLength(app_id.len() as u32));
         }
-        let seed = Seed::from_mnemonic(&recovery_phrase)?;
+        let seed = Seed::from_mnemonic(&recovery_phrase).map_err(|e| AppKeyError::RecoveryPhrase(e.to_string()))?;
         let mut state = Blake2b256::new();
         state.update(seed.as_bytes());
         state.update(app_id);
