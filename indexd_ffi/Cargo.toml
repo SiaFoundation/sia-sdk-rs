@@ -35,7 +35,6 @@ rustls-platform-verifier = "0.6"
 uniffi = { version = "0.30.0", features = ["build"] }
 
 [[bin]]
-# This can be whatever name makes sense for your project, but the rest of this tutorial assumes uniffi-bindgen.
 name = "uniffi-bindgen"
 
 [dev-dependencies]
