@@ -328,7 +328,8 @@ impl AppKey {
         if app_id.len() != 32 {
             return Err(AppKeyError::AppIdLength(app_id.len() as u32));
         }
-        let seed = Seed::from_mnemonic(&recovery_phrase).map_err(|e| AppKeyError::RecoveryPhrase(e.to_string()))?;
+        let seed = Seed::from_mnemonic(&recovery_phrase)
+            .map_err(|e| AppKeyError::RecoveryPhrase(e.to_string()))?;
         let mut state = Blake2b256::new();
         state.update(seed.as_bytes());
         state.update(app_id);
