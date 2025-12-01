@@ -31,7 +31,7 @@ bytes = "1.11.0"
 futures = "0.3.31"
 tokio-util = { version = "0.7.16", features = ["rt"] }
 priority-queue = "2.7.0"
-serde_with = {version = "3.16.0", features = ["base64"]}
+serde_with = {version = "3.16.1", features = ["base64"]}
 hex = "0.4.3"
 chacha20poly1305 = "0.10.1"
 chrono = { version = "0.4.42", features = ["serde"] }
