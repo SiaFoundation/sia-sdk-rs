@@ -25,6 +25,14 @@ pub struct Sector {
     pub host_key: PublicKey,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+/// A Trackdector is a unit of data stored on the Sia network. It can be referenced by its Merkle root.
+pub struct TrackedSector {
+    pub root: Hash256,
+    pub host_key: Option<PublicKey>,
+}
+
 /// A Slab is an erasure-coded collection of sectors. The sectors can be downloaded and
 /// used to recover the original data.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -51,35 +59,17 @@ impl Slab {
     }
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SlabSlice {
-    #[serde(rename = "slabID")]
-    pub slab_id: Hash256,
+    pub id: Hash256,
+    #[serde_as(as = "Base64")]
+    pub encryption_key: EncryptionKey,
+    pub min_shards: u8,
+    pub sectors: Vec<TrackedSector>,
     pub offset: u32,
     pub length: u32,
-}
-
-impl SiaEncodable for SlabSlice {
-    fn encode<W: std::io::Write>(&self, w: &mut W) -> encoding::Result<()> {
-        self.slab_id.encode(w)?;
-        let combined: u64 = (self.offset as u64) << 32 | (self.length as u64);
-        combined.encode(w)?;
-        Ok(())
-    }
-}
-
-impl SiaDecodable for SlabSlice {
-    fn decode<R: std::io::Read>(r: &mut R) -> encoding::Result<Self> {
-        let slab_id = Hash256::decode(r)?;
-        let combined = u64::decode(r)?;
-
-        Ok(Self {
-            slab_id,
-            offset: (combined >> 32) as u32,
-            length: combined as u32,
-        })
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -152,11 +142,7 @@ impl SealedObject {
     }
 
     pub fn id(&self) -> Hash256 {
-        let mut state = Blake2b256::default();
-        for slab in self.slabs.iter() {
-            slab.encode(&mut state).unwrap();
-        }
-        state.finalize().into()
+        object_id(&self.slabs)
     }
 
     pub fn open(self, app_key: &PrivateKey) -> Result<Object, SealedObjectError> {
@@ -248,11 +234,7 @@ impl Default for Object {
 
 impl Object {
     pub fn id(&self) -> Hash256 {
-        let mut state = Blake2b256::default();
-        for slab in self.slabs.iter() {
-            slab.encode(&mut state).unwrap();
-        }
-        state.finalize().into()
+        object_id(&self.slabs)
     }
 
     pub fn seal(&self, app_key: &PrivateKey) -> SealedObject {
@@ -284,12 +266,16 @@ impl Object {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SharedObject {
     encryption_key: EncryptionKey,
-    slabs: Vec<Slab>,
+    slabs: Vec<SlabSlice>,
     metadata: Option<Vec<u8>>,
 }
 
 impl SharedObject {
-    pub fn new(encryption_key: EncryptionKey, slabs: Vec<Slab>, metadata: Option<Vec<u8>>) -> Self {
+    pub fn new(
+        encryption_key: EncryptionKey,
+        slabs: Vec<SlabSlice>,
+        metadata: Option<Vec<u8>>,
+    ) -> Self {
         SharedObject {
             encryption_key,
             slabs,
@@ -297,7 +283,7 @@ impl SharedObject {
         }
     }
 
-    pub fn slabs(&self) -> &Vec<Slab> {
+    pub fn slabs(&self) -> &Vec<SlabSlice> {
         &self.slabs
     }
 
@@ -314,46 +300,30 @@ impl SharedObject {
     pub fn writer<W: AsyncWrite + Unpin>(&self, w: W, offset: usize) -> CipherWriter<W> {
         CipherWriter::new(w, self.encryption_key.clone(), offset)
     }
-
-    /// Converts the SharedObject into an Object that can be saved to an indexer.
-    /// The slabs must be pinned before the object can be saved.
-    pub fn object(&self) -> Object {
-        Object {
-            encryption_key: self.encryption_key.clone(),
-            slabs: self
-                .slabs
-                .iter()
-                .map(|s| SlabSlice {
-                    slab_id: s.digest(),
-                    offset: s.offset,
-                    length: s.length,
-                })
-                .collect(),
-            metadata: self.metadata.clone().unwrap_or_default(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
 }
 
 impl From<SharedObject> for Object {
     fn from(val: SharedObject) -> Self {
         Object {
             encryption_key: val.encryption_key,
-            slabs: val
-                .slabs
-                .iter()
-                .map(|s| SlabSlice {
-                    slab_id: s.digest(),
-                    offset: s.offset,
-                    length: s.length,
-                })
-                .collect(),
+            slabs: val.slabs.clone(),
             metadata: val.metadata.unwrap_or_default(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
     }
+}
+
+fn object_id(slabs: &Vec<SlabSlice>) -> Hash256 {
+    let mut state = Blake2b256::default();
+    for slab in slabs.iter() {
+        slab.min_shards.encode(&mut state).unwrap();
+        slab.encryption_key.encode(&mut state).unwrap();
+        slab.sectors.iter().for_each(|sector| {
+            sector.root.encode(&mut state).unwrap();
+        });
+    }
+    state.finalize().into()
 }
 
 #[cfg(test)]
