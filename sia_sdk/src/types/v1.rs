@@ -1511,7 +1511,7 @@ mod tests {
             ),
         ];
 
-        let seed = Seed::from_mnemonic(PHRASE).unwrap();
+        let seed = Seed::new(PHRASE).unwrap();
         for (i, expected) in test_addresses {
             let pk = seed.private_key(i).public_key();
             let addr: Address = UnlockConditions::standard_unlock_conditions(pk).address();
