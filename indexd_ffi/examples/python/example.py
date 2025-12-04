@@ -40,11 +40,12 @@ async def main():
     mnemonic = stdin.readline().strip()
     if not mnemonic:
         mnemonic = generate_recovery_phrase()
+        print("mnemonic:", mnemonic)
 
-    print("mnemonic:", mnemonic)
+    sdk = await builder.register(mnemonic)
 
-    app_key = builder.app_key(mnemonic)
-    sdk = await builder.register(app_key)
+    # Store the app key for later use
+    app_key = sdk.app_key()
     print("App registered", app_key.export())
 
     print("Connected to indexd")

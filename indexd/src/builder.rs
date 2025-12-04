@@ -158,32 +158,20 @@ impl Builder<RequestingApprovalState> {
 }
 
 impl Builder<ApprovedState> {
-    /// Derives the application key using the provided mnemonic. The
-    /// app key can be used to complete the registration process.
-    /// It should be stored securely by the application for future use.
-    ///
-    /// # Arguments
-    /// * `mnemonic` - The BIP-39 mnemonic phrase used for key derivation.
-    pub fn app_key(&self, mnemonic: &str) -> Result<PrivateKey, BuilderError> {
-        derive_app_key(mnemonic, &self.state.app_id, &self.state.user_secret)
-    }
-
     /// Completes the registration process and returns an SDK instance.
     ///
-    /// [Builder::app_key] should be called before this method to derive
-    /// the application key needed for registration.
-    ///
     /// # Arguments
-    /// * `app_key` - The application key derived using [Builder::app_key].
+    /// * `mnemonic` - The user's mnemonic phrase used to derive the application key.
     /// * `tls_config` - The TLS configuration for secure communication.
     ///
     /// # Errors
     /// Returns [BuilderError] if the registration fails or the SDK cannot be created.
     pub async fn register(
         self,
-        app_key: PrivateKey,
+        mnemonic: &str,
         tls_config: rustls::ClientConfig,
     ) -> Result<SDK, BuilderError> {
+        let app_key = derive_app_key(mnemonic, &self.state.app_id, &self.state.user_secret)?;
         self.client
             .register_app(&app_key, self.state.register_url.clone())
             .await?;
