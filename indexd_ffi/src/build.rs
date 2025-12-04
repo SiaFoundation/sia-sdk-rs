@@ -1,9 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 use indexd::app_client::RegisterAppRequest;
-use indexd::{self, AppKey as _, Url};
+use indexd::{self, Url};
 use sia::seed::{self, Seed};
-use sia::signing::PrivateKey;
+use sia::signing::{PrivateKey, Signature};
 use thiserror::Error;
 
 use crate::{AppMeta, SDK, spawn, tls};
@@ -11,11 +11,18 @@ use crate::{AppMeta, SDK, spawn, tls};
 #[derive(Debug, Error, uniffi::Error)]
 #[uniffi(flat_error)]
 pub enum AppKeyError {
-    #[error(transparent)]
-    AppKey(#[from] indexd::AppKeyError),
+    #[error("app keys must be 32 bytes")]
+    InvalidLength,
+
+    #[error("signatures must be 64 bytes")]
+    SignatureLength,
 }
 
 /// An AppKey is used to sign requests to the indexer.
+///
+/// It must be stored securely by the application and
+/// never shared publicly. If exposed, a user's data
+/// is compromised.
 #[derive(uniffi::Object)]
 pub struct AppKey(PrivateKey);
 
@@ -27,22 +34,54 @@ impl AppKey {
 
 #[uniffi::export]
 impl AppKey {
-    /// Creates a new AppKey from a recovery phrase and a unique app ID.
-    /// The app ID should be a unique 32-byte value. The value is not secret,
-    /// but it should be random and unique to the app.
+    // Imports an AppKey
     #[uniffi::constructor]
-    pub fn new(key_string: String) -> Result<Self, AppKeyError> {
-        let app_key = PrivateKey::import(&key_string)?;
-        Ok(Self(app_key))
+    pub fn new(key: Vec<u8>) -> Result<Self, AppKeyError> {
+        if key.len() != 32 {
+            return Err(AppKeyError::InvalidLength);
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&key);
+        Ok(AppKey(PrivateKey::from_seed(&seed)))
     }
 
-    /// Exports the AppKey as a string. This string can be used to
-    /// recreate the AppKey using [AppKey::new].
+    /// Exports the AppKey. The app key can be re-imported later
+    /// using [AppKey::new].
     ///
-    /// It should be stored securely by the application in lieue of the
+    /// AppKeys should be stored securely by the application in lieu of the
     /// recovery phrase.
-    pub fn export(&self) -> String {
-        self.0.export()
+    pub fn export(&self) -> Vec<u8> {
+        self.0.as_ref().to_vec()
+    }
+
+    /// Signs a message using the AppKey.
+    pub fn sign(&self, message: Vec<u8>) -> Vec<u8> {
+        let signature = self.0.sign(&message);
+        signature.as_ref().to_vec()
+    }
+
+    /// Returns the public key corresponding to the AppKey.
+    ///
+    /// This can be safely shared with others.
+    pub fn public_key(&self) -> Vec<u8> {
+        self.0.public_key().as_ref().to_vec()
+    }
+
+    /// Verifies a signature for a given message using the AppKey.
+    pub fn verify_signature(
+        &self,
+        message: Vec<u8>,
+        signature: Vec<u8>,
+    ) -> Result<bool, AppKeyError> {
+        if signature.len() != 64 {
+            return Err(AppKeyError::SignatureLength);
+        }
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes.copy_from_slice(&signature);
+        Ok(self
+            .0
+            .public_key()
+            .verify(&message, &Signature::from(sig_bytes)))
     }
 }
 

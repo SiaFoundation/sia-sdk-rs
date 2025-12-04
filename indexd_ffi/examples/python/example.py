@@ -1,7 +1,7 @@
 import asyncio
 import json
 from sys import stdin
-from indexd_ffi import generate_recovery_phrase, AppKey, AppMeta, Builder, Sdk, UploadOptions, DownloadOptions, set_logger, Logger
+from indexd_ffi import generate_recovery_phrase, AppMeta, Builder, UploadOptions, DownloadOptions, set_logger, Logger
 from logging import fatal
 from datetime import datetime, timedelta, timezone
 
@@ -45,6 +45,7 @@ async def main():
 
     app_key = builder.app_key(mnemonic)
     sdk = await builder.register(app_key)
+    print("App registered", app_key.export())
 
     print("Connected to indexd")
 

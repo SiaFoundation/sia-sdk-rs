@@ -3,8 +3,6 @@ use crate::quic::{
     DownloadError, DownloadOptions, Downloader, UploadError, UploadOptions, Uploader,
 };
 
-use base64::Engine;
-use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use sia::signing::PrivateKey;
 pub use slabs::*;
@@ -29,56 +27,6 @@ pub mod quic;
 
 mod builder;
 pub use builder::*;
-
-#[derive(Error, Debug)]
-pub enum AppKeyError {
-    #[error("decode error: {0}")]
-    DecodeError(#[from] base64::DecodeSliceError),
-    #[error("invalid length")]
-    InvalidLength,
-}
-
-mod sealed {
-    pub trait Sealed {}
-}
-
-/// An AppKey is used to sign requests to the indexer.
-/// It should be stored in a secure manner by the application instead
-/// of storing the mnemonic directly.
-pub trait AppKey: sealed::Sealed {
-    type Error;
-
-    /// Exports the AppKey to its string representation.
-    /// This can be stored and later imported using [AppKey::import].
-    fn export(&self) -> String;
-
-    /// Imports an AppKey from its string representation.
-    fn import(s: &str) -> Result<Self, Self::Error>
-    where
-        Self: Sized;
-}
-
-impl sealed::Sealed for PrivateKey {}
-
-impl AppKey for PrivateKey {
-    type Error = AppKeyError;
-
-    /// Exports the AppKey to its string representation.
-    fn export(&self) -> String {
-        let key = self.as_ref();
-        BASE64_URL_SAFE_NO_PAD.encode(&key[..32])
-    }
-
-    /// Imports an AppKey from its string representation.
-    fn import(s: &str) -> Result<Self, Self::Error> {
-        let mut seed = [0u8; 32];
-        let decoded = BASE64_URL_SAFE_NO_PAD.decode_slice(s.as_bytes(), &mut seed)?;
-        if decoded != 32 {
-            return Err(AppKeyError::InvalidLength);
-        }
-        Ok(PrivateKey::from_seed(&seed))
-    }
-}
 
 #[derive(Error, Debug)]
 pub enum Error {
