@@ -1,7 +1,7 @@
 import asyncio
 import json
 from sys import stdin
-from indexd_ffi import generate_recovery_phrase, AppKey, AppMeta, Sdk, UploadOptions, DownloadOptions, set_logger, Logger
+from indexd_ffi import generate_recovery_phrase, AppKey, AppMeta, Builder, Sdk, UploadOptions, DownloadOptions, set_logger, Logger
 from logging import fatal
 from datetime import datetime, timedelta, timezone
 
@@ -20,28 +20,31 @@ class PrintLogger(Logger):
 
 set_logger(PrintLogger(), "debug")
 async def main():
+    app_id = b'\x01' * 32
+    
+    builder = Builder("https://app.sia.storage")
+    
+    await builder.request_connection(AppMeta(
+        id = app_id,
+        name="python example",
+        description= "an example app",
+        service_url= "https://example.com",
+        logo_url=None,
+        callback_url=None,
+    ))
+
+    print(f"Please approve connection {builder.response_url()}")
+    await builder.wait_for_approval()
+
     print("Enter mnemonic (or leave empty to generate new):")
     mnemonic = stdin.readline().strip()
     if not mnemonic:
         mnemonic = generate_recovery_phrase()
 
     print("mnemonic:", mnemonic)
-    app_id = b'\x01' * 32
-    app_key = AppKey(mnemonic, app_id)
-    sdk = Sdk("https://app.sia.storage", app_key)
-    if not await sdk.connected():
-        print("App not connected")
-        resp = await sdk.request_app_connection(AppMeta(
-            name="python example",
-            description= "an example app",
-            service_url= "https://example.com",
-            logo_url=None,
-            callback_url=None,
-        ))
-        print(f"Please approve connection {resp.response_url}")
-        connected = await sdk.wait_for_connect(resp)
-        if not connected:
-            fatal("user rejected connection")
+
+    app_key = builder.app_key(mnemonic)
+    sdk = await builder.register(app_key)
 
     print("Connected to indexd")
 
