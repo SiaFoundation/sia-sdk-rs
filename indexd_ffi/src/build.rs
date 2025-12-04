@@ -142,6 +142,9 @@ pub enum BuilderError {
     #[error("crypto error: {0}")]
     Crypto(String),
 
+    #[error("join error: {0}")]
+    JoinError(#[from] tokio::task::JoinError),
+
     #[error("{0}")]
     Custom(String),
 }
@@ -153,11 +156,19 @@ impl Builder {
         F: FnOnce(BuilderState) -> Fut + Send + 'static,
         Fut: Future<Output = Result<(BuilderState, R), BuilderError>> + Send + 'static,
     {
-        let state = { self.state.lock().unwrap().take() };
+        let state = {
+            self.state
+                .lock()
+                .map_err(|_| BuilderError::Custom("mutex poisoned".into()))?
+                .take()
+        };
         match state {
             Some(state) => {
-                let (next, result) = spawn(async move { f(state).await }).await.unwrap()?;
-                *self.state.lock().unwrap() = Some(next);
+                let (next, result) = spawn(async move { f(state).await }).await??;
+                *self
+                    .state
+                    .lock()
+                    .map_err(|_| BuilderError::Custom("mutex poisoned".into()))? = Some(next);
                 Ok(result)
             }
             _ => Err(BuilderError::InvalidState),
@@ -241,9 +252,25 @@ impl Builder {
                             app_id: app_id.into(),
                             name: meta.name,
                             description: meta.description,
-                            service_url: Url::parse(&meta.service_url).expect("oops"),
-                            logo_url: meta.logo_url.map(|s| Url::parse(&s).expect("oops")),
-                            callback_url: meta.callback_url.map(|s| Url::parse(&s).expect("oops")),
+                            service_url: Url::parse(&meta.service_url).map_err(|e| {
+                                BuilderError::Custom(format!("invalid service url: {e}"))
+                            })?,
+                            logo_url: meta
+                                .logo_url
+                                .map(|s| {
+                                    Url::parse(&s).map_err(|e| {
+                                        BuilderError::Custom(format!("invalid logo url: {e}"))
+                                    })
+                                })
+                                .transpose()?,
+                            callback_url: meta
+                                .callback_url
+                                .map(|s| {
+                                    Url::parse(&s).map_err(|e| {
+                                        BuilderError::Custom(format!("invalid callback url: {e}"))
+                                    })
+                                })
+                                .transpose()?,
                         })
                         .await?;
                     Ok((BuilderState::RequestingApproval(builder), ()))
