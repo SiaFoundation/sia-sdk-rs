@@ -321,7 +321,7 @@ impl Builder {
     ///
     /// # Arguments
     /// * `mnemonic` - The user's mnemonic phrase used to derive the application key.
-    pub async fn register(&self, mnemonic: String) -> Result<SDK, BuilderError> {
+    pub async fn register(&self, mnemonic: String) -> Result<Arc<SDK>, BuilderError> {
         self.with_state_transition(|state| async move {
             match state {
                 BuilderState::Approved(builder) => {
@@ -333,7 +333,7 @@ impl Builder {
                     }
                     let rustls_config = tls::tls_config();
                     let sdk = builder.register(&mnemonic, rustls_config).await?;
-                    Ok((BuilderState::Finalized, SDK { inner: sdk }))
+                    Ok((BuilderState::Finalized, Arc::new(SDK { inner: sdk })))
                 }
                 _ => Err(BuilderError::InvalidState),
             }
