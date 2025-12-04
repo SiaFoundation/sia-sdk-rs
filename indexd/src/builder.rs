@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use log::debug;
 use reqwest::IntoUrl;
 use sia::seed::{self, Seed};
@@ -21,6 +22,7 @@ pub struct RequestingApprovalState {
     response_url: Url,
     register_url: Url,
     status_url: Url,
+    expiration: DateTime<Utc>,
 }
 
 /// The state of the SDK builder after the application has been approved.
@@ -50,6 +52,9 @@ pub enum BuilderError {
 
     #[error("mnemonic error: {0}")]
     Mnemonic(#[from] seed::SeedError),
+
+    #[error("request expired")]
+    RequestExpired,
 }
 
 impl Builder<DisconnectedState> {
@@ -63,7 +68,7 @@ impl Builder<DisconnectedState> {
             "Creating SDK builder for indexer at {}",
             indexer_url.as_str()
         );
-        let client = Client::new(indexer_url).unwrap();
+        let client = Client::new(indexer_url)?;
         Ok(Self {
             state: DisconnectedState,
             client,
@@ -106,6 +111,7 @@ impl Builder<DisconnectedState> {
                 response_url: Url::parse(&resp.response_url)?,
                 register_url: Url::parse(&resp.register_url)?,
                 status_url: Url::parse(&resp.status_url)?,
+                expiration: resp.expiration,
             },
             client: self.client,
         })
@@ -128,6 +134,10 @@ impl Builder<RequestingApprovalState> {
     /// before calling this method.
     pub async fn wait_for_approval(self) -> Result<Builder<ApprovedState>, BuilderError> {
         loop {
+            if Utc::now() >= self.state.expiration {
+                return Err(BuilderError::RequestExpired);
+            }
+
             if let Some(user_secret) = self
                 .client
                 .check_request_status(self.state.status_url.clone())
@@ -202,8 +212,6 @@ fn derive_app_key(
 
 #[cfg(test)]
 mod test {
-    use crate::AppKey;
-
     use super::*;
     use sia::hash_256;
     use sia::types::Hash256;
@@ -216,11 +224,15 @@ mod test {
             hash_256!("0e90d697f5045a6593f1c43ebf79a369e2bc72cc5c7b6282f3b5aeb0de6e4005");
         const SHARED_SECRET: Hash256 =
             hash_256!("cf02d945fe4bfe614d823dc13c19aa8501699e656d0f7915490c3056d5c97dc6");
+        const EXPECTED_APP_KEY: &str =
+            "b75061f34bb3aeab232b0671da2d0347c547343a0026bb5535c291d964fd09a1";
 
-        const EXPECTED_APP_KEY: &str = "t1Bh80uzrqsjKwZx2i0DR8VHNDoAJrtVNcKR2WT9CaE";
+        let mut seed = [0u8; 32];
+        hex::decode_to_slice(EXPECTED_APP_KEY, &mut seed).expect("decoding failed");
+        let expected_app_key = PrivateKey::from_seed(&seed);
 
-        let app_key = derive_app_key(MNEMONIC, &APP_ID, &SHARED_SECRET).expect("derivation failed");
-        let exported = app_key.export();
-        assert_eq!(exported, EXPECTED_APP_KEY);
+        let derived_app_key =
+            derive_app_key(MNEMONIC, &APP_ID, &SHARED_SECRET).expect("derivation failed");
+        assert_eq!(derived_app_key, expected_app_key);
     }
 }
