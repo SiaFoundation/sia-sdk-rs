@@ -712,6 +712,15 @@ pub struct SDK {
 
 #[uniffi::export]
 impl SDK {
+    /// Returns the application key used by the SDK.
+    ///
+    /// This should be kept secret and secure. Applications
+    /// must never share their app key publicly. Store
+    /// it safely.
+    pub fn app_key(&self) -> AppKey {
+        AppKey::from(self.inner.app_key().clone())
+    }
+
     /// Uploads data to the Sia network and pins it to the indexer
     ///
     /// # Warnings

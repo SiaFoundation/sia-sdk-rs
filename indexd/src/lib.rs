@@ -77,6 +77,14 @@ impl SDK {
         })
     }
 
+    /// Returns the application key used by the SDK.
+    ///
+    /// This should be kept secret and secure. Applications
+    /// should store it safely.
+    pub fn app_key(&self) -> &PrivateKey {
+        &self.app_key
+    }
+
     /// Uploads an object using the provided reader and options.
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,

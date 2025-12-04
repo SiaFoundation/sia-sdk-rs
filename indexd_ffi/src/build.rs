@@ -20,9 +20,15 @@ pub enum AppKeyError {
 
 /// An AppKey is used to sign requests to the indexer.
 ///
+/// AppKeys can be registered with an indexer during
+/// onboarding with a [Builder]. They are derived from
+/// a BIP-32 recovery phrase, which can be generated
+/// using [generate_recovery_phrase].
+///
 /// It must be stored securely by the application and
 /// never shared publicly. If exposed, a user's data
 /// is compromised.
+
 #[derive(uniffi::Object)]
 pub struct AppKey(PrivateKey);
 
@@ -82,6 +88,12 @@ impl AppKey {
             .0
             .public_key()
             .verify(&message, &Signature::from(sig_bytes)))
+    }
+}
+
+impl From<PrivateKey> for AppKey {
+    fn from(pk: PrivateKey) -> Self {
+        AppKey(pk)
     }
 }
 
@@ -276,29 +288,13 @@ impl Builder {
         })
     }
 
-    /// Derives the application key using the provided mnemonic. The
-    /// app key can be used to complete the registration process.
-    /// It should be stored securely by the application for future use.
-    ///
-    /// # Arguments
-    /// * `mnemonic` - The BIP-39 mnemonic phrase used for key derivation. Can be generated using [generate_recovery_phrase].
-    pub fn app_key(&self, mnemonic: String) -> Result<AppKey, BuilderError> {
-        self.with_state(|state| match state {
-            BuilderState::Approved(builder) => {
-                let app_key = builder.app_key(&mnemonic)?;
-                Ok(AppKey(app_key))
-            }
-            _ => Err(BuilderError::InvalidState),
-        })
-    }
-
-    /// Registers the application with the indexer using the provided app key.
+    /// Registers the application with the indexer using the provided mnemonic.
     /// Once registered, returns an [SDK] instance that can be used to interact
     /// with the indexer.
     ///
     /// # Arguments
-    /// * `app_key` - The application key used for registration. Can be derived using [Builder::app_key].
-    pub async fn register(&self, app_key: Arc<AppKey>) -> Result<SDK, BuilderError> {
+    /// * `mnemonic` - The user's mnemonic phrase used to derive the application key.
+    pub async fn register(&self, mnemonic: String) -> Result<SDK, BuilderError> {
         self.with_state_transition(|state| async move {
             match state {
                 BuilderState::Approved(builder) => {
@@ -309,7 +305,7 @@ impl Builder {
                             .map_err(|e| BuilderError::Crypto(format!("{:?}", e)))?;
                     }
                     let rustls_config = tls::tls_config();
-                    let sdk = builder.register(app_key.0.clone(), rustls_config).await?;
+                    let sdk = builder.register(&mnemonic, rustls_config).await?;
                     Ok((BuilderState::Finalized, SDK { inner: sdk }))
                 }
                 _ => Err(BuilderError::InvalidState),
