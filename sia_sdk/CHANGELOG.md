@@ -1,3 +1,13 @@
+## 0.1.4 (2025-12-04)
+
+### Features
+
+- Added signature macro for testing.
+
+### Fixes
+
+- Fix release registry
+
 ## 0.1.3 (2025-10-04)
 
 ### Features
