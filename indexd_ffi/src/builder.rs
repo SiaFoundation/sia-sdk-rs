@@ -75,8 +75,8 @@ impl AppKey {
     /// Returns the public key corresponding to the AppKey.
     ///
     /// This can be safely shared with others.
-    pub fn public_key(&self) -> Vec<u8> {
-        self.0.public_key().as_ref().to_vec()
+    pub fn public_key(&self) -> String {
+        self.0.public_key().to_string()
     }
 
     /// Verifies a signature for a given message using the AppKey.
