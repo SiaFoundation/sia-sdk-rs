@@ -28,6 +28,9 @@ pub enum AppKeyError {
 /// It must be stored securely by the application and
 /// never shared publicly. If exposed, a user's data
 /// is compromised.
+///
+/// Mishandling the app key will lead to data loss
+/// and inability to access stored objects.
 
 #[derive(uniffi::Object)]
 pub struct AppKey(PrivateKey);
@@ -40,7 +43,10 @@ impl AppKey {
 
 #[uniffi::export]
 impl AppKey {
-    // Imports an AppKey
+    /// Imports an AppKey from the provided byte array.
+    ///
+    /// # Arguments
+    /// * `key` - A 32-byte array representing the app key.
     #[uniffi::constructor]
     pub fn new(key: Vec<u8>) -> Result<Self, AppKeyError> {
         if key.len() != 32 {
@@ -179,7 +185,10 @@ impl Builder {
     where
         F: FnOnce(&BuilderState) -> Result<R, BuilderError>,
     {
-        let state = self.state.lock().unwrap();
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| BuilderError::Custom("mutex poisoned".into()))?;
         match state.as_ref() {
             Some(state) => f(state),
             None => Err(BuilderError::InvalidState),
