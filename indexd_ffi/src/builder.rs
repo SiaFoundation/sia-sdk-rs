@@ -350,3 +350,28 @@ impl Builder {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_recovery_phrase() {
+        let phrase = generate_recovery_phrase();
+        assert!(validate_recovery_phrase(&phrase).is_ok());
+    }
+
+    #[test]
+    fn test_validate_recovery_phrase_invalid() {
+        let invalid_phrase = "invalid recovery phrase";
+        assert!(validate_recovery_phrase(invalid_phrase).is_err());
+    }
+
+    #[test]
+    fn test_app_key_export() {
+        let seed: [u8; 32] = rand::random();
+        let app_key = AppKey::new(seed.to_vec()).unwrap();
+        let exported = app_key.export();
+        assert_eq!(exported, seed.to_vec());
+    }
+}
