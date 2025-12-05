@@ -25,8 +25,8 @@ mod tls;
 mod logging;
 pub use logging::*;
 
-mod build;
-pub use build::*;
+mod builder;
+pub use builder::*;
 
 static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
     runtime::Builder::new_multi_thread()

@@ -290,7 +290,7 @@ impl Builder {
     /// It should be displayed to the user.
     pub fn response_url(&self) -> Result<String, BuilderError> {
         self.with_state(|state| match state {
-            BuilderState::RequestingApproval(builder) => Ok(builder.response_url()),
+            BuilderState::RequestingApproval(builder) => Ok(builder.response_url().to_owned()),
             _ => Err(BuilderError::InvalidState),
         })
     }
