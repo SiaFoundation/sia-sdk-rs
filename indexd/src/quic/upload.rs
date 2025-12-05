@@ -63,9 +63,10 @@ pub enum UploadError {
     Cancelled,
 }
 
+#[derive(Clone)]
 pub struct Uploader {
     app_client: AppClient,
-    account_key: PrivateKey,
+    app_key: PrivateKey,
 
     client: Client,
 }
@@ -96,10 +97,10 @@ impl Default for UploadOptions {
 }
 
 impl Uploader {
-    pub fn new(app_client: AppClient, host_client: Client, account_key: PrivateKey) -> Self {
+    pub fn new(app_client: AppClient, host_client: Client, app_key: PrivateKey) -> Self {
         Uploader {
             app_client,
-            account_key,
+            app_key,
             client: host_client,
         }
     }
@@ -215,7 +216,10 @@ impl Uploader {
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
         if self.client.available_hosts() == 0 {
-            let hosts = self.app_client.hosts(HostQuery::default()).await?;
+            let hosts = self
+                .app_client
+                .hosts(&self.app_key, HostQuery::default())
+                .await?;
             self.client.update_hosts(hosts);
         }
         let data_shards = options.data_shards as usize;
@@ -223,7 +227,7 @@ impl Uploader {
         let (slab_tx, mut slab_rx) = mpsc::unbounded_channel();
         let semaphore = Arc::new(Semaphore::new(options.max_inflight));
         let host_client = self.client.clone();
-        let account_key = self.account_key.clone();
+        let app_key = self.app_key.clone();
         let mut object = Object::default();
         if let Some(metadata) = options.metadata {
             object.metadata = metadata;
@@ -265,7 +269,7 @@ impl Uploader {
                         permit,
                         host_client.clone(),
                         hosts.clone(),
-                        account_key.clone(),
+                        app_key.clone(),
                         shard.into(),
                         shard_index,
                     ));
@@ -290,7 +294,7 @@ impl Uploader {
                         permit,
                         host_client.clone(),
                         hosts.clone(),
-                        account_key.clone(),
+                        app_key.clone(),
                         shard.into(),
                         shard_index,
                     ));
@@ -369,7 +373,7 @@ impl Uploader {
                         let expected_slab_id = slab.digest();
                         let slab_id = self
                             .app_client
-                            .pin_slab(SlabPinParams {
+                            .pin_slab(&self.app_key, SlabPinParams {
                                 encryption_key: slab.encryption_key,
                                 min_shards: slab.min_shards,
                                 sectors: slab.sectors,
@@ -393,8 +397,8 @@ impl Uploader {
         read_slab_res.await??;
 
         object.slabs = slabs;
-        let sealed = object.seal(&self.account_key);
-        self.app_client.save_object(&sealed).await?;
+        let sealed = object.seal(&self.app_key);
+        self.app_client.save_object(&self.app_key, &sealed).await?;
         Ok(object)
     }
 }

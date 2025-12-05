@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::{DecryptError, open_metadata};
 use crate::slabs::Sector;
-use crate::{Object, ObjectEvent, PinnedSlab, SealedObject, SharedObject, Slab, SlabSlice};
+use crate::{Object, PinnedSlab, SealedObject, SharedObject, Slab, SlabSlice};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use sia::types::v2::Protocol;
@@ -66,11 +66,14 @@ pub enum Error {
 #[serde(rename_all = "camelCase")]
 pub struct AuthConnectStatusResponse {
     approved: bool,
+    user_secret: Option<Hash256>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterAppRequest {
+    #[serde(rename = "appID")]
+    pub app_id: Hash256,
     pub name: String,
     pub description: String,
     #[serde(rename = "serviceURL")]
@@ -88,6 +91,8 @@ pub struct RegisterAppResponse {
     pub response_url: String,
     #[serde(rename = "statusURL")]
     pub status_url: String,
+    #[serde(rename = "registerURL")]
+    pub register_url: String,
     pub expiration: DateTime<Utc>,
 }
 
@@ -104,6 +109,17 @@ pub struct ObjectsCursor {
     pub key: Hash256,
 }
 
+/// An SealedObjectEvent represents an object and whether it was deleted or not.
+#[serde_as]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedObjectEvent {
+    pub key: Hash256,
+    pub deleted: bool,
+    pub updated_at: DateTime<Utc>,
+    pub object: Option<SealedObject>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeoLocation {
@@ -112,7 +128,7 @@ pub struct GeoLocation {
 }
 
 impl Serialize for GeoLocation {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -206,13 +222,10 @@ impl SharedObjectResponse {
     }
 }
 
-type Result<T> = std::result::Result<T, Error>;
-
 #[derive(Clone)]
 pub struct Client {
     client: reqwest::Client,
     url: Url,
-    app_key: PrivateKey,
 }
 
 /// A placeholder type that implements serde::Deserialize for endpoints that
@@ -220,7 +233,7 @@ pub struct Client {
 struct EmptyResponse;
 
 impl<'de> serde::Deserialize<'de> for EmptyResponse {
-    fn deserialize<D>(_: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(_: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
@@ -229,19 +242,19 @@ impl<'de> serde::Deserialize<'de> for EmptyResponse {
 }
 
 impl Client {
-    pub fn new<U: IntoUrl>(url: U, app_key: PrivateKey) -> Result<Self> {
+    pub fn new<U: IntoUrl>(base_url: U) -> Result<Self, Error> {
         Ok(Self {
             client: reqwest::Client::new(),
-            url: url.into_url()?,
-            app_key,
+            url: base_url.into_url()?,
         })
     }
 
     /// Checks if the application is authenticated with the indexer. It returns
     /// true if authenticated, false if not, and an error if the request fails.
-    pub async fn check_app_authenticated(&self) -> Result<bool> {
+    pub async fn check_app_authenticated(&self, app_key: &PrivateKey) -> Result<bool, Error> {
         let url = self.url.join("auth/check")?;
         let query_params = self.sign(
+            app_key,
             &url,
             Method::GET,
             None,
@@ -261,25 +274,62 @@ impl Client {
         }
     }
 
-    /// Checks if an auth request has been approved. If the auth request is
-    /// still pending, it returns false.
-    pub async fn check_request_status(&self, status_url: Url) -> Result<bool> {
+    /// Requests an application connection to the indexer.
+    pub async fn request_app_connection(
+        &self,
+        opts: &RegisterAppRequest,
+    ) -> Result<RegisterAppResponse, Error> {
+        self.post_json("auth/connect", None, Some(opts)).await
+    }
+
+    /// Checks if an auth request has been approved.
+    ///
+    /// If approved, it returns the user secret used
+    /// to derive the application key.
+    ///
+    /// If the auth request is still pending, it returns None.
+    pub async fn check_request_status(&self, status_url: Url) -> Result<Option<Hash256>, Error> {
+        let resp = self
+            .client
+            .get(status_url)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await?;
+        match resp.status() {
+            StatusCode::OK => {
+                if let Ok(status) = resp.json::<AuthConnectStatusResponse>().await {
+                    if status.approved {
+                        Ok(status.user_secret)
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Err(Error::Api("invalid response format".to_string()))
+                }
+            }
+            StatusCode::NOT_FOUND => Err(Error::UserRejected),
+            _ => Err(Error::Api(resp.text().await?)),
+        }
+    }
+
+    /// Registers the application key with the indexer.
+    pub async fn register_app(&self, app_key: &PrivateKey, register_url: Url) -> Result<(), Error> {
         let query_params = self.sign(
-            &status_url,
-            Method::GET,
+            app_key,
+            &register_url,
+            Method::POST,
             None,
             Utc::now() + Duration::from_secs(60),
         );
         let resp = self
             .client
-            .get(status_url)
+            .post(register_url)
             .timeout(Duration::from_secs(15))
             .query(&query_params)
             .send()
             .await?;
         match resp.status() {
-            StatusCode::OK => Ok(resp.json::<AuthConnectStatusResponse>().await?.approved),
-            StatusCode::NOT_FOUND => Err(Error::UserRejected),
+            StatusCode::NO_CONTENT => Ok(()),
             _ => Err(Error::Api(resp.text().await?)),
         }
     }
@@ -288,13 +338,13 @@ impl Client {
     ///
     /// # Arguments
     /// * `query` - Parameters to control the hosts listing.
-    pub async fn hosts(&self, query: HostQuery) -> Result<Vec<Host>> {
-        self.get_json("hosts", Some(&query)).await
+    pub async fn hosts(&self, app_key: &PrivateKey, query: HostQuery) -> Result<Vec<Host>, Error> {
+        self.get_json("hosts", Some(app_key), Some(&query)).await
     }
 
     /// Retrieves an object from the indexer by its key.
-    pub async fn object(&self, key: &Hash256) -> Result<SealedObject> {
-        self.get_json::<_, ()>(&format!("objects/{key}"), None)
+    pub async fn object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<SealedObject, Error> {
+        self.get_json::<_, ()>(&format!("objects/{key}"), Some(app_key), None)
             .await
     }
 
@@ -302,9 +352,10 @@ impl Client {
     /// cursor and limit arguments.
     pub async fn objects(
         &self,
+        app_key: &PrivateKey,
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
-    ) -> Result<Vec<ObjectEvent>> {
+    ) -> Result<Vec<SealedObjectEvent>, Error> {
         let mut query_params = Vec::new();
         if let Some(limit) = limit {
             query_params.push(("limit", limit.to_string()));
@@ -313,55 +364,65 @@ impl Client {
             query_params.push(("after", after.to_rfc3339())); // indexd expects RFC3339
             query_params.push(("key", key.to_string()));
         }
-        self.get_json::<_, _>("objects", Some(&query_params)).await
+        self.get_json::<_, _>("objects", Some(app_key), Some(&query_params))
+            .await
     }
 
     /// Saves an object to the indexer.
-    pub async fn save_object(&self, object: &SealedObject) -> Result<()> {
-        self.post_json::<_, EmptyResponse>("objects", Some(object))
+    pub async fn save_object(
+        &self,
+        app_key: &PrivateKey,
+        object: &SealedObject,
+    ) -> Result<(), Error> {
+        self.post_json::<_, EmptyResponse>("objects", Some(app_key), Some(object))
             .await
             .map(|_| ())
     }
 
     /// Deletes an object from the indexer by its key.
-    pub async fn delete_object(&self, key: &Hash256) -> Result<()> {
-        self.delete(&format!("objects/{key}")).await
-    }
-
-    /// Requests an application connection to the indexer.
-    pub async fn request_app_connection(
-        &self,
-        opts: &RegisterAppRequest,
-    ) -> Result<RegisterAppResponse> {
-        self.post_json("auth/connect", Some(opts)).await
+    pub async fn delete_object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<(), Error> {
+        self.delete(&format!("objects/{key}"), app_key).await
     }
 
     /// Retrieves a slab from the indexer by its ID.
-    pub async fn slab(&self, slab_id: &Hash256) -> Result<PinnedSlab> {
-        self.get_json::<_, ()>(&format!("slabs/{slab_id}"), None)
+    pub async fn slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<PinnedSlab, Error> {
+        self.get_json::<_, ()>(&format!("slabs/{slab_id}"), Some(app_key), None)
             .await
     }
 
     /// Fetches the digests of slabs associated with the account. It supports
     /// pagination through the provided options.
-    pub async fn slab_ids(&self, offset: Option<u64>, limit: Option<u64>) -> Result<Vec<Hash256>> {
+    pub async fn slab_ids(
+        &self,
+        app_key: &PrivateKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Hash256>, Error> {
         #[derive(Serialize)]
         struct QueryParams {
             offset: Option<u64>,
             limit: Option<u64>,
         }
         let params = QueryParams { offset, limit };
-        self.get_json("slabs", Some(&params)).await
+        self.get_json("slabs", Some(app_key), Some(&params)).await
     }
 
     /// Pins slabs to the indexer.
-    pub async fn pin_slabs(&self, slabs: Vec<SlabPinParams>) -> Result<Vec<Hash256>> {
-        self.post_json("slabs", Some(&slabs)).await
+    pub async fn pin_slabs(
+        &self,
+        app_key: &PrivateKey,
+        slabs: Vec<SlabPinParams>,
+    ) -> Result<Vec<Hash256>, Error> {
+        self.post_json("slabs", Some(app_key), Some(&slabs)).await
     }
 
     /// Pin a slab to the indexer.
-    pub async fn pin_slab(&self, slab: SlabPinParams) -> Result<Hash256> {
-        self.pin_slabs(vec![slab])
+    pub async fn pin_slab(
+        &self,
+        app_key: &PrivateKey,
+        slab: SlabPinParams,
+    ) -> Result<Hash256, Error> {
+        self.pin_slabs(app_key, vec![slab])
             .await?
             .into_iter()
             .next()
@@ -369,26 +430,27 @@ impl Client {
     }
 
     /// Unpins a slab from the indexer.
-    pub async fn unpin_slab(&self, slab_id: &Hash256) -> Result<()> {
-        self.delete(&format!("slabs/{slab_id}")).await
+    pub async fn unpin_slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<(), Error> {
+        self.delete(&format!("slabs/{slab_id}"), app_key).await
     }
 
     /// Unpins slabs not used by any object on the account.
-    pub async fn prune_slabs(&self) -> Result<()> {
-        self.post_json::<(), EmptyResponse>("slabs/prune", None)
+    pub async fn prune_slabs(&self, app_key: &PrivateKey) -> Result<(), Error> {
+        self.post_json::<(), EmptyResponse>("slabs/prune", Some(app_key), None)
             .await
             .map(|_| ())
     }
 
     /// Account returns the current account.
-    pub async fn account(&self) -> Result<Account> {
-        self.get_json::<_, ()>("account", None).await
+    pub async fn account(&self, app_key: &PrivateKey) -> Result<Account, Error> {
+        self.get_json::<_, ()>("account", Some(app_key), None).await
     }
 
     /// Helper to send a signed DELETE request.
-    async fn delete(&self, path: &str) -> Result<()> {
+    async fn delete(&self, path: &str, app_key: &PrivateKey) -> Result<(), Error> {
         let url = self.url.join(path)?;
         let query_params = self.sign(
+            app_key,
             &url,
             Method::DELETE,
             None,
@@ -411,25 +473,36 @@ impl Client {
     async fn get_json<D: DeserializeOwned, Q: Serialize + ?Sized>(
         &self,
         path: &str,
+        app_key: Option<&PrivateKey>,
         query_params: Option<&Q>,
-    ) -> Result<D> {
+    ) -> Result<D, Error> {
         let url = self.url.join(path)?;
-        let params = self.sign(
-            &url,
-            Method::GET,
-            None,
-            Utc::now() + Duration::from_secs(60),
-        );
+
+        let mut signing_params = None;
+        if let Some(app_key) = app_key {
+            let params = self.sign(
+                app_key,
+                &url,
+                Method::GET,
+                None,
+                Utc::now() + Duration::from_secs(60),
+            );
+            signing_params = Some(params);
+        }
+
         let mut builder = self.client.get(url).timeout(Duration::from_secs(15));
         if let Some(q) = query_params {
             builder = builder.query(q); // optional query params
         }
-        Self::handle_response(builder.query(&params).send().await?).await
+        if let Some(signing_params) = &signing_params {
+            builder = builder.query(&signing_params);
+        }
+        Self::handle_response(builder.send().await?).await
     }
 
     /// Helper to either parse a successfully JSON response or return the error
     /// message from the API.
-    async fn handle_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
+    async fn handle_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
         if resp.status().is_success() {
             Ok(resp.json::<T>().await?)
         } else {
@@ -442,22 +515,27 @@ impl Client {
     async fn post_json<S: Serialize, D: DeserializeOwned>(
         &self,
         path: &str,
+        app_key: Option<&PrivateKey>,
         body: Option<&S>,
-    ) -> Result<D> {
+    ) -> Result<D, Error> {
         let body = body.and_then(|body| to_vec(body).ok());
         let url = self.url.join(path)?;
-        let query_params = self.sign(
-            &url,
-            Method::POST,
-            body.as_deref(),
-            Utc::now() + Duration::from_secs(60),
-        );
-        let mut builder = self
-            .client
-            .post(url)
-            .query(&query_params)
-            .timeout(Duration::from_secs(15));
 
+        let mut query_params = None;
+        if let Some(app_key) = app_key {
+            query_params = Some(self.sign(
+                app_key,
+                &url,
+                Method::POST,
+                body.as_deref(),
+                Utc::now() + Duration::from_secs(60),
+            ));
+        }
+
+        let mut builder = self.client.post(url).timeout(Duration::from_secs(15));
+        if let Some(query_params) = &query_params {
+            builder = builder.query(&query_params);
+        }
         if let Some(body) = body {
             builder = builder.body(body);
         }
@@ -493,12 +571,17 @@ impl Client {
     /// # Arguments
     /// - `object` the object to create the link for
     /// - `valid_until` the time the link expires
-    pub fn shared_object_url(&self, object: &Object, valid_until: DateTime<Utc>) -> Result<Url> {
+    pub fn shared_object_url(
+        &self,
+        app_key: &PrivateKey,
+        object: &Object,
+        valid_until: DateTime<Utc>,
+    ) -> Result<Url, Error> {
         let mut url = self
             .url
             .join(format!("objects/{}/shared", object.id()).as_str())?;
 
-        let params = self.sign(&url, Method::GET, None, valid_until);
+        let params = self.sign(app_key, &url, Method::GET, None, valid_until);
         url.set_fragment(Some(
             format!(
                 "encryption_key={}",
@@ -523,7 +606,7 @@ impl Client {
     /// # Returns
     /// A tuple with the object metadata and encryption key to decrypt
     /// the user metadata.
-    pub async fn shared_object(&self, mut share_url: Url) -> Result<SharedObject> {
+    pub async fn shared_object(&self, mut share_url: Url) -> Result<SharedObject, Error> {
         let encryption_key = match share_url.fragment() {
             Some(fragment) => {
                 let fragment = match fragment.strip_prefix("encryption_key=") {
@@ -565,14 +648,15 @@ impl Client {
 
     fn sign(
         &self,
+        app_key: &PrivateKey,
         url: &Url,
         method: Method,
         body: Option<&[u8]>,
         valid_until: DateTime<Utc>,
     ) -> [(&'static str, String); 3] {
         let hash = Self::request_hash(url, method, body, valid_until);
-        let public_key = self.app_key.public_key();
-        let signature = self.app_key.sign(hash.as_ref());
+        let public_key = app_key.public_key();
+        let signature = app_key.sign(hash.as_ref());
         [
             (QUERY_PARAM_VALID_UNTIL, valid_until.timestamp().to_string()),
             (QUERY_PARAM_CREDENTIAL, URL_SAFE.encode(public_key)),
@@ -620,10 +704,11 @@ mod tests {
     #[test]
     fn test_sign() {
         let app_key = PrivateKey::from_seed(&[0u8; 32]);
-        let client = Client::new("https://foo.bar", app_key).unwrap();
+        let client = Client::new("https://foo.bar").unwrap();
 
         // with body
         let params = client.sign(
+            &app_key,
             &"https://foo.bar/baz.jpg".parse().unwrap(),
             Method::POST,
             Some("{}".as_bytes()),
@@ -649,6 +734,7 @@ mod tests {
 
         // without body
         let params = client.sign(
+            &app_key,
             &"https://foo.bar/baz.jpg".parse().unwrap(),
             Method::GET,
             None,
@@ -697,10 +783,10 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
-        let _: Result<()> = client.get_json::<_, ()>("", None).await;
-        let _: Result<()> = client.post_json::<(), ()>("", None).await;
-        let _: Result<()> = client.delete("").await;
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        let _: Result<(), _> = client.get_json::<_, ()>("", Some(&app_key), None).await;
+        let _: Result<(), _> = client.post_json::<(), ()>("", Some(&app_key), None).await;
+        let _: Result<(), _> = client.delete("", &app_key).await;
     }
 
     #[tokio::test]
@@ -720,15 +806,18 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        let client = Client::new(server.url("/").to_string()).unwrap();
         let hosts = client
-            .hosts(HostQuery {
-                location: Some(GeoLocation {
-                    latitude: 51.2093,
-                    longitude: 3.2247,
-                }),
-                ..Default::default()
-            })
+            .hosts(
+                &app_key,
+                HostQuery {
+                    location: Some(GeoLocation {
+                        latitude: 51.2093,
+                        longitude: 3.2247,
+                    }),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         assert!(hosts.is_empty());
@@ -757,16 +846,19 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        let client = Client::new(server.url("/").to_string()).unwrap();
         let hosts = client
-            .hosts(HostQuery {
-                offset: Some(5),
-                limit: Some(25),
-                service_account: Some(true),
-                protocol: Some(Protocol::QUIC),
-                country: Some("us".into()),
-                ..Default::default()
-            })
+            .hosts(
+                &app_key,
+                HostQuery {
+                    offset: Some(5),
+                    limit: Some(25),
+                    service_account: Some(true),
+                    protocol: Some(Protocol::QUIC),
+                    country: Some("us".into()),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         assert!(hosts.is_empty());
@@ -822,8 +914,8 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
-        assert_eq!(client.slab(&slab.id).await.unwrap(), slab);
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        assert_eq!(client.slab(&app_key, &slab.id).await.unwrap(), slab);
     }
 
     #[tokio::test]
@@ -848,9 +940,9 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        let client = Client::new(server.url("/").to_string()).unwrap();
         assert_eq!(
-            client.slab_ids(Some(1), Some(2)).await.unwrap(),
+            client.slab_ids(&app_key, Some(1), Some(2)).await.unwrap(),
             vec![slab_id, slab_id]
         );
     }
@@ -888,8 +980,8 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
-        assert_eq!(client.pin_slab(slab).await.unwrap(), slab_id);
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        assert_eq!(client.pin_slab(&app_key, slab).await.unwrap(), slab_id);
     }
 
     #[tokio::test]
@@ -903,8 +995,8 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
-        client.unpin_slab(&slab_id).await.unwrap();
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        client.unpin_slab(&app_key, &slab_id).await.unwrap();
     }
 
     #[tokio::test]
@@ -920,8 +1012,8 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
-        client.prune_slabs().await.unwrap();
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        client.prune_slabs(&app_key).await.unwrap();
     }
 
     #[tokio::test]
@@ -937,14 +1029,20 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        let client = Client::new(server.url("/").to_string()).unwrap();
 
         let expected_error = Error::Api("something went wrong".to_string());
-        let get_error = client.get_json::<(), ()>("", None).await.unwrap_err();
+        let get_error = client
+            .get_json::<(), ()>("", Some(&app_key), None)
+            .await
+            .unwrap_err();
         assert_eq!(get_error.to_string(), expected_error.to_string());
-        let post_error = client.post_json::<(), ()>("", None).await.unwrap_err();
+        let post_error = client
+            .post_json::<(), ()>("", Some(&app_key), None)
+            .await
+            .unwrap_err();
         assert_eq!(post_error.to_string(), expected_error.to_string());
-        let delete_error = client.delete("").await.unwrap_err();
+        let delete_error = client.delete("", &app_key).await.unwrap_err();
         assert_eq!(delete_error.to_string(), expected_error.to_string());
     }
 
@@ -955,7 +1053,7 @@ mod tests {
             Expectation::matching(request::method_path("GET", "/approved")).respond_with(
                 Response::builder()
                     .status(StatusCode::OK)
-                    .body("{\"approved\": true}")
+                    .body("{\"approved\": true, \"userSecret\": \"3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2\"}")
                     .unwrap(),
             ),
         );
@@ -976,12 +1074,18 @@ mod tests {
             ),
         );
 
-        let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new("https://foo.com", app_key).unwrap();
+        let client = Client::new("https://foo.com").unwrap();
 
         // approved request
         let status_url: Url = server.url("/approved").to_string().parse().unwrap();
-        assert!(client.check_request_status(status_url).await.unwrap());
+        assert_eq!(
+            client
+                .check_request_status(status_url)
+                .await
+                .unwrap()
+                .unwrap(),
+            hash_256!("3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2")
+        );
 
         // rejected request
         let status_url: Url = server.url("/rejected").to_string().parse().unwrap();
@@ -1003,7 +1107,7 @@ mod tests {
     async fn test_check_app_auth() {
         let server = Server::run();
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("").to_string(), app_key).unwrap();
+        let client = Client::new(server.url("").to_string()).unwrap();
 
         // approved request
         server.expect(
@@ -1014,7 +1118,7 @@ mod tests {
                     .unwrap(),
             ),
         );
-        assert!(client.check_app_authenticated().await.unwrap());
+        assert!(client.check_app_authenticated(&app_key).await.unwrap());
 
         // rejected request
         server.expect(
@@ -1025,7 +1129,7 @@ mod tests {
                     .unwrap(),
             ),
         );
-        assert!(!client.check_app_authenticated().await.unwrap());
+        assert!(!client.check_app_authenticated(&app_key).await.unwrap());
 
         // other error
         server.expect(
@@ -1036,7 +1140,7 @@ mod tests {
                     .unwrap(),
             ),
         );
-        let err = client.check_app_authenticated().await.unwrap_err();
+        let err = client.check_app_authenticated(&app_key).await.unwrap_err();
         assert_eq!(
             err.to_string(),
             "indexd responded with an error: something went wrong"
@@ -1046,19 +1150,23 @@ mod tests {
     #[tokio::test]
     async fn test_request_app_connection() {
         let server = Server::run();
+        let app_id = {
+            let buf: [u8; 32] = rand::random();
+            Hash256::from(buf)
+        };
         server.expect(
             Expectation::matching(all_of![
                 request::method_path("POST", "/auth/connect"),
-                request::body(r#"{"name":"name","description":"description","serviceURL":"https://service.com/","logoURL":"https://logo.com/","callbackURL":"https://callback.com/"}"#),
+                request::body(format!(r#"{{"appID":"{app_id}","name":"name","description":"description","serviceURL":"https://service.com/","logoURL":"https://logo.com/","callbackURL":"https://callback.com/"}}"#)),
             ])
-                .respond_with(Response::builder().status(StatusCode::OK).body(r#"{"responseURL":"https://response.com","statusURL":"https://status.com","expiration":"1970-01-01T01:01:40+01:00"}"#).unwrap()),
+                .respond_with(Response::builder().status(StatusCode::OK).body(r#"{"responseURL":"https://response.com", "registerURL":"https://response.com","statusURL":"https://status.com","expiration":"1970-01-01T01:01:40+01:00"}"#).unwrap()),
         );
 
-        let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        let client = Client::new(server.url("/").to_string()).unwrap();
 
         let resp = client
             .request_app_connection(&RegisterAppRequest {
+                app_id,
                 name: "name".to_string(),
                 description: "description".to_string(),
                 service_url: "https://service.com".parse().unwrap(),
@@ -1071,6 +1179,7 @@ mod tests {
         assert_eq!(
             resp,
             RegisterAppResponse {
+                register_url: "https://response.com".to_string(),
                 response_url: "https://response.com".to_string(),
                 status_url: "https://status.com".to_string(),
                 expiration: DateTime::from_timestamp_secs(100).unwrap(),
@@ -1151,8 +1260,8 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
-        assert_eq!(client.object(&object_id).await.unwrap(), object);
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        assert_eq!(client.object(&app_key, &object_id).await.unwrap(), object);
     }
 
     #[tokio::test]
@@ -1288,11 +1397,12 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
+        let client = Client::new(server.url("/").to_string()).unwrap();
 
         assert_eq!(
             client
                 .objects(
+                    &app_key,
                     Some(ObjectsCursor {
                         after: object.updated_at.into(),
                         key: object.id(),
@@ -1302,19 +1412,19 @@ mod tests {
                 .await
                 .unwrap(),
             vec![
-                ObjectEvent {
+                SealedObjectEvent {
                     key: object.id(),
                     deleted: false,
                     updated_at: object.updated_at,
                     object: Some(object),
                 },
-                ObjectEvent {
+                SealedObjectEvent {
                     key: object_no_meta.id(),
                     deleted: false,
                     updated_at: object_no_meta.updated_at,
                     object: Some(object_no_meta.clone()),
                 },
-                ObjectEvent {
+                SealedObjectEvent {
                     key: object_no_meta.id(),
                     deleted: false,
                     updated_at: object_no_meta.updated_at,
@@ -1339,8 +1449,8 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
-        client.delete_object(&object_key).await.unwrap();
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        client.delete_object(&app_key, &object_key).await.unwrap();
     }
 
     #[tokio::test]
@@ -1388,7 +1498,7 @@ mod tests {
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string(), app_key).unwrap();
-        client.save_object(&object).await.unwrap();
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        client.save_object(&app_key, &object).await.unwrap();
     }
 }

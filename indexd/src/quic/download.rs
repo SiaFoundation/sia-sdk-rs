@@ -46,6 +46,7 @@ impl SlabIterator for VecDeque<Slab> {
 struct SlabFetchCache {
     cache: Mutex<HashMap<Hash256, Slab>>,
     app_client: AppClient,
+    app_key: PrivateKey,
 }
 
 impl SlabFetchCache {
@@ -60,7 +61,10 @@ impl SlabFetchCache {
             return Ok(Some(slab));
         }
 
-        let slab = self.app_client.slab(&slab_slice.slab_id).await?;
+        let slab = self
+            .app_client
+            .slab(&self.app_key, &slab_slice.slab_id)
+            .await?;
         let slab = Slab {
             encryption_key: slab.encryption_key,
             min_shards: slab.min_shards,
@@ -86,11 +90,12 @@ pub struct SlabFetcher {
 }
 
 impl SlabFetcher {
-    pub fn new(app_client: AppClient, slabs: Vec<SlabSlice>) -> Self {
+    pub fn new(app_client: AppClient, app_key: PrivateKey, slabs: Vec<SlabSlice>) -> Self {
         Self {
             cache: Arc::new(SlabFetchCache {
                 cache: Mutex::new(HashMap::new()),
                 app_client,
+                app_key,
             }),
             slabs: VecDeque::from(slabs),
         }
@@ -195,6 +200,7 @@ impl DownloaderInner {
     }
 }
 
+#[derive(Clone)]
 pub struct Downloader {
     inner: Arc<DownloaderInner>,
 }
@@ -356,29 +362,24 @@ impl Downloader {
         }
     }
 
-    /// Returns the offset and length of the sector to download in order
-    /// to recover the raw data.
-    fn sector_region(data_shards: usize, offset: usize, length: usize) -> (usize, usize) {
-        let chunk_size = SEGMENT_SIZE * data_shards;
-        let start = (offset / chunk_size) * SEGMENT_SIZE;
-        let end = (offset + length).div_ceil(chunk_size) * SEGMENT_SIZE;
-        (start, end - start)
-    }
-
     /// Downloads slabs from the provided SlabIterator and writes
     /// the encrypted data to the provided writer.
     ///
     /// This is a low-level function that can be used to download
     /// arbitrary slabs. Most users should use [Downloader::download]
     /// or [Downloader::download_shared] instead.
-    pub async fn download_slabs<W: AsyncWriteExt + Unpin, S: SlabIterator>(
+    async fn download_slabs<W: AsyncWriteExt + Unpin, S: SlabIterator>(
         &self,
         w: &mut W,
         mut slabs: S,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
         if self.inner.host_client.available_hosts() == 0 {
-            let hosts = self.inner.app_client.hosts(HostQuery::default()).await?;
+            let hosts = self
+                .inner
+                .app_client
+                .hosts(&self.inner.account_key, HostQuery::default())
+                .await?;
             self.inner.host_client.update_hosts(hosts);
         }
 
@@ -400,17 +401,24 @@ impl Downloader {
                 Some(s) => s,
                 None => break,
             };
-            let n = (slab.length - slab.offset) as usize;
-            if offset >= n {
-                offset -= n;
+
+            let slab_length = slab.length as usize;
+            if offset >= slab_length {
+                offset -= slab_length;
                 continue;
             }
 
+            // adjust slab range based on offset and length
             let slab_offset = slab.offset as usize + offset;
+            let slab_length = (slab_length - offset).min(length);
             offset = 0;
-            let slab_length = (slab.length as usize - slab_offset).min(length);
-            let (shard_offset, shard_length) =
-                Self::sector_region(slab.min_shards as usize, slab_offset, slab_length);
+
+            // compute the sector aligned region to download
+            let chunk_size = SEGMENT_SIZE * slab.min_shards as usize;
+            let start = (slab_offset / chunk_size) * SEGMENT_SIZE;
+            let end = (slab_offset + slab_length).div_ceil(chunk_size) * SEGMENT_SIZE;
+            let shard_offset = start;
+            let shard_length = end - start;
 
             let mut shards = self
                 .download_slab_shards(
@@ -449,7 +457,11 @@ impl Downloader {
         object: &Object,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
-        let slab_iterator = SlabFetcher::new(self.inner.app_client.clone(), object.slabs.clone());
+        let slab_iterator = SlabFetcher::new(
+            self.inner.app_client.clone(),
+            self.inner.account_key.clone(),
+            object.slabs.clone(),
+        );
         let mut w = object.writer(w, options.offset);
         self.download_slabs(&mut w, slab_iterator, options).await
     }
