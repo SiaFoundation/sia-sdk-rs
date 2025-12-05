@@ -63,7 +63,7 @@ impl AppKey {
     /// AppKeys should be stored securely by the application in lieu of the
     /// recovery phrase.
     pub fn export(&self) -> Vec<u8> {
-        self.0.as_ref().to_vec()
+        self.0.as_ref()[..32].to_vec()
     }
 
     /// Signs a message using the AppKey.
