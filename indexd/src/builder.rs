@@ -122,8 +122,8 @@ impl Builder<RequestingApprovalState> {
     /// Returns the response URL for the registration process. This
     /// should be displayed to the user so they can authorize the
     /// application.
-    pub fn response_url(&self) -> String {
-        self.state.response_url.clone().into()
+    pub fn response_url(&self) -> &str {
+        self.state.response_url.as_str()
     }
 
     /// Waits for the application registration to be approved. This
