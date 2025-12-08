@@ -336,7 +336,7 @@ fn object_id(slabs: &[Slab]) -> Hash256 {
         slab_id
             .encode(&mut state)
             .expect("hashing slab_id shouldn't fail");
-        (slab.offset << 32 | slab.length)
+        ((slab.offset as u64) << 32 | slab.length as u64)
             .encode(&mut state)
             .expect("hashing slab offset/length shouldn't fail");
     }
