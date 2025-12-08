@@ -348,6 +348,26 @@ mod test {
     use super::*;
     use sia::hash_256;
 
+    #[test]
+    fn test_object_id() {
+        let slabs = vec![Slab {
+            encryption_key: [0u8; 32].into(),
+            min_shards: 1,
+            sectors: vec![Sector {
+                root: Hash256::new([1u8; 32]),
+                host_key: PublicKey::new([2u8; 32]),
+            }],
+            offset: 10,
+            length: 100,
+        }];
+
+        let id = object_id(&slabs);
+        assert_eq!(
+            id.to_string(),
+            "1b13d5dd22605af0573cae7fe9242c1ee83727c29798308b2b170864677b46d0"
+        );
+    }
+
     /// tests Slab.digest against a reference digest
     #[test]
     fn test_slab_digest() {

@@ -46,7 +46,7 @@ impl Serialize for EncryptionKey {
     where
         S: serde::Serializer,
     {
-        let s = BASE64_STANDARD.encode(&self.0);
+        let s = BASE64_STANDARD.encode(self.0);
         serializer.serialize_str(&s)
     }
 }
