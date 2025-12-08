@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 use sia::blake2::{Blake2b256, Digest};
-use sia::encoding::{self, SiaDecodable, SiaEncodable};
+use sia::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use sia::encryption::{CipherReader, CipherWriter, EncryptionKey};
 use sia::signing::{PrivateKey, PublicKey, Signature};
 use sia::types::Hash256;
@@ -17,7 +17,7 @@ use crate::object_encryption::{
     DecryptError, open_encryption_key, open_metadata, seal_master_key, seal_metadata,
 };
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, SiaEncode, SiaDecode)]
 #[serde(rename_all = "camelCase")]
 /// A Sector is a unit of data stored on the Sia network. It can be referenced by its Merkle root.
 pub struct Sector {
@@ -28,6 +28,7 @@ pub struct Sector {
 /// A Slab is an erasure-coded collection of sectors. The sectors can be downloaded and
 /// used to recover the original data.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Slab {
     pub encryption_key: EncryptionKey,
     pub min_shards: u8,
@@ -51,31 +52,28 @@ impl Slab {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SlabSlice {
-    #[serde(rename = "slabID")]
-    pub slab_id: Hash256,
-    pub offset: u32,
-    pub length: u32,
-}
-
-impl SiaEncodable for SlabSlice {
+impl SiaEncodable for Slab {
     fn encode<W: std::io::Write>(&self, w: &mut W) -> encoding::Result<()> {
-        self.slab_id.encode(w)?;
+        self.encryption_key.encode(w)?;
+        self.min_shards.encode(w)?;
+        self.sectors.encode(w)?;
         let combined: u64 = (self.offset as u64) << 32 | (self.length as u64);
         combined.encode(w)?;
         Ok(())
     }
 }
 
-impl SiaDecodable for SlabSlice {
+impl SiaDecodable for Slab {
     fn decode<R: std::io::Read>(r: &mut R) -> encoding::Result<Self> {
-        let slab_id = Hash256::decode(r)?;
+        let encryption_key = EncryptionKey::decode(r)?;
+        let min_shards = u8::decode(r)?;
+        let sectors = Vec::<Sector>::decode(r)?;
         let combined = u64::decode(r)?;
 
         Ok(Self {
-            slab_id,
+            encryption_key,
+            min_shards,
+            sectors,
             offset: (combined >> 32) as u32,
             length: combined as u32,
         })
@@ -109,7 +107,7 @@ pub enum SealedObjectError {
 pub struct SealedObject {
     #[serde_as(as = "Base64")]
     pub encrypted_master_key: Vec<u8>,
-    pub slabs: Vec<SlabSlice>,
+    pub slabs: Vec<Slab>,
     #[serde_as(as = "Option<Base64>")]
     pub encrypted_metadata: Option<Vec<u8>>,
     pub signature: Signature,
@@ -121,7 +119,7 @@ pub struct SealedObject {
 impl SiaDecodable for SealedObject {
     fn decode<R: std::io::Read>(r: &mut R) -> encoding::Result<Self> {
         let encrypted_master_key = Vec::<u8>::decode(r)?;
-        let slabs = Vec::<SlabSlice>::decode(r)?;
+        let slabs = Vec::<Slab>::decode(r)?;
         let encrypted_metadata = Vec::<u8>::decode(r)?;
         let signature = Signature::decode(r)?;
         let created_at = DateTime::<Utc>::decode(r)?;
@@ -152,11 +150,7 @@ impl SealedObject {
     }
 
     pub fn id(&self) -> Hash256 {
-        let mut state = Blake2b256::default();
-        for slab in self.slabs.iter() {
-            slab.encode(&mut state).unwrap();
-        }
-        state.finalize().into()
+        object_id(&self.slabs)
     }
 
     pub fn open(self, app_key: &PrivateKey) -> Result<Object, SealedObjectError> {
@@ -201,7 +195,7 @@ pub struct ObjectEvent {
 pub struct Object {
     encryption_key: EncryptionKey, // not public to avoid accidental exposure
 
-    pub slabs: Vec<SlabSlice>,
+    pub slabs: Vec<Slab>,
     pub metadata: Vec<u8>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -247,11 +241,7 @@ impl Default for Object {
 
 impl Object {
     pub fn id(&self) -> Hash256 {
-        let mut state = Blake2b256::default();
-        for slab in self.slabs.iter() {
-            slab.encode(&mut state).unwrap();
-        }
-        state.finalize().into()
+        object_id(&self.slabs)
     }
 
     pub fn seal(&self, app_key: &PrivateKey) -> SealedObject {
@@ -319,15 +309,7 @@ impl SharedObject {
     pub fn object(&self) -> Object {
         Object {
             encryption_key: self.encryption_key.clone(),
-            slabs: self
-                .slabs
-                .iter()
-                .map(|s| SlabSlice {
-                    slab_id: s.digest(),
-                    offset: s.offset,
-                    length: s.length,
-                })
-                .collect(),
+            slabs: self.slabs.clone(),
             metadata: self.metadata.clone().unwrap_or_default(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -339,20 +321,26 @@ impl From<SharedObject> for Object {
     fn from(val: SharedObject) -> Self {
         Object {
             encryption_key: val.encryption_key,
-            slabs: val
-                .slabs
-                .iter()
-                .map(|s| SlabSlice {
-                    slab_id: s.digest(),
-                    offset: s.offset,
-                    length: s.length,
-                })
-                .collect(),
+            slabs: val.slabs.clone(),
             metadata: val.metadata.unwrap_or_default(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
     }
+}
+
+fn object_id(slabs: &[Slab]) -> Hash256 {
+    let mut state = Blake2b256::default();
+    for slab in slabs.iter() {
+        let slab_id = slab.digest();
+        slab_id
+            .encode(&mut state)
+            .expect("hashing slab_id shouldn't fail");
+        (slab.offset << 32 | slab.length)
+            .encode(&mut state)
+            .expect("hashing slab offset/length shouldn't fail");
+    }
+    state.finalize().into()
 }
 
 #[cfg(test)]
@@ -404,17 +392,17 @@ mod test {
     #[test]
     fn test_object_roundtrip() {
         let slabs = vec![
-            SlabSlice {
-                slab_id: hash_256!(
-                    "d1aea84f8682d7ae17b6c1f14dc344eb70b9328ee913a76fc241559657b06284"
-                ),
+            Slab {
+                encryption_key: rand::random::<[u8; 32]>().into(),
+                min_shards: 2,
+                sectors: vec![],
                 offset: 0,
                 length: 100,
             },
-            SlabSlice {
-                slab_id: hash_256!(
-                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-                ),
+            Slab {
+                encryption_key: rand::random::<[u8; 32]>().into(),
+                min_shards: 2,
+                sectors: vec![],
                 offset: 0,
                 length: 100,
             },

@@ -9,7 +9,7 @@ use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
-use indexd::{Object, SealedObjectError, SlabSlice, Url, quic};
+use indexd::{Object, SealedObjectError, Url, quic};
 use log::debug;
 use sia::rhp::SECTOR_SIZE;
 use sia::signing::{PublicKey, Signature};
@@ -589,27 +589,45 @@ impl From<indexd::PinnedSlab> for PinnedSlab {
 /// A Slab represents a contiguous erasure-coded segment of a file stored on the Sia network.
 #[derive(uniffi::Record)]
 pub struct Slab {
-    pub id: String,
+    pub encryption_key: Vec<u8>,
+    pub min_shards: u8,
+    pub sectors: Vec<PinnedSector>,
     pub offset: u32,
     pub length: u32,
 }
 
-impl From<SlabSlice> for Slab {
-    fn from(s: SlabSlice) -> Self {
+impl From<indexd::Slab> for Slab {
+    fn from(s: indexd::Slab) -> Self {
         Self {
-            id: s.slab_id.to_string(),
+            encryption_key: s.encryption_key.as_ref().to_vec(),
+            min_shards: s.min_shards,
+            sectors: s
+                .sectors
+                .into_iter()
+                .map(|sec| PinnedSector {
+                    root: sec.root.to_string(),
+                    host_key: sec.host_key.to_string(),
+                })
+                .collect(),
             offset: s.offset,
             length: s.length,
         }
     }
 }
 
-impl TryInto<SlabSlice> for Slab {
-    type Error = HexParseError;
+impl TryInto<indexd::Slab> for Slab {
+    type Error = String;
 
-    fn try_into(self) -> Result<SlabSlice, Self::Error> {
-        Ok(SlabSlice {
-            slab_id: Hash256::from_str(self.id.as_str())?,
+    fn try_into(self) -> Result<indexd::Slab, Self::Error> {
+        Ok(indexd::Slab {
+            encryption_key: encryption::EncryptionKey::try_from(self.encryption_key.as_slice())?,
+            min_shards: self.min_shards,
+            sectors: self
+                .sectors
+                .into_iter()
+                .map(|sec| sec.try_into())
+                .collect::<Result<Vec<indexd::Sector>, HexParseError>>()
+                .map_err(|e| e.to_string())?,
             offset: self.offset,
             length: self.length,
         })

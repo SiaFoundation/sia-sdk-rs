@@ -18,7 +18,7 @@ use tokio::time::sleep;
 
 use crate::app_client::{self, Client as AppClient, HostQuery};
 use crate::quic::client::Client;
-use crate::{Object, Sector, SharedObject, Slab, SlabSlice, quic};
+use crate::{Object, Sector, SharedObject, Slab, quic};
 
 /// A SlabIterator can be used to iterate over slabs to be downloaded.
 /// This is used to abstract over different sources of slabs, such as
@@ -50,21 +50,19 @@ struct SlabFetchCache {
 }
 
 impl SlabFetchCache {
-    async fn slab(&self, slab_slice: &SlabSlice) -> Result<Option<Slab>, app_client::Error> {
+    async fn slab(&self, slab_slice: &Slab) -> Result<Option<Slab>, app_client::Error> {
+        let slab_id = slab_slice.digest();
         if let Some(slab) = {
             let cache = self
                 .cache
                 .lock()
                 .map_err(|_| app_client::Error::Custom("failed to lock mutex".into()))?;
-            cache.get(&slab_slice.slab_id).cloned()
+            cache.get(&slab_id).cloned()
         } {
             return Ok(Some(slab));
         }
 
-        let slab = self
-            .app_client
-            .slab(&self.app_key, &slab_slice.slab_id)
-            .await?;
+        let slab = self.app_client.slab(&self.app_key, &slab_id).await?;
         let slab = Slab {
             encryption_key: slab.encryption_key,
             min_shards: slab.min_shards,
@@ -75,7 +73,7 @@ impl SlabFetchCache {
         self.cache
             .lock()
             .map_err(|_| app_client::Error::Custom("failed to lock mutex".into()))?
-            .insert(slab_slice.slab_id, slab.clone());
+            .insert(slab_id, slab.clone());
         Ok(Some(slab))
     }
 }
@@ -86,11 +84,11 @@ impl SlabFetchCache {
 #[derive(Clone)]
 pub struct SlabFetcher {
     cache: Arc<SlabFetchCache>,
-    slabs: VecDeque<SlabSlice>,
+    slabs: VecDeque<Slab>,
 }
 
 impl SlabFetcher {
-    pub fn new(app_client: AppClient, app_key: PrivateKey, slabs: Vec<SlabSlice>) -> Self {
+    pub fn new(app_client: AppClient, app_key: PrivateKey, slabs: Vec<Slab>) -> Self {
         Self {
             cache: Arc::new(SlabFetchCache {
                 cache: Mutex::new(HashMap::new()),

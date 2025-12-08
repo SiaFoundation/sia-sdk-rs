@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::{DecryptError, open_metadata};
 use crate::slabs::Sector;
-use crate::{Object, PinnedSlab, SealedObject, SharedObject, Slab, SlabSlice};
+use crate::{Object, PinnedSlab, SealedObject, SharedObject, Slab};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use sia::types::v2::Protocol;
@@ -210,13 +210,7 @@ impl SharedObjectResponse {
         let mut state = Blake2b256::new();
         for slab in &self.slabs {
             let slab: Slab = slab.clone().into();
-            SlabSlice {
-                slab_id: slab.digest(),
-                offset: slab.offset,
-                length: slab.length,
-            }
-            .encode(&mut state)
-            .unwrap();
+            slab.encode(&mut state).unwrap();
         }
         state.finalize().into()
     }
@@ -1194,17 +1188,17 @@ mod tests {
             encrypted_metadata: Some(b"hello world!".to_vec()),
             signature: Signature::from([2u8; 64]),
             slabs: vec![
-                SlabSlice {
-                    slab_id: hash_256!(
-                        "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
-                    ),
+                Slab {
+                    encryption_key: [1u8; 32].into(),
+                    min_shards: 2,
+                    sectors: vec![],
                     offset: 0,
                     length: 256,
                 },
-                SlabSlice {
-                    slab_id: hash_256!(
-                        "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405"
-                    ),
+                Slab {
+                    encryption_key: [2u8; 32].into(),
+                    min_shards: 2,
+                    sectors: vec![],
                     offset: 256,
                     length: 512,
                 },
