@@ -1321,15 +1321,49 @@ mod tests {
             slabs: vec![
                 Slab {
                     encryption_key: [1u8; 32].into(),
-                    min_shards: 2,
-                    sectors: vec![],
+                    min_shards: 1,
+                    sectors: vec![
+                        Sector {
+                            root: hash_256!(
+                                "0202020202020202020202020202020202020202020202020202020202020202"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+                            ),
+                        },
+                        Sector {
+                            root: hash_256!(
+                                "0404040404040404040404040404040404040404040404040404040404040404"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+                            ),
+                        },
+                    ],
                     offset: 0,
                     length: 256,
                 },
                 Slab {
                     encryption_key: [2u8; 32].into(),
-                    min_shards: 2,
-                    sectors: vec![],
+                    min_shards: 1,
+                    sectors: vec![
+                        Sector {
+                            root: hash_256!(
+                                "0202020202020202020202020202020202020202020202020202020202020202"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+                            ),
+                        },
+                        Sector {
+                            root: hash_256!(
+                                "0404040404040404040404040404040404040404040404040404040404040404"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+                            ),
+                        },
+                    ],
                     offset: 256,
                     length: 512,
                 },
@@ -1355,19 +1389,41 @@ mod tests {
         const TEST_OBJECTS_JSON: &str = r#"
 [
   {
-    "key": "3a707a322387c9f0f7549f35be78bf58cd2742b809f65d37b41ebba48226f5cf",
+    "key": "7f26b785c0dff73f51b81728289381064ad4b947f37417cbcb366afc3d80c7f5",
     "deleted": false,
     "updatedAt": "2025-09-09T16:10:46.898399-07:00",
     "object": {
       "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
       "slabs": [
         {
-          "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
+          "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+          "minShards": 1,
+          "sectors": [
+            {
+              "root": "0202020202020202020202020202020202020202020202020202020202020202",
+              "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+            },
+            {
+              "root": "0404040404040404040404040404040404040404040404040404040404040404",
+              "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+            }
+          ],
           "offset": 0,
           "length": 256
         },
         {
-          "slabID": "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405",
+          "encryptionKey": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+          "minShards": 1,
+          "sectors": [
+            {
+              "root": "0202020202020202020202020202020202020202020202020202020202020202",
+              "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+            },
+            {
+              "root": "0404040404040404040404040404040404040404040404040404040404040404",
+              "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+            }
+          ],
           "offset": 256,
           "length": 512
         }
@@ -1379,19 +1435,41 @@ mod tests {
     }
   },
   {
-    "key": "3a707a322387c9f0f7549f35be78bf58cd2742b809f65d37b41ebba48226f5cf",
+    "key": "7f26b785c0dff73f51b81728289381064ad4b947f37417cbcb366afc3d80c7f5",
     "deleted": false,
     "updatedAt": "2025-09-09T16:10:46.898399-07:00",
     "object": {
       "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
       "slabs": [
         {
-          "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
+          "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+          "minShards": 1,
+          "sectors": [
+            {
+              "root": "0202020202020202020202020202020202020202020202020202020202020202",
+              "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+            },
+            {
+              "root": "0404040404040404040404040404040404040404040404040404040404040404",
+              "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+            }
+          ],
           "offset": 0,
           "length": 256
         },
         {
-          "slabID": "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405",
+          "encryptionKey": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+          "minShards": 1,
+          "sectors": [
+            {
+              "root": "0202020202020202020202020202020202020202020202020202020202020202",
+              "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+            },
+            {
+              "root": "0404040404040404040404040404040404040404040404040404040404040404",
+              "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+            }
+          ],
           "offset": 256,
           "length": 512
         }
@@ -1403,19 +1481,41 @@ mod tests {
     }
   },
   {
-    "key": "3a707a322387c9f0f7549f35be78bf58cd2742b809f65d37b41ebba48226f5cf",
+    "key": "7f26b785c0dff73f51b81728289381064ad4b947f37417cbcb366afc3d80c7f5",
     "deleted": false,
     "updatedAt": "2025-09-09T16:10:46.898399-07:00",
     "object": {
       "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
       "slabs": [
         {
-          "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
+          "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+          "minShards": 1,
+          "sectors": [
+            {
+              "root": "0202020202020202020202020202020202020202020202020202020202020202",
+              "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+            },
+            {
+              "root": "0404040404040404040404040404040404040404040404040404040404040404",
+              "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+            }
+          ],
           "offset": 0,
           "length": 256
         },
         {
-          "slabID": "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405",
+          "encryptionKey": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+          "minShards": 1,
+          "sectors": [
+            {
+              "root": "0202020202020202020202020202020202020202020202020202020202020202",
+              "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+            },
+            {
+              "root": "0404040404040404040404040404040404040404040404040404040404040404",
+              "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+            }
+          ],
           "offset": 256,
           "length": 512
         }
@@ -1426,7 +1526,7 @@ mod tests {
     }
   }
 ]
-        "#;
+"#;
 
         let server = Server::run();
         server.expect(
