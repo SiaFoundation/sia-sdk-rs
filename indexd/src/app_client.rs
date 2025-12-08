@@ -1655,4 +1655,27 @@ mod tests {
         let client = Client::new(server.url("/").to_string()).unwrap();
         client.save_object(&app_key, &object).await.unwrap();
     }
+
+    #[test]
+    fn test_shared_object_id() {
+        let obj = SharedObjectResponse {
+            slabs: vec![SharedObjectSlab {
+                id: hash_256!("9fefb8c783425e3abc5ce045cfbff1818dbd797a0d279de021127520cc114e4e"),
+                encryption_key: [0u8; 32].into(),
+                min_shards: 1,
+                sectors: vec![Sector {
+                    root: Hash256::new([1u8; 32]),
+                    host_key: PublicKey::new([2u8; 32]),
+                }],
+                offset: 10,
+                length: 100,
+            }],
+            encrypted_metadata: None,
+        };
+
+        assert_eq!(
+            obj.id().to_string(),
+            "1b13d5dd22605af0573cae7fe9242c1ee83727c29798308b2b170864677b46d0"
+        );
+    }
 }
