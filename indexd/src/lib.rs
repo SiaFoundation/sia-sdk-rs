@@ -1,23 +1,18 @@
-pub mod app_client;
-
-pub mod quic;
-use crate::app_client::HostQuery;
+use crate::app_client::{HostQuery, SlabPinParams};
 use crate::quic::{
     DownloadError, DownloadOptions, Downloader, UploadError, UploadOptions, Uploader,
 };
 
-mod slabs;
+use chrono::{DateTime, Utc};
+use sia::signing::PrivateKey;
 pub use slabs::*;
 
 mod hosts;
 pub use hosts::*;
 
-use crate::app_client::{Account, Client, ObjectsCursor, RegisterAppRequest};
-use log::debug;
+use crate::app_client::{Account, Client, ObjectsCursor};
 use sia::rhp::Host;
-use sia::signing::PrivateKey;
 use sia::types::Hash256;
-use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -25,23 +20,13 @@ use tokio_util::sync::CancellationToken;
 pub use reqwest::{IntoUrl, Url};
 
 mod object_encryption;
+mod slabs;
 
-pub struct DisconnectedState;
+pub mod app_client;
+pub mod quic;
 
-pub struct RegisteredState {
-    app: Client,
-    app_key: PrivateKey,
-
-    connect_url: Option<Url>,
-    status_url: Option<Url>,
-}
-
-pub struct ConnectedState {
-    app_key: PrivateKey,
-    app: Client,
-    downloader: Downloader,
-    uploader: Uploader,
-}
+mod builder;
+pub use builder::*;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -61,250 +46,241 @@ pub enum Error {
     SealedObject(#[from] SealedObjectError),
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
-
-pub struct SDK<S> {
-    state: S,
+/// The SDK provides methods for uploading and downloading objects,
+/// as well as interacting with an indexer service.
+#[derive(Clone)]
+pub struct SDK {
+    client: Client,
+    app_key: PrivateKey,
+    downloader: Downloader,
+    uploader: Uploader,
 }
 
-impl SDK<DisconnectedState> {
-    pub async fn connect(
-        app_url: &str,
+impl SDK {
+    /// Creates a new SDK instance.
+    async fn new(
+        client: Client,
         app_key: PrivateKey,
-        app_name: String,
-        app_description: String,
-        app_service_url: Url,
-    ) -> Result<SDK<RegisteredState>> {
-        let client =
-            Client::new(app_url, app_key.clone()).map_err(|e| Error::App(format!("{e:?}")))?;
-
-        let authenticated = client
-            .check_app_authenticated()
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
-
-        if authenticated {
-            debug!("app connected and authenticated");
-            return Ok(SDK {
-                state: RegisteredState {
-                    app: client,
-                    app_key,
-                    connect_url: None,
-                    status_url: None,
-                },
-            });
-        }
-
-        debug!("requesting app connection");
-        let res = client
-            .request_app_connection(&RegisterAppRequest {
-                name: app_name,
-                description: app_description,
-                service_url: app_service_url,
-                logo_url: None,
-                callback_url: None,
-            })
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
-
-        debug!("app connected, awaiting approval");
-        Ok(SDK {
-            state: RegisteredState {
-                app: client,
-                app_key,
-                connect_url: Some(
-                    res.response_url
-                        .parse()
-                        .map_err(|e| Error::App(format!("{e:?}")))?,
-                ),
-                status_url: Some(
-                    res.status_url
-                        .parse()
-                        .map_err(|e| Error::App(format!("{e:?}")))?,
-                ),
-            },
-        })
-    }
-}
-
-impl SDK<RegisteredState> {
-    pub fn needs_approval(&self) -> bool {
-        self.state.connect_url.is_some()
-    }
-
-    pub fn approval_url(&self) -> Option<&Url> {
-        self.state.connect_url.as_ref()
-    }
-
-    pub async fn connected(self, tls_config: rustls::ClientConfig) -> Result<SDK<ConnectedState>> {
-        if self.state.connect_url.is_some() {
-            loop {
-                let ok = self
-                    .state
-                    .app
-                    .check_request_status(self.state.status_url.clone().unwrap())
-                    .await
-                    .map_err(|e| Error::App(format!("{e:?}")))?;
-                if ok {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-            tokio::time::sleep(Duration::from_secs(30)).await; // wait for accounts to get funded
-        }
-
-        let hosts = self
-            .state
-            .app
-            .hosts(HostQuery::default())
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
-        let dialer = quic::Client::new(tls_config).map_err(|e| Error::Tls(format!("{e:?}")))?;
+        tls_config: rustls::ClientConfig,
+    ) -> Result<Self, BuilderError> {
+        let hosts = client.hosts(&app_key, HostQuery::default()).await?;
+        let dialer = quic::Client::new(tls_config)?;
         dialer.update_hosts(hosts);
 
-        let downloader = Downloader::new(
-            self.state.app.clone(),
-            dialer.clone(),
-            self.state.app_key.clone(),
-        );
-        let uploader = Uploader::new(
-            self.state.app.clone(),
-            dialer.clone(),
-            self.state.app_key.clone(),
-        );
-
-        Ok(SDK {
-            state: ConnectedState {
-                app_key: self.state.app_key,
-                app: self.state.app,
-                downloader,
-                uploader,
-            },
+        let downloader = Downloader::new(client.clone(), dialer.clone(), app_key.clone());
+        let uploader = Uploader::new(client.clone(), dialer.clone(), app_key.clone());
+        Ok(Self {
+            client,
+            app_key,
+            downloader,
+            uploader,
         })
     }
-}
 
-impl SDK<ConnectedState> {
+    /// Returns the application key used by the SDK.
+    ///
+    /// This should be kept secret and secure. Applications
+    /// should store it safely.
+    pub fn app_key(&self) -> &PrivateKey {
+        &self.app_key
+    }
+
+    /// Uploads an object using the provided reader and options.
     pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
         &self,
         cancel: CancellationToken,
         reader: R,
         options: UploadOptions,
-    ) -> Result<Object> {
-        let object = self.state.uploader.upload(cancel, reader, options).await?;
+    ) -> Result<Object, Error> {
+        let object = self.uploader.upload(cancel, reader, options).await?;
         Ok(object)
     }
 
+    /// Downloads an object using the provided writer and options.
     pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
         w: W,
         object: &Object,
         options: DownloadOptions,
-    ) -> Result<()> {
-        self.state.downloader.download(w, object, options).await?;
+    ) -> Result<(), Error> {
+        self.downloader.download(w, object, options).await?;
         Ok(())
     }
 
+    /// Downloads a shared object using the provided writer and options.
     pub async fn download_shared<W: AsyncWriteExt + Unpin>(
         &self,
         w: W,
         object: &SharedObject,
         options: DownloadOptions,
-    ) -> Result<()> {
-        self.state
-            .downloader
-            .download_shared(w, object, options)
-            .await?;
+    ) -> Result<(), Error> {
+        self.downloader.download_shared(w, object, options).await?;
         Ok(())
     }
 
-    pub async fn hosts(&self, query: HostQuery) -> Result<Vec<Host>> {
-        self.state
-            .app
-            .hosts(query)
+    /// Retrieves a list of hosts from the indexer matching the provided query
+    /// that can be used for uploading and downloading data.
+    ///
+    /// # Arguments
+    /// * `query` - Filtering criteria to select hosts.
+    pub async fn hosts(&self, query: HostQuery) -> Result<Vec<Host>, Error> {
+        self.client
+            .hosts(&self.app_key, query)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }
 
-    pub async fn slab(&self, slab_id: &Hash256) -> Result<PinnedSlab> {
-        self.state
-            .app
-            .slab(slab_id)
+    /// Retrieves account information from the indexer.
+    pub async fn account(&self) -> Result<Account, Error> {
+        self.client
+            .account(&self.app_key)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }
 
-    pub async fn account(&self) -> Result<Account> {
-        self.state
-            .app
-            .account()
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))
-    }
-
-    pub async fn slab_ids(&self, offset: Option<u64>, limit: Option<u64>) -> Result<Vec<Hash256>> {
-        self.state
-            .app
-            .slab_ids(offset, limit)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))
-    }
-
-    pub async fn object(&self, key: &Hash256) -> Result<Object> {
+    /// Retrieves an object from the indexer by its key.
+    ///
+    /// # Arguments
+    /// * `key` - The key of the object to retrieve.
+    pub async fn object(&self, key: &Hash256) -> Result<Object, Error> {
         let sealed = self
-            .state
-            .app
-            .object(key)
+            .client
+            .object(&self.app_key, key)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
-        let obj = sealed.open(&self.state.app_key)?;
+        let obj = sealed.open(&self.app_key)?;
         Ok(obj)
     }
 
-    pub async fn objects(
+    /// Retrieves a list of object events from the indexer. This
+    /// can be used to synchronize local state with the indexer.
+    ///
+    /// # Arguments
+    /// * `cursor` - An optional cursor to continue from a previous call.
+    /// * `limit` - An optional limit on the number of events to retrieve.
+    pub async fn object_events(
         &self,
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
-    ) -> Result<Vec<Object>> {
+    ) -> Result<Vec<ObjectEvent>, Error> {
         let events = self
-            .state
-            .app
-            .objects(cursor, limit)
+            .client
+            .objects(&self.app_key, cursor, limit)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
         let objs = events
             .into_iter()
-            .filter_map(|event| event.object.map(|sealed| sealed.open(&self.state.app_key)))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .map(|event| {
+                let object = match event.object {
+                    Some(sealed) => Some(sealed.open(&self.app_key)?),
+                    None => None,
+                };
+                Ok(ObjectEvent {
+                    key: event.key,
+                    deleted: event.deleted,
+                    updated_at: event.updated_at,
+                    object,
+                })
+            })
+            .collect::<Result<_, Error>>()?;
 
         Ok(objs)
     }
 
-    pub async fn prune_slabs(&self) -> Result<()> {
-        self.state
-            .app
-            .prune_slabs()
+    /// Prunes unused slabs from the indexer. This helps to free up
+    /// storage space by removing slabs that are no longer
+    /// referenced by objects.
+    pub async fn prune_slabs(&self) -> Result<(), Error> {
+        self.client
+            .prune_slabs(&self.app_key)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())
     }
 
-    pub async fn save_object(&self, object: &Object) -> Result<()> {
-        let sealed = object.seal(&self.state.app_key);
-        self.state
-            .app
-            .save_object(&sealed)
+    /// Saves the given object to the indexer.
+    ///
+    /// # Arguments
+    /// * `object` - The object to save.
+    pub async fn save_object(&self, object: &Object) -> Result<(), Error> {
+        let sealed = object.seal(&self.app_key);
+        self.client
+            .save_object(&self.app_key, &sealed)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())
     }
 
-    pub async fn delete_object(&self, key: &Hash256) -> Result<()> {
-        self.state
-            .app
-            .delete_object(key)
+    /// Deletes the object with the given id.
+    ///
+    /// # Arguments
+    /// * `id` - The id of the object to delete.
+    pub async fn delete_object(&self, id: &Hash256) -> Result<(), Error> {
+        self.client
+            .delete_object(&self.app_key, id)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
+    /// Generates a shared URL for the given object that is valid until the specified time.
+    ///
+    /// This object should be considered public even if the URL is kept secret,
+    /// as anyone with the URL can access the object until the expiration time.
+    ///
+    /// # Arguments
+    /// * `object` - The object to share.
+    /// * `valid_until` - The time until which the shared URL is valid.
+    pub fn share_object(&self, object: &Object, valid_until: DateTime<Utc>) -> Result<Url, Error> {
+        self.client
+            .shared_object_url(&self.app_key, object, valid_until)
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
+    /// Retrieves a shared object from the given share URL.
+    ///
+    /// # Arguments
+    /// * `share_url` - The URL of the shared object.
+    pub async fn shared_object<U: IntoUrl>(&self, share_url: U) -> Result<SharedObject, Error> {
+        let share_url = share_url
+            .into_url()
+            .map_err(|e| Error::App(format!("{e:?}")))?;
+        self.client
+            .shared_object(share_url)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
+    /// Pins a shared object to the indexer, making it available for download.
+    pub async fn pin_shared(&self, shared_object: SharedObject) -> Result<Object, Error> {
+        let slabs = shared_object
+            .slabs()
+            .iter()
+            .map(|s| SlabPinParams {
+                encryption_key: s.encryption_key.clone(),
+                min_shards: s.min_shards,
+                sectors: s.sectors.clone(),
+            })
+            .collect();
+
+        self.client
+            .pin_slabs(&self.app_key, slabs)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))?;
+
+        let object: Object = shared_object.into();
+        self.client
+            .save_object(&self.app_key, &object.seal(&self.app_key))
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))?;
+        Ok(object)
+    }
+
+    /// Retrieves a pinned slab from the indexer by its id.
+    pub async fn slab(&self, id: &Hash256) -> Result<PinnedSlab, Error> {
+        self.client
+            .slab(&self.app_key, id)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }

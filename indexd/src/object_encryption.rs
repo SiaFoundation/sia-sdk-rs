@@ -16,6 +16,11 @@ pub enum DecryptError {
     KeyLength,
 }
 
+pub(crate) fn derive(key: &[u8], salt: &[u8], domain: &[u8], okm: &mut [u8]) {
+    let hkdf = hkdf::SimpleHkdf::<Blake2b256>::new(Some(salt), key);
+    hkdf.expand(domain, okm).unwrap();
+}
+
 pub(crate) fn derive_encryption_key(key: &[u8], salt: &[u8], domain: &[u8]) -> EncryptionKey {
     let hkdf = hkdf::SimpleHkdf::<Blake2b256>::new(Some(salt), key);
     let mut okm = [0u8; 32];

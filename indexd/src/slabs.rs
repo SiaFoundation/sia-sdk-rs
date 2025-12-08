@@ -187,13 +187,12 @@ impl SealedObject {
 
 /// An ObjectEvent represents an object and whether it was deleted or not.
 #[serde_as]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ObjectEvent {
     pub key: Hash256,
     pub deleted: bool,
     pub updated_at: DateTime<Utc>,
-    pub object: Option<SealedObject>,
+    pub object: Option<Object>,
 }
 
 // An Object represents a file stored on the Sia network, consisting of multiple slabs and

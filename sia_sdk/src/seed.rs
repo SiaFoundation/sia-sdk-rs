@@ -1,76 +1,65 @@
-use crate::signing::PrivateKey;
-use crate::types::Hash256;
-use bip39::{Error as MnemonicError, Language, Mnemonic};
-use blake2b_simd::Params;
-use thiserror::Error;
+use std::fmt::Display;
 
-pub struct Seed([u8; 16]);
+use crate::blake2::Blake2b256;
+use crate::signing::PrivateKey;
+use bip39::{Error as MnemonicError, Language, Mnemonic};
+use sha2::Digest;
+use thiserror::Error;
+use zeroize::ZeroizeOnDrop;
+
+#[derive(ZeroizeOnDrop)]
+pub struct Seed {
+    seed: [u8; 16],
+    entropy: [u8; 32],
+}
 
 #[derive(Debug, PartialEq, Error)]
 pub enum SeedError {
     #[error("failed to parse recovery phrase")]
-    MnemonicError,
+    MnemonicError(#[from] MnemonicError),
     #[error("invalid length of entropy, must be 16 bytes")]
     InvalidLength,
 }
 
-impl From<MnemonicError> for SeedError {
-    fn from(_: MnemonicError) -> Self {
-        SeedError::MnemonicError
-    }
-}
-
 impl Seed {
-    pub fn new(seed: [u8; 16]) -> Self {
-        Self(seed)
-    }
-
-    pub fn from_mnemonic(s: &str) -> Result<Self, SeedError> {
+    pub fn new(s: &str) -> Result<Self, SeedError> {
         let m = Mnemonic::parse_in(Language::English, s)?;
         let buf = m.to_entropy();
         if buf.len() != 16 {
             return Err(SeedError::InvalidLength);
         }
-
-        let mut entropy = [0; 16];
-        entropy.copy_from_slice(&buf[..16]);
-        Ok(Self::new(entropy))
+        let mut seed = [0u8; 16];
+        seed.copy_from_slice(&buf);
+        Ok(Self::from_seed(seed))
     }
 
-    pub fn to_mnemonic(&self) -> String {
-        Mnemonic::from_entropy_in(Language::English, &self.0)
-            .unwrap()
-            .to_string()
+    pub fn from_seed(seed: [u8; 16]) -> Self {
+        let mut h = Blake2b256::new();
+        h.update(seed);
+
+        let entropy: [u8; 32] = h.finalize().into();
+        Seed { seed, entropy }
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
-        self.0.as_ref()
+    pub fn entropy(&self) -> &[u8] {
+        &self.entropy
     }
 
     /// Derive a private key from the seed
     pub fn private_key(&self, index: u64) -> PrivateKey {
-        let mut params = Params::new();
-        params.hash_length(32);
+        let mut h = Blake2b256::new();
+        h.update(self.entropy());
+        h.update(index.to_le_bytes());
+        let hash: [u8; 32] = h.finalize().into();
 
-        let entropy: Hash256 = params.to_state().update(self.0.as_ref()).finalize().into();
-
-        let seed: Hash256 = params
-            .to_state()
-            .update(entropy.as_ref())
-            .update(&index.to_le_bytes())
-            .finalize()
-            .into();
-
-        seed.into()
+        PrivateKey::from_seed(&hash)
     }
 }
 
-impl Drop for Seed {
-    fn drop(&mut self) {
-        // Zero out the private key
-        for byte in self.0.iter_mut() {
-            *byte = 0;
-        }
+impl Display for Seed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let m = Mnemonic::from_entropy(&self.seed).expect("invalid seed");
+        write!(f, "{}", m)
     }
 }
 
@@ -228,8 +217,8 @@ mod tests {
         ];
 
         for (entropy, expected) in test_cases {
-            let seed = Seed::new(entropy);
-            assert_eq!(seed.to_mnemonic(), expected);
+            let seed = Seed::from_seed(entropy);
+            assert_eq!(seed.to_string(), expected.to_string());
         }
     }
 
@@ -253,7 +242,7 @@ mod tests {
 			(18446744073709551615, hex::decode("c03b2570cb69e300cd4ccbe0c4d8ee7b8ccfad7383f10aa2df52a4a9d05ab843d39fbd56458e94d711061748a051d434d2200e1af71df56070d2df0883453b2c").unwrap()),
 		];
 
-        let seed = Seed::from_mnemonic(PHRASE).unwrap();
+        let seed = Seed::new(PHRASE).unwrap();
         for (i, expected) in test_addresses {
             let pk = seed.private_key(i);
             assert_eq!(pk.as_ref(), expected, "index {i}");
@@ -280,7 +269,7 @@ mod tests {
 			(18446744073709551615, hex::decode("c03b2570cb69e300cd4ccbe0c4d8ee7b8ccfad7383f10aa2df52a4a9d05ab843d39fbd56458e94d711061748a051d434d2200e1af71df56070d2df0883453b2c").unwrap()),
 		];
 
-        let seed = Seed::from_mnemonic(PHRASE).unwrap();
+        let seed = Seed::new(PHRASE).unwrap();
         for (i, expected) in test_addresses {
             let pk = seed.private_key(i).public_key();
             assert_eq!(pk.as_ref(), &expected[32..], "index {i}");
