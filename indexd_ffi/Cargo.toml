@@ -15,7 +15,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 [dependencies]
 base64 = "0.22.1"
 indexd = { version = "0.1.2", path = "../indexd" }
-log = "0.4.28"
+log = "0.4.29"
 rand = "0.9.2"
 rustls = { version = "0.23.35", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 sia_sdk = { version = "0.1.1", path = "../sia_sdk" }
