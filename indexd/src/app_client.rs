@@ -881,7 +881,7 @@ mod tests {
         const TEST_SLAB_JSON: &str = r#"
         {
           "id": "43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28",
-          "encryptionKey": [186,153,179,170,159,95,101,177,15,130,58,19,138,144,9,91,181,119,38,225,209,47,149,22,157,210,16,232,10,151,186,160],
+          "encryptionKey": "upmzqp9fZbEPgjoTipAJW7V3JuHRL5UWndIQ6AqXuqA=",
           "minShards": 1,
           "sectors": [
             {
