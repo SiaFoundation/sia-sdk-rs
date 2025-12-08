@@ -207,10 +207,14 @@ struct SharedObjectResponse {
 
 impl SharedObjectResponse {
     pub fn id(&self) -> Hash256 {
-        let mut state = Blake2b256::new();
-        for slab in &self.slabs {
-            let slab: Slab = slab.clone().into();
-            slab.encode(&mut state).unwrap();
+        let mut state = Blake2b256::default();
+        for slab in self.slabs.iter() {
+            slab.id
+                .encode(&mut state)
+                .expect("hashing slab_id shouldn't fail");
+            ((slab.offset as u64) << 32 | slab.length as u64)
+                .encode(&mut state)
+                .expect("hashing slab offset/length shouldn't fail");
         }
         state.finalize().into()
     }

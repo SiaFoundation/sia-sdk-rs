@@ -62,11 +62,11 @@ impl SlabFetchCache {
             return Ok(Some(slab));
         }
 
-        let slab = self.app_client.slab(&self.app_key, &slab_id).await?;
+        let pinned_slab = self.app_client.slab(&self.app_key, &slab_id).await?;
         let slab = Slab {
-            encryption_key: slab.encryption_key,
+            encryption_key: pinned_slab.encryption_key,
             min_shards: slab.min_shards,
-            sectors: slab.sectors,
+            sectors: pinned_slab.sectors,
             offset: slab.offset,
             length: slab.length,
         };
