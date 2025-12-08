@@ -50,8 +50,8 @@ struct SlabFetchCache {
 }
 
 impl SlabFetchCache {
-    async fn slab(&self, slab_slice: &Slab) -> Result<Option<Slab>, app_client::Error> {
-        let slab_id = slab_slice.digest();
+    async fn slab(&self, slab: &Slab) -> Result<Option<Slab>, app_client::Error> {
+        let slab_id = slab.digest();
         if let Some(slab) = {
             let cache = self
                 .cache
@@ -67,8 +67,8 @@ impl SlabFetchCache {
             encryption_key: slab.encryption_key,
             min_shards: slab.min_shards,
             sectors: slab.sectors,
-            offset: slab_slice.offset,
-            length: slab_slice.length,
+            offset: slab.offset,
+            length: slab.length,
         };
         self.cache
             .lock()
@@ -106,7 +106,7 @@ impl SlabIterator for SlabFetcher {
     async fn next(&mut self) -> Result<Option<Slab>, Self::Error> {
         let slab = self.slabs.pop_front();
         match slab {
-            Some(slab_slice) => self.cache.slab(&slab_slice).await,
+            Some(s) => self.cache.slab(&s).await,
             None => Ok(None),
         }
     }
