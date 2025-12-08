@@ -1190,17 +1190,51 @@ mod tests {
             slabs: vec![
                 Slab {
                     encryption_key: [1u8; 32].into(),
-                    min_shards: 2,
-                    sectors: vec![],
-                    offset: 0,
-                    length: 256,
+                    min_shards: 1,
+                    sectors: vec![
+                        Sector {
+                            root: hash_256!(
+                                "0202020202020202020202020202020202020202020202020202020202020202"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+                            ),
+                        },
+                        Sector {
+                            root: hash_256!(
+                                "0404040404040404040404040404040404040404040404040404040404040404"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+                            ),
+                        },
+                    ],
+                    offset: 6,
+                    length: 7,
                 },
                 Slab {
-                    encryption_key: [2u8; 32].into(),
-                    min_shards: 2,
-                    sectors: vec![],
-                    offset: 256,
-                    length: 512,
+                    encryption_key: [1u8; 32].into(),
+                    min_shards: 1,
+                    sectors: vec![
+                        Sector {
+                            root: hash_256!(
+                                "0202020202020202020202020202020202020202020202020202020202020202"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+                            ),
+                        },
+                        Sector {
+                            root: hash_256!(
+                                "0404040404040404040404040404040404040404040404040404040404040404"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+                            ),
+                        },
+                    ],
+                    offset: 6,
+                    length: 7,
                 },
             ],
             created_at: DateTime::<FixedOffset>::parse_from_rfc3339(
@@ -1220,14 +1254,36 @@ mod tests {
           "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
           "slabs": [
            {
-            "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
-            "offset": 0,
-            "length": 256
+             "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+             "minShards": 1,
+             "sectors": [
+               {
+                 "root": "0202020202020202020202020202020202020202020202020202020202020202",
+                 "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+               },
+               {
+                 "root": "0404040404040404040404040404040404040404040404040404040404040404",
+                 "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+               }
+             ],
+             "offset": 6,
+             "length": 7
            },
            {
-            "slabID": "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405",
-            "offset": 256,
-            "length": 512
+             "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+             "minShards": 1,
+             "sectors": [
+               {
+                 "root": "0202020202020202020202020202020202020202020202020202020202020202",
+                 "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+               },
+               {
+                 "root": "0404040404040404040404040404040404040404040404040404040404040404",
+                 "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+               }
+             ],
+             "offset": 6,
+             "length": 7
            }
           ],
           "encryptedMetadata": "aGVsbG8gd29ybGQh",
