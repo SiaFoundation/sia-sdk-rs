@@ -201,7 +201,7 @@ impl SealedObject {
 
         // decrypt data key and metadata
         let data_key = open_data_key(app_key, &object_id, &self.encrypted_data_key)?;
-        let metadata = if self.encrypted_metadata.len() > 0 {
+        let metadata = if !self.encrypted_metadata.is_empty() {
             let metadata_key =
                 open_metadata_key(app_key, &object_id, &self.encrypted_metadata_key)?;
             open_metadata(&metadata_key, &object_id, &self.encrypted_metadata)?
