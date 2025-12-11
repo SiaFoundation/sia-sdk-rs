@@ -170,9 +170,9 @@ impl SealedObject {
         app_key: &PublicKey,
         object_id: &Hash256,
     ) -> Result<(), SealedObjectError> {
-        let data_sig_hash = Self::data_sig_hash(&object_id, &self.encrypted_data_key);
+        let data_sig_hash = Self::data_sig_hash(object_id, &self.encrypted_data_key);
         let meta_sig_hash = Self::meta_sig_hash(
-            &object_id,
+            object_id,
             &self.encrypted_metadata_key,
             &self.encrypted_metadata,
         );
@@ -295,7 +295,7 @@ impl Object {
         };
 
         // encrypt metadata key and metadata, if present, and create metadata signature
-        let (encrypted_metadata_key, encrypted_metadata) = if self.metadata.len() > 0 {
+        let (encrypted_metadata_key, encrypted_metadata) = if !self.metadata.is_empty() {
             let metadata_key = EncryptionKey::from(rand::random::<[u8; 32]>());
             let encrypted_metadata_key = seal_metadata_key(app_key, &object_id, &metadata_key);
             let encrypted_metadata = seal_metadata(&metadata_key, &object_id, &self.metadata);
@@ -337,7 +337,7 @@ pub struct SharedObject {
 }
 
 impl SharedObject {
-    pub fn new(encryption_key: EncryptionKey, slabs: Vec<Slab>, metadata: Option<Vec<u8>>) -> Self {
+    pub fn new(encryption_key: EncryptionKey, slabs: Vec<Slab>) -> Self {
         SharedObject {
             data_key: encryption_key,
             slabs,

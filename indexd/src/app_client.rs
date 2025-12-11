@@ -9,7 +9,6 @@ use serde_json::to_vec;
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 use sia::blake2::Blake2b256;
-use sia::encoding::SiaEncodable;
 use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
 
@@ -19,7 +18,7 @@ use serde::de::DeserializeOwned;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
-use crate::object_encryption::{DecryptError, open_metadata};
+use crate::object_encryption::DecryptError;
 use crate::slabs::Sector;
 use crate::{Object, PinnedSlab, SealedObject, SharedObject, Slab};
 use sia::signing::{PrivateKey, PublicKey};
@@ -203,21 +202,6 @@ struct SharedObjectResponse {
     pub slabs: Vec<SharedObjectSlab>,
     #[serde_as(as = "Option<Base64>")]
     pub encrypted_metadata: Option<Vec<u8>>,
-}
-
-impl SharedObjectResponse {
-    pub fn id(&self) -> Hash256 {
-        let mut state = Blake2b256::default();
-        for slab in self.slabs.iter() {
-            slab.id
-                .encode(&mut state)
-                .expect("hashing slab_id shouldn't fail");
-            ((slab.offset as u64) << 32 | slab.length as u64)
-                .encode(&mut state)
-                .expect("hashing slab offset/length shouldn't fail");
-        }
-        state.finalize().into()
-    }
 }
 
 #[derive(Clone)]
@@ -629,18 +613,9 @@ impl Client {
         )
         .await?;
 
-        let object_id = shared_object.id();
-        let metadata = if let Some(encrypted_metadata) = shared_object.encrypted_metadata {
-            let meta = open_metadata(&encryption_key, &object_id, &encrypted_metadata)?;
-            Some(meta)
-        } else {
-            None
-        };
-
         Ok(SharedObject::new(
             encryption_key,
             shared_object.slabs.into_iter().map(|s| s.into()).collect(),
-            metadata,
         ))
     }
 
