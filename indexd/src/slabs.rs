@@ -3,6 +3,7 @@ use rand::TryRngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
+use serde_with::DefaultOnNull;
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 use sia::blake2::{Blake2b256, Digest};
@@ -111,9 +112,9 @@ pub struct SealedObject {
     pub slabs: Vec<Slab>,
     pub data_signature: Signature,
 
-    #[serde_as(as = "Base64")]
+    #[serde_as(as = "DefaultOnNull<Base64>")]
     pub encrypted_metadata_key: Vec<u8>,
-    #[serde_as(as = "Base64")]
+    #[serde_as(as = "DefaultOnNull<Base64>")]
     pub encrypted_metadata: Vec<u8>,
     pub metadata_signature: Signature,
 
@@ -199,12 +200,12 @@ impl SealedObject {
 
         // decrypt data key and metadata
         let data_key = open_data_key(app_key, &object_id, &self.encrypted_data_key)?;
-        let metadata = if self.encrypted_metadata.is_empty() {
-            Vec::new()
-        } else {
+        let metadata = if self.encrypted_metadata.len() > 0 {
             let metadata_key =
                 open_metadata_key(app_key, &object_id, &self.encrypted_metadata_key)?;
             open_metadata(&metadata_key, &object_id, &self.encrypted_metadata)?
+        } else {
+            Vec::new()
         };
 
         Ok(Object {
@@ -303,6 +304,7 @@ impl Object {
         } else {
             (Vec::new(), Vec::new())
         };
+
         let metadata_signature = {
             let sig_hash = SealedObject::meta_sig_hash(
                 &object_id,

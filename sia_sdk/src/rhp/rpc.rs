@@ -1344,8 +1344,6 @@ mod test {
             bytes
         });
 
-        let mut sig_buf = [0u8; 64];
-        sig_buf[0] = 9;
         let req = RPCReadSectorRequest {
             prices,
             token,
