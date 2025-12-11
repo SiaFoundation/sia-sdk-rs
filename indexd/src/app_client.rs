@@ -583,7 +583,7 @@ impl Client {
         url.set_fragment(Some(
             format!(
                 "encryption_key={}",
-                URL_SAFE.encode(object.encryption_key().as_ref())
+                URL_SAFE.encode(object.data_key().as_ref())
             )
             .as_str(),
         ));
@@ -1188,9 +1188,11 @@ mod tests {
     #[tokio::test]
     async fn test_object() {
         let object = SealedObject {
-            encrypted_master_key: vec![1u8; 72],
+            encrypted_data_key: vec![1u8; 72],
+            encrypted_metadata_key: Some(vec![1u8; 72]),
             encrypted_metadata: Some(b"hello world!".to_vec()),
-            signature: Signature::from([2u8; 64]),
+            data_signature: Signature::from([2u8; 64]),
+            metadata_signature: Some(Signature::from([2u8; 64])),
             slabs: vec![
                 Slab {
                     encryption_key: [1u8; 32].into(),
@@ -1321,7 +1323,8 @@ mod tests {
     #[tokio::test]
     async fn test_objects() {
         let object = SealedObject {
-            encrypted_master_key: vec![1u8; 72],
+            encrypted_data_key: vec![1u8; 72],
+            encrypted_metadata_key: Some(vec![1u8; 72]),
             slabs: vec![
                 Slab {
                     encryption_key: [1u8; 32].into(),
@@ -1373,7 +1376,8 @@ mod tests {
                 },
             ],
             encrypted_metadata: Some(b"hello world!".to_vec()),
-            signature: Signature::from([2u8; 64]),
+            data_signature: Signature::from([2u8; 64]),
+            metadata_signature: Some(Signature::from([2u8; 64])),
             created_at: DateTime::<FixedOffset>::parse_from_rfc3339(
                 "2025-09-09T16:10:46.898399-07:00",
             )
@@ -1610,8 +1614,10 @@ mod tests {
     #[tokio::test]
     async fn save_object() {
         let object = SealedObject {
-            encrypted_master_key: vec![1u8; 72],
-            signature: Signature::from([2u8; 64]),
+            encrypted_data_key: vec![1u8; 72],
+            encrypted_metadata_key: Some(vec![1u8; 72]),
+            data_signature: Signature::from([2u8; 64]),
+            metadata_signature: Some(Signature::from([2u8; 64])),
             slabs: vec![
                 Slab {
                     encryption_key: [1u8; 32].into(),

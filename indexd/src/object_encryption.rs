@@ -28,39 +28,74 @@ pub(crate) fn derive_encryption_key(key: &[u8], salt: &[u8], domain: &[u8]) -> E
     okm.into()
 }
 
-pub(crate) fn seal_master_key(
+pub(crate) fn seal_data_key(
     app_key: &PrivateKey,
     object_id: &Hash256,
     encryption_key: &EncryptionKey,
 ) -> Vec<u8> {
-    let master_encryption_key =
-        derive_encryption_key(app_key.as_ref(), object_id.as_ref(), b"master");
-    let encryption_key_cipher = XChaCha20Poly1305::new(master_encryption_key.as_ref().into());
+    let data_encryption_key =
+        derive_encryption_key(app_key.as_ref(), object_id.as_ref(), b"dataKey");
+    let encryption_key_cipher = XChaCha20Poly1305::new(data_encryption_key.as_ref().into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-    let encrypted_master_key = encryption_key_cipher
+    let encrypted_data_key = encryption_key_cipher
         .encrypt(&nonce, encryption_key.as_ref().as_ref())
         .expect("encryption failed");
-    [nonce.to_vec(), encrypted_master_key].concat()
+    [nonce.to_vec(), encrypted_data_key].concat()
 }
 
-pub(crate) fn open_encryption_key(
+pub(crate) fn seal_metadata_key(
     app_key: &PrivateKey,
     object_id: &Hash256,
-    encrypted_master_key: &[u8],
+    encryption_key: &EncryptionKey,
+) -> Vec<u8> {
+    let meta_encryption_key =
+        derive_encryption_key(app_key.as_ref(), object_id.as_ref(), b"metadataKey");
+    let encryption_key_cipher = XChaCha20Poly1305::new(meta_encryption_key.as_ref().into());
+    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let encrypted_meta_key = encryption_key_cipher
+        .encrypt(&nonce, encryption_key.as_ref().as_ref())
+        .expect("encryption failed");
+    [nonce.to_vec(), encrypted_meta_key].concat()
+}
+
+pub(crate) fn open_data_key(
+    app_key: &PrivateKey,
+    object_id: &Hash256,
+    encrypted_data_key: &[u8],
 ) -> Result<EncryptionKey, DecryptError> {
-    if encrypted_master_key.len() < NONCE_SIZE {
+    if encrypted_data_key.len() < NONCE_SIZE {
         return Err(DecryptError::Decryption);
     }
-    let master_encryption_key =
-        derive_encryption_key(app_key.as_ref(), object_id.as_ref(), b"master");
-    let encryption_key_cipher = XChaCha20Poly1305::new(master_encryption_key.as_ref().into());
-    let (nonce_bytes, ciphertext) = encrypted_master_key.split_at(NONCE_SIZE);
+    let data_encryption_key =
+        derive_encryption_key(app_key.as_ref(), object_id.as_ref(), b"dataKey");
+    let encryption_key_cipher = XChaCha20Poly1305::new(data_encryption_key.as_ref().into());
+    let (nonce_bytes, ciphertext) = encrypted_data_key.split_at(NONCE_SIZE);
     let nonce_bytes: [u8; 24] = nonce_bytes.try_into().unwrap(); // safe due to length check above
     let nonce = chacha20poly1305::XNonce::from(nonce_bytes);
-    let decrypted_master_key = encryption_key_cipher
+    let decrypted_data_key = encryption_key_cipher
         .decrypt(&nonce, ciphertext)
         .map_err(|_| DecryptError::Decryption)?;
-    EncryptionKey::try_from(decrypted_master_key.as_ref()).map_err(|_| DecryptError::KeyLength)
+    EncryptionKey::try_from(decrypted_data_key.as_ref()).map_err(|_| DecryptError::KeyLength)
+}
+
+pub(crate) fn open_metadata_key(
+    app_key: &PrivateKey,
+    object_id: &Hash256,
+    encrypted_meta_key: &[u8],
+) -> Result<EncryptionKey, DecryptError> {
+    if encrypted_meta_key.len() < NONCE_SIZE {
+        return Err(DecryptError::Decryption);
+    }
+    let meta_encryption_key =
+        derive_encryption_key(app_key.as_ref(), object_id.as_ref(), b"metadataKey");
+    let encryption_key_cipher = XChaCha20Poly1305::new(meta_encryption_key.as_ref().into());
+    let (nonce_bytes, ciphertext) = encrypted_meta_key.split_at(NONCE_SIZE);
+    let nonce_bytes: [u8; 24] = nonce_bytes.try_into().unwrap(); // safe due to length check above
+    let nonce = chacha20poly1305::XNonce::from(nonce_bytes);
+    let decrypted_meta_key = encryption_key_cipher
+        .decrypt(&nonce, ciphertext)
+        .map_err(|_| DecryptError::Decryption)?;
+    EncryptionKey::try_from(decrypted_meta_key.as_ref()).map_err(|_| DecryptError::KeyLength)
 }
 
 pub(crate) fn seal_metadata(
