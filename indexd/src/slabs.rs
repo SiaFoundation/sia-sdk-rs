@@ -3,9 +3,8 @@ use rand::TryRngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
-use serde_with::DefaultOnNull;
 use serde_with::base64::Base64;
-use serde_with::serde_as;
+use serde_with::{DefaultOnNull, serde_as};
 use sia::blake2::{Blake2b256, Digest};
 use sia::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use sia::encryption::{CipherReader, CipherWriter, EncryptionKey};
