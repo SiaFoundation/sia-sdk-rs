@@ -112,8 +112,10 @@ pub struct SealedObject {
     pub slabs: Vec<Slab>,
     pub data_signature: Signature,
 
+    #[serde(default)]
     #[serde_as(as = "DefaultOnNull<Base64>")]
     pub encrypted_metadata_key: Vec<u8>,
+    #[serde(default)]
     #[serde_as(as = "DefaultOnNull<Base64>")]
     pub encrypted_metadata: Vec<u8>,
     pub metadata_signature: Signature,
