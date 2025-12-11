@@ -383,7 +383,7 @@ impl From<SharedObject> for Object {
     }
 }
 
-fn object_id(slabs: &[Slab]) -> Hash256 {
+pub(crate) fn object_id(slabs: &[Slab]) -> Hash256 {
     let mut state = Blake2b256::default();
     for slab in slabs.iter() {
         let slab_id = slab.digest();

@@ -172,34 +172,11 @@ pub struct Account {
     pub service_url: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SharedObjectSlab {
-    pub id: Hash256,
-    pub encryption_key: EncryptionKey,
-    pub min_shards: u8,
-    pub sectors: Vec<Sector>,
-    pub offset: u32,
-    pub length: u32,
-}
-
-impl From<SharedObjectSlab> for Slab {
-    fn from(val: SharedObjectSlab) -> Self {
-        Slab {
-            encryption_key: val.encryption_key,
-            min_shards: val.min_shards,
-            sectors: val.sectors,
-            offset: val.offset,
-            length: val.length,
-        }
-    }
-}
-
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SharedObjectResponse {
-    pub slabs: Vec<SharedObjectSlab>,
+    pub slabs: Vec<Slab>,
     #[serde_as(as = "Option<Base64>")]
     pub encrypted_metadata: Option<Vec<u8>>,
 }
@@ -1164,10 +1141,10 @@ mod tests {
     async fn test_object() {
         let object = SealedObject {
             encrypted_data_key: vec![1u8; 72],
-            encrypted_metadata_key: Some(vec![1u8; 72]),
-            encrypted_metadata: Some(b"hello world!".to_vec()),
+            encrypted_metadata_key: vec![1u8; 72],
+            encrypted_metadata: b"hello world!".to_vec(),
             data_signature: Signature::from([2u8; 64]),
-            metadata_signature: Some(Signature::from([2u8; 64])),
+            metadata_signature: Signature::from([2u8; 64]),
             slabs: vec![
                 Slab {
                     encryption_key: [1u8; 32].into(),
@@ -1299,7 +1276,7 @@ mod tests {
     async fn test_objects() {
         let object = SealedObject {
             encrypted_data_key: vec![1u8; 72],
-            encrypted_metadata_key: Some(vec![1u8; 72]),
+            encrypted_metadata_key: vec![1u8; 72],
             slabs: vec![
                 Slab {
                     encryption_key: [1u8; 32].into(),
@@ -1350,9 +1327,9 @@ mod tests {
                     length: 512,
                 },
             ],
-            encrypted_metadata: Some(b"hello world!".to_vec()),
+            encrypted_metadata: b"hello world!".to_vec(),
             data_signature: Signature::from([2u8; 64]),
-            metadata_signature: Some(Signature::from([2u8; 64])),
+            metadata_signature: Signature::from([2u8; 64]),
             created_at: DateTime::<FixedOffset>::parse_from_rfc3339(
                 "2025-09-09T16:10:46.898399-07:00",
             )
@@ -1365,7 +1342,7 @@ mod tests {
             .to_utc(),
         };
         let object_no_meta = SealedObject {
-            encrypted_metadata: None,
+            encrypted_metadata: vec![],
             ..object.clone()
         };
 
@@ -1590,9 +1567,9 @@ mod tests {
     async fn save_object() {
         let object = SealedObject {
             encrypted_data_key: vec![1u8; 72],
-            encrypted_metadata_key: Some(vec![1u8; 72]),
+            encrypted_metadata_key: vec![1u8; 72],
             data_signature: Signature::from([2u8; 64]),
-            metadata_signature: Some(Signature::from([2u8; 64])),
+            metadata_signature: Signature::from([2u8; 64]),
             slabs: vec![
                 Slab {
                     encryption_key: [1u8; 32].into(),
@@ -1640,8 +1617,7 @@ mod tests {
     #[test]
     fn test_shared_object_id() {
         let obj = SharedObjectResponse {
-            slabs: vec![SharedObjectSlab {
-                id: hash_256!("9fefb8c783425e3abc5ce045cfbff1818dbd797a0d279de021127520cc114e4e"),
+            slabs: vec![Slab {
                 encryption_key: [0u8; 32].into(),
                 min_shards: 1,
                 sectors: vec![Sector {
@@ -1655,7 +1631,7 @@ mod tests {
         };
 
         assert_eq!(
-            obj.id().to_string(),
+            object_id(&obj.slabs).to_string(),
             "1b13d5dd22605af0573cae7fe9242c1ee83727c29798308b2b170864677b46d0"
         );
     }
