@@ -592,7 +592,7 @@ impl Client {
 
         Ok(SharedObject::new(
             encryption_key,
-            shared_object.slabs.into_iter().map(|s| s.into()).collect(),
+            shared_object.slabs.clone(),
         ))
     }
 
