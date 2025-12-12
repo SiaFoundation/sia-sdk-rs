@@ -90,7 +90,7 @@ pub fn encrypt_shards(
 pub fn encrypt_shard(key: &EncryptionKey, index: u8, offset: usize, shard: &mut [u8]) {
     let mut nonce: [u8; 24] = [0u8; 24]; // XChaCha20 nonce size
     nonce[0] = index;
-    let mut cipher = XChaCha20::new(key.as_ref().into(), (&nonce).into());
+    let mut cipher = XChaCha20::new(key.as_ref().into(), &nonce.into());
     cipher.seek(offset);
     cipher.apply_keystream(shard);
 }
