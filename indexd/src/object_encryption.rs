@@ -98,14 +98,8 @@ pub(crate) fn open_metadata_key(
     EncryptionKey::try_from(decrypted_meta_key.as_ref()).map_err(|_| DecryptError::KeyLength)
 }
 
-pub(crate) fn seal_metadata(
-    master_key: &EncryptionKey,
-    object_id: &Hash256,
-    metadata: &[u8],
-) -> Vec<u8> {
-    let metadata_encryption_key =
-        derive_encryption_key(master_key.as_ref(), object_id.as_ref(), b"metadata");
-    let metadata_cipher = XChaCha20Poly1305::new(metadata_encryption_key.as_ref().into());
+pub(crate) fn seal_metadata(meta_key: &EncryptionKey, metadata: &[u8]) -> Vec<u8> {
+    let metadata_cipher = XChaCha20Poly1305::new(meta_key.as_ref().into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let encrypted_metadata = metadata_cipher
         .encrypt(&nonce, metadata)
@@ -114,16 +108,13 @@ pub(crate) fn seal_metadata(
 }
 
 pub(crate) fn open_metadata(
-    master_key: &EncryptionKey,
-    object_id: &Hash256,
+    meta_key: &EncryptionKey,
     encrypted_metadata: &[u8],
 ) -> Result<Vec<u8>, DecryptError> {
     if encrypted_metadata.len() < NONCE_SIZE {
         return Err(DecryptError::Decryption);
     }
-    let metadata_encryption_key =
-        derive_encryption_key(master_key.as_ref(), object_id.as_ref(), b"metadata");
-    let metadata_cipher = XChaCha20Poly1305::new(metadata_encryption_key.as_ref().into());
+    let metadata_cipher = XChaCha20Poly1305::new(meta_key.as_ref().into());
     let (nonce_bytes, ciphertext) = encrypted_metadata.split_at(NONCE_SIZE);
     let nonce_bytes: [u8; 24] = nonce_bytes.try_into().unwrap(); // safe due to length check above
     let nonce = chacha20poly1305::XNonce::from(nonce_bytes);
