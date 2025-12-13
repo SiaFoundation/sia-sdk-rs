@@ -9,7 +9,6 @@ use serde_json::to_vec;
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 use sia::blake2::Blake2b256;
-use sia::encoding::SiaEncodable;
 use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
 
@@ -19,7 +18,7 @@ use serde::de::DeserializeOwned;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
-use crate::object_encryption::{DecryptError, open_metadata};
+use crate::object_encryption::DecryptError;
 use crate::slabs::Sector;
 use crate::{Object, PinnedSlab, SealedObject, SharedObject, Slab};
 use sia::signing::{PrivateKey, PublicKey};
@@ -173,51 +172,13 @@ pub struct Account {
     pub service_url: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SharedObjectSlab {
-    pub id: Hash256,
-    pub encryption_key: EncryptionKey,
-    pub min_shards: u8,
-    pub sectors: Vec<Sector>,
-    pub offset: u32,
-    pub length: u32,
-}
-
-impl From<SharedObjectSlab> for Slab {
-    fn from(val: SharedObjectSlab) -> Self {
-        Slab {
-            encryption_key: val.encryption_key,
-            min_shards: val.min_shards,
-            sectors: val.sectors,
-            offset: val.offset,
-            length: val.length,
-        }
-    }
-}
-
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SharedObjectResponse {
-    pub slabs: Vec<SharedObjectSlab>,
+    pub slabs: Vec<Slab>,
     #[serde_as(as = "Option<Base64>")]
     pub encrypted_metadata: Option<Vec<u8>>,
-}
-
-impl SharedObjectResponse {
-    pub fn id(&self) -> Hash256 {
-        let mut state = Blake2b256::default();
-        for slab in self.slabs.iter() {
-            slab.id
-                .encode(&mut state)
-                .expect("hashing slab_id shouldn't fail");
-            ((slab.offset as u64) << 32 | slab.length as u64)
-                .encode(&mut state)
-                .expect("hashing slab offset/length shouldn't fail");
-        }
-        state.finalize().into()
-    }
 }
 
 #[derive(Clone)]
@@ -583,7 +544,7 @@ impl Client {
         url.set_fragment(Some(
             format!(
                 "encryption_key={}",
-                URL_SAFE.encode(object.encryption_key().as_ref())
+                URL_SAFE.encode(object.data_key().as_ref())
             )
             .as_str(),
         ));
@@ -629,18 +590,9 @@ impl Client {
         )
         .await?;
 
-        let object_id = shared_object.id();
-        let metadata = if let Some(encrypted_metadata) = shared_object.encrypted_metadata {
-            let meta = open_metadata(&encryption_key, &object_id, &encrypted_metadata)?;
-            Some(meta)
-        } else {
-            None
-        };
-
         Ok(SharedObject::new(
             encryption_key,
-            shared_object.slabs.into_iter().map(|s| s.into()).collect(),
-            metadata,
+            shared_object.slabs.clone(),
         ))
     }
 
@@ -670,6 +622,8 @@ mod tests {
     use chrono::FixedOffset;
     use sia::signing::Signature;
     use sia::{hash_256, public_key, signature};
+
+    use crate::object_id;
 
     use super::*;
     use httptest::http::Response;
@@ -1188,9 +1142,11 @@ mod tests {
     #[tokio::test]
     async fn test_object() {
         let object = SealedObject {
-            encrypted_master_key: vec![1u8; 72],
-            encrypted_metadata: Some(b"hello world!".to_vec()),
-            signature: Signature::from([2u8; 64]),
+            encrypted_data_key: vec![1u8; 72],
+            encrypted_metadata_key: vec![1u8; 72],
+            encrypted_metadata: b"hello world!".to_vec(),
+            data_signature: Signature::from([2u8; 64]),
+            metadata_signature: Signature::from([2u8; 64]),
             slabs: vec![
                 Slab {
                     encryption_key: [1u8; 32].into(),
@@ -1255,7 +1211,8 @@ mod tests {
 
         const TEST_OBJECT_JSON: &str = r#"
         {
-          "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+          "encryptedDataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+          "encryptedMetadataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
           "slabs": [
            {
              "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
@@ -1291,7 +1248,8 @@ mod tests {
            }
           ],
           "encryptedMetadata": "aGVsbG8gd29ybGQh",
-          "signature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+          "dataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+          "metadataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
           "createdAt": "2025-09-09T16:10:46.898399-07:00",
           "updatedAt": "2025-09-09T16:10:46.898399-07:00"
          }
@@ -1321,7 +1279,8 @@ mod tests {
     #[tokio::test]
     async fn test_objects() {
         let object = SealedObject {
-            encrypted_master_key: vec![1u8; 72],
+            encrypted_data_key: vec![1u8; 72],
+            encrypted_metadata_key: vec![1u8; 72],
             slabs: vec![
                 Slab {
                     encryption_key: [1u8; 32].into(),
@@ -1372,8 +1331,9 @@ mod tests {
                     length: 512,
                 },
             ],
-            encrypted_metadata: Some(b"hello world!".to_vec()),
-            signature: Signature::from([2u8; 64]),
+            encrypted_metadata: b"hello world!".to_vec(),
+            data_signature: Signature::from([2u8; 64]),
+            metadata_signature: Signature::from([2u8; 64]),
             created_at: DateTime::<FixedOffset>::parse_from_rfc3339(
                 "2025-09-09T16:10:46.898399-07:00",
             )
@@ -1386,7 +1346,7 @@ mod tests {
             .to_utc(),
         };
         let object_no_meta = SealedObject {
-            encrypted_metadata: None,
+            encrypted_metadata: Vec::new(),
             ..object.clone()
         };
 
@@ -1397,7 +1357,8 @@ mod tests {
     "deleted": false,
     "updatedAt": "2025-09-09T16:10:46.898399-07:00",
     "object": {
-      "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+      "encryptedDataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+      "encryptedMetadataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
       "slabs": [
         {
           "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
@@ -1433,7 +1394,8 @@ mod tests {
         }
       ],
       "encryptedMetadata": "aGVsbG8gd29ybGQh",
-      "signature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+      "dataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+      "metadataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
       "createdAt": "2025-09-09T16:10:46.898399-07:00",
       "updatedAt": "2025-09-09T16:10:46.898399-07:00"
     }
@@ -1443,7 +1405,8 @@ mod tests {
     "deleted": false,
     "updatedAt": "2025-09-09T16:10:46.898399-07:00",
     "object": {
-      "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+      "encryptedDataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+      "encryptedMetadataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
       "slabs": [
         {
           "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
@@ -1479,7 +1442,8 @@ mod tests {
         }
       ],
       "encryptedMetadata": null,
-      "signature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+      "dataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+      "metadataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
       "createdAt": "2025-09-09T16:10:46.898399-07:00",
       "updatedAt": "2025-09-09T16:10:46.898399-07:00"
     }
@@ -1489,7 +1453,8 @@ mod tests {
     "deleted": false,
     "updatedAt": "2025-09-09T16:10:46.898399-07:00",
     "object": {
-      "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+      "encryptedDataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+      "encryptedMetadataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
       "slabs": [
         {
           "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
@@ -1524,7 +1489,8 @@ mod tests {
           "length": 512
         }
       ],
-      "signature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+      "dataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+      "metadataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
       "createdAt": "2025-09-09T16:10:46.898399-07:00",
       "updatedAt": "2025-09-09T16:10:46.898399-07:00"
     }
@@ -1610,8 +1576,10 @@ mod tests {
     #[tokio::test]
     async fn save_object() {
         let object = SealedObject {
-            encrypted_master_key: vec![1u8; 72],
-            signature: Signature::from([2u8; 64]),
+            encrypted_data_key: vec![1u8; 72],
+            encrypted_metadata_key: vec![1u8; 72],
+            data_signature: Signature::from([2u8; 64]),
+            metadata_signature: Signature::from([2u8; 64]),
             slabs: vec![
                 Slab {
                     encryption_key: [1u8; 32].into(),
@@ -1659,8 +1627,7 @@ mod tests {
     #[test]
     fn test_shared_object_id() {
         let obj = SharedObjectResponse {
-            slabs: vec![SharedObjectSlab {
-                id: hash_256!("9fefb8c783425e3abc5ce045cfbff1818dbd797a0d279de021127520cc114e4e"),
+            slabs: vec![Slab {
                 encryption_key: [0u8; 32].into(),
                 min_shards: 1,
                 sectors: vec![Sector {
@@ -1674,7 +1641,7 @@ mod tests {
         };
 
         assert_eq!(
-            obj.id().to_string(),
+            object_id(&obj.slabs).to_string(),
             "1b13d5dd22605af0573cae7fe9242c1ee83727c29798308b2b170864677b46d0"
         );
     }

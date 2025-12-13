@@ -340,14 +340,16 @@ impl PinnedObject {
     #[uniffi::constructor]
     pub fn open(app_key: Arc<AppKey>, sealed: SealedObject) -> Result<Self, ObjectError> {
         let sealed = indexd::SealedObject {
-            encrypted_master_key: sealed.encrypted_master_key,
+            encrypted_data_key: sealed.encrypted_data_key,
+            encrypted_metadata_key: sealed.encrypted_metadata_key,
             slabs: sealed
                 .slabs
                 .into_iter()
                 .map(|s| s.try_into().unwrap())
                 .collect(),
-            encrypted_metadata: Some(sealed.encrypted_metadata),
-            signature: Signature::try_from(sealed.signature.as_ref())?,
+            encrypted_metadata: sealed.encrypted_metadata,
+            data_signature: Signature::try_from(sealed.data_signature.as_ref())?,
+            metadata_signature: Signature::try_from(sealed.metadata_signature.as_ref())?,
             created_at: sealed.created_at.into(),
             updated_at: sealed.updated_at.into(),
         };
@@ -417,10 +419,12 @@ impl PinnedObject {
 #[derive(uniffi::Record)]
 pub struct SealedObject {
     pub id: String,
-    pub encrypted_master_key: Vec<u8>,
+    pub encrypted_data_key: Vec<u8>,
+    pub encrypted_metadata_key: Vec<u8>,
     pub slabs: Vec<Slab>,
     pub encrypted_metadata: Vec<u8>,
-    pub signature: Vec<u8>,
+    pub data_signature: Vec<u8>,
+    pub metadata_signature: Vec<u8>,
 
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
@@ -430,10 +434,12 @@ impl From<indexd::SealedObject> for SealedObject {
     fn from(o: indexd::SealedObject) -> Self {
         Self {
             id: o.id().to_string(),
-            encrypted_master_key: o.encrypted_master_key,
+            encrypted_data_key: o.encrypted_data_key,
+            encrypted_metadata_key: o.encrypted_metadata_key,
             slabs: o.slabs.into_iter().map(|s| s.into()).collect(),
-            encrypted_metadata: o.encrypted_metadata.unwrap_or_default(),
-            signature: o.signature.as_ref().to_vec(),
+            encrypted_metadata: o.encrypted_metadata,
+            data_signature: o.data_signature.as_ref().to_vec(),
+            metadata_signature: o.metadata_signature.as_ref().to_vec(),
             created_at: o.created_at.into(),
             updated_at: o.updated_at.into(),
         }
@@ -445,14 +451,16 @@ impl TryInto<indexd::SealedObject> for SealedObject {
 
     fn try_into(self) -> Result<indexd::SealedObject, Self::Error> {
         let sealed = indexd::SealedObject {
-            encrypted_master_key: self.encrypted_master_key,
+            encrypted_data_key: self.encrypted_data_key,
+            encrypted_metadata_key: self.encrypted_metadata_key,
             slabs: self
                 .slabs
                 .into_iter()
                 .map(|s| s.try_into().unwrap())
                 .collect(),
-            encrypted_metadata: Some(self.encrypted_metadata),
-            signature: Signature::try_from(self.signature.as_ref())?,
+            encrypted_metadata: self.encrypted_metadata,
+            data_signature: Signature::try_from(self.data_signature.as_ref())?,
+            metadata_signature: Signature::try_from(self.metadata_signature.as_ref())?,
             created_at: self.created_at.into(),
             updated_at: self.updated_at.into(),
         };
@@ -485,11 +493,6 @@ impl SharedObject {
     /// Returns the size of the object by summing the lengths of its slabs.
     pub fn size(&self) -> u64 {
         self.0.size()
-    }
-
-    /// Returns the slabs that make up the object.
-    pub fn metadata(&self) -> Vec<u8> {
-        self.0.metadata()
     }
 }
 
