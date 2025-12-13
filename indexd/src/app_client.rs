@@ -9,7 +9,6 @@ use serde_json::to_vec;
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 use sia::blake2::Blake2b256;
-use sia::encoding::SiaEncodable;
 use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
 
@@ -19,9 +18,9 @@ use serde::de::DeserializeOwned;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
-use crate::object_encryption::{DecryptError, open_metadata};
+use crate::object_encryption::DecryptError;
 use crate::slabs::Sector;
-use crate::{Object, PinnedSlab, SealedObject, SharedObject, Slab, SlabSlice};
+use crate::{Object, PinnedSlab, SealedObject, SharedObject, Slab};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use sia::types::v2::Protocol;
@@ -173,53 +172,13 @@ pub struct Account {
     pub service_url: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SharedObjectSlab {
-    pub id: Hash256,
-    pub encryption_key: EncryptionKey,
-    pub min_shards: u8,
-    pub sectors: Vec<Sector>,
-    pub offset: u32,
-    pub length: u32,
-}
-
-impl From<SharedObjectSlab> for Slab {
-    fn from(val: SharedObjectSlab) -> Self {
-        Slab {
-            encryption_key: val.encryption_key,
-            min_shards: val.min_shards,
-            sectors: val.sectors,
-            offset: val.offset,
-            length: val.length,
-        }
-    }
-}
-
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SharedObjectResponse {
-    pub slabs: Vec<SharedObjectSlab>,
+    pub slabs: Vec<Slab>,
     #[serde_as(as = "Option<Base64>")]
     pub encrypted_metadata: Option<Vec<u8>>,
-}
-
-impl SharedObjectResponse {
-    pub fn id(&self) -> Hash256 {
-        let mut state = Blake2b256::new();
-        for slab in &self.slabs {
-            let slab: Slab = slab.clone().into();
-            SlabSlice {
-                slab_id: slab.digest(),
-                offset: slab.offset,
-                length: slab.length,
-            }
-            .encode(&mut state)
-            .unwrap();
-        }
-        state.finalize().into()
-    }
 }
 
 #[derive(Clone)]
@@ -585,7 +544,7 @@ impl Client {
         url.set_fragment(Some(
             format!(
                 "encryption_key={}",
-                URL_SAFE.encode(object.encryption_key().as_ref())
+                URL_SAFE.encode(object.data_key().as_ref())
             )
             .as_str(),
         ));
@@ -631,18 +590,9 @@ impl Client {
         )
         .await?;
 
-        let object_id = shared_object.id();
-        let metadata = if let Some(encrypted_metadata) = shared_object.encrypted_metadata {
-            let meta = open_metadata(&encryption_key, &object_id, &encrypted_metadata)?;
-            Some(meta)
-        } else {
-            None
-        };
-
         Ok(SharedObject::new(
             encryption_key,
-            shared_object.slabs.into_iter().map(|s| s.into()).collect(),
-            metadata,
+            shared_object.slabs.clone(),
         ))
     }
 
@@ -672,6 +622,8 @@ mod tests {
     use chrono::FixedOffset;
     use sia::signing::Signature;
     use sia::{hash_256, public_key, signature};
+
+    use crate::object_id;
 
     use super::*;
     use httptest::http::Response;
@@ -887,7 +839,7 @@ mod tests {
         const TEST_SLAB_JSON: &str = r#"
         {
           "id": "43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28",
-          "encryptionKey": [186,153,179,170,159,95,101,177,15,130,58,19,138,144,9,91,181,119,38,225,209,47,149,22,157,210,16,232,10,151,186,160],
+          "encryptionKey": "upmzqp9fZbEPgjoTipAJW7V3JuHRL5UWndIQ6AqXuqA=",
           "minShards": 1,
           "sectors": [
             {
@@ -1190,23 +1142,59 @@ mod tests {
     #[tokio::test]
     async fn test_object() {
         let object = SealedObject {
-            encrypted_master_key: vec![1u8; 72],
-            encrypted_metadata: Some(b"hello world!".to_vec()),
-            signature: Signature::from([2u8; 64]),
+            encrypted_data_key: vec![1u8; 72],
+            encrypted_metadata_key: vec![1u8; 72],
+            encrypted_metadata: b"hello world!".to_vec(),
+            data_signature: Signature::from([2u8; 64]),
+            metadata_signature: Signature::from([2u8; 64]),
             slabs: vec![
-                SlabSlice {
-                    slab_id: hash_256!(
-                        "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
-                    ),
-                    offset: 0,
-                    length: 256,
+                Slab {
+                    encryption_key: [1u8; 32].into(),
+                    min_shards: 1,
+                    sectors: vec![
+                        Sector {
+                            root: hash_256!(
+                                "0202020202020202020202020202020202020202020202020202020202020202"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+                            ),
+                        },
+                        Sector {
+                            root: hash_256!(
+                                "0404040404040404040404040404040404040404040404040404040404040404"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+                            ),
+                        },
+                    ],
+                    offset: 6,
+                    length: 7,
                 },
-                SlabSlice {
-                    slab_id: hash_256!(
-                        "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405"
-                    ),
-                    offset: 256,
-                    length: 512,
+                Slab {
+                    encryption_key: [1u8; 32].into(),
+                    min_shards: 1,
+                    sectors: vec![
+                        Sector {
+                            root: hash_256!(
+                                "0202020202020202020202020202020202020202020202020202020202020202"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+                            ),
+                        },
+                        Sector {
+                            root: hash_256!(
+                                "0404040404040404040404040404040404040404040404040404040404040404"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+                            ),
+                        },
+                    ],
+                    offset: 6,
+                    length: 7,
                 },
             ],
             created_at: DateTime::<FixedOffset>::parse_from_rfc3339(
@@ -1223,21 +1211,45 @@ mod tests {
 
         const TEST_OBJECT_JSON: &str = r#"
         {
-          "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+          "encryptedDataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+          "encryptedMetadataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
           "slabs": [
            {
-            "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
-            "offset": 0,
-            "length": 256
+             "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+             "minShards": 1,
+             "sectors": [
+               {
+                 "root": "0202020202020202020202020202020202020202020202020202020202020202",
+                 "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+               },
+               {
+                 "root": "0404040404040404040404040404040404040404040404040404040404040404",
+                 "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+               }
+             ],
+             "offset": 6,
+             "length": 7
            },
            {
-            "slabID": "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405",
-            "offset": 256,
-            "length": 512
+             "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+             "minShards": 1,
+             "sectors": [
+               {
+                 "root": "0202020202020202020202020202020202020202020202020202020202020202",
+                 "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+               },
+               {
+                 "root": "0404040404040404040404040404040404040404040404040404040404040404",
+                 "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+               }
+             ],
+             "offset": 6,
+             "length": 7
            }
           ],
           "encryptedMetadata": "aGVsbG8gd29ybGQh",
-          "signature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+          "dataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+          "metadataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
           "createdAt": "2025-09-09T16:10:46.898399-07:00",
           "updatedAt": "2025-09-09T16:10:46.898399-07:00"
          }
@@ -1267,25 +1279,61 @@ mod tests {
     #[tokio::test]
     async fn test_objects() {
         let object = SealedObject {
-            encrypted_master_key: vec![1u8; 72],
+            encrypted_data_key: vec![1u8; 72],
+            encrypted_metadata_key: vec![1u8; 72],
             slabs: vec![
-                SlabSlice {
-                    slab_id: hash_256!(
-                        "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
-                    ),
+                Slab {
+                    encryption_key: [1u8; 32].into(),
+                    min_shards: 1,
+                    sectors: vec![
+                        Sector {
+                            root: hash_256!(
+                                "0202020202020202020202020202020202020202020202020202020202020202"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+                            ),
+                        },
+                        Sector {
+                            root: hash_256!(
+                                "0404040404040404040404040404040404040404040404040404040404040404"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+                            ),
+                        },
+                    ],
                     offset: 0,
                     length: 256,
                 },
-                SlabSlice {
-                    slab_id: hash_256!(
-                        "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405"
-                    ),
+                Slab {
+                    encryption_key: [2u8; 32].into(),
+                    min_shards: 1,
+                    sectors: vec![
+                        Sector {
+                            root: hash_256!(
+                                "0202020202020202020202020202020202020202020202020202020202020202"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+                            ),
+                        },
+                        Sector {
+                            root: hash_256!(
+                                "0404040404040404040404040404040404040404040404040404040404040404"
+                            ),
+                            host_key: public_key!(
+                                "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+                            ),
+                        },
+                    ],
                     offset: 256,
                     length: 512,
                 },
             ],
-            encrypted_metadata: Some(b"hello world!".to_vec()),
-            signature: Signature::from([2u8; 64]),
+            encrypted_metadata: b"hello world!".to_vec(),
+            data_signature: Signature::from([2u8; 64]),
+            metadata_signature: Signature::from([2u8; 64]),
             created_at: DateTime::<FixedOffset>::parse_from_rfc3339(
                 "2025-09-09T16:10:46.898399-07:00",
             )
@@ -1298,85 +1346,157 @@ mod tests {
             .to_utc(),
         };
         let object_no_meta = SealedObject {
-            encrypted_metadata: None,
+            encrypted_metadata: Vec::new(),
             ..object.clone()
         };
 
         const TEST_OBJECTS_JSON: &str = r#"
 [
   {
-    "key": "3a707a322387c9f0f7549f35be78bf58cd2742b809f65d37b41ebba48226f5cf",
+    "key": "7f26b785c0dff73f51b81728289381064ad4b947f37417cbcb366afc3d80c7f5",
     "deleted": false,
     "updatedAt": "2025-09-09T16:10:46.898399-07:00",
     "object": {
-      "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+      "encryptedDataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+      "encryptedMetadataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
       "slabs": [
         {
-          "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
+          "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+          "minShards": 1,
+          "sectors": [
+            {
+              "root": "0202020202020202020202020202020202020202020202020202020202020202",
+              "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+            },
+            {
+              "root": "0404040404040404040404040404040404040404040404040404040404040404",
+              "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+            }
+          ],
           "offset": 0,
           "length": 256
         },
         {
-          "slabID": "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405",
+          "encryptionKey": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+          "minShards": 1,
+          "sectors": [
+            {
+              "root": "0202020202020202020202020202020202020202020202020202020202020202",
+              "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+            },
+            {
+              "root": "0404040404040404040404040404040404040404040404040404040404040404",
+              "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+            }
+          ],
           "offset": 256,
           "length": 512
         }
       ],
       "encryptedMetadata": "aGVsbG8gd29ybGQh",
-      "signature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+      "dataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+      "metadataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
       "createdAt": "2025-09-09T16:10:46.898399-07:00",
       "updatedAt": "2025-09-09T16:10:46.898399-07:00"
     }
   },
   {
-    "key": "3a707a322387c9f0f7549f35be78bf58cd2742b809f65d37b41ebba48226f5cf",
+    "key": "7f26b785c0dff73f51b81728289381064ad4b947f37417cbcb366afc3d80c7f5",
     "deleted": false,
     "updatedAt": "2025-09-09T16:10:46.898399-07:00",
     "object": {
-      "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+      "encryptedDataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+      "encryptedMetadataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
       "slabs": [
         {
-          "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
+          "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+          "minShards": 1,
+          "sectors": [
+            {
+              "root": "0202020202020202020202020202020202020202020202020202020202020202",
+              "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+            },
+            {
+              "root": "0404040404040404040404040404040404040404040404040404040404040404",
+              "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+            }
+          ],
           "offset": 0,
           "length": 256
         },
         {
-          "slabID": "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405",
+          "encryptionKey": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+          "minShards": 1,
+          "sectors": [
+            {
+              "root": "0202020202020202020202020202020202020202020202020202020202020202",
+              "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+            },
+            {
+              "root": "0404040404040404040404040404040404040404040404040404040404040404",
+              "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+            }
+          ],
           "offset": 256,
           "length": 512
         }
       ],
       "encryptedMetadata": null,
-      "signature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+      "dataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+      "metadataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
       "createdAt": "2025-09-09T16:10:46.898399-07:00",
       "updatedAt": "2025-09-09T16:10:46.898399-07:00"
     }
   },
   {
-    "key": "3a707a322387c9f0f7549f35be78bf58cd2742b809f65d37b41ebba48226f5cf",
+    "key": "7f26b785c0dff73f51b81728289381064ad4b947f37417cbcb366afc3d80c7f5",
     "deleted": false,
     "updatedAt": "2025-09-09T16:10:46.898399-07:00",
     "object": {
-      "encryptedMasterKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+      "encryptedDataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+      "encryptedMetadataKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
       "slabs": [
         {
-          "slabID": "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2",
+          "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+          "minShards": 1,
+          "sectors": [
+            {
+              "root": "0202020202020202020202020202020202020202020202020202020202020202",
+              "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+            },
+            {
+              "root": "0404040404040404040404040404040404040404040404040404040404040404",
+              "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+            }
+          ],
           "offset": 0,
           "length": 256
         },
         {
-          "slabID": "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405",
+          "encryptionKey": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+          "minShards": 1,
+          "sectors": [
+            {
+              "root": "0202020202020202020202020202020202020202020202020202020202020202",
+              "hostKey": "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+            },
+            {
+              "root": "0404040404040404040404040404040404040404040404040404040404040404",
+              "hostKey": "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
+            }
+          ],
           "offset": 256,
           "length": 512
         }
       ],
-      "signature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+      "dataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+      "metadataSignature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
       "createdAt": "2025-09-09T16:10:46.898399-07:00",
       "updatedAt": "2025-09-09T16:10:46.898399-07:00"
     }
   }
 ]
-        "#;
+"#;
 
         let server = Server::run();
         server.expect(
@@ -1456,20 +1576,22 @@ mod tests {
     #[tokio::test]
     async fn save_object() {
         let object = SealedObject {
-            encrypted_master_key: vec![1u8; 72],
-            signature: Signature::from([2u8; 64]),
+            encrypted_data_key: vec![1u8; 72],
+            encrypted_metadata_key: vec![1u8; 72],
+            data_signature: Signature::from([2u8; 64]),
+            metadata_signature: Signature::from([2u8; 64]),
             slabs: vec![
-                SlabSlice {
-                    slab_id: hash_256!(
-                        "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
-                    ),
+                Slab {
+                    encryption_key: [1u8; 32].into(),
+                    min_shards: 2,
+                    sectors: vec![],
                     offset: 0,
                     length: 256,
                 },
-                SlabSlice {
-                    slab_id: hash_256!(
-                        "281a9c3fc1d74012ed4659a7fbd271237322e757e6427b561b73dbd9b3e09405"
-                    ),
+                Slab {
+                    encryption_key: [2u8; 32].into(),
+                    min_shards: 2,
+                    sectors: vec![],
                     offset: 256,
                     length: 512,
                 },
@@ -1500,5 +1622,27 @@ mod tests {
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string()).unwrap();
         client.save_object(&app_key, &object).await.unwrap();
+    }
+
+    #[test]
+    fn test_shared_object_id() {
+        let obj = SharedObjectResponse {
+            slabs: vec![Slab {
+                encryption_key: [0u8; 32].into(),
+                min_shards: 1,
+                sectors: vec![Sector {
+                    root: Hash256::new([1u8; 32]),
+                    host_key: PublicKey::new([2u8; 32]),
+                }],
+                offset: 10,
+                length: 100,
+            }],
+            encrypted_metadata: None,
+        };
+
+        assert_eq!(
+            object_id(&obj.slabs).to_string(),
+            "1b13d5dd22605af0573cae7fe9242c1ee83727c29798308b2b170864677b46d0"
+        );
     }
 }

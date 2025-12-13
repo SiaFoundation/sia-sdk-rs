@@ -150,9 +150,10 @@ where
     T: SiaDecodable,
 {
     fn decode<R: Read>(r: &mut R) -> Result<Self> {
-        let len = usize::decode(r)?;
-        let mut vec = Vec::with_capacity(len);
-        for _ in 0..len {
+        let mut vec = Vec::new();
+        // note: the vec is not pre-allocated
+        // to prevent abuse by sending a large len
+        for _ in 0..usize::decode(r)? {
             vec.push(T::decode(r)?);
         }
         Ok(vec)

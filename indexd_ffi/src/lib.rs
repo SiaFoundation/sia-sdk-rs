@@ -9,7 +9,7 @@ use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
-use indexd::{Object, SealedObjectError, SlabSlice, Url, quic};
+use indexd::{Object, SealedObjectError, Url, quic};
 use log::debug;
 use sia::rhp::SECTOR_SIZE;
 use sia::signing::{PublicKey, Signature};
@@ -340,14 +340,16 @@ impl PinnedObject {
     #[uniffi::constructor]
     pub fn open(app_key: Arc<AppKey>, sealed: SealedObject) -> Result<Self, ObjectError> {
         let sealed = indexd::SealedObject {
-            encrypted_master_key: sealed.encrypted_master_key,
+            encrypted_data_key: sealed.encrypted_data_key,
+            encrypted_metadata_key: sealed.encrypted_metadata_key,
             slabs: sealed
                 .slabs
                 .into_iter()
                 .map(|s| s.try_into().unwrap())
                 .collect(),
-            encrypted_metadata: Some(sealed.encrypted_metadata),
-            signature: Signature::try_from(sealed.signature.as_ref())?,
+            encrypted_metadata: sealed.encrypted_metadata,
+            data_signature: Signature::try_from(sealed.data_signature.as_ref())?,
+            metadata_signature: Signature::try_from(sealed.metadata_signature.as_ref())?,
             created_at: sealed.created_at.into(),
             updated_at: sealed.updated_at.into(),
         };
@@ -417,10 +419,12 @@ impl PinnedObject {
 #[derive(uniffi::Record)]
 pub struct SealedObject {
     pub id: String,
-    pub encrypted_master_key: Vec<u8>,
+    pub encrypted_data_key: Vec<u8>,
+    pub encrypted_metadata_key: Vec<u8>,
     pub slabs: Vec<Slab>,
     pub encrypted_metadata: Vec<u8>,
-    pub signature: Vec<u8>,
+    pub data_signature: Vec<u8>,
+    pub metadata_signature: Vec<u8>,
 
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
@@ -430,10 +434,12 @@ impl From<indexd::SealedObject> for SealedObject {
     fn from(o: indexd::SealedObject) -> Self {
         Self {
             id: o.id().to_string(),
-            encrypted_master_key: o.encrypted_master_key,
+            encrypted_data_key: o.encrypted_data_key,
+            encrypted_metadata_key: o.encrypted_metadata_key,
             slabs: o.slabs.into_iter().map(|s| s.into()).collect(),
-            encrypted_metadata: o.encrypted_metadata.unwrap_or_default(),
-            signature: o.signature.as_ref().to_vec(),
+            encrypted_metadata: o.encrypted_metadata,
+            data_signature: o.data_signature.as_ref().to_vec(),
+            metadata_signature: o.metadata_signature.as_ref().to_vec(),
             created_at: o.created_at.into(),
             updated_at: o.updated_at.into(),
         }
@@ -445,14 +451,16 @@ impl TryInto<indexd::SealedObject> for SealedObject {
 
     fn try_into(self) -> Result<indexd::SealedObject, Self::Error> {
         let sealed = indexd::SealedObject {
-            encrypted_master_key: self.encrypted_master_key,
+            encrypted_data_key: self.encrypted_data_key,
+            encrypted_metadata_key: self.encrypted_metadata_key,
             slabs: self
                 .slabs
                 .into_iter()
                 .map(|s| s.try_into().unwrap())
                 .collect(),
-            encrypted_metadata: Some(self.encrypted_metadata),
-            signature: Signature::try_from(self.signature.as_ref())?,
+            encrypted_metadata: self.encrypted_metadata,
+            data_signature: Signature::try_from(self.data_signature.as_ref())?,
+            metadata_signature: Signature::try_from(self.metadata_signature.as_ref())?,
             created_at: self.created_at.into(),
             updated_at: self.updated_at.into(),
         };
@@ -485,11 +493,6 @@ impl SharedObject {
     /// Returns the size of the object by summing the lengths of its slabs.
     pub fn size(&self) -> u64 {
         self.0.size()
-    }
-
-    /// Returns the slabs that make up the object.
-    pub fn metadata(&self) -> Vec<u8> {
-        self.0.metadata()
     }
 }
 
@@ -589,27 +592,45 @@ impl From<indexd::PinnedSlab> for PinnedSlab {
 /// A Slab represents a contiguous erasure-coded segment of a file stored on the Sia network.
 #[derive(uniffi::Record)]
 pub struct Slab {
-    pub id: String,
+    pub encryption_key: Vec<u8>,
+    pub min_shards: u8,
+    pub sectors: Vec<PinnedSector>,
     pub offset: u32,
     pub length: u32,
 }
 
-impl From<SlabSlice> for Slab {
-    fn from(s: SlabSlice) -> Self {
+impl From<indexd::Slab> for Slab {
+    fn from(s: indexd::Slab) -> Self {
         Self {
-            id: s.slab_id.to_string(),
+            encryption_key: s.encryption_key.as_ref().to_vec(),
+            min_shards: s.min_shards,
+            sectors: s
+                .sectors
+                .into_iter()
+                .map(|sec| PinnedSector {
+                    root: sec.root.to_string(),
+                    host_key: sec.host_key.to_string(),
+                })
+                .collect(),
             offset: s.offset,
             length: s.length,
         }
     }
 }
 
-impl TryInto<SlabSlice> for Slab {
-    type Error = HexParseError;
+impl TryInto<indexd::Slab> for Slab {
+    type Error = String;
 
-    fn try_into(self) -> Result<SlabSlice, Self::Error> {
-        Ok(SlabSlice {
-            slab_id: Hash256::from_str(self.id.as_str())?,
+    fn try_into(self) -> Result<indexd::Slab, Self::Error> {
+        Ok(indexd::Slab {
+            encryption_key: encryption::EncryptionKey::try_from(self.encryption_key.as_slice())?,
+            min_shards: self.min_shards,
+            sectors: self
+                .sectors
+                .into_iter()
+                .map(|sec| sec.try_into())
+                .collect::<Result<Vec<indexd::Sector>, HexParseError>>()
+                .map_err(|e| e.to_string())?,
             offset: self.offset,
             length: self.length,
         })

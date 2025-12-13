@@ -24,7 +24,7 @@ use crate::app_client::{Client as AppClient, HostQuery, SlabPinParams};
 use crate::hosts::{HostQueue, QueueError};
 use crate::quic::client::Client;
 use crate::quic::{self};
-use crate::{Object, Sector, Slab, SlabSlice};
+use crate::{Object, Sector, Slab};
 
 #[derive(Debug, Error)]
 pub enum UploadError {
@@ -364,8 +364,10 @@ impl Uploader {
                         // ensure the slabs vector is large enough
                         slabs.resize(
                             slabs.len().max(slab_index + 1),
-                            SlabSlice {
-                                slab_id: Hash256::default(),
+                            Slab {
+                                encryption_key: EncryptionKey::from([0u8; 32]),
+                                min_shards: 0,
+                                sectors: vec![],
                                 offset: 0,
                                 length: 0,
                             },
@@ -374,20 +376,16 @@ impl Uploader {
                         let slab_id = self
                             .app_client
                             .pin_slab(&self.app_key, SlabPinParams {
-                                encryption_key: slab.encryption_key,
+                                encryption_key: slab.encryption_key.clone(),
                                 min_shards: slab.min_shards,
-                                sectors: slab.sectors,
+                                sectors: slab.sectors.clone(),
                             })
                             .await?;
                         if slab_id != expected_slab_id {
                             return Err(UploadError::InvalidSlabId);
                         }
                         // overwrite the slab at the index
-                        slabs[slab_index] = SlabSlice {
-                            slab_id,
-                            offset: slab.offset,
-                            length: slab.length,
-                        };
+                        slabs[slab_index] = slab;
                     },
                     Some(Err(e)) => return Err(e),
                     None => break, // channel closed

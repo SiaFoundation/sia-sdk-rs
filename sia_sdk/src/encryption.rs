@@ -1,4 +1,6 @@
 use crate::encoding::{SiaDecodable, SiaEncodable};
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use chacha20::cipher::{
     KeyIvInit, StreamCipher, StreamCipherCoreWrapper, StreamCipherError, StreamCipherSeek,
 };
@@ -11,7 +13,7 @@ use sia_derive::{SiaDecode, SiaEncode};
 use tokio::io::{AsyncRead, AsyncWrite};
 use zeroize::ZeroizeOnDrop;
 
-#[derive(Serialize, Deserialize, SiaEncode, SiaDecode, Clone, Debug, ZeroizeOnDrop, PartialEq)]
+#[derive(SiaEncode, SiaDecode, Clone, Debug, ZeroizeOnDrop, PartialEq)]
 pub struct EncryptionKey([u8; 32]);
 
 impl From<[u8; 32]> for EncryptionKey {
@@ -36,6 +38,29 @@ impl TryFrom<&[u8]> for EncryptionKey {
 impl AsRef<[u8; 32]> for EncryptionKey {
     fn as_ref(&self) -> &[u8; 32] {
         &self.0
+    }
+}
+
+impl Serialize for EncryptionKey {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let s = BASE64_STANDARD.encode(self.0);
+        serializer.serialize_str(&s)
+    }
+}
+
+impl<'de> Deserialize<'de> for EncryptionKey {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes = BASE64_STANDARD
+            .decode(s.as_bytes())
+            .map_err(serde::de::Error::custom)?;
+        EncryptionKey::try_from(bytes.as_slice()).map_err(serde::de::Error::custom)
     }
 }
 
