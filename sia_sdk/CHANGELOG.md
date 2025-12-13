@@ -1,3 +1,18 @@
+## 0.2.0 (2025-12-13)
+
+### Breaking Changes
+
+- Changes the Seed constructor to accept a mnemonic instead of raw entropy and adds `Seed::from_seed` to replace the old constructor.
+- Merge SlabSlice and Slab types.
+
+### Features
+
+- Added signature macro for testing.
+
+### Fixes
+
+- Fix release registry
+
 ## 0.1.3 (2025-10-04)
 
 ### Features
