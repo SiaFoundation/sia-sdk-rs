@@ -1,6 +1,6 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use log::debug;
@@ -19,104 +19,6 @@ use tokio::time::sleep;
 use crate::app_client::{self, Client as AppClient, HostQuery};
 use crate::quic::client::Client;
 use crate::{Object, Sector, SharedObject, Slab, quic};
-
-/// A SlabIterator can be used to iterate over slabs to be downloaded.
-/// This is used to abstract over different sources of slabs, such as
-/// a pre-fetched list of slabs, or fetching slabs on-demand from the
-/// indexer.
-pub trait SlabIterator {
-    type Error: Debug;
-
-    fn next(&mut self) -> impl Future<Output = Result<Option<Slab>, Self::Error>>;
-    fn max_length(&self) -> usize;
-}
-
-impl SlabIterator for VecDeque<Slab> {
-    type Error = ();
-
-    async fn next(&mut self) -> Result<Option<Slab>, Self::Error> {
-        Ok(self.pop_front())
-    }
-
-    fn max_length(&self) -> usize {
-        self.iter().fold(0, |sum, slab| sum + slab.length as usize)
-    }
-}
-
-struct SlabFetchCache {
-    cache: Mutex<HashMap<Hash256, Slab>>,
-    app_client: AppClient,
-    app_key: PrivateKey,
-}
-
-impl SlabFetchCache {
-    async fn slab(&self, slab: &Slab) -> Result<Option<Slab>, app_client::Error> {
-        let slab_id = slab.digest();
-        if let Some(slab) = {
-            let cache = self
-                .cache
-                .lock()
-                .map_err(|_| app_client::Error::Custom("failed to lock mutex".into()))?;
-            cache.get(&slab_id).cloned()
-        } {
-            return Ok(Some(slab));
-        }
-
-        let pinned_slab = self.app_client.slab(&self.app_key, &slab_id).await?;
-        let slab = Slab {
-            encryption_key: pinned_slab.encryption_key,
-            min_shards: slab.min_shards,
-            sectors: pinned_slab.sectors,
-            offset: slab.offset,
-            length: slab.length,
-        };
-        self.cache
-            .lock()
-            .map_err(|_| app_client::Error::Custom("failed to lock mutex".into()))?
-            .insert(slab_id, slab.clone());
-        Ok(Some(slab))
-    }
-}
-
-/// A SlabFetcher fetches slabs on-demand from the indexer.
-/// It internally caches fetched slabs to avoid redundant
-/// network requests.
-#[derive(Clone)]
-pub struct SlabFetcher {
-    cache: Arc<SlabFetchCache>,
-    slabs: VecDeque<Slab>,
-}
-
-impl SlabFetcher {
-    pub fn new(app_client: AppClient, app_key: PrivateKey, slabs: Vec<Slab>) -> Self {
-        Self {
-            cache: Arc::new(SlabFetchCache {
-                cache: Mutex::new(HashMap::new()),
-                app_client,
-                app_key,
-            }),
-            slabs: VecDeque::from(slabs),
-        }
-    }
-}
-
-impl SlabIterator for SlabFetcher {
-    type Error = app_client::Error;
-
-    async fn next(&mut self) -> Result<Option<Slab>, Self::Error> {
-        let slab = self.slabs.pop_front();
-        match slab {
-            Some(s) => self.cache.slab(&s).await,
-            None => Ok(None),
-        }
-    }
-
-    fn max_length(&self) -> usize {
-        self.slabs
-            .iter()
-            .fold(0, |sum, slab| sum + slab.length as usize)
-    }
-}
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
@@ -344,10 +246,10 @@ impl Downloader {
     /// This is a low-level function that can be used to download
     /// arbitrary slabs. Most users should use [Downloader::download]
     /// or [Downloader::download_shared] instead.
-    async fn download_slabs<W: AsyncWriteExt + Unpin, S: SlabIterator>(
+    async fn download_slabs<W: AsyncWriteExt + Unpin>(
         &self,
         w: &mut W,
-        mut slabs: S,
+        slabs: &[Slab],
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
         if self.inner.host_client.available_hosts() == 0 {
@@ -359,24 +261,17 @@ impl Downloader {
             self.inner.host_client.update_hosts(hosts);
         }
 
-        let max_length = slabs.max_length();
+        let max_length = slabs.iter().map(|s| s.length as usize).sum();
         let mut offset = options.offset;
         let mut length = options.length.unwrap_or(max_length);
         if offset > max_length || length == 0 {
             return Ok(());
         }
-        loop {
+
+        for slab in slabs {
             if length == 0 {
                 break;
             }
-            let slab = match slabs
-                .next()
-                .await
-                .map_err(|e| DownloadError::Custom(format!("{:?}", e)))?
-            {
-                Some(s) => s,
-                None => break,
-            };
 
             let slab_length = slab.length as usize;
             if offset >= slab_length {
@@ -433,13 +328,8 @@ impl Downloader {
         object: &Object,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
-        let slab_iterator = SlabFetcher::new(
-            self.inner.app_client.clone(),
-            self.inner.account_key.clone(),
-            object.slabs.clone(),
-        );
         let mut w = object.writer(w, options.offset);
-        self.download_slabs(&mut w, slab_iterator, options).await
+        self.download_slabs(&mut w, &object.slabs, options).await
     }
 
     pub async fn download_shared<W: AsyncWriteExt + Unpin>(
@@ -448,9 +338,7 @@ impl Downloader {
         object: &SharedObject,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
-        let slabs: Vec<Slab> = object.slabs().clone();
         let mut w = object.writer(w, options.offset);
-        self.download_slabs(&mut w, VecDeque::from(slabs), options)
-            .await
+        self.download_slabs(&mut w, object.slabs(), options).await
     }
 }
