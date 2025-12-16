@@ -150,8 +150,6 @@ pub struct HostQuery {
     pub offset: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
-    #[serde(rename = "serviceaccount", skip_serializing_if = "Option::is_none")]
-    pub service_account: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol: Option<Protocol>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -162,7 +160,6 @@ pub struct HostQuery {
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub account_key: PublicKey,
-    pub service_account: bool,
     pub max_pinned_data: u64,
     pub pinned_data: u64,
     pub description: String,
@@ -784,7 +781,6 @@ mod tests {
                 request::query(url_decoded(all_of![
                     contains(("offset", "5")),
                     contains(("limit", "25")),
-                    contains(("serviceaccount", "true")),
                     contains(("protocol", "quic")),
                     contains(("country", "us"))
                 ]))
@@ -805,7 +801,6 @@ mod tests {
                 HostQuery {
                     offset: Some(5),
                     limit: Some(25),
-                    service_account: Some(true),
                     protocol: Some(Protocol::QUIC),
                     country: Some("us".into()),
                     ..Default::default()
