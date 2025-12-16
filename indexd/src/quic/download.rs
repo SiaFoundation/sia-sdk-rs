@@ -240,8 +240,8 @@ impl Downloader {
         }
     }
 
-    /// Downloads slabs from the provided SlabIterator and writes
-    /// the encrypted data to the provided writer.
+    /// Downloads the provided slabs and writes the encrypted data to the
+    /// provided writer.
     ///
     /// This is a low-level function that can be used to download
     /// arbitrary slabs. Most users should use [Downloader::download]
