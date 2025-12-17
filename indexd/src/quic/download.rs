@@ -299,11 +299,14 @@ impl Downloader {
                             let rem = min_shards.saturating_sub(successful);
                             if rem == 0 {
                                 return Ok(shards); // sanity check
+                            } else if download_tasks.len() + sectors.len() < rem as usize {
+                                return Err(DownloadError::NotEnoughShards(successful, min_shards));
                             } else if download_tasks.len() <= rem as usize && let Some(task) = sectors.pop_front() {
                                 let permit = semaphore.clone().acquire_owned().await?;
-                                // only spawn additional download tasks if there are not
-                                // enough to satisfy the required number of shards. The
-                                // sleep arm will handle slow hosts.
+                                // only spawn additional download tasks if there
+                                // are not enough to satisfy the required number
+                                // of shards. The sleep arm will handle slow
+                                // hosts.
                                 let inner = self.inner.clone();
                                 download_tasks.spawn(inner.try_download_sector(
                                     permit,
@@ -313,8 +316,6 @@ impl Downloader {
                                     limit,
                                     task.index,
                                 ));
-                            } else if download_tasks.is_empty() && successful < min_shards {
-                                return Err(DownloadError::NotEnoughShards(successful, min_shards));
                             }
                         }
                         Err(e) => {
@@ -322,11 +323,14 @@ impl Downloader {
                             let rem = min_shards.saturating_sub(successful);
                             if rem == 0 {
                                 return Ok(shards); // sanity check
+                            } else if download_tasks.len() + sectors.len() < rem as usize {
+                                return Err(DownloadError::NotEnoughShards(successful, min_shards));
                             } else if download_tasks.len() <= rem as usize && let Some(task) = sectors.pop_front() {
                                 let permit = semaphore.clone().acquire_owned().await?;
-                                // only spawn additional download tasks if there are not
-                                // enough to satisfy the required number of shards. The
-                                // sleep arm will handle slow hosts.
+                                // only spawn additional download tasks if there
+                                // are not enough to satisfy the required number
+                                // of shards. The sleep arm will handle slow
+                                // hosts.
                                 let inner = self.inner.clone();
                                 download_tasks.spawn(inner.try_download_sector(
                                     permit,
@@ -336,8 +340,6 @@ impl Downloader {
                                     limit,
                                     task.index,
                                 ));
-                            } else if download_tasks.is_empty() && successful < min_shards {
-                                return Err(DownloadError::NotEnoughShards(successful, min_shards));
                             }
                         }
                     }
