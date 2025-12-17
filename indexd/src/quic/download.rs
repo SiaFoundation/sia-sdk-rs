@@ -281,8 +281,8 @@ impl Downloader {
             tokio::select! {
                 biased;
                 Some(res) = download_tasks.join_next() => {
-                    match res {
-                        Ok(Ok((index, mut data))) => {
+                    match res? { // safe because tasks are never cancelled
+                        Ok((index, mut data)) => {
                             let encryption_key = encryption_key.clone();
                             let data = spawn_blocking(move || {
                                 encrypt_shard(&encryption_key, index as u8, offset, &mut data);
@@ -294,39 +294,19 @@ impl Downloader {
                                return Ok(shards);
                             }
                         }
-                        Ok(Err(e)) => {
-                            debug!("sector download failed {:?}", e);
-                            let rem = min_shards.saturating_sub(successful);
-                            if rem == 0 {
-                                return Ok(shards); // sanity check
-                            } else if download_tasks.len() <= rem as usize && let Some(task) = sectors.pop_front() {
-                                let permit = semaphore.clone().acquire_owned().await?;
-                                // only spawn additional download tasks if there are not
-                                // enough to satisfy the required number of shards. The
-                                // sleep arm will handle slow hosts.
-                                let inner = self.inner.clone();
-                                download_tasks.spawn(inner.try_download_sector(
-                                    permit,
-                                    task.sector.host_key,
-                                    task.sector.root,
-                                    offset,
-                                    limit,
-                                    task.index,
-                                ));
-                            } else if download_tasks.is_empty() && successful < min_shards {
-                                return Err(DownloadError::NotEnoughShards(successful, min_shards));
-                            }
-                        }
                         Err(e) => {
                             debug!("sector download failed {:?}", e);
                             let rem = min_shards.saturating_sub(successful);
                             if rem == 0 {
                                 return Ok(shards); // sanity check
+                            } else if download_tasks.len() + sectors.len() < rem as usize {
+                                return Err(DownloadError::NotEnoughShards(successful, min_shards));
                             } else if download_tasks.len() <= rem as usize && let Some(task) = sectors.pop_front() {
                                 let permit = semaphore.clone().acquire_owned().await?;
-                                // only spawn additional download tasks if there are not
-                                // enough to satisfy the required number of shards. The
-                                // sleep arm will handle slow hosts.
+                                // only spawn additional download tasks if there
+                                // are not enough to satisfy the required number
+                                // of shards. The sleep arm will handle slow
+                                // hosts.
                                 let inner = self.inner.clone();
                                 download_tasks.spawn(inner.try_download_sector(
                                     permit,
@@ -336,8 +316,6 @@ impl Downloader {
                                     limit,
                                     task.index,
                                 ));
-                            } else if download_tasks.is_empty() && successful < min_shards {
-                                return Err(DownloadError::NotEnoughShards(successful, min_shards));
                             }
                         }
                     }
