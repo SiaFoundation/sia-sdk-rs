@@ -1,3 +1,27 @@
+## 0.3.0 (2025-12-18)
+
+### Breaking Changes
+
+- Implemented new `indexd` authentication.
+- Merge SlabSlice and Slab types.
+- Reduced size of shared object URLs by using base64 URL encoding for the encryption key.
+- Reduced size of signed urls by shortening query parameter names and using base64 URL encoding instead of hex.
+
+### Features
+
+- Add optional host filters (offset/limit/service-account/protocol/country) plus distance sort
+- Track RPC failure rate when selecting hosts rather than raw RPCs.
+- Unified the SDK logic where possible.
+
+### Fixes
+
+- Added missing updated_at field.
+- Fix decoding failing when encrypted metadata is null or missing
+- Fixed an issue with uploads stalling after resuming on some platforms.
+- Fixed signing when URLs have port number.
+- Remove service account fields
+- Update object listing endpoints to use events
+
 ## 0.2.2 (2025-10-04)
 
 ### Features
