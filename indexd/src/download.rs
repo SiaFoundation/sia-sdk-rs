@@ -17,7 +17,7 @@ use tokio::time::error::Elapsed;
 use tokio::time::sleep;
 
 use crate::app_client::{self, Client as AppClient, HostQuery};
-use crate::quic::client::Client;
+use crate::quic::Client;
 use crate::{Object, Sector, SharedObject, Slab, quic};
 
 #[derive(Debug, Error)]

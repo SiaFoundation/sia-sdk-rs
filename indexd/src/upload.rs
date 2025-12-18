@@ -22,8 +22,9 @@ use tokio_util::task::TaskTracker;
 
 use crate::app_client::{Client as AppClient, HostQuery, SlabPinParams};
 use crate::hosts::{HostQueue, QueueError};
-use crate::quic::client::Client;
-use crate::quic::{self};
+use crate::quic::{
+    Client, {self},
+};
 use crate::{Object, Sector, Slab};
 
 #[derive(Debug, Error)]

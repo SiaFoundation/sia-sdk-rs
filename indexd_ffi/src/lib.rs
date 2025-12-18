@@ -9,7 +9,7 @@ use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
-use indexd::{Object, SealedObjectError, Url, quic};
+use indexd::{Object, SealedObjectError, Url, download, upload};
 use log::debug;
 use sia::rhp::SECTOR_SIZE;
 use sia::signing::{PublicKey, Signature};
@@ -780,7 +780,7 @@ impl SDK {
                         .upload(
                             upload_token,
                             result_buf,
-                            quic::UploadOptions {
+                            upload::UploadOptions {
                                 max_inflight: options.max_inflight as usize,
                                 data_shards: options.data_shards,
                                 parity_shards: options.parity_shards,
@@ -826,7 +826,7 @@ impl SDK {
                 let future = sdk.download(
                     &mut buf,
                     &object,
-                    quic::DownloadOptions {
+                    download::DownloadOptions {
                         offset,
                         length: Some(total_length.min(CHUNK_SIZE)),
                         max_inflight: max_inflight as usize,
@@ -880,7 +880,7 @@ impl SDK {
                 let future = sdk.download_shared(
                     &mut buf,
                     &shared_object,
-                    quic::DownloadOptions {
+                    download::DownloadOptions {
                         offset,
                         length: Some(total_length.min(CHUNK_SIZE)),
                         max_inflight: max_inflight as usize,

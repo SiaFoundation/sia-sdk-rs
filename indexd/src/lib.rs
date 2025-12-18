@@ -1,7 +1,6 @@
 use crate::app_client::{HostQuery, SlabPinParams};
-use crate::quic::{
-    DownloadError, DownloadOptions, Downloader, UploadError, UploadOptions, Uploader,
-};
+use crate::download::{DownloadError, DownloadOptions, Downloader};
+use crate::upload::{UploadError, UploadOptions, Uploader};
 
 use chrono::{DateTime, Utc};
 use sia::signing::PrivateKey;
@@ -19,8 +18,10 @@ use tokio_util::sync::CancellationToken;
 
 pub use reqwest::{IntoUrl, Url};
 
+pub mod download;
 mod object_encryption;
 mod slabs;
+pub mod upload;
 
 pub mod app_client;
 pub mod quic;
