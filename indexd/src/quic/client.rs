@@ -18,14 +18,17 @@ use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, VarInt};
 use sia::encoding;
 use sia::encoding_async::AsyncDecoder;
 use sia::rhp::{
-    self, AccountToken, Host, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector, Transport,
+    self, AccountToken, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector, Transport,
 };
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use sia::types::v2::Protocol;
 use std::sync::Mutex;
 
-use crate::hosts::{HostQueue, Hosts};
+use crate::HostClient;
+use crate::download::DownloadError;
+use crate::hosts::Hosts;
+use crate::upload::UploadError;
 
 struct Stream {
     send: SendStream,
@@ -92,6 +95,18 @@ pub enum Error {
     NoEndpoint,
 }
 
+impl From<Error> for UploadError {
+    fn from(err: Error) -> Self {
+        UploadError::Client(err.to_string())
+    }
+}
+
+impl From<Error> for DownloadError {
+    fn from(err: Error) -> Self {
+        DownloadError::Client(err.to_string())
+    }
+}
+
 impl AsyncDecoder for Stream {
     type Error = Error;
     async fn decode_buf(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
@@ -130,60 +145,49 @@ pub struct Client {
     inner: Arc<ClientInner>,
 }
 
-impl Client {
-    pub fn new(client_config: rustls::ClientConfig) -> Result<Self, Error> {
-        let inner = ClientInner::new(Hosts::new(), client_config)?;
-        Ok(Client {
-            inner: Arc::new(inner),
-        })
+impl HostClient for Client {
+    type Error = Error;
+
+    fn hosts(&self) -> &Hosts {
+        &self.inner.hosts
     }
 
-    /// Sorts a list of hosts according to their priority in the client's
-    /// preferred hosts queue. The function `f` is used to extract the
-    /// public key from each item.
-    pub fn prioritize_hosts<H, F>(&self, hosts: &mut [H], f: F)
-    where
-        F: Fn(&H) -> &PublicKey,
-    {
-        self.inner.hosts.prioritize(hosts, f);
-    }
-
-    /// Updates the list of known hosts.
+    /// Reads a segment of a sector from a host.
     ///
-    /// Existing hosts not in the new list are removed, but
-    /// their metrics are retained in case they reappear later.
-    pub fn update_hosts(&self, hosts: Vec<Host>) {
-        self.inner.hosts.update(hosts);
-    }
-
-    /// Returns a new host queue for selecting hosts
-    /// according to their priority.
-    pub fn host_queue(&self) -> HostQueue {
-        self.inner.hosts.queue()
-    }
-
-    /// Returns the number of available hosts.
-    pub fn available_hosts(&self) -> usize {
-        self.inner.hosts.available()
-    }
-
-    /// Fetches the prices from a host optionally refreshing
-    /// the cached prices.
-    pub async fn host_prices(
+    /// # Arguments
+    /// * `host_key` - The public key of the host to read from.
+    /// * `account_key` - The private key of the account to pay with.
+    /// * `root` - The root hash of the sector to read from.
+    /// * `offset` - The offset within the sector to start reading from.
+    /// * `length` - The length of the segment to read.
+    ///
+    /// # Returns
+    /// A `Bytes` object containing the requested data segment. The
+    /// returned data is validated against the sector's Merkle root.
+    async fn read_sector(
         &self,
         host_key: PublicKey,
-        refresh: bool,
-    ) -> Result<HostPrices, Error> {
+        account_key: &PrivateKey,
+        root: Hash256,
+        offset: usize,
+        length: usize,
+    ) -> Result<Bytes, Error> {
+        let start = Instant::now();
         self.inner
-            .host_prices(host_key, refresh)
+            .read_sector(host_key, account_key, root, offset, length)
             .await
+            .inspect(|_| {
+                let elapsed = start.elapsed();
+                debug!("read sector from {host_key} in {}ms", elapsed.as_millis());
+                self.inner.hosts.add_read_sample(&host_key, elapsed);
+            })
             .inspect_err(|_| {
                 self.inner.hosts.add_failure(&host_key);
             })
     }
 
     /// Writes a sector to a host and returns the root hash.
-    pub async fn write_sector(
+    async fn write_sector(
         &self,
         host_key: PublicKey,
         account_key: &PrivateKey,
@@ -202,36 +206,26 @@ impl Client {
                 self.inner.hosts.add_failure(&host_key);
             })
     }
+}
 
-    /// Reads a segment of a sector from a host.
-    ///
-    /// # Arguments
-    /// * `host_key` - The public key of the host to read from.
-    /// * `account_key` - The private key of the account to pay with.
-    /// * `root` - The root hash of the sector to read from.
-    /// * `offset` - The offset within the sector to start reading from.
-    /// * `length` - The length of the segment to read.
-    ///
-    /// # Returns
-    /// A `Bytes` object containing the requested data segment. The
-    /// returned data is validated against the sector's Merkle root.
-    pub async fn read_sector(
+impl Client {
+    pub fn new(client_config: rustls::ClientConfig) -> Result<Self, Error> {
+        let inner = ClientInner::new(Hosts::new(), client_config)?;
+        Ok(Client {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Fetches the prices from a host optionally refreshing
+    /// the cached prices.
+    pub async fn host_prices(
         &self,
         host_key: PublicKey,
-        account_key: &PrivateKey,
-        root: Hash256,
-        offset: usize,
-        length: usize,
-    ) -> Result<Bytes, Error> {
-        let start = Instant::now();
+        refresh: bool,
+    ) -> Result<HostPrices, Error> {
         self.inner
-            .read_sector(host_key, account_key, root, offset, length)
+            .host_prices(host_key, refresh)
             .await
-            .inspect(|_| {
-                let elapsed = start.elapsed();
-                debug!("read sector from {host_key} in {}ms", elapsed.as_millis());
-                self.inner.hosts.add_read_sample(&host_key, elapsed);
-            })
             .inspect_err(|_| {
                 self.inner.hosts.add_failure(&host_key);
             })
@@ -619,7 +613,7 @@ mod test {
         let client_config =
             rustls::ClientConfig::with_platform_verifier().expect("Failed to create client config");
         let dialer = Client::new(client_config).expect("Failed to create dialer");
-        dialer.update_hosts(vec![Host {
+        dialer.hosts().update(vec![Host {
             public_key: host_key,
             addresses: vec![NetAddress {
                 protocol: Protocol::QUIC,

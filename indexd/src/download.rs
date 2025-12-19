@@ -17,16 +17,15 @@ use tokio::time::error::Elapsed;
 use tokio::time::sleep;
 
 use crate::app_client::{self, Client as AppClient, HostQuery};
-use crate::quic::client::Client;
-use crate::{Object, Sector, SharedObject, Slab, quic};
+use crate::{HostClient, Object, Sector, SharedObject, Slab};
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("QUIC error: {0}")]
-    Quic(#[from] quic::Error),
+    #[error("Client error: {0}")]
+    Client(String),
 
     #[error("encoder error: {0}")]
     Encoder(#[from] erasure_coding::Error),
@@ -73,13 +72,16 @@ impl Default for DownloadOptions {
     }
 }
 
-pub struct DownloaderInner {
+pub struct DownloaderInner<C: HostClient> {
     account_key: PrivateKey,
-    host_client: Client,
+    host_client: C,
     app_client: AppClient,
 }
 
-impl DownloaderInner {
+impl<C: HostClient> DownloaderInner<C>
+where
+    DownloadError: From<C::Error>,
+{
     // helper to pair a sector with its erasure-coded index.
     // Required because [FuturesUnordered.push] does not
     // preserve ordering and doesn't play nice with closures.
@@ -101,8 +103,8 @@ impl DownloaderInner {
 }
 
 #[derive(Clone)]
-pub struct Downloader {
-    inner: Arc<DownloaderInner>,
+pub struct Downloader<C: HostClient> {
+    inner: Arc<DownloaderInner<C>>,
 }
 
 struct SectorDownloadTask {
@@ -110,8 +112,11 @@ struct SectorDownloadTask {
     index: usize,
 }
 
-impl Downloader {
-    pub fn new(app_client: AppClient, host_client: Client, account_key: PrivateKey) -> Self {
+impl<C: HostClient> Downloader<C>
+where
+    DownloadError: From<C::Error>,
+{
+    pub fn new(app_client: AppClient, host_client: C, account_key: PrivateKey) -> Self {
         Self {
             inner: Arc::new(DownloaderInner {
                 account_key,
@@ -155,7 +160,8 @@ impl Downloader {
             .collect::<Vec<_>>();
         self.inner
             .host_client
-            .prioritize_hosts(&mut sectors, |task| &task.sector.host_key);
+            .hosts()
+            .prioritize(&mut sectors, |task| &task.sector.host_key);
         let total_shards = sectors.len();
         let mut sectors = VecDeque::from(sectors);
         let mut download_tasks = JoinSet::new();
@@ -252,13 +258,13 @@ impl Downloader {
         slabs: &[Slab],
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
-        if self.inner.host_client.available_hosts() == 0 {
+        if self.inner.host_client.hosts().available() == 0 {
             let hosts = self
                 .inner
                 .app_client
                 .hosts(&self.inner.account_key, HostQuery::default())
                 .await?;
-            self.inner.host_client.update_hosts(hosts);
+            self.inner.host_client.hosts().update(hosts);
         }
 
         let max_length = slabs.iter().map(|s| s.length as usize).sum();
