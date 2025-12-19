@@ -7,7 +7,7 @@ use rand::TryRngCore;
 use rand::rngs::OsRng;
 use sia::encryption::{EncryptionKey, encrypt_shards};
 use sia::erasure_coding::{self, ErasureCoder};
-use sia::rhp;
+use sia::rhp::{self};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use thiserror::Error;
@@ -22,15 +22,13 @@ use tokio_util::task::TaskTracker;
 
 use crate::app_client::{Client as AppClient, HostQuery, SlabPinParams};
 use crate::hosts::{HostQueue, QueueError};
-use crate::quic::{
-    Client, {self},
-};
-use crate::{Object, Sector, Slab};
+use crate::{HostClient, Object, Sector, Slab};
 
 #[derive(Debug, Error)]
 pub enum UploadError {
-    #[error("I/O error: {0}")]
-    QUIC(#[from] quic::Error),
+    #[error("Client error: {0}")]
+    Client(String),
+
     #[error("RHP error: {0}")]
     RPC(#[from] rhp::Error),
 
@@ -65,11 +63,11 @@ pub enum UploadError {
 }
 
 #[derive(Clone)]
-pub struct Uploader {
+pub struct Uploader<C: HostClient> {
     app_client: AppClient,
     app_key: PrivateKey,
 
-    client: Client,
+    client: C,
 }
 
 pub struct UploadOptions {
@@ -97,8 +95,11 @@ impl Default for UploadOptions {
     }
 }
 
-impl Uploader {
-    pub fn new(app_client: AppClient, host_client: Client, app_key: PrivateKey) -> Self {
+impl<C: HostClient> Uploader<C>
+where
+    UploadError: From<C::Error>,
+{
+    pub fn new(app_client: AppClient, host_client: C, app_key: PrivateKey) -> Self {
         Uploader {
             app_client,
             app_key,
@@ -107,7 +108,7 @@ impl Uploader {
     }
 
     async fn upload_shard(
-        client: Client,
+        client: C,
         hosts: HostQueue,
         host_key: PublicKey,
         account_key: PrivateKey,
@@ -143,7 +144,7 @@ impl Uploader {
 
     async fn upload_slab_shard(
         permit: OwnedSemaphorePermit,
-        client: Client,
+        client: C,
         hosts: HostQueue,
         account_key: PrivateKey,
         data: Bytes,

@@ -10,7 +10,9 @@ mod hosts;
 pub use hosts::*;
 
 use crate::app_client::{Account, Client, ObjectsCursor};
+use bytes::Bytes;
 use sia::rhp::Host;
+use sia::signing::PublicKey;
 use sia::types::Hash256;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -45,6 +47,30 @@ pub enum Error {
 
     #[error("sealed object: {0}")]
     SealedObject(#[from] SealedObjectError),
+}
+
+pub trait HostClient: Clone + Send + 'static {
+    type Error: std::error::Error;
+
+    /// Returns the number of available hosts.
+    fn available_hosts(&self) -> usize;
+
+    /// Updates the list of known hosts.
+    ///
+    /// Existing hosts not in the new list are removed, but
+    /// their metrics are retained in case they reappear later.
+    fn update_hosts(&self, hosts: Vec<Host>);
+
+    /// Returns a new host queue for selecting hosts
+    /// according to their priority.
+    fn host_queue(&self) -> HostQueue;
+
+    fn write_sector(
+        &self,
+        host_key: PublicKey,
+        account_key: &PrivateKey,
+        sector: Bytes,
+    ) -> impl Future<Output = Result<Hash256, Self::Error>> + Send;
 }
 
 /// The SDK provides methods for uploading and downloading objects,

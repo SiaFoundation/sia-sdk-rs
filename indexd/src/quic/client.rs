@@ -26,6 +26,7 @@ use sia::types::v2::Protocol;
 use std::sync::Mutex;
 
 use crate::hosts::{HostQueue, Hosts};
+use crate::upload::{HostClient, UploadError};
 
 struct Stream {
     send: SendStream,
@@ -92,6 +93,12 @@ pub enum Error {
     NoEndpoint,
 }
 
+impl From<Error> for UploadError {
+    fn from(err: Error) -> Self {
+        UploadError::Client(err.to_string())
+    }
+}
+
 impl AsyncDecoder for Stream {
     type Error = Error;
     async fn decode_buf(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
@@ -130,6 +137,50 @@ pub struct Client {
     inner: Arc<ClientInner>,
 }
 
+impl HostClient for Client {
+    type Error = Error;
+
+    /// Updates the list of known hosts.
+    ///
+    /// Existing hosts not in the new list are removed, but
+    /// their metrics are retained in case they reappear later.
+    fn update_hosts(&self, hosts: Vec<Host>) {
+        self.inner.hosts.update(hosts);
+    }
+
+    /// Returns a new host queue for selecting hosts
+    /// according to their priority.
+    fn host_queue(&self) -> HostQueue {
+        self.inner.hosts.queue()
+    }
+
+    /// Returns the number of available hosts.
+    fn available_hosts(&self) -> usize {
+        self.inner.hosts.available()
+    }
+
+    /// Writes a sector to a host and returns the root hash.
+    async fn write_sector(
+        &self,
+        host_key: PublicKey,
+        account_key: &PrivateKey,
+        sector: Bytes,
+    ) -> Result<Hash256, Error> {
+        let start = Instant::now();
+        self.inner
+            .write_sector(host_key, account_key, sector)
+            .await
+            .inspect(|_| {
+                self.inner
+                    .hosts
+                    .add_write_sample(&host_key, start.elapsed());
+            })
+            .inspect_err(|_| {
+                self.inner.hosts.add_failure(&host_key);
+            })
+    }
+}
+
 impl Client {
     pub fn new(client_config: rustls::ClientConfig) -> Result<Self, Error> {
         let inner = ClientInner::new(Hosts::new(), client_config)?;
@@ -148,25 +199,6 @@ impl Client {
         self.inner.hosts.prioritize(hosts, f);
     }
 
-    /// Updates the list of known hosts.
-    ///
-    /// Existing hosts not in the new list are removed, but
-    /// their metrics are retained in case they reappear later.
-    pub fn update_hosts(&self, hosts: Vec<Host>) {
-        self.inner.hosts.update(hosts);
-    }
-
-    /// Returns a new host queue for selecting hosts
-    /// according to their priority.
-    pub fn host_queue(&self) -> HostQueue {
-        self.inner.hosts.queue()
-    }
-
-    /// Returns the number of available hosts.
-    pub fn available_hosts(&self) -> usize {
-        self.inner.hosts.available()
-    }
-
     /// Fetches the prices from a host optionally refreshing
     /// the cached prices.
     pub async fn host_prices(
@@ -177,27 +209,6 @@ impl Client {
         self.inner
             .host_prices(host_key, refresh)
             .await
-            .inspect_err(|_| {
-                self.inner.hosts.add_failure(&host_key);
-            })
-    }
-
-    /// Writes a sector to a host and returns the root hash.
-    pub async fn write_sector(
-        &self,
-        host_key: PublicKey,
-        account_key: &PrivateKey,
-        sector: Bytes,
-    ) -> Result<Hash256, Error> {
-        let start = Instant::now();
-        self.inner
-            .write_sector(host_key, account_key, sector)
-            .await
-            .inspect(|_| {
-                self.inner
-                    .hosts
-                    .add_write_sample(&host_key, start.elapsed());
-            })
             .inspect_err(|_| {
                 self.inner.hosts.add_failure(&host_key);
             })
