@@ -52,25 +52,8 @@ pub enum Error {
 pub trait HostClient: Clone + Send + Sync + 'static {
     type Error: std::error::Error;
 
-    /// Returns the number of available hosts.
-    fn available_hosts(&self) -> usize;
-
-    /// Updates the list of known hosts.
-    ///
-    /// Existing hosts not in the new list are removed, but
-    /// their metrics are retained in case they reappear later.
-    fn update_hosts(&self, hosts: Vec<Host>);
-
-    /// Returns a new host queue for selecting hosts
-    /// according to their priority.
-    fn host_queue(&self) -> HostQueue;
-
-    /// Sorts a list of hosts according to their priority in the client's
-    /// preferred hosts queue. The function `f` is used to extract the
-    /// public key from each item.
-    fn prioritize_hosts<H, F>(&self, hosts: &mut [H], f: F)
-    where
-        F: Fn(&H) -> &PublicKey;
+    /// Returns a reference to the client's internal Hosts state.
+    fn hosts(&self) -> &Hosts;
 
     /// Reads a segment of a sector from a host.
     ///
@@ -136,7 +119,7 @@ where
         app_key: PrivateKey,
     ) -> Result<Self, BuilderError> {
         let hosts = app_client.hosts(&app_key, HostQuery::default()).await?;
-        host_client.update_hosts(hosts);
+        host_client.hosts().update(hosts);
 
         let downloader = Downloader::new(app_client.clone(), host_client.clone(), app_key.clone());
         let uploader = Uploader::new(app_client.clone(), host_client.clone(), app_key.clone());

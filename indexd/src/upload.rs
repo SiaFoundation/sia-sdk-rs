@@ -217,12 +217,12 @@ where
         r: R,
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
-        if self.client.available_hosts() == 0 {
+        if self.client.hosts().available() == 0 {
             let hosts = self
                 .app_client
                 .hosts(&self.app_key, HostQuery::default())
                 .await?;
-            self.client.update_hosts(hosts);
+            self.client.hosts().update(hosts);
         }
         let data_shards = options.data_shards as usize;
         let parity_shards = options.parity_shards as usize;
@@ -264,7 +264,7 @@ where
                 .await?;
 
                 let mut shard_upload_tasks = JoinSet::new();
-                let hosts = host_client.host_queue();
+                let hosts = host_client.hosts().queue();
                 for (shard_index, shard) in encrypted_data_shards.into_iter().enumerate() {
                     let permit = semaphore.clone().acquire_owned().await?;
                     shard_upload_tasks.spawn(Self::upload_slab_shard(

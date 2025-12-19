@@ -160,7 +160,8 @@ where
             .collect::<Vec<_>>();
         self.inner
             .host_client
-            .prioritize_hosts(&mut sectors, |task| &task.sector.host_key);
+            .hosts()
+            .prioritize(&mut sectors, |task| &task.sector.host_key);
         let total_shards = sectors.len();
         let mut sectors = VecDeque::from(sectors);
         let mut download_tasks = JoinSet::new();
@@ -257,13 +258,13 @@ where
         slabs: &[Slab],
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
-        if self.inner.host_client.available_hosts() == 0 {
+        if self.inner.host_client.hosts().available() == 0 {
             let hosts = self
                 .inner
                 .app_client
                 .hosts(&self.inner.account_key, HostQuery::default())
                 .await?;
-            self.inner.host_client.update_hosts(hosts);
+            self.inner.host_client.hosts().update(hosts);
         }
 
         let max_length = slabs.iter().map(|s| s.length as usize).sum();
