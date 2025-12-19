@@ -25,8 +25,10 @@ use sia::types::Hash256;
 use sia::types::v2::Protocol;
 use std::sync::Mutex;
 
+use crate::HostClient;
+use crate::download::DownloadError;
 use crate::hosts::{HostQueue, Hosts};
-use crate::upload::{HostClient, UploadError};
+use crate::upload::UploadError;
 
 struct Stream {
     send: SendStream,
@@ -99,6 +101,12 @@ impl From<Error> for UploadError {
     }
 }
 
+impl From<Error> for DownloadError {
+    fn from(err: Error) -> Self {
+        DownloadError::Client(err.to_string())
+    }
+}
+
 impl AsyncDecoder for Stream {
     type Error = Error;
     async fn decode_buf(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
@@ -154,9 +162,53 @@ impl HostClient for Client {
         self.inner.hosts.queue()
     }
 
+    /// Sorts a list of hosts according to their priority in the client's
+    /// preferred hosts queue. The function `f` is used to extract the
+    /// public key from each item.
+    fn prioritize_hosts<H, F>(&self, hosts: &mut [H], f: F)
+    where
+        F: Fn(&H) -> &PublicKey,
+    {
+        self.inner.hosts.prioritize(hosts, f);
+    }
+
     /// Returns the number of available hosts.
     fn available_hosts(&self) -> usize {
         self.inner.hosts.available()
+    }
+
+    /// Reads a segment of a sector from a host.
+    ///
+    /// # Arguments
+    /// * `host_key` - The public key of the host to read from.
+    /// * `account_key` - The private key of the account to pay with.
+    /// * `root` - The root hash of the sector to read from.
+    /// * `offset` - The offset within the sector to start reading from.
+    /// * `length` - The length of the segment to read.
+    ///
+    /// # Returns
+    /// A `Bytes` object containing the requested data segment. The
+    /// returned data is validated against the sector's Merkle root.
+    async fn read_sector(
+        &self,
+        host_key: PublicKey,
+        account_key: &PrivateKey,
+        root: Hash256,
+        offset: usize,
+        length: usize,
+    ) -> Result<Bytes, Error> {
+        let start = Instant::now();
+        self.inner
+            .read_sector(host_key, account_key, root, offset, length)
+            .await
+            .inspect(|_| {
+                let elapsed = start.elapsed();
+                debug!("read sector from {host_key} in {}ms", elapsed.as_millis());
+                self.inner.hosts.add_read_sample(&host_key, elapsed);
+            })
+            .inspect_err(|_| {
+                self.inner.hosts.add_failure(&host_key);
+            })
     }
 
     /// Writes a sector to a host and returns the root hash.
@@ -189,16 +241,6 @@ impl Client {
         })
     }
 
-    /// Sorts a list of hosts according to their priority in the client's
-    /// preferred hosts queue. The function `f` is used to extract the
-    /// public key from each item.
-    pub fn prioritize_hosts<H, F>(&self, hosts: &mut [H], f: F)
-    where
-        F: Fn(&H) -> &PublicKey,
-    {
-        self.inner.hosts.prioritize(hosts, f);
-    }
-
     /// Fetches the prices from a host optionally refreshing
     /// the cached prices.
     pub async fn host_prices(
@@ -209,40 +251,6 @@ impl Client {
         self.inner
             .host_prices(host_key, refresh)
             .await
-            .inspect_err(|_| {
-                self.inner.hosts.add_failure(&host_key);
-            })
-    }
-
-    /// Reads a segment of a sector from a host.
-    ///
-    /// # Arguments
-    /// * `host_key` - The public key of the host to read from.
-    /// * `account_key` - The private key of the account to pay with.
-    /// * `root` - The root hash of the sector to read from.
-    /// * `offset` - The offset within the sector to start reading from.
-    /// * `length` - The length of the segment to read.
-    ///
-    /// # Returns
-    /// A `Bytes` object containing the requested data segment. The
-    /// returned data is validated against the sector's Merkle root.
-    pub async fn read_sector(
-        &self,
-        host_key: PublicKey,
-        account_key: &PrivateKey,
-        root: Hash256,
-        offset: usize,
-        length: usize,
-    ) -> Result<Bytes, Error> {
-        let start = Instant::now();
-        self.inner
-            .read_sector(host_key, account_key, root, offset, length)
-            .await
-            .inspect(|_| {
-                let elapsed = start.elapsed();
-                debug!("read sector from {host_key} in {}ms", elapsed.as_millis());
-                self.inner.hosts.add_read_sample(&host_key, elapsed);
-            })
             .inspect_err(|_| {
                 self.inner.hosts.add_failure(&host_key);
             })

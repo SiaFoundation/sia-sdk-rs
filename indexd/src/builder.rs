@@ -87,12 +87,12 @@ impl Builder<DisconnectedState> {
         &self,
         app_key: &PrivateKey,
         tls_config: rustls::ClientConfig,
-    ) -> Result<Option<SDK>, BuilderError> {
+    ) -> Result<Option<SDK<quic::Client>>, BuilderError> {
         let connected = self.client.check_app_authenticated(app_key).await?;
         if !connected {
             return Ok(None);
         }
-        let sdk = SDK::new(self.client.clone(), app_key.clone(), tls_config).await?;
+        let sdk = SDK::new_quic(self.client.clone(), app_key.clone(), tls_config).await?;
         Ok(Some(sdk))
     }
 
@@ -170,12 +170,12 @@ impl Builder<ApprovedState> {
         self,
         mnemonic: &str,
         tls_config: rustls::ClientConfig,
-    ) -> Result<SDK, BuilderError> {
+    ) -> Result<SDK<quic::Client>, BuilderError> {
         let app_key = derive_app_key(mnemonic, &self.state.app_id, &self.state.user_secret)?;
         self.client
             .register_app(&app_key, self.state.register_url.clone())
             .await?;
-        SDK::new(self.client, app_key, tls_config).await
+        SDK::new_quic(self.client, app_key, tls_config).await
     }
 }
 

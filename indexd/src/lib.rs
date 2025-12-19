@@ -49,7 +49,7 @@ pub enum Error {
     SealedObject(#[from] SealedObjectError),
 }
 
-pub trait HostClient: Clone + Send + 'static {
+pub trait HostClient: Clone + Send + Sync + 'static {
     type Error: std::error::Error;
 
     /// Returns the number of available hosts.
@@ -65,6 +65,34 @@ pub trait HostClient: Clone + Send + 'static {
     /// according to their priority.
     fn host_queue(&self) -> HostQueue;
 
+    /// Sorts a list of hosts according to their priority in the client's
+    /// preferred hosts queue. The function `f` is used to extract the
+    /// public key from each item.
+    fn prioritize_hosts<H, F>(&self, hosts: &mut [H], f: F)
+    where
+        F: Fn(&H) -> &PublicKey;
+
+    /// Reads a segment of a sector from a host.
+    ///
+    /// # Arguments
+    /// * `host_key` - The public key of the host to read from.
+    /// * `account_key` - The private key of the account to pay with.
+    /// * `root` - The root hash of the sector to read from.
+    /// * `offset` - The offset within the sector to start reading from.
+    /// * `length` - The length of the segment to read.
+    ///
+    /// # Returns
+    /// A `Bytes` object containing the requested data segment. The
+    /// returned data is validated against the sector's Merkle root.
+    fn read_sector(
+        &self,
+        host_key: PublicKey,
+        account_key: &PrivateKey,
+        root: Hash256,
+        offset: usize,
+        length: usize,
+    ) -> impl Future<Output = Result<Bytes, Self::Error>> + Send;
+
     fn write_sector(
         &self,
         host_key: PublicKey,
@@ -76,28 +104,43 @@ pub trait HostClient: Clone + Send + 'static {
 /// The SDK provides methods for uploading and downloading objects,
 /// as well as interacting with an indexer service.
 #[derive(Clone)]
-pub struct SDK {
+pub struct SDK<C: HostClient> {
     client: Client,
     app_key: PrivateKey,
-    downloader: Downloader,
-    uploader: Uploader,
+    downloader: Downloader<C>,
+    uploader: Uploader<C>,
 }
 
-impl SDK {
-    /// Creates a new SDK instance.
-    async fn new(
-        client: Client,
+impl SDK<quic::Client> {
+    /// Creates a new SDK instance using QUIC as the transport protocol.
+    pub async fn new_quic(
+        app_client: Client,
         app_key: PrivateKey,
         tls_config: rustls::ClientConfig,
-    ) -> Result<Self, BuilderError> {
-        let hosts = client.hosts(&app_key, HostQuery::default()).await?;
-        let dialer = quic::Client::new(tls_config)?;
-        dialer.update_hosts(hosts);
+    ) -> Result<SDK<quic::Client>, BuilderError> {
+        let host_client = quic::Client::new(tls_config)?;
+        SDK::new(app_client, host_client, app_key).await
+    }
+}
 
-        let downloader = Downloader::new(client.clone(), dialer.clone(), app_key.clone());
-        let uploader = Uploader::new(client.clone(), dialer.clone(), app_key.clone());
+impl<C: HostClient> SDK<C>
+where
+    UploadError: From<C::Error>,
+    DownloadError: From<C::Error>,
+{
+    /// Creates a new SDK instance.
+    async fn new(
+        app_client: Client,
+        host_client: C,
+        app_key: PrivateKey,
+    ) -> Result<Self, BuilderError> {
+        let hosts = app_client.hosts(&app_key, HostQuery::default()).await?;
+        host_client.update_hosts(hosts);
+
+        let downloader = Downloader::new(app_client.clone(), host_client.clone(), app_key.clone());
+        let uploader = Uploader::new(app_client.clone(), host_client.clone(), app_key.clone());
         Ok(Self {
-            client,
+            client: app_client,
             app_key,
             downloader,
             uploader,

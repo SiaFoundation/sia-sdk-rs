@@ -9,7 +9,7 @@ use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
-use indexd::{Object, SealedObjectError, Url, download, upload};
+use indexd::{Object, SealedObjectError, Url, download, quic, upload};
 use log::debug;
 use sia::rhp::SECTOR_SIZE;
 use sia::signing::{PublicKey, Signature};
@@ -726,7 +726,7 @@ pub struct DownloadOptions {
 
 #[derive(uniffi::Object)]
 pub struct SDK {
-    inner: indexd::SDK,
+    inner: indexd::SDK<quic::Client>,
 }
 
 #[uniffi::export]
