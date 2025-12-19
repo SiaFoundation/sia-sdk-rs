@@ -93,6 +93,7 @@ pub trait HostClient: Clone + Send + Sync + 'static {
         length: usize,
     ) -> impl Future<Output = Result<Bytes, Self::Error>> + Send;
 
+    /// Writes a sector to a host and returns the root hash.
     fn write_sector(
         &self,
         host_key: PublicKey,
