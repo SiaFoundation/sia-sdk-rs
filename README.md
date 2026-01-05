@@ -23,3 +23,8 @@ for production use. The API will have breaking changes.
 - [ ] Transaction signing
 - [ ] RHP4
 - [ ] State tree verification
+
+## License
+This project makes use of the `webpki-roots` crate which contains data from
+Common CA Database (CCADB) and is used under the CDLA-2.0-Permissive license.
+The remaining code in this project is licensed under the MIT License.
