@@ -50,6 +50,7 @@ async def main():
 
     print("Connected to indexd")
 
+    start = datetime.now(timezone.utc)
     writer = await sdk.upload(UploadOptions(
         metadata=json.dumps({"example": "value"}).encode(),
     ))
@@ -58,11 +59,13 @@ async def main():
     await writer.write(wrote_data)
     print("Wrote", len(wrote_data), "bytes")
     obj = await writer.finalize()
-    print("Upload finished", obj.size(), obj.metadata().decode())
+    elapsed = datetime.now(timezone.utc) - start
+    print(f"Upload finished {obj.size()} in {elapsed}")
 
     sealed = obj.seal(app_key)
-    print("sealed:", sealed.id, sealed.signature)
+    print("sealed:", sealed.id, sealed.data_signature)
 
+    start = datetime.now(timezone.utc)
     reader = await sdk.download(obj, DownloadOptions())
     read_data = b''
     while True:
@@ -73,5 +76,7 @@ async def main():
 
     if wrote_data != read_data:
         print("data mismatch", wrote_data, read_data)
+    elapsed = datetime.now(timezone.utc) - start
+    print(f"Download finished {len(read_data)} bytes in {elapsed}")
 
 asyncio.run(main())

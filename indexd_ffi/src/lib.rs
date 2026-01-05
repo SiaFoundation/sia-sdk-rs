@@ -9,7 +9,7 @@ use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
-use indexd::{Object, SealedObjectError, Url, quic};
+use indexd::{Object, SealedObjectError, Url};
 use log::debug;
 use sia::rhp::SECTOR_SIZE;
 use sia::signing::{PublicKey, Signature};
@@ -56,20 +56,8 @@ pub enum Error {
     #[error("{0}")]
     SDK(#[from] indexd::Error),
 
-    #[error("crypto error: {0}")]
-    Crypto(String),
-
-    #[error("app error: {0}")]
-    AppClient(#[from] indexd::app_client::Error),
-
-    #[error("quic error: {0}")]
-    Quic(#[from] indexd::quic::Error),
-
     #[error("hex error: {0}")]
     HexParseError(#[from] sia::types::HexParseError),
-
-    #[error("not connected")]
-    NotConnected,
 
     #[error("sealed object error: {0}")]
     SealedObject(#[from] SealedObjectError),
@@ -84,10 +72,6 @@ pub enum Error {
 #[derive(Debug, Error, uniffi::Error)]
 #[uniffi(flat_error)]
 pub enum ConnectError {
-    #[error("not connected")]
-    NotConnected,
-    #[error("already connected")]
-    AlreadyConnected,
     #[error("app client error: {0}")]
     AppClient(#[from] indexd::app_client::Error),
     #[error("task error: {0}")]
@@ -105,12 +89,6 @@ pub enum UploadError {
     #[error("{0}")]
     Upload(#[from] indexd::Error),
 
-    #[error("crypto error: {0}")]
-    Crypto(String),
-
-    #[error("not connected")]
-    NotConnected,
-
     #[error("task error: {0}")]
     JoinError(#[from] tokio::task::JoinError),
 
@@ -124,23 +102,8 @@ pub enum DownloadError {
     #[error("{0}")]
     SDK(#[from] indexd::Error),
 
-    #[error("app error: {0}")]
-    AppClient(#[from] indexd::app_client::Error),
-
-    #[error("hex error: {0}")]
-    HexParseError(#[from] sia::types::HexParseError),
-
-    #[error("not connected")]
-    NotConnected,
-
     #[error("cancelled")]
     Cancelled,
-
-    #[error("task error: {0}")]
-    JoinError(#[from] tokio::task::JoinError),
-
-    #[error("custom error: {0}")]
-    Custom(String),
 }
 
 struct ChunkedWriterInner {
@@ -379,13 +342,13 @@ impl PinnedObject {
     /// Returns the total size of the object by summing the lengths of its slabs.
     pub fn size(&self) -> u64 {
         let inner = self.inner.lock().unwrap();
-        inner.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
+        inner.size()
     }
 
     /// Returns the slabs that make up the object.
     pub fn slabs(&self) -> Vec<Slab> {
         let inner = self.inner.lock().unwrap();
-        inner.slabs.iter().cloned().map(|s| s.into()).collect()
+        inner.slabs().iter().cloned().map(|s| s.into()).collect()
     }
 
     /// Returns the metadata associated with the object.
@@ -403,13 +366,13 @@ impl PinnedObject {
     /// Returns the time the object was created.
     pub fn created_at(&self) -> SystemTime {
         let inner = self.inner.lock().unwrap();
-        inner.created_at.into()
+        (*inner.created_at()).into()
     }
 
     /// Returns the time the object was last updated.
     pub fn updated_at(&self) -> SystemTime {
         let inner = self.inner.lock().unwrap();
-        inner.updated_at.into()
+        (*inner.updated_at()).into()
     }
 }
 
@@ -780,7 +743,7 @@ impl SDK {
                         .upload(
                             upload_token,
                             result_buf,
-                            quic::UploadOptions {
+                            indexd::UploadOptions {
                                 max_inflight: options.max_inflight as usize,
                                 data_shards: options.data_shards,
                                 parity_shards: options.parity_shards,
@@ -826,7 +789,7 @@ impl SDK {
                 let future = sdk.download(
                     &mut buf,
                     &object,
-                    quic::DownloadOptions {
+                    indexd::DownloadOptions {
                         offset,
                         length: Some(total_length.min(CHUNK_SIZE)),
                         max_inflight: max_inflight as usize,
@@ -880,7 +843,7 @@ impl SDK {
                 let future = sdk.download_shared(
                     &mut buf,
                     &shared_object,
-                    quic::DownloadOptions {
+                    indexd::DownloadOptions {
                         offset,
                         length: Some(total_length.min(CHUNK_SIZE)),
                         max_inflight: max_inflight as usize,

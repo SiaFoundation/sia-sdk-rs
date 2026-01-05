@@ -7,7 +7,6 @@ use rand::TryRngCore;
 use rand::rngs::OsRng;
 use sia::encryption::{EncryptionKey, encrypt_shards};
 use sia::erasure_coding::{self, ErasureCoder};
-use sia::rhp;
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use thiserror::Error;
@@ -20,18 +19,15 @@ use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::app_client::{Client as AppClient, HostQuery, SlabPinParams};
+use crate::app_client::{Error as AppError, SlabPinParams};
 use crate::hosts::{HostQueue, QueueError};
-use crate::quic::client::Client;
-use crate::quic::{self};
-use crate::{Object, Sector, Slab};
+use crate::rhp4::RHP4Client;
+use crate::{Hosts, Object, SealedObject, Sector, Slab};
 
 #[derive(Debug, Error)]
 pub enum UploadError {
-    #[error("I/O error: {0}")]
-    QUIC(#[from] quic::Error),
-    #[error("RHP error: {0}")]
-    RPC(#[from] rhp::Error),
+    #[error("rhp4 error: {0}")]
+    RHP4(#[from] crate::rhp4::Error),
 
     #[error("encoder error: {0}")]
     Encoder(#[from] erasure_coding::Error),
@@ -63,14 +59,6 @@ pub enum UploadError {
     Cancelled,
 }
 
-#[derive(Clone)]
-pub struct Uploader {
-    app_client: AppClient,
-    app_key: PrivateKey,
-
-    client: Client,
-}
-
 pub struct UploadOptions {
     pub data_shards: u8,
     pub parity_shards: u8,
@@ -96,27 +84,54 @@ impl Default for UploadOptions {
     }
 }
 
-impl Uploader {
-    pub fn new(app_client: AppClient, host_client: Client, app_key: PrivateKey) -> Self {
+pub(crate) trait Pinner {
+    async fn pin_slab(
+        &self,
+        app_key: &PrivateKey,
+        params: SlabPinParams,
+    ) -> Result<Hash256, AppError>;
+
+    async fn save_object(
+        &self,
+        app_key: &PrivateKey,
+        object: &SealedObject,
+    ) -> Result<(), AppError>;
+}
+
+#[derive(Clone)]
+pub(crate) struct Uploader<T: RHP4Client, P: Pinner> {
+    app_key: Arc<PrivateKey>,
+    hosts: Hosts,
+    pinner: P,
+    transport: T,
+}
+
+impl<T: RHP4Client, P: Pinner> Uploader<T, P>
+where
+    T: Send + Sync + Clone + 'static,
+    P: Send + Sync + Clone + 'static,
+{
+    pub fn new(pinner: P, hosts: Hosts, transport: T, app_key: Arc<PrivateKey>) -> Self {
         Uploader {
-            app_client,
             app_key,
-            client: host_client,
+            hosts,
+            pinner,
+            transport,
         }
     }
 
     async fn upload_shard(
-        client: Client,
+        transport: T,
         hosts: HostQueue,
         host_key: PublicKey,
-        account_key: PrivateKey,
+        account_key: Arc<PrivateKey>,
         data: Bytes,
         write_timeout: Duration,
     ) -> Result<Sector, UploadError> {
         let now = Instant::now();
         let root = timeout(
             write_timeout,
-            client.write_sector(host_key, &account_key, data),
+            transport.write_sector(host_key, &account_key, data),
         )
         .await
         .inspect_err(|e| {
@@ -142,9 +157,9 @@ impl Uploader {
 
     async fn upload_slab_shard(
         permit: OwnedSemaphorePermit,
-        client: Client,
+        transport: T,
         hosts: HostQueue,
-        account_key: PrivateKey,
+        account_key: Arc<PrivateKey>,
         data: Bytes,
         shard_index: usize,
         progress_tx: Option<mpsc::UnboundedSender<()>>,
@@ -153,7 +168,7 @@ impl Uploader {
         let mut write_timeout = Self::upload_timeout(attempts); // mutable so that it can be adjusted on retries
         let mut tasks = JoinSet::new();
         tasks.spawn(Self::upload_shard(
-            client.clone(),
+            transport.clone(),
             hosts.clone(),
             host_key,
             account_key.clone(),
@@ -179,7 +194,7 @@ impl Uploader {
                             if tasks.is_empty() {
                                 let (host_key, attempts) = hosts.pop_front()?;
                                 write_timeout = Self::upload_timeout(attempts);
-                                tasks.spawn(Self::upload_shard(client.clone(), hosts.clone(), host_key, account_key.clone(), data.clone(), write_timeout));
+                                tasks.spawn(Self::upload_shard(transport.clone(), hosts.clone(), host_key, account_key.clone(), data.clone(), write_timeout));
                             }
                         }
                     }
@@ -187,7 +202,7 @@ impl Uploader {
                 _ = sleep(Duration::from_secs(active as u64)) => {
                     if let Ok(racer) = semaphore.clone().try_acquire_owned() {
                         // only race if there's an empty slot
-                        let client = client.clone();
+                        let transport = transport.clone();
                         let data = data.clone();
                         let account_key = account_key.clone();
                         tasks.spawn(async move {
@@ -195,7 +210,7 @@ impl Uploader {
                             debug!("racing slow host for shard {shard_index}");
                             let (host_key, attempts) = hosts.pop_front()?;
                             let write_timeout = Self::upload_timeout(attempts);
-                            Self::upload_shard(client.clone(), hosts.clone(), host_key, account_key, data, write_timeout).await
+                            Self::upload_shard(transport.clone(), hosts.clone(), host_key, account_key, data, write_timeout).await
                         });
                     }
                 }
@@ -219,18 +234,10 @@ impl Uploader {
         r: R,
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
-        if self.client.available_hosts() == 0 {
-            let hosts = self
-                .app_client
-                .hosts(&self.app_key, HostQuery::default())
-                .await?;
-            self.client.update_hosts(hosts);
-        }
         let data_shards = options.data_shards as usize;
         let parity_shards = options.parity_shards as usize;
         let (slab_tx, mut slab_rx) = mpsc::unbounded_channel();
         let semaphore = Arc::new(Semaphore::new(options.max_inflight));
-        let host_client = self.client.clone();
         let app_key = self.app_key.clone();
         let mut object = Object::default();
         if let Some(metadata) = options.metadata {
@@ -239,6 +246,8 @@ impl Uploader {
 
         // use a buffered reader since the erasure coder reads 64 bytes at a time.
         let mut r = object.reader(BufReader::new(r), 0);
+        let transport = self.transport.clone();
+        let hosts = self.hosts.clone();
         let read_slab_res: JoinHandle<Result<(), UploadError>> = tokio::spawn(async move {
             let mut slab_index: usize = 0;
             let slab_upload_tasks = TaskTracker::new();
@@ -266,13 +275,13 @@ impl Uploader {
                 .await?;
 
                 let mut shard_upload_tasks = JoinSet::new();
-                let hosts = host_client.host_queue();
+                let host_queue = hosts.queue();
                 for (shard_index, shard) in encrypted_data_shards.into_iter().enumerate() {
                     let permit = semaphore.clone().acquire_owned().await?;
                     shard_upload_tasks.spawn(Self::upload_slab_shard(
                         permit,
-                        host_client.clone(),
-                        hosts.clone(),
+                        transport.clone(),
+                        host_queue.clone(),
                         app_key.clone(),
                         shard.into(),
                         shard_index,
@@ -297,8 +306,8 @@ impl Uploader {
                     let shard_index = shard_index + data_shards; // offset by data shards
                     shard_upload_tasks.spawn(Self::upload_slab_shard(
                         permit,
-                        host_client.clone(),
-                        hosts.clone(),
+                        transport.clone(),
+                        host_queue.clone(),
                         app_key.clone(),
                         shard.into(),
                         shard_index,
@@ -352,7 +361,7 @@ impl Uploader {
             Ok(())
         });
 
-        let mut slabs = Vec::new();
+        let slabs = object.slabs_mut();
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -375,7 +384,7 @@ impl Uploader {
                         );
                         let expected_slab_id = slab.digest();
                         let slab_id = self
-                            .app_client
+                            .pinner
                             .pin_slab(&self.app_key, SlabPinParams {
                                 encryption_key: slab.encryption_key.clone(),
                                 min_shards: slab.min_shards,
@@ -394,10 +403,8 @@ impl Uploader {
             }
         }
         read_slab_res.await??;
-
-        object.slabs = slabs;
         let sealed = object.seal(&self.app_key);
-        self.app_client.save_object(&self.app_key, &sealed).await?;
+        self.pinner.save_object(&self.app_key, &sealed).await?;
         Ok(object)
     }
 }

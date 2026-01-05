@@ -1,7 +1,7 @@
+use std::sync::Arc;
+
 use crate::app_client::{HostQuery, SlabPinParams};
-use crate::quic::{
-    DownloadError, DownloadOptions, Downloader, UploadError, UploadOptions, Uploader,
-};
+use crate::rhp4::RHP4Client;
 
 use chrono::{DateTime, Utc};
 use sia::signing::PrivateKey;
@@ -10,7 +10,7 @@ pub use slabs::*;
 mod hosts;
 pub use hosts::*;
 
-use crate::app_client::{Account, Client, ObjectsCursor};
+use crate::app_client::{Account, ObjectsCursor};
 use sia::rhp::Host;
 use sia::types::Hash256;
 use thiserror::Error;
@@ -18,6 +18,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 pub use reqwest::{IntoUrl, Url};
+
+mod rhp4;
+mod upload;
+pub use upload::*;
+
+mod download;
+pub use download::*;
 
 mod object_encryption;
 mod slabs;
@@ -46,32 +53,37 @@ pub enum Error {
     SealedObject(#[from] SealedObjectError),
 }
 
-/// The SDK provides methods for uploading and downloading objects,
-/// as well as interacting with an indexer service.
 #[derive(Clone)]
 pub struct SDK {
-    client: Client,
-    app_key: PrivateKey,
-    downloader: Downloader,
-    uploader: Uploader,
+    app_key: Arc<PrivateKey>,
+    api_client: app_client::Client,
+    downloader: Downloader<quic::Client>,
+    uploader: Uploader<quic::Client, app_client::Client>,
 }
 
 impl SDK {
     /// Creates a new SDK instance.
     async fn new(
-        client: Client,
-        app_key: PrivateKey,
+        api_client: app_client::Client,
+        app_key: Arc<PrivateKey>,
         tls_config: rustls::ClientConfig,
     ) -> Result<Self, BuilderError> {
-        let hosts = client.hosts(&app_key, HostQuery::default()).await?;
-        let dialer = quic::Client::new(tls_config)?;
-        dialer.update_hosts(hosts);
+        let usable_hosts = api_client.hosts(&app_key, HostQuery::default()).await?;
+        let hosts = Hosts::new();
+        hosts.update(usable_hosts);
 
-        let downloader = Downloader::new(client.clone(), dialer.clone(), app_key.clone());
-        let uploader = Uploader::new(client.clone(), dialer.clone(), app_key.clone());
+        let transport = quic::Client::new(tls_config, hosts.clone())?;
+
+        let downloader = Downloader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let uploader = Uploader::new(
+            api_client.clone(),
+            hosts.clone(),
+            transport.clone(),
+            app_key.clone(),
+        );
         Ok(Self {
-            client,
             app_key,
+            api_client,
             downloader,
             uploader,
         })
@@ -124,7 +136,7 @@ impl SDK {
     /// # Arguments
     /// * `query` - Filtering criteria to select hosts.
     pub async fn hosts(&self, query: HostQuery) -> Result<Vec<Host>, Error> {
-        self.client
+        self.api_client
             .hosts(&self.app_key, query)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
@@ -132,7 +144,7 @@ impl SDK {
 
     /// Retrieves account information from the indexer.
     pub async fn account(&self) -> Result<Account, Error> {
-        self.client
+        self.api_client
             .account(&self.app_key)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
@@ -144,7 +156,7 @@ impl SDK {
     /// * `key` - The key of the object to retrieve.
     pub async fn object(&self, key: &Hash256) -> Result<Object, Error> {
         let sealed = self
-            .client
+            .api_client
             .object(&self.app_key, key)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
@@ -165,7 +177,7 @@ impl SDK {
         limit: Option<usize>,
     ) -> Result<Vec<ObjectEvent>, Error> {
         let events = self
-            .client
+            .api_client
             .objects(&self.app_key, cursor, limit)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
@@ -193,7 +205,7 @@ impl SDK {
     /// storage space by removing slabs that are no longer
     /// referenced by objects.
     pub async fn prune_slabs(&self) -> Result<(), Error> {
-        self.client
+        self.api_client
             .prune_slabs(&self.app_key)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
@@ -206,7 +218,7 @@ impl SDK {
     /// * `object` - The object to save.
     pub async fn save_object(&self, object: &Object) -> Result<(), Error> {
         let sealed = object.seal(&self.app_key);
-        self.client
+        self.api_client
             .save_object(&self.app_key, &sealed)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
@@ -218,7 +230,7 @@ impl SDK {
     /// # Arguments
     /// * `id` - The id of the object to delete.
     pub async fn delete_object(&self, id: &Hash256) -> Result<(), Error> {
-        self.client
+        self.api_client
             .delete_object(&self.app_key, id)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
@@ -233,7 +245,7 @@ impl SDK {
     /// * `object` - The object to share.
     /// * `valid_until` - The time until which the shared URL is valid.
     pub fn share_object(&self, object: &Object, valid_until: DateTime<Utc>) -> Result<Url, Error> {
-        self.client
+        self.api_client
             .shared_object_url(&self.app_key, object, valid_until)
             .map_err(|e| Error::App(format!("{e:?}")))
     }
@@ -246,7 +258,7 @@ impl SDK {
         let share_url = share_url
             .into_url()
             .map_err(|e| Error::App(format!("{e:?}")))?;
-        self.client
+        self.api_client
             .shared_object(share_url)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
@@ -264,13 +276,13 @@ impl SDK {
             })
             .collect();
 
-        self.client
+        self.api_client
             .pin_slabs(&self.app_key, slabs)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
         let object: Object = shared_object.into();
-        self.client
+        self.api_client
             .save_object(&self.app_key, &object.seal(&self.app_key))
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
@@ -279,9 +291,184 @@ impl SDK {
 
     /// Retrieves a pinned slab from the indexer by its id.
     pub async fn slab(&self, id: &Hash256) -> Result<PinnedSlab, Error> {
-        self.client
+        self.api_client
             .slab(&self.app_key, id)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use bytes::{Bytes, BytesMut};
+    use sia::rhp::{self, HostPrices};
+    use sia::signing::{PublicKey, Signature};
+    use sia::types::Currency;
+    use sia::types::v2::NetAddress;
+    use std::collections::HashMap;
+    use std::io::Cursor;
+    use std::sync::RwLock;
+
+    use super::*;
+
+    struct NoOpPinner {}
+
+    impl Pinner for Arc<NoOpPinner> {
+        async fn pin_slab(
+            &self,
+            _: &PrivateKey,
+            params: SlabPinParams,
+        ) -> Result<Hash256, app_client::Error> {
+            let s = Slab {
+                min_shards: params.min_shards,
+                encryption_key: params.encryption_key,
+                sectors: params.sectors,
+                length: 0,
+                offset: 0,
+            };
+            Ok(s.digest())
+        }
+
+        async fn save_object(
+            &self,
+            _: &PrivateKey,
+            _: &SealedObject,
+        ) -> Result<(), app_client::Error> {
+            Ok(())
+        }
+    }
+
+    struct TestRHP4Client {
+        sectors: RwLock<HashMap<PublicKey, HashMap<Hash256, Bytes>>>,
+    }
+
+    impl TestRHP4Client {
+        fn new() -> Self {
+            Self {
+                sectors: RwLock::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl RHP4Client for Arc<TestRHP4Client> {
+        async fn host_prices(&self, _: PublicKey, _: bool) -> Result<HostPrices, rhp4::Error> {
+            Ok(HostPrices {
+                contract_price: Currency::zero(),
+                collateral: Currency::zero(),
+                ingress_price: Currency::zero(),
+                egress_price: Currency::zero(),
+                storage_price: Currency::zero(),
+                free_sector_price: Currency::zero(),
+                tip_height: 0,
+                signature: Signature::default(),
+                valid_until: Utc::now() + chrono::Duration::days(1),
+            })
+        }
+
+        async fn write_sector(
+            &self,
+            host_key: PublicKey,
+            _: &PrivateKey,
+            sector: Bytes,
+        ) -> Result<Hash256, rhp4::Error> {
+            let mut sectors = self.sectors.write().unwrap();
+            let host_sectors = sectors.entry(host_key).or_default();
+            let sector_root = rhp::sector_root(&sector);
+            host_sectors.insert(sector_root, sector);
+            Ok(sector_root)
+        }
+
+        async fn read_sector(
+            &self,
+            host_key: PublicKey,
+            _: &PrivateKey,
+            root: Hash256,
+            offset: usize,
+            length: usize,
+        ) -> Result<Bytes, rhp4::Error> {
+            let sectors = self.sectors.read().unwrap();
+            let host_sectors = sectors
+                .get(&host_key)
+                .ok_or_else(|| rhp4::Error::Transport("host not found".to_string()))?;
+            let sector = host_sectors
+                .get(&root)
+                .cloned()
+                .ok_or_else(|| rhp4::Error::Transport("sector not found".to_string()))?;
+            Ok(sector.slice(offset..offset + length))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upload_download() {
+        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
+        let noop_pinner = Arc::new(NoOpPinner {});
+        let transport = Arc::new(TestRHP4Client::new());
+        let hosts = Hosts::new();
+
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: sia::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                })
+                .collect(),
+        );
+
+        let uploader = Uploader::new(
+            noop_pinner.clone(),
+            hosts.clone(),
+            transport.clone(),
+            app_key.clone(),
+        );
+        let downloader = Downloader::new(hosts.clone(), transport.clone(), app_key.clone());
+
+        let input: Bytes = Bytes::from("Hello, world!");
+
+        let object = uploader
+            .upload(
+                CancellationToken::new(),
+                Cursor::new(input.clone()),
+                UploadOptions::default(),
+            )
+            .await
+            .expect("upload to complete");
+
+        assert_eq!(object.slabs().len(), 1);
+        assert_eq!(object.size(), 13);
+
+        let mut output = BytesMut::zeroed(object.size() as usize);
+        downloader
+            .download(
+                Cursor::new(&mut output[..]),
+                &object,
+                DownloadOptions::default(),
+            )
+            .await
+            .expect("download to complete");
+
+        assert_eq!(output.freeze(), input.clone());
+
+        let range = 7..13;
+        let mut output = BytesMut::zeroed(range.end - range.start);
+        downloader
+            .download(
+                Cursor::new(&mut output[..]),
+                &object,
+                DownloadOptions {
+                    offset: range.start,
+                    length: Some(range.end - range.start),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("download to complete");
+
+        assert_eq!(output.freeze(), input.slice(range));
     }
 }
