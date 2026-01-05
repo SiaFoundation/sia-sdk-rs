@@ -42,7 +42,7 @@ impl Slab {
     /// creates a unique identifier for the resulting slab to be referenced by hashing
     /// its contents, excluding the host key, length, and offset.
     pub fn digest(&self) -> Hash256 {
-        let mut state = blake2b_simd::Params::new().hash_length(32).to_state();
+        let mut state = Blake2b256::new();
 
         (self.min_shards as u64).encode(&mut state).unwrap();
         self.encryption_key.encode(&mut state).unwrap();
@@ -235,55 +235,36 @@ pub struct ObjectEvent {
 pub struct Object {
     data_key: EncryptionKey, // not public to avoid accidental exposure
 
-    pub slabs: Vec<Slab>,
+    slabs: Vec<Slab>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+
     pub metadata: Vec<u8>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl Object {
-    /// Returns the total size of the object by summing the lengths of its slabs.
-    pub fn size(&self) -> u64 {
-        self.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
-    }
-
-    /// Returns a reader that encrypts data on-the-fly using the object's encryption key.
-    pub fn reader<R: AsyncRead + Unpin>(&self, r: R, offset: usize) -> CipherReader<R> {
-        CipherReader::new(r, self.data_key.clone(), offset)
-    }
-
-    /// Returns a writer that encrypts data on-the-fly using the object's encryption key.
-    pub fn writer<W: AsyncWrite + Unpin>(&self, w: W, offset: usize) -> CipherWriter<W> {
-        CipherWriter::new(w, self.data_key.clone(), offset)
-    }
-
-    /// Returns the object's encryption key.
-    ///
-    /// Be careful when using this function to avoid accidental exposure.
-    pub(crate) fn data_key(&self) -> &EncryptionKey {
-        &self.data_key
-    }
-}
-
-impl Default for Object {
-    fn default() -> Self {
-        let mut data_key: [u8; 32] = [0; 32];
-        OsRng.try_fill_bytes(&mut data_key).unwrap();
-        let mut meta_key: [u8; 32] = [0; 32];
-        OsRng.try_fill_bytes(&mut meta_key).unwrap();
-        Object {
-            data_key: EncryptionKey::from(data_key),
-            slabs: Vec::new(),
-            metadata: Vec::new(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
 }
 
 impl Object {
     pub fn id(&self) -> Hash256 {
         object_id(&self.slabs)
+    }
+
+    /// Returns the slabs that make up the object.
+    pub fn slabs(&self) -> &[Slab] {
+        &self.slabs
+    }
+
+    /// Returns the creation time of the object.
+    pub fn created_at(&self) -> &DateTime<Utc> {
+        &self.created_at
+    }
+
+    /// Returns the last updated time of the object.
+    pub fn updated_at(&self) -> &DateTime<Utc> {
+        &self.updated_at
+    }
+
+    /// Returns the total size of the object by summing the lengths of its slabs.
+    pub fn size(&self) -> u64 {
+        self.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
     }
 
     pub fn seal(&self, app_key: &PrivateKey) -> SealedObject {
@@ -325,6 +306,43 @@ impl Object {
 
             created_at: self.created_at,
             updated_at: self.updated_at,
+        }
+    }
+
+    pub(crate) fn slabs_mut(&mut self) -> &mut Vec<Slab> {
+        &mut self.slabs
+    }
+
+    /// Returns a reader that encrypts data on-the-fly using the object's encryption key.
+    pub(crate) fn reader<R: AsyncRead + Unpin>(&self, r: R, offset: usize) -> CipherReader<R> {
+        CipherReader::new(r, self.data_key.clone(), offset)
+    }
+
+    /// Returns a writer that encrypts data on-the-fly using the object's encryption key.
+    pub(crate) fn writer<W: AsyncWrite + Unpin>(&self, w: W, offset: usize) -> CipherWriter<W> {
+        CipherWriter::new(w, self.data_key.clone(), offset)
+    }
+
+    /// Returns the object's encryption key.
+    ///
+    /// Be careful when using this function to avoid accidental exposure.
+    pub(crate) fn data_key(&self) -> &EncryptionKey {
+        &self.data_key
+    }
+}
+
+impl Default for Object {
+    fn default() -> Self {
+        let mut data_key: [u8; 32] = [0; 32];
+        OsRng.try_fill_bytes(&mut data_key).unwrap();
+        let mut meta_key: [u8; 32] = [0; 32];
+        OsRng.try_fill_bytes(&mut meta_key).unwrap();
+        Object {
+            data_key: EncryptionKey::from(data_key),
+            slabs: Vec::new(),
+            metadata: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
         }
     }
 }

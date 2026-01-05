@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -48,7 +49,7 @@ pub enum BuilderError {
     Client(#[from] app_client::Error),
 
     #[error("quic error: {0}")]
-    QUIC(#[from] quic::Error),
+    QUIC(#[from] quic::ConnectError),
 
     #[error("mnemonic error: {0}")]
     Mnemonic(#[from] seed::SeedError),
@@ -92,7 +93,7 @@ impl Builder<DisconnectedState> {
         if !connected {
             return Ok(None);
         }
-        let sdk = SDK::new(self.client.clone(), app_key.clone(), tls_config).await?;
+        let sdk = SDK::new(self.client.clone(), Arc::new(app_key.clone()), tls_config).await?;
         Ok(Some(sdk))
     }
 
@@ -175,7 +176,7 @@ impl Builder<ApprovedState> {
         self.client
             .register_app(&app_key, self.state.register_url.clone())
             .await?;
-        SDK::new(self.client, app_key, tls_config).await
+        SDK::new(self.client, Arc::new(app_key), tls_config).await
     }
 }
 

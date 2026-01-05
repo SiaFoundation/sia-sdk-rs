@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Display};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use priority_queue::PriorityQueue;
@@ -180,7 +180,7 @@ struct HostsInner {
 /// It can be safely shared across threads and cloned.
 #[derive(Debug, Clone)]
 pub struct Hosts {
-    inner: Arc<Mutex<HostsInner>>,
+    inner: Arc<RwLock<HostsInner>>,
 }
 
 impl Default for Hosts {
@@ -192,7 +192,7 @@ impl Default for Hosts {
 impl Hosts {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HostsInner {
+            inner: Arc::new(RwLock::new(HostsInner {
                 hosts: HashMap::new(),
                 preferred_hosts: PriorityQueue::new(),
             })),
@@ -200,7 +200,7 @@ impl Hosts {
     }
 
     pub fn addresses(&self, host_key: &PublicKey) -> Option<Vec<NetAddress>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.read().unwrap();
         inner.hosts.get(host_key).cloned()
     }
 
@@ -211,7 +211,7 @@ impl Hosts {
     where
         F: Fn(&H) -> &PublicKey,
     {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.read().unwrap();
         let preferred_hosts = &inner.preferred_hosts;
         hosts.sort_by(|a, b| {
             preferred_hosts
@@ -225,7 +225,7 @@ impl Hosts {
     /// Existing hosts not in the new list are removed, but their metrics are retained
     /// in case they reappear later.
     pub fn update(&self, hosts: Vec<Host>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         inner.hosts.clear();
         for host in hosts {
             inner.hosts.insert(host.public_key, host.addresses);
@@ -237,44 +237,14 @@ impl Hosts {
         }
     }
 
-    /// Records a read RPC sample for the given host.
-    pub fn add_read_sample(&self, host_key: &PublicKey, duration: Duration) {
-        let mut inner = self.inner.lock().unwrap();
-        inner
-            .preferred_hosts
-            .change_priority_by(host_key, |metric| {
-                metric.add_read_sample(duration);
-            });
-    }
-
-    /// Records a write sample for the given host.
-    pub fn add_write_sample(&self, host_key: &PublicKey, duration: Duration) {
-        let mut inner = self.inner.lock().unwrap();
-        inner
-            .preferred_hosts
-            .change_priority_by(host_key, |metric| {
-                metric.add_write_sample(duration);
-            });
-    }
-
-    /// Records a failure for the given host.
-    pub fn add_failure(&self, host_key: &PublicKey) {
-        let mut inner = self.inner.lock().unwrap();
-        inner
-            .preferred_hosts
-            .change_priority_by(host_key, |metric| {
-                metric.add_failure();
-            });
-    }
-
     pub fn available(&self) -> usize {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.read().unwrap();
         inner.hosts.len()
     }
 
     /// Returns a list of all known hosts, sorted by priority.
     pub fn hosts(&self) -> Vec<PublicKey> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.read().unwrap();
         let preferred_hosts = &inner.preferred_hosts;
         let mut hosts = inner.hosts.iter().map(|h| *h.0).collect::<Vec<_>>();
 
@@ -290,6 +260,36 @@ impl Hosts {
     pub fn queue(&self) -> HostQueue {
         let hosts = self.hosts();
         HostQueue::new(hosts)
+    }
+
+    /// Adds a failure for the given host, updating its metrics and priority.
+    pub fn add_failure(&self, host_key: &PublicKey) {
+        let mut inner = self.inner.write().unwrap();
+        inner
+            .preferred_hosts
+            .change_priority_by(host_key, |metric| {
+                metric.add_failure();
+            });
+    }
+
+    /// Adds a read sample for the given host, updating its metrics and priority.
+    pub fn add_read_sample(&self, host_key: &PublicKey, duration: Duration) {
+        let mut inner = self.inner.write().unwrap();
+        inner
+            .preferred_hosts
+            .change_priority_by(host_key, |metric| {
+                metric.add_read_sample(duration);
+            });
+    }
+
+    /// Adds a write sample for the given host, updating its metrics and priority.
+    pub fn add_write_sample(&self, host_key: &PublicKey, duration: Duration) {
+        let mut inner = self.inner.write().unwrap();
+        inner
+            .preferred_hosts
+            .change_priority_by(host_key, |metric| {
+                metric.add_write_sample(duration);
+            });
     }
 }
 
