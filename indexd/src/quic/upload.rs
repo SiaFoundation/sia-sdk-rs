@@ -147,6 +147,7 @@ impl Uploader {
         account_key: PrivateKey,
         data: Bytes,
         shard_index: usize,
+        progress_tx: Option<mpsc::UnboundedSender<()>>,
     ) -> Result<(usize, Sector), UploadError> {
         let (host_key, attempts) = hosts.pop_front()?;
         let mut write_timeout = Self::upload_timeout(attempts); // mutable so that it can be adjusted on retries
@@ -168,6 +169,9 @@ impl Uploader {
                 Some(res) = tasks.join_next() => {
                     match res.unwrap() {
                         Ok(sector) => {
+                            if let Some(progress_tx) = progress_tx {
+                                let _ = progress_tx.send(());
+                            }
                             return Ok((shard_index, sector));
                         }
                         Err(e) => {
@@ -272,6 +276,7 @@ impl Uploader {
                         app_key.clone(),
                         shard.into(),
                         shard_index,
+                        options.shard_uploaded.clone(),
                     ));
                 }
 
@@ -297,13 +302,13 @@ impl Uploader {
                         app_key.clone(),
                         shard.into(),
                         shard_index,
+                        options.shard_uploaded.clone(),
                     ));
                 }
 
                 // wait for all shards to finish uploading
                 // this is done in a separate task to allow preparing the next slab
                 let slab_tx = slab_tx.clone();
-                let progress_tx = options.shard_uploaded.clone();
                 slab_upload_tasks.spawn(async move {
                         let mut slab = Slab {
                             sectors: vec![
@@ -320,12 +325,11 @@ impl Uploader {
                         };
                         let mut remaining_shards = data_shards + parity_shards;
                         while let Some(res) = shard_upload_tasks.join_next().await {
-                            let (shard_index, sector) = match res {
-                                Ok(Ok(s)) => {
-                                    if let Some(chan) = &progress_tx {
-                                        let _ = chan.send(());
-                                    }
-                                    s
+                            match res {
+                                Ok(Ok((shard_index, sector))) => {
+                                    slab.sectors[shard_index] = sector;
+                                    remaining_shards -= 1;
+                                    debug!("slab {slab_index} shard {shard_index} uploaded ({remaining_shards} remaining)");
                                 },
                                 Ok(Err(e)) => {
                                     slab_tx.send(Err(e)).unwrap();
@@ -336,9 +340,6 @@ impl Uploader {
                                     return;
                                 }
                             };
-                            slab.sectors[shard_index] = sector;
-                            remaining_shards -= 1;
-                            debug!("slab {slab_index} shard {shard_index} uploaded ({remaining_shards} remaining)");
                         }
                         // send the completed slab to the channel
                         slab_tx.send(Ok((slab_index, slab))).unwrap();
