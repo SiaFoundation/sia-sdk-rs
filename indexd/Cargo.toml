@@ -14,7 +14,7 @@ name = "indexd"
 path = "src/lib.rs"
 
 [dependencies]
-reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["charset", "http2", "json"] }
 rustls = { version = "0.23.35", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 serde = "1.0.228"
 serde_json = "1.0.148"
@@ -25,7 +25,7 @@ rand = "0.9.2"
 blake2b_simd = "1.0.3"
 url = "2.5.7"
 log = "0.4.29"
-# avoid rustls-platform-verifier until https://github.com/rustls/rustls-platform-verifier/issues/115 is resolved 
+# avoid rustls-platform-verifier until https://github.com/rustls/rustls-platform-verifier/issues/115 is resolved
 quinn = { version = "0.11.9", default-features = false, features = ["bloom", "log", "runtime-tokio", "rustls-ring"] }
 bytes = "1.11.0"
 futures = "0.3.31"
