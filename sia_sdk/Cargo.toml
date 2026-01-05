@@ -36,7 +36,7 @@ serde_json = "1.0.148"
 sha2 = "0.10.9"
 sia-sdk-derive = { version = "0.0.6", path = "../sia_derive" }
 thiserror = "2.0.17"
-tokio = { version = "1.48.0", features = [
+tokio = { version = "1.49.0", features = [
     "macros",
     "rt",
     "sync",
@@ -48,7 +48,7 @@ zeroize = { version = "1.8.1", features = ["zeroize_derive"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
-tokio = { version = "1.48.0", features = [
+tokio = { version = "1.49.0", features = [
     "macros",
     "rt-multi-thread",
     "sync",
