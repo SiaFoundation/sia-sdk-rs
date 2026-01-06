@@ -111,6 +111,7 @@ pub struct ClientInner {
 
     open_conns: RwLock<HashMap<PublicKey, Connection>>,
     cached_prices: RwLock<HashMap<PublicKey, HostPrices>>,
+    cached_tokens: RwLock<HashMap<PublicKey, AccountToken>>,
 }
 
 impl ClientInner {
@@ -234,6 +235,21 @@ impl ClientInner {
         }
     }
 
+    fn account_token(&self, account_key: &PrivateKey, host_key: PublicKey) -> AccountToken {
+        let cached_token = {
+            let cache = self.cached_tokens.read().unwrap();
+            cache.get(&host_key).cloned()
+        };
+        match cached_token {
+            Some(token) if token.valid_until > Utc::now() => token.clone(),
+            _ => {
+                let token = AccountToken::new(account_key, host_key);
+                self.cached_tokens.write().unwrap().insert(host_key, token.clone());
+                token
+            },
+        }
+    }
+
     async fn connect_to_host(
         &self,
         socket_addr: SocketAddr,
@@ -323,7 +339,7 @@ impl ClientInner {
             .host_stream(host_key)
             .await
             .map_err(|e| RHP4Error::Transport(e.to_string()))?;
-        let token = AccountToken::new(account_key, host_key);
+        let token = self.account_token(account_key, host_key);
         let resp = RPCWriteSector::send_request(stream, prices, token, sector)
             .await?
             .complete()
@@ -344,7 +360,7 @@ impl ClientInner {
             .host_stream(host_key)
             .await
             .map_err(|e| RHP4Error::Transport(e.to_string()))?;
-        let token = AccountToken::new(account_key, host_key);
+        let token = self.account_token(account_key, host_key);
         let resp = RPCReadSector::send_request(stream, prices, token, root, offset, length)
             .await?
             .complete()
@@ -433,6 +449,7 @@ impl Client {
                 client_config,
                 open_conns: RwLock::new(HashMap::new()),
                 cached_prices: RwLock::new(HashMap::new()),
+                cached_tokens: RwLock::new(HashMap::new()),
             }),
         };
         client.inner.init_quic_endpoints()?;
