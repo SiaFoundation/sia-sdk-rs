@@ -244,9 +244,12 @@ impl ClientInner {
             Some(token) if token.valid_until > Utc::now() => token.clone(),
             _ => {
                 let token = AccountToken::new(account_key, host_key);
-                self.cached_tokens.write().unwrap().insert(host_key, token.clone());
+                self.cached_tokens
+                    .write()
+                    .unwrap()
+                    .insert(host_key, token.clone());
                 token
-            },
+            }
         }
     }
 
