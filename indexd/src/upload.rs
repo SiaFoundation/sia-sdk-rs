@@ -106,10 +106,10 @@ pub(crate) struct Uploader<T: RHP4Client, P: Pinner> {
     transport: T,
 }
 
-impl<T: RHP4Client, P: Pinner> Uploader<T, P>
+impl<T, P> Uploader<T, P>
 where
-    T: Send + Sync + Clone + 'static,
-    P: Send + Sync + Clone + 'static,
+    T: RHP4Client + Send + Sync + Clone + 'static,
+    P: Pinner + Send + Sync + Clone + 'static,
 {
     pub fn new(pinner: P, hosts: Hosts, transport: T, app_key: Arc<PrivateKey>) -> Self {
         Uploader {
