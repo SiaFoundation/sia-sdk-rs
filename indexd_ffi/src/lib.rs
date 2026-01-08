@@ -649,7 +649,7 @@ impl SDK {
     /// Initiates a download of the data referenced by the object, starting at `offset` and reading `length` bytes.
     pub async fn download(
         &self,
-        w: Arc<dyn Write>,
+        w: Arc<dyn Writer>,
         object: Arc<PinnedObject>,
         options: DownloadOptions,
     ) -> Result<(), Error> {
