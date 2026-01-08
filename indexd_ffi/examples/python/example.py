@@ -1,7 +1,7 @@
 import asyncio
 import json
 from sys import stdin
-from indexd_ffi import uniffi_set_event_loop, generate_recovery_phrase, AppMeta, Builder, Reader, Write, UploadOptions, DownloadOptions, set_logger, Logger
+from indexd_ffi import uniffi_set_event_loop, generate_recovery_phrase, AppMeta, Builder, Reader, Writer, UploadOptions, DownloadOptions, set_logger, Logger
 from logging import fatal
 from datetime import datetime, timedelta, timezone
 
@@ -29,7 +29,7 @@ class BytesReader(Reader):
         return self.buffer.read(self.chunk_size)
 
 
-class BytesWriter(Write):
+class BytesWriter(Writer):
     def __init__(self):
         self.buffer = BytesIO()
 

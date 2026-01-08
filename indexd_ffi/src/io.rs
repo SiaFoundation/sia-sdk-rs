@@ -6,7 +6,6 @@ use std::task::{Context, Poll, ready};
 use bytes::Bytes;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::StreamReader;
@@ -56,15 +55,15 @@ pub(crate) fn adapt_ffi_reader(reader: Arc<dyn Reader>) -> impl AsyncRead + Unpi
     tokio::spawn(async move {
         loop {
             match reader.read().await {
-                Ok(data) if data.is_empty() => return,
+                Ok(data) if data.is_empty() => break,
                 Ok(data) => {
                     if tx.send(Ok(Bytes::from(data))).await.is_err() {
-                        return;
+                        break;
                     }
                 }
                 Err(e) => {
                     let _ = tx.send(Err(e)).await;
-                    return;
+                    break;
                 }
             }
         }
@@ -76,13 +75,9 @@ pub(crate) fn adapt_ffi_reader(reader: Arc<dyn Reader>) -> impl AsyncRead + Unpi
 /// A foreign writer that can be used to transfer data across FFI boundaries.
 /// The data may be sent in multiple chunks. The implementation should handle
 /// buffering and writing the data as it is received.
-///
-/// Implementations should treat a call to `write` with an empty chunk as EoF.
-/// If an error is returned by `write`, the writer will be closed and no further
-/// calls will be made.
 #[uniffi::export(with_foreign)]
 #[async_trait::async_trait]
-pub trait Write: Send + Sync {
+pub trait Writer: Send + Sync {
     async fn write(&self, data: Vec<u8>) -> Result<(), IOError>;
 }
 
@@ -129,15 +124,14 @@ impl AsyncWrite for FFIWriter {
     }
 }
 
-pub(crate) fn adapt_ffi_writer(writer: Arc<dyn Write>) -> FFIWriter {
+pub(crate) fn adapt_ffi_writer(writer: Arc<dyn Writer>) -> FFIWriter {
     let (tx, mut rx) = mpsc::channel::<Bytes>(8);
-    spawn(async move {
+    tokio::spawn(async move {
         while let Some(buf) = rx.recv().await {
             if writer.write(buf.to_vec()).await.is_err() {
                 return;
             }
         }
-        let _ = writer.write(vec![]).await; // signal EOF
     });
     FFIWriter {
         sender: PollSender::new(tx),
