@@ -25,10 +25,8 @@ pub use upload::*;
 mod download;
 pub use download::*;
 
-#[cfg(feature = "mock")]
+#[cfg(any(test, feature = "mock"))]
 pub mod mock;
-#[cfg(not(feature = "mock"))]
-mod mock;
 
 mod object_encryption;
 mod slabs;
