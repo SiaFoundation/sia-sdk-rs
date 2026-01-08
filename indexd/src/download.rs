@@ -45,7 +45,7 @@ pub enum DownloadError {
     InvalidSlab(String),
 
     #[error("rhp4 error: {0}")]
-    RHP4(#[from] crate::rhp4::Error),
+    Rhp4(#[from] crate::rhp4::Error),
 
     #[error("custom error: {0}")]
     Custom(String),

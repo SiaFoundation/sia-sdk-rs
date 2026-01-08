@@ -74,24 +74,24 @@ async def main():
     print("Connected to indexd")
 
     start = datetime.now(timezone.utc)
-    data = b'hello, world!'
-    reader = BytesReader(data)
-    print("starting upload")
-    object = await sdk.upload(reader, UploadOptions())
+    upload = await sdk.upload_packed(UploadOptions())
+
+    for i in range(10):
+        data = f'hello, world {i}!'
+        reader = BytesReader(data.encode())
+        size = await upload.add(reader)
+        rem = await upload.remaining()
+        print(f"upload {i} added {size} bytes ({rem} remaining)")
+
+    objects = await upload.finalize()
     elapsed = datetime.now(timezone.utc) - start
-    print(f"Upload finished {object.size()} in {elapsed}")
-    await sdk.pin_object(object)
-    
-    print("pinned", object.id())
+    print(f"Upload finished {len(objects)} objects in {elapsed}")
+
 
     start = datetime.now(timezone.utc)
     writer = BytesWriter()
-    await sdk.download(writer, object, DownloadOptions())
+    await sdk.download(writer, objects[len(objects)-1], DownloadOptions())
     elapsed = datetime.now(timezone.utc) - start
-    
-    if writer.get_data() != data:
-        print("data mismatch", data, writer.get_data())
-
-    print(f"Download finished {len(writer.get_data())} bytes in {elapsed}")
+    print(f"Downloaded object {objects[len(objects)-1].id} with {writer.get_data()} bytes in {elapsed}")
 
 asyncio.run(main())

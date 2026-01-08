@@ -84,8 +84,11 @@ pub enum UploadError {
     #[error("buffer closed")]
     Closed,
 
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
+
     #[error("{0}")]
-    Upload(#[from] indexd::Error),
+    Upload(#[from] indexd::UploadError),
 
     #[error("task error: {0}")]
     JoinError(#[from] tokio::task::JoinError),
@@ -98,10 +101,10 @@ pub enum UploadError {
 #[uniffi(flat_error)]
 pub enum DownloadError {
     #[error("{0}")]
-    SDK(#[from] indexd::Error),
+    Download(#[from] indexd::DownloadError),
 
-    #[error("cancelled")]
-    Cancelled,
+    #[error("task error: {0}")]
+    JoinError(#[from] tokio::task::JoinError),
 }
 
 /// Metadata about an application connecting to the indexer.
@@ -552,6 +555,67 @@ impl From<indexd::app_client::Account> for Account {
     }
 }
 
+/// A packed upload allows multiple objects to be uploaded together in a single upload. This can be more
+/// efficient than uploading each object separately if the size of the object is less than the minimum
+/// slab size.
+#[derive(uniffi::Object)]
+pub struct PackedUpload {
+    packed_upload: Arc<tokio::sync::Mutex<Option<indexd::PackedUpload>>>,
+}
+
+#[uniffi::export]
+impl PackedUpload {
+    /// Returns the number of bytes remaining until reaching the optimal
+    /// packed size. Adding objects larger than this will start a new slab.
+    /// To minimize padding, prioritize objects that fit within the remaining
+    /// size.
+    pub async fn remaining(&self) -> Result<u64, UploadError> {
+        let packed_upload = self.packed_upload.clone();
+        spawn(async move {
+            let mut guard = packed_upload.lock().await;
+            let packed_upload = guard.as_mut().ok_or(UploadError::Closed)?;
+            Ok(packed_upload.remaining())
+        })
+        .await?
+    }
+
+    /// Adds a new object to the upload. The data will be read until EOF and packed into
+    /// the upload. The resulting object will contain the metadata needed to download the object. The caller
+    /// must call [finalize](Self::finalize) to get the resulting objects after all objects have been added.
+    pub async fn add(&self, reader: Arc<dyn Reader>) -> Result<u64, UploadError> {
+        let packed_upload = self.packed_upload.clone();
+        spawn(async move {
+            let mut guard = packed_upload.lock().await;
+            let packed_upload = guard.as_mut().ok_or(UploadError::Closed)?;
+            let size = packed_upload.add(adapt_ffi_reader(reader)).await?;
+            Ok(size)
+        })
+        .await?
+    }
+
+    /// Finalizes the upload and returns the resulting objects. This will wait for all readers
+    /// to finish and all slabs to be uploaded before returning. The resulting objects will contain the metadata needed to download the objects.
+    ///
+    /// The caller must pin the resulting objects to the indexer when ready.
+    pub async fn finalize(&self) -> Result<Vec<Arc<PinnedObject>>, UploadError> {
+        let packed_upload = self.packed_upload.clone();
+        spawn(async move {
+            let mut guard = packed_upload.lock().await;
+            let packed_upload = guard.take().ok_or(UploadError::Closed)?;
+            let objects = packed_upload.finalize().await?;
+            Ok(objects
+                .into_iter()
+                .map(|o| {
+                    Arc::new(PinnedObject {
+                        inner: Arc::new(Mutex::new(o)),
+                    })
+                })
+                .collect())
+        })
+        .await?
+    }
+}
+
 /// Provides options for an upload operation.
 #[derive(uniffi::Record)]
 pub struct UploadOptions {
@@ -594,6 +658,33 @@ impl SDK {
     /// it safely.
     pub fn app_key(&self) -> AppKey {
         AppKey::from(self.inner.app_key().clone())
+    }
+
+    /// Creates a new packed upload. This allows multiple objects to be packed together
+    /// for more efficient uploads. The returned `PackedUpload` can be used to add objects to the upload, and then finalized to get the resulting objects.
+    ///
+    /// # Arguments
+    /// * `options` - The [UploadOptions] to use for the upload.
+    ///
+    /// # Returns
+    /// A [PackedUpload] that can be used to add objects and finalize the upload.
+    pub async fn upload_packed(&self, options: UploadOptions) -> PackedUpload {
+        let sdk = self.inner.clone();
+        spawn(async move {
+            // this needs to be in a spawn to ensure a tokio runtime is available since `upload_packed` spawns a task
+            PackedUpload {
+                packed_upload: Arc::new(tokio::sync::Mutex::new(Some(sdk.upload_packed(
+                    indexd::UploadOptions {
+                        max_inflight: options.max_inflight as usize,
+                        data_shards: options.data_shards,
+                        parity_shards: options.parity_shards,
+                        shard_uploaded: None,
+                    },
+                )))),
+            }
+        })
+        .await
+        .unwrap()
     }
 
     /// Uploads data to the Sia network and pins it to the indexer
@@ -652,7 +743,7 @@ impl SDK {
         w: Arc<dyn Writer>,
         object: Arc<PinnedObject>,
         options: DownloadOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<(), DownloadError> {
         const CHUNK_SIZE: usize = 1 << 19; // 512KiB
         let object = object.object();
         let object_size = object.size();
