@@ -1,7 +1,7 @@
 import asyncio
 import json
 from sys import stdin
-from indexd_ffi import generate_recovery_phrase, AppMeta, Builder, UploadOptions, DownloadOptions, set_logger, Logger
+from indexd_ffi import uniffi_set_event_loop, generate_recovery_phrase, AppMeta, Builder, Reader, Write, UploadOptions, DownloadOptions, set_logger, Logger
 from logging import fatal
 from datetime import datetime, timedelta, timezone
 
@@ -18,8 +18,31 @@ class PrintLogger(Logger):
     def error(self, msg):
         print("ERROR", msg)
 
+from io import BytesIO
+
+class BytesReader(Reader):
+    def __init__(self, data: bytes, chunk_size: int = 65536):
+        self.buffer = BytesIO(data)
+        self.chunk_size = chunk_size
+
+    async def read(self) -> bytes:
+        return self.buffer.read(self.chunk_size)
+
+
+class BytesWriter(Write):
+    def __init__(self):
+        self.buffer = BytesIO()
+
+    async def write(self, data: bytes) -> None:
+        if len(data) > 0:
+            self.buffer.write(data)
+
+    def get_data(self) -> bytes:
+        return self.buffer.getvalue()
+
 set_logger(PrintLogger(), "debug")
 async def main():
+    uniffi_set_event_loop(asyncio.get_running_loop()) # type: ignore[arg-type]
     app_id = b'\x01' * 32
     
     builder = Builder("https://app.sia.storage")
@@ -51,32 +74,24 @@ async def main():
     print("Connected to indexd")
 
     start = datetime.now(timezone.utc)
-    writer = await sdk.upload(UploadOptions(
-        metadata=json.dumps({"example": "value"}).encode(),
-    ))
+    data = b'hello, world!'
+    reader = BytesReader(data)
     print("starting upload")
-    wrote_data = b'hello, world!'
-    await writer.write(wrote_data)
-    print("Wrote", len(wrote_data), "bytes")
-    obj = await writer.finalize()
+    object = await sdk.upload(reader, UploadOptions())
     elapsed = datetime.now(timezone.utc) - start
-    print(f"Upload finished {obj.size()} in {elapsed}")
-
-    sealed = obj.seal(app_key)
-    print("sealed:", sealed.id, sealed.data_signature)
+    print(f"Upload finished {object.size()} in {elapsed}")
+    await sdk.pin_object(object)
+    
+    print("pinned", object.id())
 
     start = datetime.now(timezone.utc)
-    reader = await sdk.download(obj, DownloadOptions())
-    read_data = b''
-    while True:
-        chunk = await reader.read_chunk()
-        if not chunk:
-            break
-        read_data += chunk
-
-    if wrote_data != read_data:
-        print("data mismatch", wrote_data, read_data)
+    writer = BytesWriter()
+    await sdk.download(writer, object, DownloadOptions())
     elapsed = datetime.now(timezone.utc) - start
-    print(f"Download finished {len(read_data)} bytes in {elapsed}")
+    
+    if writer.get_data() != data:
+        print("data mismatch", data, writer.get_data())
+
+    print(f"Download finished {len(writer.get_data())} bytes in {elapsed}")
 
 asyncio.run(main())

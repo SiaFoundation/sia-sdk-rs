@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::DecryptError;
 use crate::slabs::Sector;
-use crate::{Object, PinnedSlab, Pinner, SealedObject, SharedObject, Slab};
+use crate::{Object, PinnedSlab, SealedObject, Slab};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use sia::types::v2::Protocol;
@@ -562,7 +562,7 @@ impl Client {
     /// # Returns
     /// A tuple with the object metadata and encryption key to decrypt
     /// the user metadata.
-    pub async fn shared_object(&self, mut share_url: Url) -> Result<SharedObject, Error> {
+    pub async fn shared_object(&self, mut share_url: Url) -> Result<Object, Error> {
         let encryption_key = match share_url.fragment() {
             Some(fragment) => {
                 let fragment = match fragment.strip_prefix("encryption_key=") {
@@ -587,9 +587,10 @@ impl Client {
         )
         .await?;
 
-        Ok(SharedObject::new(
+        Ok(Object::new(
             encryption_key,
             shared_object.slabs.clone(),
+            Vec::new(),
         ))
     }
 
@@ -609,20 +610,6 @@ impl Client {
             (QUERY_PARAM_CREDENTIAL, URL_SAFE.encode(public_key)),
             (QUERY_PARAM_SIGNATURE, URL_SAFE.encode(signature.as_ref())),
         ]
-    }
-}
-
-impl Pinner for Client {
-    async fn pin_slab(
-        &self,
-        app_key: &PrivateKey,
-        params: SlabPinParams,
-    ) -> Result<Hash256, Error> {
-        self.pin_slab(app_key, params).await
-    }
-
-    async fn save_object(&self, app_key: &PrivateKey, object: &SealedObject) -> Result<(), Error> {
-        self.save_object(app_key, object).await
     }
 }
 

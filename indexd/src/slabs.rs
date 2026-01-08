@@ -220,10 +220,9 @@ impl SealedObject {
 }
 
 /// An ObjectEvent represents an object and whether it was deleted or not.
-#[serde_as]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectEvent {
-    pub key: Hash256,
+    pub id: Hash256,
     pub deleted: bool,
     pub updated_at: DateTime<Utc>,
     pub object: Option<Object>,
@@ -243,6 +242,16 @@ pub struct Object {
 }
 
 impl Object {
+    pub(crate) fn new(data_key: EncryptionKey, slabs: Vec<Slab>, metadata: Vec<u8>) -> Self {
+        Object {
+            data_key,
+            slabs,
+            metadata,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
     pub fn id(&self) -> Hash256 {
         object_id(&self.slabs)
     }
@@ -340,63 +349,6 @@ impl Default for Object {
         Object {
             data_key: EncryptionKey::from(data_key),
             slabs: Vec::new(),
-            metadata: Vec::new(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-}
-
-/// A SharedObject is an object that can be shared with others. It contains the encryption key
-/// needed to decrypt the data, as well as the slabs that make up the object.
-///
-/// It has no public fields to avoid corruption of the internal state.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SharedObject {
-    data_key: EncryptionKey,
-    slabs: Vec<Slab>,
-}
-
-impl SharedObject {
-    pub fn new(encryption_key: EncryptionKey, slabs: Vec<Slab>) -> Self {
-        SharedObject {
-            data_key: encryption_key,
-            slabs,
-        }
-    }
-
-    pub fn slabs(&self) -> &Vec<Slab> {
-        &self.slabs
-    }
-
-    /// Computes the total size of the object by summing the lengths of its slabs.
-    pub fn size(&self) -> u64 {
-        self.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
-    }
-
-    /// Returns a writer that decrypts data on-the-fly using the object's encryption key.
-    pub fn writer<W: AsyncWrite + Unpin>(&self, w: W, offset: usize) -> CipherWriter<W> {
-        CipherWriter::new(w, self.data_key.clone(), offset)
-    }
-
-    /// Converts the SharedObject into an Object that can be saved to an indexer.
-    /// The slabs must be pinned before the object can be saved.
-    pub fn object(&self) -> Object {
-        Object {
-            data_key: self.data_key.clone(),
-            slabs: self.slabs.clone(),
-            metadata: Vec::new(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-}
-
-impl From<SharedObject> for Object {
-    fn from(val: SharedObject) -> Self {
-        Object {
-            data_key: val.data_key,
-            slabs: val.slabs.clone(),
             metadata: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

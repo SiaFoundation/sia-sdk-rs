@@ -2,6 +2,7 @@ use crate::rhp::{SECTOR_SIZE, SEGMENT_SIZE};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use thiserror::Error;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -85,24 +86,18 @@ impl ErasureCoder {
         Ok(())
     }
 
-    /// read_shards reads data from the given reader into a vector of shards.
-    pub async fn read_shards<R: AsyncRead + Unpin>(
-        &self,
+    async fn read_slab_shards<R: AsyncRead + Unpin>(
         r: &mut R,
-    ) -> Result<(Vec<Vec<u8>>, u32)> {
-        // allocate memory for shards
-        let mut shards: Vec<Vec<u8>> = Vec::with_capacity(self.data_shards);
-        for _ in 0..self.data_shards + self.parity_shards {
-            shards.push(vec![0u8; SECTOR_SIZE]);
-        }
-
+        data_shards: usize,
+        shards: &mut [Vec<u8>],
+    ) -> Result<usize> {
         // limit total read size to the size of the slab's data shards
-        let mut r = r.take(self.data_shards as u64 * SECTOR_SIZE as u64);
+        let mut r = r.take(data_shards as u64 * SECTOR_SIZE as u64);
         let mut data_size = 0;
         for off in (0..SECTOR_SIZE).step_by(SEGMENT_SIZE) {
             let start = off;
             let end = off + SEGMENT_SIZE;
-            for shard in &mut shards[..self.data_shards].iter_mut() {
+            for shard in &mut shards[..data_shards].iter_mut() {
                 let segment = &mut shard[start..end];
                 let mut bytes_read = 0;
                 while bytes_read < SEGMENT_SIZE {
@@ -113,14 +108,57 @@ impl ErasureCoder {
                     // possible implementation of the Read trait.
                     let n = r.read(&mut segment[bytes_read..]).await?;
                     if n == 0 {
-                        return Ok((shards, data_size));
+                        return Ok(data_size);
                     }
                     bytes_read += n;
-                    data_size += n as u32;
+                    data_size += n;
                 }
             }
         }
-        Ok((shards, data_size))
+        Ok(data_size)
+    }
+
+    // Reads data from the given reader into a vector of shards, returning a stream of shard batches.
+    // Each batch contains the shards for a single slab, along with the total size of the data read.
+    pub fn shard_reader<R: AsyncRead + Send + Unpin + 'static>(
+        &self,
+        mut r: R,
+    ) -> mpsc::Receiver<Result<(Vec<Vec<u8>>, usize)>> {
+        let (tx, rx) = mpsc::channel(1);
+        let data_shards = self.data_shards;
+        let total_shards = self.data_shards + self.parity_shards;
+        tokio::spawn(async move {
+            loop {
+                let mut shards = vec![vec![0u8; SECTOR_SIZE]; total_shards];
+                match Self::read_slab_shards(&mut r, data_shards, &mut shards).await {
+                    Ok(size) => {
+                        if size == 0 {
+                            break;
+                        }
+                        if tx.send(Ok((shards, size))).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
+                };
+            }
+        });
+        rx
+    }
+
+    /// read_shards reads data from the given reader into a vector of shards.
+    pub async fn read_shards<R: AsyncRead + Unpin>(
+        &self,
+        r: &mut R,
+    ) -> Result<(Vec<Vec<u8>>, u32)> {
+        let total_shards = self.data_shards + self.parity_shards;
+        let mut shards = vec![vec![0u8; SECTOR_SIZE]; total_shards];
+        let mut r = r.take(self.data_shards as u64 * SECTOR_SIZE as u64);
+        let slab_size = Self::read_slab_shards(&mut r, self.data_shards, &mut shards).await?;
+        Ok((shards, slab_size as u32))
     }
 }
 

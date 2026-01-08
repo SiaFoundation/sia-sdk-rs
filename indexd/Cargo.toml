@@ -40,6 +40,15 @@ hkdf = "0.12.4"
 base64 = "0.22.1"
 
 [dev-dependencies]
+criterion = { version = "0.8.1", features = ["async_tokio"] }
 httptest = "0.16.3"
 rustls-platform-verifier = "0.6.2"
 tokio = { version = "1.49.0", features = ["macros"] }
+
+[features]
+mock = []
+
+[[bench]]
+name = "upload"
+harness = false
+required-features = ["mock"]
