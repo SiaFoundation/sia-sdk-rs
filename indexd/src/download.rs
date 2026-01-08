@@ -16,7 +16,7 @@ use tokio::time::error::Elapsed;
 use tokio::time::sleep;
 
 use crate::rhp4::RHP4Client;
-use crate::{Hosts, Object, Sector, SharedObject, Slab};
+use crate::{Hosts, Object, Sector};
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
@@ -54,8 +54,8 @@ pub enum DownloadError {
 pub struct DownloadOptions {
     /// Maximum number of concurrent sector downloads.
     pub max_inflight: usize,
-    pub offset: usize,
-    pub length: Option<usize>,
+    pub offset: u64,
+    pub length: Option<u64>,
 }
 
 impl Default for DownloadOptions {
@@ -77,8 +77,8 @@ pub(crate) struct Downloader<T: RHP4Client> {
 
 struct SectorDownloadTask {
     sector: Sector,
-    offset: usize,
-    limit: usize,
+    offset: u64,
+    length: u64,
     index: usize,
 }
 
@@ -100,8 +100,8 @@ where
                 task.sector.host_key,
                 &account_key,
                 task.sector.root,
-                task.offset,
-                task.limit,
+                task.offset as usize,
+                task.length as usize,
             )
             .await?;
         Ok((task.index, data.to_vec()))
@@ -126,8 +126,8 @@ where
         encryption_key: &EncryptionKey,
         sectors: &[Sector],
         min_shards: u8,
-        offset: usize,
-        limit: usize,
+        offset: u64,
+        length: u64,
         max_inflight: usize,
     ) -> Result<Vec<Option<Vec<u8>>>, DownloadError> {
         if sectors.len() < min_shards as usize {
@@ -145,7 +145,7 @@ where
             .map(|(index, s)| SectorDownloadTask {
                 sector: s.clone(),
                 offset,
-                limit,
+                length,
                 index,
             })
             .collect::<Vec<_>>();
@@ -181,7 +181,7 @@ where
                         Ok((index, mut data)) => {
                             let encryption_key = encryption_key.clone();
                             let data = spawn_blocking(move || {
-                                encrypt_shard(&encryption_key, index as u8, offset, &mut data);
+                                encrypt_shard(&encryption_key, index as u8, offset as usize, &mut data);
                                 data
                             }).await?;
                             shards[index] = Some(data);
@@ -232,45 +232,42 @@ where
         }
     }
 
-    /// Downloads the provided slabs and writes the encrypted data to the
+    /// Downloads the provided slabs and writes the decrypted data to the
     /// provided writer.
-    ///
-    /// This is a low-level function that can be used to download
-    /// arbitrary slabs. Most users should use [Downloader::download]
-    /// or [Downloader::download_shared] instead.
-    async fn download_slabs<W: AsyncWriteExt + Unpin>(
+    pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
-        w: &mut W,
-        slabs: &[Slab],
+        w: W,
+        object: &Object,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
-        let max_length = slabs.iter().map(|s| s.length as usize).sum();
+        let mut w = object.writer(w, options.offset as usize);
         let mut offset = options.offset;
+        let max_length = object.size();
         let mut length = options.length.unwrap_or(max_length);
         if offset > max_length || length == 0 {
             return Ok(());
         }
 
-        for slab in slabs {
+        for slab in object.slabs() {
             if length == 0 {
                 break;
             }
 
-            let slab_length = slab.length as usize;
+            let slab_length = slab.length as u64;
             if offset >= slab_length {
                 offset -= slab_length;
                 continue;
             }
 
             // adjust slab range based on offset and length
-            let slab_offset = slab.offset as usize + offset;
+            let slab_offset = slab.offset as u64 + offset;
             let slab_length = (slab_length - offset).min(length);
             offset = 0;
 
             // compute the sector aligned region to download
-            let chunk_size = SEGMENT_SIZE * slab.min_shards as usize;
-            let start = (slab_offset / chunk_size) * SEGMENT_SIZE;
-            let end = (slab_offset + slab_length).div_ceil(chunk_size) * SEGMENT_SIZE;
+            let chunk_size = SEGMENT_SIZE as u64 * slab.min_shards as u64;
+            let start = (slab_offset / chunk_size) * SEGMENT_SIZE as u64;
+            let end = (slab_offset + slab_length).div_ceil(chunk_size) * SEGMENT_SIZE as u64;
             let shard_offset = start;
             let shard_length = end - start;
 
@@ -293,35 +290,15 @@ where
             })
             .await??;
             ErasureCoder::write_data_shards(
-                w,
+                &mut w,
                 &shards[..data_shards],
-                slab_offset % (SEGMENT_SIZE * slab.min_shards as usize),
-                slab_length,
+                slab_offset as usize % (SEGMENT_SIZE * slab.min_shards as usize),
+                slab_length as usize,
             )
             .await?;
             length -= slab_length;
         }
         w.flush().await?;
         Ok(())
-    }
-
-    pub async fn download<W: AsyncWriteExt + Unpin>(
-        &self,
-        w: W,
-        object: &Object,
-        options: DownloadOptions,
-    ) -> Result<(), DownloadError> {
-        let mut w = object.writer(w, options.offset);
-        self.download_slabs(&mut w, object.slabs(), options).await
-    }
-
-    pub async fn download_shared<W: AsyncWriteExt + Unpin>(
-        &self,
-        w: W,
-        object: &SharedObject,
-        options: DownloadOptions,
-    ) -> Result<(), DownloadError> {
-        let mut w = object.writer(w, options.offset);
-        self.download_slabs(&mut w, object.slabs(), options).await
     }
 }

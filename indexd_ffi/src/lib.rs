@@ -5,20 +5,15 @@ use std::str::FromStr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 use tokio::runtime::{self, Runtime};
-use tokio::select;
-use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
-use indexd::{Object, SealedObjectError, Url};
-use log::debug;
+use indexd::{SealedObjectError, Url};
 use sia::rhp::SECTOR_SIZE;
 use sia::signing::{PublicKey, Signature};
 use sia::types::{self, Hash256, HexParseError};
 use sia::{encoding, encryption};
 use thiserror::Error;
-use tokio::io::AsyncRead;
-use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::task::JoinHandle;
+use tokio::sync::mpsc;
 
 mod tls;
 
@@ -27,6 +22,9 @@ pub use logging::*;
 
 mod builder;
 pub use builder::*;
+
+mod io;
+pub use io::*;
 
 static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
     runtime::Builder::new_multi_thread()
@@ -104,91 +102,6 @@ pub enum DownloadError {
 
     #[error("cancelled")]
     Cancelled,
-}
-
-struct ChunkedWriterInner {
-    buffer: Vec<u8>,
-    rx: Receiver<Vec<u8>>,
-    tx: Option<Sender<Vec<u8>>>,
-}
-
-#[derive(Clone)]
-struct ChunkedWriter {
-    inner: Arc<Mutex<ChunkedWriterInner>>,
-}
-
-impl ChunkedWriter {
-    pub fn close(&self) -> Result<(), UploadError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| UploadError::Custom(e.to_string()))?;
-        inner.tx.take();
-        Ok(())
-    }
-
-    pub async fn push_chunk(&self, chunk: Vec<u8>) -> Result<(), UploadError> {
-        let tx = {
-            let inner = self
-                .inner
-                .lock()
-                .map_err(|e| UploadError::Custom(e.to_string()))?;
-            match inner.tx.clone() {
-                Some(tx) => tx,
-                None => return Err(UploadError::Closed),
-            }
-        };
-        tx.send(chunk)
-            .await
-            .map_err(|e| UploadError::Custom(format!("failed to send chunk to reader: {}", e)))
-    }
-}
-
-impl Default for ChunkedWriter {
-    fn default() -> Self {
-        let (tx, rx) = mpsc::channel(1);
-        Self {
-            inner: Arc::new(Mutex::new(ChunkedWriterInner {
-                buffer: Vec::with_capacity(SECTOR_SIZE),
-                rx,
-                tx: Some(tx),
-            })),
-        }
-    }
-}
-
-impl AsyncRead for ChunkedWriter {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-        if !inner.buffer.is_empty() {
-            let to_read = buf.remaining().min(inner.buffer.len());
-            buf.put_slice(&inner.buffer[..to_read]);
-            inner.buffer.drain(..to_read); // remove the read bytes
-            return std::task::Poll::Ready(Ok(()));
-        }
-
-        match inner.rx.poll_recv(cx) {
-            std::task::Poll::Ready(Some(chunk)) => {
-                let to_read = buf.remaining().min(chunk.len());
-                buf.put_slice(&chunk[..to_read]);
-                if to_read < chunk.len() {
-                    // save the rest for the next call
-                    inner.buffer.extend_from_slice(&chunk[to_read..]);
-                }
-                std::task::Poll::Ready(Ok(()))
-            }
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(Ok(())), // channel closed
-            std::task::Poll::Pending => std::task::Poll::Pending,           // no data available yet
-        }
-    }
 }
 
 /// Metadata about an application connecting to the indexer.
@@ -437,26 +350,10 @@ impl TryInto<indexd::SealedObject> for SealedObject {
 /// An ObjectEvent represents an object and whether it was deleted or not.
 #[derive(uniffi::Record)]
 pub struct ObjectEvent {
-    pub key: String,
+    pub id: String,
     pub deleted: bool,
     pub updated_at: SystemTime,
     pub object: Option<Arc<PinnedObject>>,
-}
-
-/// An object that has been shared from an indexer. Shared objects
-/// are read-only and cannot be modified. They can be downloaded
-/// using [Sdk.download_shared] or pinned using [Sdk.pin_shared].
-///
-/// It has no public fields to prevent accidental leakage or corruption.
-#[derive(uniffi::Object)]
-pub struct SharedObject(indexd::SharedObject);
-
-#[uniffi::export]
-impl SharedObject {
-    /// Returns the size of the object by summing the lengths of its slabs.
-    pub fn size(&self) -> u64 {
-        self.0.size()
-    }
 }
 
 /// Information about a storage provider on the
@@ -665,10 +562,6 @@ pub struct UploadOptions {
     #[uniffi(default = 20)]
     pub parity_shards: u8,
 
-    /// Optional metadata to attach to the object.
-    /// This will be encrypted with the object's master key.
-    #[uniffi(default = None)]
-    pub metadata: Option<Vec<u8>>,
     /// Optional callback to report upload progress.
     /// The callback will be called with the number of bytes uploaded
     /// and the total encoded size of the upload.
@@ -705,168 +598,85 @@ impl SDK {
 
     /// Uploads data to the Sia network and pins it to the indexer
     ///
-    /// # Warnings
-    /// * The `encryption_key` must be unique for every upload. Reusing an
-    ///   encryption key will compromise the security of the data.
+    /// # Arguments
+    /// * `options` - The [UploadOptions] to use for the upload
     ///
     /// # Returns
     /// An object representing the uploaded data.
-    pub async fn upload(&self, options: UploadOptions) -> Result<Upload, UploadError> {
+    pub async fn upload(
+        &self,
+        r: Arc<dyn Reader>,
+        options: UploadOptions,
+    ) -> Result<PinnedObject, UploadError> {
         let sdk = self.inner.clone();
-        // do not use helper, use cancellation token directly
-        RUNTIME
-            .spawn(async move {
-                let buf = ChunkedWriter::default();
-                let progress_tx = if let Some(callback) = options.progress_callback {
-                    let total_shards = options.data_shards as u64 + options.parity_shards as u64;
-                    let slab_size = total_shards * SECTOR_SIZE as u64;
-                    let (tx, mut rx) = mpsc::unbounded_channel();
-                    tokio::spawn(async move {
-                        let mut sectors: u64 = 0;
-                        while rx.recv().await.is_some() {
-                            sectors += 1;
-                            let size = sectors * SECTOR_SIZE as u64;
-                            let slabs_size = sectors.div_ceil(total_shards) * slab_size;
-                            callback.progress(size, slabs_size);
-                        }
-                    });
-                    Some(tx)
-                } else {
-                    None
-                };
-
-                let cancel_token = CancellationToken::new();
-                let upload_token = cancel_token.child_token();
-                let result_buf = buf.clone();
-                let result = tokio::spawn(async move {
-                    let res = sdk
-                        .upload(
-                            upload_token,
-                            result_buf,
-                            indexd::UploadOptions {
-                                max_inflight: options.max_inflight as usize,
-                                data_shards: options.data_shards,
-                                parity_shards: options.parity_shards,
-                                metadata: options.metadata,
-                                shard_uploaded: progress_tx,
-                            },
-                        )
-                        .await?;
-                    Ok(res)
+        spawn(async move {
+            let r = adapt_ffi_reader(r);
+            let progress_tx = if let Some(callback) = options.progress_callback {
+                let total_shards = options.data_shards as u64 + options.parity_shards as u64;
+                let slab_size = total_shards * SECTOR_SIZE as u64;
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                tokio::spawn(async move {
+                    let mut sectors: u64 = 0;
+                    while rx.recv().await.is_some() {
+                        sectors += 1;
+                        let size = sectors * SECTOR_SIZE as u64;
+                        let slabs_size = sectors.div_ceil(total_shards) * slab_size;
+                        callback.progress(size, slabs_size);
+                    }
                 });
-                Ok(Upload {
-                    reader: buf.clone(),
-                    result: Mutex::new(Some(result)),
-                    cancel: cancel_token,
-                })
+                Some(tx)
+            } else {
+                None
+            };
+            let obj = sdk
+                .upload(
+                    r,
+                    indexd::UploadOptions {
+                        max_inflight: options.max_inflight as usize,
+                        data_shards: options.data_shards,
+                        parity_shards: options.parity_shards,
+                        shard_uploaded: progress_tx,
+                    },
+                )
+                .await?;
+            Ok(PinnedObject {
+                inner: Arc::new(Mutex::new(obj)),
             })
-            .await?
+        })
+        .await?
     }
 
     /// Initiates a download of the data referenced by the object, starting at `offset` and reading `length` bytes.
-    ///
-    /// # Returns
-    /// A [Download] object that can be used to read the data in chunks
     pub async fn download(
         &self,
+        w: Arc<dyn Writer>,
         object: Arc<PinnedObject>,
         options: DownloadOptions,
-    ) -> Result<Download, DownloadError> {
+    ) -> Result<(), Error> {
         const CHUNK_SIZE: usize = 1 << 19; // 512KiB
         let object = object.object();
         let object_size = object.size();
-        let offset = options.offset as usize;
-        let total_length = options.length.unwrap_or(object_size) as usize;
+        let offset = options.offset;
+        let max_length = options.length.unwrap_or(object_size);
         let max_inflight = options.max_inflight;
-        let (chunk_tx, chunk_rx) = mpsc::channel(8); // 4MiB buffer
-        let cancel_token = CancellationToken::new();
-        let future_token = cancel_token.child_token();
         let sdk = self.inner.clone();
-        // do not use helper, use cancellation token directly
-        RUNTIME.spawn(async move {
-            for offset in (offset..total_length).step_by(CHUNK_SIZE) {
-                let mut buf = Vec::with_capacity(CHUNK_SIZE);
-                let future = sdk.download(
-                    &mut buf,
+        spawn(async move {
+            let w = adapt_ffi_writer(w.clone());
+            for offset in (offset..max_length).step_by(CHUNK_SIZE) {
+                sdk.download(
+                    w.clone(),
                     &object,
                     indexd::DownloadOptions {
                         offset,
-                        length: Some(total_length.min(CHUNK_SIZE)),
+                        length: Some(max_length.min(CHUNK_SIZE as u64)),
                         max_inflight: max_inflight as usize,
                     },
-                );
-                select! {
-                    _ = future_token.cancelled() => {
-                        chunk_tx.send(Err(DownloadError::Cancelled)).await.ok();
-                        return;
-                    },
-                    result = future => {
-                        let n = buf.len();
-                        let result = result
-                            .map(|_| buf)
-                            .map_err(DownloadError::from)
-                            .inspect(|_| { debug!("downloaded chunk {}-{}", offset, offset+n) });
-                        chunk_tx.send(result).await.ok();
-                    }
-                }
+                )
+                .await?;
             }
-        });
-        Ok(Download {
-            cancel_token,
-            rx: tokio::sync::Mutex::new(chunk_rx),
+            Ok(())
         })
-    }
-
-    /// Initiates a download of the data referenced by the shared object, starting at `offset` and reading `length` bytes.
-    ///
-    /// # Returns
-    /// A [`Download`] object that can be used to read the data in chunks
-    pub async fn download_shared(
-        &self,
-        shared_object: Arc<SharedObject>,
-        options: DownloadOptions,
-    ) -> Result<Download, DownloadError> {
-        const CHUNK_SIZE: usize = 1 << 19; // 512KiB
-        let shared_object = shared_object.0.clone();
-        let object_size = shared_object.size();
-        let offset = options.offset as usize;
-        let total_length = options.length.unwrap_or(object_size) as usize;
-        let max_inflight = options.max_inflight;
-        let (chunk_tx, chunk_rx) = mpsc::channel(8); // 4MiB buffer
-        let cancel_token = CancellationToken::new();
-        let future_token = cancel_token.child_token();
-        let sdk = self.inner.clone();
-        // do not use helper, use cancellation token directly
-        RUNTIME.spawn(async move {
-            for offset in (offset..total_length).step_by(CHUNK_SIZE) {
-                let mut buf = Vec::with_capacity(CHUNK_SIZE);
-                let future = sdk.download_shared(
-                    &mut buf,
-                    &shared_object,
-                    indexd::DownloadOptions {
-                        offset,
-                        length: Some(total_length.min(CHUNK_SIZE)),
-                        max_inflight: max_inflight as usize,
-                    },
-                );
-                select! {
-                    _ = future_token.cancelled() => {
-                        chunk_tx.send(Err(DownloadError::Cancelled)).await.ok();
-                        return;
-                    },
-                    result = future => {
-                        let result = result
-                            .map(|_| buf)
-                            .map_err(DownloadError::from);
-                        chunk_tx.send(result).await.ok();
-                    }
-                }
-            }
-        });
-        Ok(Download {
-            cancel_token,
-            rx: tokio::sync::Mutex::new(chunk_rx),
-        })
+        .await?
     }
 
     /// Returns a list of all usable hosts.
@@ -906,7 +716,7 @@ impl SDK {
                 .into_iter()
                 .map(|event| {
                     Ok(ObjectEvent {
-                        key: event.key.to_string(),
+                        id: event.id.to_string(),
                         deleted: event.deleted,
                         updated_at: event.updated_at.into(),
                         object: event.object.map(|obj| {
@@ -922,12 +732,13 @@ impl SDK {
         .await?
     }
 
-    /// Saves an object to the indexer.
-    pub async fn save_object(&self, object: Arc<PinnedObject>) -> Result<(), Error> {
+    /// Updates the metadata of an object stored in the indexer. The object must already be pinned to
+    /// the indexer.
+    pub async fn update_object_metadata(&self, object: Arc<PinnedObject>) -> Result<(), Error> {
         let object = object.object();
         let sdk = self.inner.clone();
         spawn(async move {
-            sdk.save_object(&object).await?;
+            sdk.update_object_metadata(&object).await?;
             Ok(())
         })
         .await?
@@ -1002,135 +813,28 @@ impl SDK {
     }
 
     /// Retrieves a shared object from a signed URL.
-    pub async fn shared_object(&self, shared_url: &str) -> Result<SharedObject, Error> {
+    pub async fn shared_object(&self, shared_url: &str) -> Result<PinnedObject, Error> {
         let shared_url: Url = shared_url
             .parse()
             .map_err(|e| Error::Custom(format!("{e}")))?;
         let sdk = self.inner.clone();
         spawn(async move {
-            let shared_object = sdk.shared_object(shared_url).await?;
-            Ok(SharedObject(shared_object))
-        })
-        .await?
-    }
-
-    /// Pins a shared object to the indexer and returns a [PinnedObject].
-    pub async fn pin_shared(&self, shared: Arc<SharedObject>) -> Result<PinnedObject, Error> {
-        let shared_object = shared.0.clone();
-        let sdk = self.inner.clone();
-        spawn(async move {
-            let obj = sdk.pin_shared(shared_object).await?;
+            let object = sdk.shared_object(shared_url).await?;
             Ok(PinnedObject {
-                inner: Arc::new(Mutex::new(obj)),
+                inner: Arc::new(Mutex::new(object)),
             })
         })
         .await?
     }
-}
 
-/// Uploads data to the Sia network. It does so in chunks to support large files in
-/// arbitrary languages.
-///
-/// Callers should write data using [`Upload::write`] until EoF, then call
-/// [`Upload::finalize`] to complete the upload and get the metadata. [`Upload::cancel`]
-/// can be called to abort an in-progress upload.
-///
-/// Language bindings should provide a higher-level implementation that wraps a stream.
-#[derive(uniffi::Object)]
-pub struct Upload {
-    reader: ChunkedWriter,
-    result: Mutex<Option<JoinHandle<Result<Object, UploadError>>>>,
-    cancel: CancellationToken,
-}
-
-impl Drop for Upload {
-    fn drop(&mut self) {
-        self.cancel();
-        let _ = self.result.lock().unwrap().take(); // drop the result
-    }
-}
-
-#[uniffi::export]
-impl Upload {
-    /// Writes a chunk of data to the Sia network. The data will be
-    /// erasure-coded and encrypted before upload.
-    ///
-    /// Chunks should be written until EoF, then call [`Upload::finalize`].
-    pub async fn write(&self, buf: &[u8]) -> Result<(), UploadError> {
-        self.reader.push_chunk(buf.to_vec()).await
-    }
-
-    /// Cancels an in-progress upload. This will drop any data
-    /// that has already been written.
-    pub fn cancel(&self) {
-        self.cancel.cancel(); // signal cancellation
-        let _ = self.reader.close(); // ignore error
-
-        let result = self.result.lock().unwrap().take();
-        if let Some(result) = result {
-            result.abort();
-        }
-    }
-
-    /// Waits for all chunks of data to be pinned to the indexer and
-    /// returns the metadata. Data can no longer be written after
-    /// calling finalize. This function must only be called once.
-    ///
-    /// The caller must store the metadata locally in order to download
-    /// it in the future.
-    pub async fn finalize(&self) -> Result<PinnedObject, UploadError> {
-        self.reader.close()?;
-        let result = {
-            let mut result = self.result.lock().unwrap();
-            result.take()
-        };
-        match result {
-            Some(result) => {
-                let object = result.await??;
-                Ok(PinnedObject {
-                    inner: Arc::new(Mutex::new(object)),
-                })
-            }
-            None => Err(UploadError::Closed),
-        }
-    }
-}
-
-/// Downloads data from the Sia network. It does so in chunks to support large files in
-/// arbitrary languages.
-///
-/// Language bindings should provide a higher-level implementation that wraps a stream.
-#[derive(uniffi::Object)]
-pub struct Download {
-    cancel_token: CancellationToken,
-    rx: tokio::sync::Mutex<Receiver<Result<Vec<u8>, DownloadError>>>,
-}
-
-impl Drop for Download {
-    fn drop(&mut self) {
-        self.cancel();
-    }
-}
-
-#[uniffi::export]
-impl Download {
-    pub fn cancel(&self) {
-        self.cancel_token.cancel();
-    }
-
-    /// Reads a chunk of data from the Sia network.
-    ///
-    /// # Returns
-    /// A vector containing the chunk of data read. If the vector is empty, the end of the download has been reached.
-    pub async fn read_chunk(&self) -> Result<Vec<u8>, DownloadError> {
-        if self.cancel_token.is_cancelled() {
-            return Err(DownloadError::Cancelled);
-        }
-        let mut rx = self.rx.lock().await;
-        match rx.recv().await {
-            Some(res) => res,
-            None => Ok(Vec::with_capacity(0)),
-        }
+    /// Pins an object to the indexer
+    pub async fn pin_object(&self, object: Arc<PinnedObject>) -> Result<(), Error> {
+        let sdk = self.inner.clone();
+        spawn(async move {
+            sdk.pin_object(&object.object()).await?;
+            Ok(())
+        })
+        .await?
     }
 }
 
