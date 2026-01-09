@@ -97,7 +97,7 @@ pub struct PackedUpload {
 
 impl PackedUpload {
     /// Returns the number of bytes remaining until reaching the optimal
-    /// pack size. Adding objects larger than this will start a new slab.
+    /// packed size. Adding objects larger than this will start a new slab.
     /// To minimize padding, prioritize objects that fit within the
     /// remaining size.
     pub fn remaining(&self) -> u64 {

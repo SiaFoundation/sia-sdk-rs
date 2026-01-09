@@ -90,8 +90,8 @@ async def main():
 
     start = datetime.now(timezone.utc)
     writer = BytesWriter()
-    await sdk.download(writer, objects[len(objects)-1], DownloadOptions())
+    await sdk.download(writer, objects[-1], DownloadOptions())
     elapsed = datetime.now(timezone.utc) - start
-    print(f"Downloaded object {objects[len(objects)-1].id} with {writer.get_data()} bytes in {elapsed}")
+    print(f"Downloaded object {objects[-1].id()} with {writer.get_data()} bytes in {elapsed}")
 
 asyncio.run(main())
