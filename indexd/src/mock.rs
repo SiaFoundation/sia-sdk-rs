@@ -12,7 +12,8 @@ use tokio::time::sleep;
 
 use crate::rhp4::{self, RHP4Client};
 use crate::{
-    DownloadError, DownloadOptions, Downloader, Hosts, Object, UploadError, UploadOptions, Uploader,
+    DownloadError, DownloadOptions, Downloader, Hosts, Object, PackedUpload, UploadError,
+    UploadOptions, Uploader,
 };
 
 pub struct MockRHP4Client {
@@ -100,6 +101,10 @@ impl MockUploader {
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
         self.uploader.upload(r, options).await
+    }
+
+    pub fn upload_packed(&self, options: UploadOptions) -> PackedUpload {
+        self.uploader.upload_packed(options)
     }
 }
 

@@ -1,3 +1,4 @@
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -5,11 +6,12 @@ use bytes::Bytes;
 use log::debug;
 use sia::encryption::{EncryptionKey, encrypt_shard};
 use sia::erasure_coding::{self, ErasureCoder};
+use sia::rhp;
 use sia::signing::{PrivateKey, PublicKey};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, SimplexStream, WriteHalf, copy, simplex};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio::task::{JoinSet, spawn_blocking};
+use tokio::task::{JoinHandle, JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
 use tokio::time::{Instant, sleep, timeout};
 
@@ -19,8 +21,11 @@ use crate::{Hosts, Object, Sector, Slab};
 
 #[derive(Debug, Error)]
 pub enum UploadError {
+    #[error("i/o error: {0}")]
+    Io(#[from] io::Error),
+
     #[error("rhp4 error: {0}")]
-    RHP4(#[from] crate::rhp4::Error),
+    Rhp4(#[from] crate::rhp4::Error),
 
     #[error("encoder error: {0}")]
     Encoder(#[from] erasure_coding::Error),
@@ -70,6 +75,87 @@ impl Default for UploadOptions {
             max_inflight: 16,
             shard_uploaded: None,
         }
+    }
+}
+
+struct ObjectUpload {
+    start: u64,
+    end: u64,
+    object: Object,
+}
+
+/// A packed upload allows multiple objects to be uploaded together in a single upload. This can be more
+/// efficient than uploading each object separately if the size of the object is less than the minimum
+/// slab size.
+pub struct PackedUpload {
+    slab_size: u64,
+    length: u64,
+    writer: WriteHalf<SimplexStream>,
+    objects: Vec<ObjectUpload>,
+    upload_handle: JoinHandle<Result<Vec<Slab>, UploadError>>,
+}
+
+impl PackedUpload {
+    /// Returns the number of bytes remaining until reaching the optimal
+    /// packed size. Adding objects larger than this will start a new slab.
+    /// To minimize padding, prioritize objects that fit within the
+    /// remaining size.
+    pub fn remaining(&self) -> u64 {
+        if self.length == 0 {
+            return self.slab_size;
+        }
+        (self.slab_size - (self.length % self.slab_size)) % self.slab_size
+    }
+
+    /// Returns the cumulative length of all objects currently in the upload.
+    pub fn length(&self) -> u64 {
+        self.length
+    }
+
+    /// Finalizes the upload and returns the resulting objects. This will wait for all readers
+    /// to finish and all slabs to be uploaded before returning. The resulting objects will contain the metadata needed to download the objects.
+    ///
+    /// The caller must pin the resulting objects to the indexer when ready.
+    pub async fn finalize(mut self) -> Result<Vec<Object>, UploadError> {
+        let _ = self.writer.shutdown().await; // ignore error
+        let uploaded_slabs = self.upload_handle.await??;
+        self.objects
+            .into_iter()
+            .map(|upload| {
+                let mut object = upload.object;
+                let slabs = object.slabs_mut();
+                let slabs_start = upload.start / self.slab_size;
+                let slabs_end = upload.end.div_ceil(self.slab_size);
+                let n = slabs_end - slabs_start;
+                slabs.extend_from_slice(&uploaded_slabs[slabs_start as usize..slabs_end as usize]);
+
+                slabs[0].offset = (upload.start % self.slab_size) as u32;
+                let last_slab_index = (n - 1) as usize;
+                let last_slab_offset = slabs[last_slab_index].offset as u64;
+                slabs[last_slab_index].length =
+                    (upload.end - ((slabs_end - 1) * self.slab_size) - last_slab_offset) as u32;
+
+                Ok(object)
+            })
+            .collect()
+    }
+
+    /// Adds a new object to the upload. The data will be read until EOF and packed into
+    /// the upload. The resulting object will contain the metadata needed to download the object. The caller
+    /// must call [finalize](Self::finalize) to get the resulting objects after all objects have been added.
+    pub async fn add<R: AsyncReadExt + Unpin>(&mut self, r: R) -> io::Result<u64> {
+        if self.upload_handle.is_finished() {
+            // should only happen if the upload errored; callers can get the error by calling finalize
+            return Err(io::Error::other("cannot add object to finalized upload"));
+        }
+        let object = Object::default();
+        let mut r = object.reader(r, 0);
+        let object_length = copy(&mut r, &mut self.writer).await?;
+        let start = self.length;
+        let end = start + object_length;
+        self.objects.push(ObjectUpload { start, end, object });
+        self.length += object_length;
+        Ok(object_length)
     }
 }
 
@@ -334,5 +420,30 @@ where
         let slabs = object.slabs_mut();
         slabs.extend(new_slabs.into_iter());
         Ok(object)
+    }
+
+    /// Creates a new packed upload. This allows multiple objects to be packed together
+    /// for more efficient uploads. The returned `PackedUpload` can be used to add objects to the upload, and then finalized to get the resulting objects.
+    ///
+    /// # Arguments
+    /// * `options` - The [UploadOptions] to use for the upload.
+    ///
+    /// # Returns
+    /// A [PackedUpload] that can be used to add objects and finalize the upload.
+    pub fn upload_packed(&self, options: UploadOptions) -> PackedUpload {
+        let transport = self.transport.clone();
+        let hosts = self.hosts.clone();
+        let app_key = self.app_key.clone();
+        let (reader, writer) = simplex(1024 * 1024);
+        PackedUpload {
+            slab_size: options.data_shards as u64 * rhp::SECTOR_SIZE as u64,
+            length: 0,
+            writer,
+            objects: Vec::new(),
+            upload_handle: tokio::spawn(async move {
+                let slabs = Self::upload_slabs(transport, hosts, app_key, reader, options).await?;
+                Ok(slabs)
+            }),
+        }
     }
 }

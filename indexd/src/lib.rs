@@ -109,9 +109,21 @@ impl SDK {
         &self,
         reader: R,
         options: UploadOptions,
-    ) -> Result<Object, Error> {
+    ) -> Result<Object, UploadError> {
         let object = self.uploader.upload(reader, options).await?;
         Ok(object)
+    }
+
+    /// Creates a new packed upload. This allows multiple objects to be packed together
+    /// for more efficient uploads. The returned `PackedUpload` can be used to add objects to the upload, and then finalized to get the resulting objects.
+    ///
+    /// # Arguments
+    /// * `options` - The [UploadOptions] to use for the upload.
+    ///
+    /// # Returns
+    /// A [PackedUpload] that can be used to add objects and finalize the upload.
+    pub fn upload_packed(&self, options: UploadOptions) -> PackedUpload {
+        self.uploader.upload_packed(options)
     }
 
     /// Downloads an object using the provided writer and options.
@@ -120,7 +132,7 @@ impl SDK {
         w: W,
         object: &Object,
         options: DownloadOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<(), DownloadError> {
         self.downloader.download(w, object, options).await?;
         Ok(())
     }
@@ -296,12 +308,241 @@ impl SDK {
 #[cfg(test)]
 mod test {
     use bytes::{Bytes, BytesMut};
+    use rand::RngCore;
+    use sia::rhp::SECTOR_SIZE;
     use sia::types::v2::NetAddress;
     use std::io::Cursor;
 
-    use crate::mock::MockRHP4Client;
+    use crate::mock::{MockDownloader, MockRHP4Client, MockUploader};
 
     use super::*;
+
+    const SLAB_SIZE: u64 = SECTOR_SIZE as u64 * 10; // 10 sectors per slab
+
+    #[tokio::test]
+    async fn test_upload_download_packed() {
+        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
+        let transport = Arc::new(MockRHP4Client::new());
+        let hosts = Hosts::new();
+
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: sia::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                })
+                .collect(),
+        );
+
+        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let downloader = MockDownloader::new(hosts.clone(), transport.clone(), app_key.clone());
+
+        let input: Bytes = Bytes::from("Hello, world!");
+
+        let mut packed_upload = uploader.upload_packed(UploadOptions::default());
+        assert_eq!(packed_upload.remaining(), SLAB_SIZE);
+
+        packed_upload
+            .add(Cursor::new(input.clone()))
+            .await
+            .expect("add 1 to complete");
+        packed_upload
+            .add(Cursor::new(input.clone()))
+            .await
+            .expect("add 2 to complete");
+
+        assert_eq!(
+            packed_upload.remaining(),
+            SLAB_SIZE - (input.len() * 2) as u64
+        );
+
+        let objects = packed_upload.finalize().await.expect("upload to finish");
+        assert_eq!(objects.len(), 2);
+        assert_ne!(objects[0].id(), objects[1].id()); // encryption keys should be different
+
+        // Both objects should have 1 slab each, since the input is small enough to fit in a single slab.
+        assert_eq!(objects[0].slabs().len(), 1);
+        assert_eq!(objects[1].slabs().len(), 1);
+
+        // obj 0 should be the first 13 bytes
+        assert_eq!(objects[0].slabs()[0].offset, 0);
+        assert_eq!(objects[0].size(), 13);
+
+        // obj 1 should be the next 13 bytes
+        assert_eq!(objects[1].slabs()[0].offset, 13);
+        assert_eq!(objects[1].size(), 13);
+
+        let mut output = BytesMut::zeroed(13);
+        downloader
+            .download(
+                Cursor::new(&mut output[..]),
+                &objects[0],
+                DownloadOptions::default(),
+            )
+            .await
+            .expect("download to complete");
+
+        assert_eq!(output.freeze(), input.clone());
+
+        let mut output = BytesMut::zeroed(13);
+        downloader
+            .download(
+                Cursor::new(&mut output[..]),
+                &objects[1],
+                DownloadOptions::default(),
+            )
+            .await
+            .expect("download to complete");
+
+        assert_eq!(output.freeze(), input.clone());
+    }
+
+    #[tokio::test]
+    async fn test_upload_download_packed_spanning() {
+        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
+        let transport = Arc::new(MockRHP4Client::new());
+        let hosts = Hosts::new();
+
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: sia::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                })
+                .collect(),
+        );
+
+        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let downloader = MockDownloader::new(hosts.clone(), transport.clone(), app_key.clone());
+
+        let mut large_input = BytesMut::zeroed(SLAB_SIZE as usize + 18); // 1 full slab + 18 bytes
+        rand::rng().fill_bytes(&mut large_input);
+        let large_input = large_input.freeze();
+
+        let small_input = Bytes::from("Hello, world!");
+
+        let mut packed_upload = uploader.upload_packed(UploadOptions::default());
+        packed_upload
+            .add(Cursor::new(large_input.clone()))
+            .await
+            .expect("add 1 to complete");
+        packed_upload
+            .add(Cursor::new(small_input.clone()))
+            .await
+            .expect("add 2 to complete");
+
+        let objects = packed_upload.finalize().await.expect("upload to finish");
+        assert_eq!(objects.len(), 2);
+
+        // The first object should have 2 slabs, since it overflows
+        assert_eq!(objects[0].slabs().len(), 2);
+        assert_eq!(objects[1].slabs().len(), 1);
+
+        // the first slab of obj[0] should be the full length. the second slab should be the remaining 18 bytes.
+        assert_eq!(objects[0].size(), SLAB_SIZE + 18);
+        assert_eq!(objects[0].slabs()[0].offset, 0);
+        assert_eq!(objects[0].slabs()[0].length, SLAB_SIZE as u32);
+        assert_eq!(objects[0].slabs()[1].offset, 0);
+        assert_eq!(objects[0].slabs()[1].length, 18);
+
+        // obj 1 should be the small input with a single slab, but offset by 18 bytes since it comes after the large input
+        assert_eq!(objects[1].size(), 13);
+        assert_eq!(objects[1].slabs()[0].offset, 18);
+        assert_eq!(objects[1].slabs()[0].length, 13);
+
+        let mut output = BytesMut::zeroed(objects[0].size() as usize);
+        downloader
+            .download(
+                Cursor::new(&mut output[..]),
+                &objects[0],
+                DownloadOptions::default(),
+            )
+            .await
+            .expect("download to complete");
+
+        assert_eq!(output.freeze(), large_input);
+
+        let mut output = BytesMut::zeroed(objects[1].size() as usize);
+        downloader
+            .download(
+                Cursor::new(&mut output[..]),
+                &objects[1],
+                DownloadOptions::default(),
+            )
+            .await
+            .expect("download to complete");
+
+        assert_eq!(output.freeze(), small_input);
+    }
+
+    #[tokio::test]
+    async fn test_upload_download_packed_exact() {
+        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
+        let transport = Arc::new(MockRHP4Client::new());
+        let hosts = Hosts::new();
+
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: sia::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                })
+                .collect(),
+        );
+
+        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let downloader = MockDownloader::new(hosts.clone(), transport.clone(), app_key.clone());
+
+        let mut exact_input = BytesMut::zeroed(SLAB_SIZE as usize); // 1 full slab
+        rand::rng().fill_bytes(&mut exact_input);
+        let exact_input = exact_input.freeze();
+
+        let mut packed_upload = uploader.upload_packed(UploadOptions::default());
+        packed_upload
+            .add(Cursor::new(exact_input.clone()))
+            .await
+            .expect("add 1 to complete");
+
+        let objects = packed_upload.finalize().await.expect("upload to finish");
+        assert_eq!(objects.len(), 1);
+
+        // The first object should have 1 slab, since it fits exactly
+        assert_eq!(objects[0].slabs().len(), 1);
+        // the first slab of obj[0] should be the full length. the second slab should be the remaining 18 bytes.
+        assert_eq!(objects[0].size(), SLAB_SIZE);
+        assert_eq!(objects[0].slabs()[0].offset, 0);
+        assert_eq!(objects[0].slabs()[0].length, SLAB_SIZE as u32);
+
+        let mut output = BytesMut::zeroed(objects[0].size() as usize);
+        downloader
+            .download(
+                Cursor::new(&mut output[..]),
+                &objects[0],
+                DownloadOptions::default(),
+            )
+            .await
+            .expect("download to complete");
+
+        assert_eq!(output.freeze(), exact_input);
+    }
 
     #[tokio::test]
     async fn test_upload_download() {
@@ -324,8 +565,8 @@ mod test {
                 .collect(),
         );
 
-        let uploader = Uploader::new(hosts.clone(), transport.clone(), app_key.clone());
-        let downloader = Downloader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let downloader = MockDownloader::new(hosts.clone(), transport.clone(), app_key.clone());
 
         let input: Bytes = Bytes::from("Hello, world!");
 
