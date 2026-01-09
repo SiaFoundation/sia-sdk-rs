@@ -104,7 +104,7 @@ impl PackedUpload {
         if self.length == 0 {
             return self.slab_size;
         }
-        (self.slab_size - self.length % self.slab_size) % self.slab_size
+        (self.slab_size - (self.length % self.slab_size)) % self.slab_size
     }
 
     /// Returns the cumulative length of all objects currently in the upload.
