@@ -488,6 +488,63 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_upload_download_packed_exact() {
+        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
+        let transport = Arc::new(MockRHP4Client::new());
+        let hosts = Hosts::new();
+
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: sia::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                })
+                .collect(),
+        );
+
+        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let downloader = MockDownloader::new(hosts.clone(), transport.clone(), app_key.clone());
+
+        let mut exact_input = BytesMut::zeroed(SLAB_SIZE as usize); // 1 full slab
+        rand::rng().fill_bytes(&mut exact_input);
+        let exact_input = exact_input.freeze();
+
+        let mut packed_upload = uploader.upload_packed(UploadOptions::default());
+        packed_upload
+            .add(Cursor::new(exact_input.clone()))
+            .await
+            .expect("add 1 to complete");
+
+        let objects = packed_upload.finalize().await.expect("upload to finish");
+        assert_eq!(objects.len(), 1);
+
+        // The first object should have 1 slab, since it fits exactly
+        assert_eq!(objects[0].slabs().len(), 1);
+        // the first slab of obj[0] should be the full length. the second slab should be the remaining 18 bytes.
+        assert_eq!(objects[0].size(), SLAB_SIZE);
+        assert_eq!(objects[0].slabs()[0].offset, 0);
+        assert_eq!(objects[0].slabs()[0].length, SLAB_SIZE as u32);
+
+        let mut output = BytesMut::zeroed(objects[0].size() as usize);
+        downloader
+            .download(
+                Cursor::new(&mut output[..]),
+                &objects[0],
+                DownloadOptions::default(),
+            )
+            .await
+            .expect("download to complete");
+
+        assert_eq!(output.freeze(), exact_input);
+    }
+
+    #[tokio::test]
     async fn test_upload_download() {
         let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
         let transport = Arc::new(MockRHP4Client::new());

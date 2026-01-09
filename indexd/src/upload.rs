@@ -107,6 +107,11 @@ impl PackedUpload {
         (self.slab_size - self.length % self.slab_size) % self.slab_size
     }
 
+    /// Returns the cumulative length of all objects currently in the upload.
+    pub fn length(&self) -> u64 {
+        self.length
+    }
+
     /// Finalizes the upload and returns the resulting objects. This will wait for all readers
     /// to finish and all slabs to be uploaded before returning. The resulting objects will contain the metadata needed to download the objects.
     ///
