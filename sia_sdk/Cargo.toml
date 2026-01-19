@@ -20,7 +20,7 @@ blake2 = "0.10.6"
 blake2b_simd = "1.0.4"
 bytes = "1.11.0"
 chacha20 = "0.9.1"
-chrono = { version = "0.4.42", features = ["serde"] }
+chrono = { version = "0.4.43", features = ["serde"] }
 ed25519-dalek = "2.2.0"
 futures = "0.3.31"
 hex = "0.4.3"
@@ -35,7 +35,7 @@ serde-big-array = "0.5.1"
 serde_json = "1.0.149"
 sha2 = "0.10.9"
 sia-sdk-derive = { version = "0.0.6", path = "../sia_derive" }
-thiserror = "2.0.17"
+thiserror = "2.0.18"
 tokio = { version = "1.49.0", features = [
     "macros",
     "rt",
