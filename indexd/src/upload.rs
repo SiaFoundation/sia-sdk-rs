@@ -319,7 +319,7 @@ where
                 // generate a unique encryption key for the slab
                 let slab_key: EncryptionKey = rand::random::<[u8; 32]>().into();
 
-                let host_queue = hosts.queue();
+                let host_queue = hosts.upload_queue();
                 let owned_slab_key = Arc::new(slab_key.clone());
                 let mut shard_upload_tasks = JoinSet::new();
                 for (shard_index, mut shard) in shards.into_iter().enumerate() {
