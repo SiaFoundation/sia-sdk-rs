@@ -416,7 +416,7 @@ impl TryInto<sia::rhp::Host> for Host {
             country_code: self.country_code,
             latitude: self.latitude,
             longitude: self.longitude,
-            good_for_upload: true,
+            good_for_upload: self.good_for_upload,
         })
     }
 }
