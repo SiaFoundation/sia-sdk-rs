@@ -30,5 +30,7 @@ jobs:
         run: cargo doc --all-features --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
+      - name: Build benches
+        run: cargo build --benches --features=mock
       - name: Test
         run: cargo test
