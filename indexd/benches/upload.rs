@@ -73,6 +73,7 @@ fn upload_benchmark(c: &mut Criterion) {
                 country_code: "US".to_string(),
                 latitude: 0.0,
                 longitude: 0.0,
+                good_for_upload: true,
             })
             .collect(),
     );

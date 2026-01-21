@@ -276,8 +276,7 @@ impl Hosts {
         let mut hosts = inner
             .hosts
             .iter()
-            .filter(|(_, h)| h.good_for_upload)
-            .map(|(hk, _)| *hk)
+            .filter_map(|(hk, h)| h.good_for_upload.then_some(*hk))
             .collect::<Vec<_>>();
 
         hosts.sort_by(|a, b| {
