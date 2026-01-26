@@ -139,7 +139,9 @@ impl AsyncWrite for FFIWriter {
     }
 }
 
-pub(crate) fn adapt_ffi_writer(writer: Arc<dyn Writer>) -> FFIWriter {
+pub(crate) fn adapt_ffi_writer(
+    writer: Arc<dyn Writer>,
+) -> (FFIWriter, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<Bytes>(8);
     let join_handle = spawn(async move {
         while let Some(buf) = rx.recv().await {
