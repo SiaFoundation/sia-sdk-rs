@@ -158,15 +158,22 @@ pub struct HostQuery {
 
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct App {
+    pub id: Hash256,
+    pub description: String,
+    pub logo_url: Option<String>,
+    pub service_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct Account {
     pub account_key: PublicKey,
+    pub connect_key: String,
     pub max_pinned_data: u64,
     pub pinned_data: u64,
-    pub description: String,
-    #[serde(rename = "logoURL")]
-    pub logo_url: Option<String>,
-    #[serde(rename = "serviceURL")]
-    pub service_url: Option<String>,
+    pub app: App,
+    pub last_used: DateTime<Utc>,
 }
 
 #[serde_as]

@@ -534,15 +534,22 @@ impl From<indexd::app_client::ObjectsCursor> for ObjectsCursor {
     }
 }
 
+#[derive(uniffi::Record)]
+pub struct App {
+    pub id: String,
+    pub description: String,
+    pub service_url: Option<String>,
+    pub logo_url: Option<String>,
+}
+
 /// An account registered on the indexer.
 #[derive(uniffi::Record)]
 pub struct Account {
     pub account_key: String,
     pub max_pinned_data: u64,
     pub pinned_data: u64,
-    pub description: String,
-    pub logo_url: Option<String>,
-    pub service_url: Option<String>,
+    pub app: App,
+    pub last_used: SystemTime,
 }
 
 impl From<indexd::app_client::Account> for Account {
@@ -551,9 +558,13 @@ impl From<indexd::app_client::Account> for Account {
             account_key: a.account_key.to_string(),
             max_pinned_data: a.max_pinned_data,
             pinned_data: a.pinned_data,
-            description: a.description,
-            logo_url: a.logo_url,
-            service_url: a.service_url,
+            app: App {
+                id: a.app.id.to_string(),
+                description: a.app.description,
+                service_url: a.app.service_url,
+                logo_url: a.app.logo_url,
+            },
+            last_used: a.last_used.into(),
         }
     }
 }
