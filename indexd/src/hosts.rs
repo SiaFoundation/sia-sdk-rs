@@ -167,8 +167,14 @@ impl PartialOrd for HostMetric {
 }
 
 #[derive(Debug)]
+struct HostInfo {
+    addresses: Vec<NetAddress>,
+    good_for_upload: bool,
+}
+
+#[derive(Debug)]
 struct HostsInner {
-    hosts: HashMap<PublicKey, Vec<NetAddress>>,
+    hosts: HashMap<PublicKey, HostInfo>,
     preferred_hosts: PriorityQueue<PublicKey, HostMetric>,
 }
 
@@ -201,7 +207,7 @@ impl Hosts {
 
     pub fn addresses(&self, host_key: &PublicKey) -> Option<Vec<NetAddress>> {
         let inner = self.inner.read().unwrap();
-        inner.hosts.get(host_key).cloned()
+        inner.hosts.get(host_key).map(|h| h.addresses.clone())
     }
 
     /// Sorts a list of hosts according to their priority in the client's
@@ -228,7 +234,13 @@ impl Hosts {
         let mut inner = self.inner.write().unwrap();
         inner.hosts.clear();
         for host in hosts {
-            inner.hosts.insert(host.public_key, host.addresses);
+            inner.hosts.insert(
+                host.public_key,
+                HostInfo {
+                    addresses: host.addresses,
+                    good_for_upload: host.good_for_upload,
+                },
+            );
             if !inner.preferred_hosts.contains(&host.public_key) {
                 inner
                     .preferred_hosts
@@ -256,9 +268,22 @@ impl Hosts {
         hosts
     }
 
-    /// Creates a queue of hosts for sequential access sorted by priority.
-    pub fn queue(&self) -> HostQueue {
-        let hosts = self.hosts();
+    /// Creates a queue of hosts that are good to upload to for sequential
+    /// access sorted by priority.
+    pub fn upload_queue(&self) -> HostQueue {
+        let inner = self.inner.read().unwrap();
+        let preferred_hosts = &inner.preferred_hosts;
+        let mut hosts = inner
+            .hosts
+            .iter()
+            .filter_map(|(hk, h)| h.good_for_upload.then_some(*hk))
+            .collect::<Vec<_>>();
+
+        hosts.sort_by(|a, b| {
+            preferred_hosts
+                .get_priority(b)
+                .cmp(&preferred_hosts.get_priority(a))
+        });
         HostQueue::new(hosts)
     }
 
@@ -499,5 +524,49 @@ mod test {
             metric.add_failure();
         });
         assert_eq!(pq.peek().unwrap().0, &hosts[3]);
+    }
+
+    #[test]
+    fn test_upload_queue() {
+        let hosts_manager = Hosts::new();
+
+        let hk1 = PrivateKey::from_seed(&rand::random()).public_key();
+        let hk2 = PrivateKey::from_seed(&rand::random()).public_key();
+        let hk3 = PrivateKey::from_seed(&rand::random()).public_key();
+
+        hosts_manager.update(vec![
+            Host {
+                public_key: hk1,
+                addresses: vec![],
+                country_code: String::new(),
+                latitude: 0.0,
+                longitude: 0.0,
+                good_for_upload: false,
+            },
+            Host {
+                public_key: hk2,
+                addresses: vec![],
+                country_code: String::new(),
+                latitude: 0.0,
+                longitude: 0.0,
+                good_for_upload: true,
+            },
+            Host {
+                public_key: hk3,
+                addresses: vec![],
+                country_code: String::new(),
+                latitude: 0.0,
+                longitude: 0.0,
+                good_for_upload: false,
+            },
+        ]);
+
+        let queue = hosts_manager.upload_queue();
+        let (first, _) = queue.pop_front().unwrap();
+        assert_eq!(first, hk2);
+        assert!(
+            queue.pop_front().is_err(),
+            "queue should only have one host"
+        );
     }
 }

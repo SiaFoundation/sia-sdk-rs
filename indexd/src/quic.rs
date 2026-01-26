@@ -549,6 +549,7 @@ mod test {
             country_code: "US".into(),
             latitude: 0.0,
             longitude: 0.0,
+            good_for_upload: true,
         }]);
         let dialer = Client::new(client_config, hosts).expect("Failed to create dialer");
 

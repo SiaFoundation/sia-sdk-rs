@@ -368,6 +368,7 @@ pub struct Host {
     pub country_code: String,
     pub latitude: f64,
     pub longitude: f64,
+    pub good_for_upload: bool,
 }
 
 impl From<sia::rhp::Host> for Host {
@@ -388,6 +389,7 @@ impl From<sia::rhp::Host> for Host {
             country_code: h.country_code,
             latitude: h.latitude,
             longitude: h.longitude,
+            good_for_upload: h.good_for_upload,
         }
     }
 }
@@ -414,6 +416,7 @@ impl TryInto<sia::rhp::Host> for Host {
             country_code: self.country_code,
             latitude: self.latitude,
             longitude: self.longitude,
+            good_for_upload: self.good_for_upload,
         })
     }
 }

@@ -22,6 +22,7 @@ pub struct Host {
     pub country_code: String,
     pub latitude: f64,
     pub longitude: f64,
+    pub good_for_upload: bool,
 }
 
 /// Contains the prices and parameters of a host.
