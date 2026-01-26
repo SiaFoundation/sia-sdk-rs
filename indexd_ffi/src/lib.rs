@@ -763,7 +763,7 @@ impl SDK {
         let max_inflight = options.max_inflight;
         let sdk = self.inner.clone();
         spawn(async move {
-            let w = adapt_ffi_writer(w.clone());
+            let (w, flush_handle) = adapt_ffi_writer(w.clone());
             for offset in (offset..max_length).step_by(CHUNK_SIZE) {
                 sdk.download(
                     w.clone(),
@@ -776,6 +776,9 @@ impl SDK {
                 )
                 .await?;
             }
+            // Close the channel and wait for all data to be flushed to the foreign writer
+            drop(w);
+            let _ = flush_handle.await;
             Ok(())
         })
         .await?

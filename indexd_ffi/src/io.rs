@@ -124,16 +124,21 @@ impl AsyncWrite for FFIWriter {
     }
 }
 
-pub(crate) fn adapt_ffi_writer(writer: Arc<dyn Writer>) -> FFIWriter {
+pub(crate) fn adapt_ffi_writer(
+    writer: Arc<dyn Writer>,
+) -> (FFIWriter, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<Bytes>(8);
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         while let Some(buf) = rx.recv().await {
             if writer.write(buf.to_vec()).await.is_err() {
                 return;
             }
         }
     });
-    FFIWriter {
-        sender: PollSender::new(tx),
-    }
+    (
+        FFIWriter {
+            sender: PollSender::new(tx),
+        },
+        handle,
+    )
 }
