@@ -678,7 +678,7 @@ mod test {
         let object = uploader
             .upload(Cursor::new(input.clone()), UploadOptions::default())
             .await
-            .expect("upload should succeed with 40% slow hosts");
+            .expect("upload should succeed with 1 slow host");
 
         assert_eq!(object.slabs().len(), 1);
     }
