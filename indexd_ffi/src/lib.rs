@@ -1,19 +1,20 @@
 uniffi::setup_scaffolding!();
 
 use base64::prelude::*;
-use std::str::FromStr;
-use std::sync::{Arc, LazyLock, Mutex};
-use std::time::SystemTime;
-use tokio::runtime::{self, Runtime};
-use tokio_util::task::AbortOnDropHandle;
-
 use indexd::{SealedObjectError, Url};
+use log::debug;
 use sia::rhp::SECTOR_SIZE;
 use sia::signing::{PublicKey, Signature};
 use sia::types::{self, Hash256, HexParseError};
 use sia::{encoding, encryption};
+use std::str::FromStr;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::SystemTime;
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
+use tokio::runtime::{self, Runtime};
 use tokio::sync::mpsc;
+use tokio_util::task::AbortOnDropHandle;
 
 mod tls;
 
@@ -765,11 +766,11 @@ impl SDK {
         let max_length = options.length.unwrap_or(object_size);
         let max_inflight = options.max_inflight;
         let sdk = self.inner.clone();
+        let mut w = adapt_ffi_writer(w);
         spawn(async move {
-            let w = adapt_ffi_writer(w.clone());
             for offset in (offset..max_length).step_by(CHUNK_SIZE) {
                 sdk.download(
-                    w.clone(),
+                    &mut w,
                     &object,
                     indexd::DownloadOptions {
                         offset,
@@ -778,6 +779,9 @@ impl SDK {
                     },
                 )
                 .await?;
+            }
+            if let Err(e) = w.shutdown().await {
+                debug!("error shutting down writer: {}", e);
             }
             Ok(())
         })

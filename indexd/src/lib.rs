@@ -129,7 +129,7 @@ impl SDK {
     /// Downloads an object using the provided writer and options.
     pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
-        w: W,
+        w: &mut W,
         object: &Object,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
@@ -382,7 +382,7 @@ mod test {
         let mut output = BytesMut::zeroed(13);
         downloader
             .download(
-                Cursor::new(&mut output[..]),
+                &mut Cursor::new(&mut output[..]),
                 &objects[0],
                 DownloadOptions::default(),
             )
@@ -394,7 +394,7 @@ mod test {
         let mut output = BytesMut::zeroed(13);
         downloader
             .download(
-                Cursor::new(&mut output[..]),
+                &mut Cursor::new(&mut output[..]),
                 &objects[1],
                 DownloadOptions::default(),
             )
@@ -467,7 +467,7 @@ mod test {
         let mut output = BytesMut::zeroed(objects[0].size() as usize);
         downloader
             .download(
-                Cursor::new(&mut output[..]),
+                &mut Cursor::new(&mut output[..]),
                 &objects[0],
                 DownloadOptions::default(),
             )
@@ -479,7 +479,7 @@ mod test {
         let mut output = BytesMut::zeroed(objects[1].size() as usize);
         downloader
             .download(
-                Cursor::new(&mut output[..]),
+                &mut Cursor::new(&mut output[..]),
                 &objects[1],
                 DownloadOptions::default(),
             )
@@ -537,7 +537,7 @@ mod test {
         let mut output = BytesMut::zeroed(objects[0].size() as usize);
         downloader
             .download(
-                Cursor::new(&mut output[..]),
+                &mut Cursor::new(&mut output[..]),
                 &objects[0],
                 DownloadOptions::default(),
             )
@@ -585,7 +585,7 @@ mod test {
         let mut output = BytesMut::zeroed(object.size() as usize);
         downloader
             .download(
-                Cursor::new(&mut output[..]),
+                &mut Cursor::new(&mut output[..]),
                 &object,
                 DownloadOptions::default(),
             )
@@ -598,7 +598,7 @@ mod test {
         let mut output = BytesMut::zeroed(range.end - range.start);
         downloader
             .download(
-                Cursor::new(&mut output[..]),
+                &mut Cursor::new(&mut output[..]),
                 &object,
                 DownloadOptions {
                     offset: range.start as u64,
