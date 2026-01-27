@@ -13,6 +13,9 @@ on:
       - '.github/workflows/python.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build wheels (${{ matrix.target }} - ${{ matrix.os }})
@@ -30,7 +33,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             manylinux: manylinux2014
           # macOS x86_64
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
           # macOS ARM64
           - os: macos-14
@@ -54,6 +57,10 @@ jobs:
           manylinux: ${{ matrix.manylinux || 'auto' }}
           args: --release --out dist --manifest-path indexd_ffi/Cargo.toml
           sccache: 'true'
+        # Fix for ring crate cross-compilation on aarch64
+        # See: https://github.com/briansmith/ring/issues/1789
+        env:
+          CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.platform.target == 'aarch64' && '-D__ARM_ARCH=8' || '' }}
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
