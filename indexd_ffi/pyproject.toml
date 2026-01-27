@@ -1,0 +1,38 @@
+[build-system]
+requires = ["maturin>=1.8,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "sia-indexd"
+version = "0.2.2"
+description = "Python SDK for interacting with a Sia indexer"
+requires-python = ">=3.9"
+license = "MIT"
+keywords = ["sia", "decentralized", "storage"]
+authors = [
+    { name = "The Sia Foundation" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://sia.tech"
+Repository = "https://github.com/SiaFoundation/sia-sdk-rs"
+Documentation = "https://github.com/SiaFoundation/sia-sdk-rs"
+
+[tool.maturin]
+bindings = "uniffi"
+module-name = "sia_indexd"
+python-source = "python"
+compatibility = "manylinux2014"

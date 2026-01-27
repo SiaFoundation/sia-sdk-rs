@@ -1,9 +1,8 @@
 import asyncio
 import json
 from sys import stdin
-from indexd_ffi import uniffi_set_event_loop, generate_recovery_phrase, AppMeta, Builder, Reader, Writer, UploadOptions, DownloadOptions, set_logger, Logger
-from logging import fatal
-from datetime import datetime, timedelta, timezone
+from sia_indexd import uniffi_set_event_loop, generate_recovery_phrase, AppMeta, Builder, Reader, Writer, UploadOptions, DownloadOptions, set_logger, Logger
+from datetime import datetime, timezone
 
 class PrintLogger(Logger):
     def debug(self, msg):

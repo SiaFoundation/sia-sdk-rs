@@ -1,10 +1,31 @@
-# Running
+# sia-indexd
 
-From the repo root, run the following:
+Python SDK for interacting with a Sia network indexer.
 
-```sh
-cargo build --release --package=indexd_ffi
-cargo run --package=indexd_ffi --bin uniffi-bindgen generate --library target/release/libindexd_ffi.dylib --language python --out-dir indexd_ffi/examples/python
-mv target/release/libindexd_ffi.dylib indexd_ffi/examples/python
-(cd indexd_ffi/examples/python && python3 example.py)
+## Installation
+
+```bash
+pip install sia-indexd
 ```
+
+### Building from source
+
+To build from source, you need Rust and Maturin:
+
+```bash
+python3 -m venv env
+source env/bin/activate
+pip install maturin
+cd indexd_ffi
+maturin develop
+```
+
+## Usage
+
+```bash
+python3 ./examples/python/example.py
+````
+
+## Async Support
+
+This SDK uses async/await for all network operations. Make sure to call `uniffi_set_event_loop()` before making any async calls.
