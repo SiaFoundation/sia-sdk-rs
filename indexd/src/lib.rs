@@ -312,6 +312,7 @@ mod test {
     use sia::rhp::SECTOR_SIZE;
     use sia::types::v2::NetAddress;
     use std::io::Cursor;
+    use std::time::Duration;
 
     use crate::mock::{MockDownloader, MockRHP4Client, MockUploader};
 
@@ -611,5 +612,119 @@ mod test {
             .expect("download to complete");
 
         assert_eq!(output.freeze(), input.slice(range));
+    }
+
+    #[tokio::test]
+    async fn test_upload_timeout_no_hosts() {
+        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
+        let transport = Arc::new(MockRHP4Client::new());
+        let hosts = Hosts::new();
+
+        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
+
+        let input: Bytes = Bytes::from("Hello, world!");
+
+        let err = uploader
+            .upload(Cursor::new(input.clone()), UploadOptions::default())
+            .await
+            .expect_err("upload to fail");
+
+        match err {
+            UploadError::QueueError(QueueError::NoMoreHosts) => (),
+            _ => panic!(),
+        }
+    }
+
+    /// Tests that upload succeeds even when some hosts are slow, as long as
+    /// there are enough fast hosts to complete the upload.
+    /// This mirrors Go's TestUpload "slow" subtest.
+    #[tokio::test]
+    async fn test_upload_slow() {
+        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
+        let transport = Arc::new(MockRHP4Client::new());
+        let hosts = Hosts::new();
+
+        // Create 30 hosts and track their public keys
+        let host_keys: Vec<_> = (0..30)
+            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
+            .collect();
+
+        hosts.update(
+            host_keys
+                .iter()
+                .map(|pk| Host {
+                    public_key: *pk,
+                    addresses: vec![NetAddress {
+                        protocol: sia::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                })
+                .collect(),
+        );
+
+        // make the 1st host slow
+        transport.set_slow_hosts(
+            host_keys.iter().take(1).copied(),
+            tokio::time::Duration::from_secs(1),
+        );
+
+        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
+
+        let input: Bytes = Bytes::from("Hello, world!");
+
+        let object = uploader
+            .upload(Cursor::new(input.clone()), UploadOptions::default())
+            .await
+            .expect("upload should succeed with 40% slow hosts");
+
+        assert_eq!(object.slabs().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_upload_slow_timeout() {
+        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
+        let transport = Arc::new(MockRHP4Client::new());
+        let hosts = Hosts::new();
+
+        // Create 30 hosts and track their public keys
+        let host_keys: Vec<_> = (0..30)
+            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
+            .collect();
+
+        hosts.update(
+            host_keys
+                .iter()
+                .map(|pk| Host {
+                    public_key: *pk,
+                    addresses: vec![NetAddress {
+                        protocol: sia::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                })
+                .collect(),
+        );
+
+        // Make all hosts slow
+        transport.set_slow_hosts(host_keys.iter().take(30).copied(), Duration::from_secs(20));
+
+        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
+
+        let input: Bytes = Bytes::from("Hello, world!");
+
+        let object = uploader
+            .upload(Cursor::new(input.clone()), UploadOptions::default())
+            .await
+            .expect_err("upload should fail");
+
+        match object {
+            UploadError::QueueError(QueueError::NoMoreHosts) => {}
+            _ => panic!("unexpected error variant"),
+        }
     }
 }
