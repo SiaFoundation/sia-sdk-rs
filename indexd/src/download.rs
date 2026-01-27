@@ -236,7 +236,7 @@ where
     /// provided writer.
     pub async fn download<W: AsyncWriteExt + Unpin>(
         &self,
-        w: W,
+        w: &mut W,
         object: &Object,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {

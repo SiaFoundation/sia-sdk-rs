@@ -157,7 +157,7 @@ fn upload_benchmark(c: &mut Criterion) {
             b.to_async(&runtime).iter(|| async {
                 downloader
                     .download(
-                        sink(),
+                        &mut sink(),
                         object,
                         DownloadOptions {
                             max_inflight: 30,
@@ -177,7 +177,7 @@ fn upload_benchmark(c: &mut Criterion) {
             b.to_async(&runtime).iter(|| async {
                 downloader
                     .download(
-                        sink(),
+                        &mut sink(),
                         object,
                         DownloadOptions {
                             max_inflight: 10,
@@ -196,7 +196,7 @@ fn upload_benchmark(c: &mut Criterion) {
         |b, object| {
             b.to_async(&runtime).iter(|| async {
                 downloader
-                    .download(sink(), object, DownloadOptions::default())
+                    .download(&mut sink(), object, DownloadOptions::default())
                     .await
                     .expect("download to complete");
             });

@@ -121,7 +121,7 @@ impl MockDownloader {
 
     pub async fn download<W: AsyncWriteExt + Send + Sync + Unpin>(
         &self,
-        w: W,
+        w: &mut W,
         object: &Object,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {

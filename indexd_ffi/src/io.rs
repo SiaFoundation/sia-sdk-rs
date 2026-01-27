@@ -10,6 +10,9 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::PollSender;
+use tokio_util::task::AbortOnDropHandle;
+
+use crate::spawn;
 
 #[derive(Debug, Error, uniffi::Error)]
 #[uniffi(flat_error)]
@@ -81,9 +84,9 @@ pub trait Writer: Send + Sync {
     async fn write(&self, data: Vec<u8>) -> Result<(), IOError>;
 }
 
-#[derive(Clone)]
 pub struct FFIWriter {
     sender: PollSender<Bytes>,
+    join_handle: Option<AbortOnDropHandle<()>>,
 }
 
 impl AsyncWrite for FFIWriter {
@@ -118,15 +121,27 @@ impl AsyncWrite for FFIWriter {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        self.get_mut().sender.close();
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.sender.close();
+
+        if let Some(join_handle) = self.join_handle.as_mut() {
+            match ready!(Pin::new(join_handle).poll(cx)) {
+                Ok(()) => {
+                    self.join_handle = None;
+                }
+                Err(e) => {
+                    self.join_handle = None;
+                    return Poll::Ready(Err(io::Error::other(format!("join error: {}", e))));
+                }
+            }
+        }
         Poll::Ready(Ok(()))
     }
 }
 
 pub(crate) fn adapt_ffi_writer(writer: Arc<dyn Writer>) -> FFIWriter {
     let (tx, mut rx) = mpsc::channel::<Bytes>(8);
-    tokio::spawn(async move {
+    let join_handle = spawn(async move {
         while let Some(buf) = rx.recv().await {
             if writer.write(buf.to_vec()).await.is_err() {
                 return;
@@ -135,5 +150,6 @@ pub(crate) fn adapt_ffi_writer(writer: Arc<dyn Writer>) -> FFIWriter {
     });
     FFIWriter {
         sender: PollSender::new(tx),
+        join_handle: Some(join_handle),
     }
 }
