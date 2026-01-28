@@ -197,7 +197,7 @@ impl SDK {
                     None => None,
                 };
                 Ok(ObjectEvent {
-                    id: event.key,
+                    id: event.id,
                     deleted: event.deleted,
                     updated_at: event.updated_at,
                     object,

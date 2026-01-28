@@ -105,7 +105,7 @@ pub struct SlabPinParams {
 
 pub struct ObjectsCursor {
     pub after: DateTime<Utc>,
-    pub key: Hash256,
+    pub id: Hash256,
 }
 
 /// An SealedObjectEvent represents an object and whether it was deleted or not.
@@ -113,7 +113,8 @@ pub struct ObjectsCursor {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SealedObjectEvent {
-    pub key: Hash256,
+    #[serde(rename = "key")]
+    pub id: Hash256,
     pub deleted: bool,
     pub updated_at: DateTime<Utc>,
     pub object: Option<SealedObject>,
@@ -323,9 +324,9 @@ impl Client {
         if let Some(limit) = limit {
             query_params.push(("limit", limit.to_string()));
         }
-        if let Some(ObjectsCursor { after, key }) = cursor {
+        if let Some(ObjectsCursor { after, id }) = cursor {
             query_params.push(("after", after.to_rfc3339())); // indexd expects RFC3339
-            query_params.push(("key", key.to_string()));
+            query_params.push(("key", id.to_string()));
         }
         self.get_json::<_, _>("objects", Some(app_key), Some(&query_params))
             .await
@@ -1528,7 +1529,7 @@ mod tests {
                     &app_key,
                     Some(ObjectsCursor {
                         after: object.updated_at.into(),
-                        key: object.id(),
+                        id: object.id(),
                     }),
                     Some(1)
                 )
@@ -1536,19 +1537,19 @@ mod tests {
                 .unwrap(),
             vec![
                 SealedObjectEvent {
-                    key: object.id(),
+                    id: object.id(),
                     deleted: false,
                     updated_at: object.updated_at,
                     object: Some(object),
                 },
                 SealedObjectEvent {
-                    key: object_no_meta.id(),
+                    id: object_no_meta.id(),
                     deleted: false,
                     updated_at: object_no_meta.updated_at,
                     object: Some(object_no_meta.clone()),
                 },
                 SealedObjectEvent {
-                    key: object_no_meta.id(),
+                    id: object_no_meta.id(),
                     deleted: false,
                     updated_at: object_no_meta.updated_at,
                     object: Some(object_no_meta),
