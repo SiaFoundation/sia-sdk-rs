@@ -1,6 +1,6 @@
 [package]
 name = "indexd_ffi"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 repository = "https://github.com/SiaFoundation/sia-sdk-rs"
 license = "MIT"
@@ -16,7 +16,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 async-trait = "0.1.89"
 base64 = "0.22.1"
 bytes = "1.11.0"
-indexd = { version = "0.1.2", path = "../indexd" }
+indexd = { version = "0.2.0", path = "../indexd" }
 log = "0.4.29"
 rand = "0.9.2"
 rustls = { version = "0.23.36", default-features = false, features = ["ring", "logging", "std", "tls12"] }
