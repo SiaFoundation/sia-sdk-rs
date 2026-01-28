@@ -64,7 +64,6 @@ __all__ = [
     "encoded_size",
     "uniffi_set_event_loop",
     # Classes/Objects
-    "Sdk",
     "SDK",  # alias
     "Builder",
     "AppKey",
@@ -97,7 +96,6 @@ __all__ = [
     "BuilderError",
     "EncryptionKeyParseError",
     "ObjectError",
-    "IoError",
     "IOError",  # alias
     # Base classes for implementing custom traits
     "Logger",
