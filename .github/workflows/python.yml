@@ -60,7 +60,7 @@ jobs:
         # Fix for ring crate cross-compilation on aarch64
         # See: https://github.com/briansmith/ring/issues/1789
         env:
-          CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.platform.target == 'aarch64' && '-D__ARM_ARCH=8' || '' }}
+          CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8"
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
