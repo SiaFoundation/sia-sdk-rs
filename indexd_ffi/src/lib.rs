@@ -522,15 +522,15 @@ impl TryInto<indexd::Sector> for PinnedSector {
 /// last object's key seen.
 #[derive(uniffi::Record)]
 pub struct ObjectsCursor {
+    pub id: String,
     pub after: SystemTime,
-    pub key: String,
 }
 
 impl From<indexd::app_client::ObjectsCursor> for ObjectsCursor {
     fn from(c: indexd::app_client::ObjectsCursor) -> Self {
         Self {
+            id: c.id.to_string(),
             after: c.after.into(),
-            key: c.key.to_string(),
         }
     }
 }
@@ -799,7 +799,7 @@ impl SDK {
     }
 
     /// Returns objects stored in the indexer. When syncing, the caller should
-    /// provide the last `updated_at` timestamp and `key` seen in the `cursor
+    /// provide the last `updated_at` timestamp and `id` seen in the `cursor`
     /// parameter to avoid missing or duplicating objects.
     ///
     /// # Arguments
@@ -813,7 +813,7 @@ impl SDK {
         let cursor = match cursor {
             Some(c) => Some(indexd::app_client::ObjectsCursor {
                 after: c.after.into(),
-                key: Hash256::from_str(c.key.as_str())?,
+                id: Hash256::from_str(c.id.as_str())?,
             }),
             None => None,
         };
