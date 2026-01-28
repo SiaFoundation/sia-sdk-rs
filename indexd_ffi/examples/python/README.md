@@ -24,8 +24,8 @@ maturin develop
 
 ```bash
 python3 ./examples/python/example.py
-````
+```
 
 ## Async Support
 
-This SDK uses async/await for all network operations. Make sure to call `uniffi_set_event_loop()` before making any async calls.
+This SDK uses async/await for all network operations. Make sure to call `uniffi_set_event_loop` before making any async calls.
