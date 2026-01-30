@@ -4,11 +4,11 @@ build-backend = "maturin"
 
 [project]
 name = "sia-indexd"
-version = "0.2.2"
-description = "Python SDK for interacting with a Sia indexer"
+version = "0.3.0"
+description = "Python SDK for interacting with the Sia decentralized storage network"
 requires-python = ">=3.9"
 license = "MIT"
-keywords = ["sia", "decentralized", "storage"]
+keywords = ["sia", "decentralized", "blockchain", "depin", "storage"]
 authors = [
     { name = "The Sia Foundation" }
 ]
