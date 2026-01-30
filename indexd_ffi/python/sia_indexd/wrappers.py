@@ -5,17 +5,44 @@ feel native to Python developers, wrapping the low-level Reader/Writer
 traits with standard file-like object support.
 """
 
+import asyncio
 from io import BytesIO
-from typing import BinaryIO, Optional, Union
+from typing import BinaryIO, Optional
 
 from .sia_indexd.indexd_ffi import (
+    AppMeta,
+    Builder as _Builder,
     DownloadOptions,
     PinnedObject,
     Reader,
     Sdk,
     UploadOptions,
     Writer,
+    uniffi_set_event_loop,
 )
+
+
+class Builder:
+    """Wrapper around the UniFFI Builder that auto-initializes the event loop."""
+
+    def __init__(self, base_url: str):
+        try:
+            uniffi_set_event_loop(asyncio.get_running_loop())
+        except RuntimeError:
+            pass  # No running loop yet
+        self._inner = _Builder(base_url)
+
+    async def request_connection(self, app_meta: AppMeta) -> None:
+        return await self._inner.request_connection(app_meta)
+
+    def response_url(self) -> str:
+        return self._inner.response_url()
+
+    async def wait_for_approval(self) -> None:
+        return await self._inner.wait_for_approval()
+
+    async def register(self, mnemonic: str) -> Sdk:
+        return await self._inner.register(mnemonic)
 
 
 class BytesReader(Reader):

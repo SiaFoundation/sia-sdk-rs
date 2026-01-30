@@ -8,7 +8,6 @@ from sia_indexd.sia_indexd.indexd_ffi import (
     uniffi_set_event_loop,
     # Classes/Objects
     Sdk,
-    Builder,
     AppKey,
     EncryptionKey,
     PinnedObject,
@@ -58,6 +57,7 @@ IOError = IoError
 
 # Idiomatic Python wrappers for common operations
 from sia_indexd.wrappers import (
+    Builder,
     BytesReader,
     BytesWriter,
     upload_bytes,

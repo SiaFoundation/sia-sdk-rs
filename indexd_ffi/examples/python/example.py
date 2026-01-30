@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from io import BytesIO
 
 from sia_indexd import (
-    uniffi_set_event_loop,
     generate_recovery_phrase,
     AppMeta,
     Builder,
@@ -39,7 +38,6 @@ set_logger(PrintLogger(), "debug")
 
 
 async def main():
-    uniffi_set_event_loop(asyncio.get_running_loop())  # type: ignore[arg-type]
     app_id = b"\x01" * 32
 
     builder = Builder("https://app.sia.storage")
