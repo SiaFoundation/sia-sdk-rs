@@ -11,7 +11,7 @@ use std::str::FromStr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::runtime::{self, Runtime};
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
@@ -686,6 +686,23 @@ impl SDK {
     pub async fn upload_packed(&self, options: UploadOptions) -> PackedUpload {
         let sdk = self.inner.clone();
         spawn(async move {
+            let progress_tx = if let Some(callback) = options.progress_callback {
+                let total_shards = options.data_shards as u64 + options.parity_shards as u64;
+                let slab_size = total_shards * SECTOR_SIZE as u64;
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                tokio::spawn(async move {
+                    let mut sectors: u64 = 0;
+                    while rx.recv().await.is_some() {
+                        sectors += 1;
+                        let size = sectors * SECTOR_SIZE as u64;
+                        let slabs_size = sectors.div_ceil(total_shards) * slab_size;
+                        callback.progress(size, slabs_size);
+                    }
+                });
+                Some(tx)
+            } else {
+                None
+            };
             // this needs to be in a spawn to ensure a tokio runtime is available since `upload_packed` spawns a task
             PackedUpload {
                 packed_upload: Arc::new(tokio::sync::Mutex::new(Some(sdk.upload_packed(
@@ -693,7 +710,7 @@ impl SDK {
                         max_inflight: options.max_inflight as usize,
                         data_shards: options.data_shards,
                         parity_shards: options.parity_shards,
-                        shard_uploaded: None,
+                        shard_uploaded: progress_tx,
                     },
                 )))),
             }
@@ -766,7 +783,8 @@ impl SDK {
         let max_length = options.length.unwrap_or(object_size);
         let max_inflight = options.max_inflight;
         let sdk = self.inner.clone();
-        let mut w = adapt_ffi_writer(w);
+        let w = adapt_ffi_writer(w);
+        let mut w = BufWriter::with_capacity(CHUNK_SIZE, w);
         spawn(async move {
             for offset in (offset..max_length).step_by(CHUNK_SIZE) {
                 sdk.download(
