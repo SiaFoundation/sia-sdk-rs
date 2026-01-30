@@ -1,3 +1,9 @@
+## 0.3.1 (2026-01-30)
+
+### Fixes
+
+- Progress callback will now be called as expected for packed uploads.
+
 ## 0.3.0 (2026-01-28)
 
 ### Breaking Changes
