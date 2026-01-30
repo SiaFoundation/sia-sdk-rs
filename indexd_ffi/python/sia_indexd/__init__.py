@@ -61,9 +61,7 @@ from sia_indexd.wrappers import (
     BytesReader,
     BytesWriter,
     upload_bytes,
-    upload_stream,
     download_bytes,
-    download_stream,
 )
 
 __all__ = [
@@ -121,7 +119,5 @@ __all__ = [
     "BytesReader",
     "BytesWriter",
     "upload_bytes",
-    "upload_stream",
     "download_bytes",
-    "download_stream",
 ]

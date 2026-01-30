@@ -99,28 +99,6 @@ async def upload_bytes(
     return await sdk.upload(BytesReader(BytesIO(data)), options or UploadOptions())
 
 
-async def upload_stream(
-    sdk: Sdk,
-    stream: BinaryIO,
-    options: Optional[UploadOptions] = None,
-) -> PinnedObject:
-    """Upload from any file-like object to the Sia network.
-
-    Args:
-        sdk: The SDK instance.
-        stream: Any file-like object with a read() method.
-        options: Optional upload options.
-
-    Returns:
-        The pinned object representing the uploaded data.
-
-    Example:
-        with open("data.bin", "rb") as f:
-            obj = await upload_stream(sdk, f)
-    """
-    return await sdk.upload(BytesReader(stream), options or UploadOptions())
-
-
 async def download_bytes(
     sdk: Sdk,
     obj: PinnedObject,
@@ -142,24 +120,3 @@ async def download_bytes(
     buf = BytesIO()
     await sdk.download(BytesWriter(buf), obj, options or DownloadOptions())
     return buf.getvalue()
-
-
-async def download_stream(
-    sdk: Sdk,
-    obj: PinnedObject,
-    stream: BinaryIO,
-    options: Optional[DownloadOptions] = None,
-) -> None:
-    """Download an object to any file-like object.
-
-    Args:
-        sdk: The SDK instance.
-        obj: The pinned object to download.
-        stream: Any file-like object with a write() method.
-        options: Optional download options.
-
-    Example:
-        buf = BytesIO()
-        await download_stream(sdk, obj, buf)
-    """
-    await sdk.download(BytesWriter(stream), obj, options or DownloadOptions())
