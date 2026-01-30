@@ -2,6 +2,7 @@
 versioned_files = [
     "sia_sdk/Cargo.toml",
     { path = "indexd/Cargo.toml", dependency = "sia_sdk" },
+    { path = "indexd_ffi/Cargo.toml", dependency = "sia_sdk" },
     { path = "Cargo.lock", dependency = "sia_sdk" }
 ]
 changelog = "sia_sdk/CHANGELOG.md"
