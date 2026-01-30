@@ -1,8 +1,25 @@
 import asyncio
-import json
 from sys import stdin
-from sia_indexd import uniffi_set_event_loop, generate_recovery_phrase, AppMeta, Builder, Reader, Writer, UploadOptions, DownloadOptions, set_logger, Logger
 from datetime import datetime, timezone
+from io import BytesIO
+
+from sia_indexd import (
+    uniffi_set_event_loop,
+    generate_recovery_phrase,
+    AppMeta,
+    Builder,
+    UploadOptions,
+    DownloadOptions,
+    set_logger,
+    Logger,
+    # Wrappers for standard Python file-like objects
+    BytesReader,
+    BytesWriter,
+    # Convenience functions for simple upload/download
+    upload_bytes,
+    download_bytes,
+)
+
 
 class PrintLogger(Logger):
     def debug(self, msg):
@@ -17,43 +34,26 @@ class PrintLogger(Logger):
     def error(self, msg):
         print("ERROR", msg)
 
-from io import BytesIO
-
-class BytesReader(Reader):
-    def __init__(self, data: bytes, chunk_size: int = 65536):
-        self.buffer = BytesIO(data)
-        self.chunk_size = chunk_size
-
-    async def read(self) -> bytes:
-        return self.buffer.read(self.chunk_size)
-
-
-class BytesWriter(Writer):
-    def __init__(self):
-        self.buffer = BytesIO()
-
-    async def write(self, data: bytes) -> None:
-        if len(data) > 0:
-            self.buffer.write(data)
-
-    def get_data(self) -> bytes:
-        return self.buffer.getvalue()
 
 set_logger(PrintLogger(), "debug")
+
+
 async def main():
-    uniffi_set_event_loop(asyncio.get_running_loop()) # type: ignore[arg-type]
-    app_id = b'\x01' * 32
-    
+    uniffi_set_event_loop(asyncio.get_running_loop())  # type: ignore[arg-type]
+    app_id = b"\x01" * 32
+
     builder = Builder("https://app.sia.storage")
-    
-    await builder.request_connection(AppMeta(
-        id = app_id,
-        name="python example",
-        description= "an example app",
-        service_url= "https://example.com",
-        logo_url=None,
-        callback_url=None,
-    ))
+
+    await builder.request_connection(
+        AppMeta(
+            id=app_id,
+            name="python example",
+            description="an example app",
+            service_url="https://example.com",
+            logo_url=None,
+            callback_url=None,
+        )
+    )
 
     print(f"Please approve connection {builder.response_url()}")
     await builder.wait_for_approval()
@@ -76,8 +76,8 @@ async def main():
     upload = await sdk.upload_packed(UploadOptions())
 
     for i in range(10):
-        data = f'hello, world {i}!'
-        reader = BytesReader(data.encode())
+        data = f"hello, world {i}!"
+        reader = BytesReader(BytesIO(data.encode()))
         size = await upload.add(reader)
         rem = await upload.remaining()
         print(f"upload {i} added {size} bytes ({rem} remaining)")
@@ -86,12 +86,23 @@ async def main():
     elapsed = datetime.now(timezone.utc) - start
     print(f"Upload finished {len(objects)} objects in {elapsed}")
 
-
     start = datetime.now(timezone.utc)
-    writer = BytesWriter()
+    writer = BytesWriter(BytesIO())
     print(f"Downloading object {objects[-1].id()} {objects[-1].size()} bytes")
     await sdk.download(writer, objects[-1], DownloadOptions())
     elapsed = datetime.now(timezone.utc) - start
-    print(f"Downloaded object {objects[-1].id()} with {len(writer.get_data())} bytes in {elapsed}")
+    print(
+        f"Downloaded object {objects[-1].id()} with {len(writer._stream.getvalue())} bytes in {elapsed}"
+    )
+
+    # Convenience functions for simple cases
+    print("\nConvenience function examples...")
+
+    obj = await upload_bytes(sdk, b"hello from upload_bytes!")
+    print(f"Uploaded {obj.size()} bytes with upload_bytes()")
+
+    data = await download_bytes(sdk, obj)
+    print(f"Downloaded with download_bytes(): {data.decode()!r}")
+
 
 asyncio.run(main())

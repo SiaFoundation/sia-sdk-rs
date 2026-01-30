@@ -56,6 +56,16 @@ from sia_indexd.sia_indexd.indexd_ffi import (
 SDK = Sdk
 IOError = IoError
 
+# Idiomatic Python wrappers for common operations
+from sia_indexd.wrappers import (
+    BytesReader,
+    BytesWriter,
+    upload_bytes,
+    upload_stream,
+    download_bytes,
+    download_stream,
+)
+
 __all__ = [
     # Functions
     "generate_recovery_phrase",
@@ -107,4 +117,11 @@ __all__ = [
     "ReaderProtocol",
     "WriterProtocol",
     "UploadProgressCallbackProtocol",
+    # Idiomatic Python wrappers
+    "BytesReader",
+    "BytesWriter",
+    "upload_bytes",
+    "upload_stream",
+    "download_bytes",
+    "download_stream",
 ]
