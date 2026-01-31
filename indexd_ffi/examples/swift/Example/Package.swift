@@ -8,14 +8,14 @@ let package = Package(
         .macOS(.v11)
     ],
     dependencies: [
-        // Reference the SiaSDK package from bindings/swift
-        .package(path: "../../../bindings/swift"),
+        // Reference the SiaSDK package at the repo root
+        .package(path: "../../../../"),
     ],
     targets: [
         .executableTarget(
             name: "Example",
             dependencies: [
-                .product(name: "SiaSDK", package: "SiaSDK"),
+                .product(name: "SiaSDK", package: "sia-sdk-rs"),
             ],
             path: "Sources"
         )

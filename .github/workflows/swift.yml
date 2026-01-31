@@ -80,7 +80,7 @@ jobs:
       - name: Extract XCFramework
         run: |
           cd indexd_ffi/bindings/swift
-          unzip -q build/SiaSDKFFI.xcframework.zip -d .
+          unzip -q build/SiaSDKFFI.xcframework.zip -d build
 
       - name: Install Rust (for UniFFI bindgen)
         uses: dtolnay/rust-toolchain@stable
@@ -97,21 +97,22 @@ jobs:
           cargo run -p indexd_ffi --bin uniffi-bindgen -- \
             generate --library target/release/libindexd_ffi.dylib \
             --language swift \
-            --out-dir indexd_ffi/bindings/swift/generated
-          mkdir -p indexd_ffi/bindings/swift/Sources/SiaSDK
-          cp indexd_ffi/bindings/swift/generated/SiaSDK.swift indexd_ffi/bindings/swift/Sources/SiaSDK/
+            --out-dir indexd_ffi/bindings/swift/generated \
+            --config indexd_ffi/uniffi.toml
+          mkdir -p Sources/SiaSDK
+          cp indexd_ffi/bindings/swift/generated/SiaSDK.swift Sources/SiaSDK/
 
       - name: Build Example app
         run: |
           cd indexd_ffi/examples/swift/Example
-          swift build
+          SIA_SDK_USE_LOCAL_XCFRAMEWORK=1 swift build
 
       - name: Verify package structure
         run: |
           echo "Verifying Swift package structure..."
-          ls -la indexd_ffi/bindings/swift/
-          ls -la indexd_ffi/bindings/swift/SiaSDKFFI.xcframework/
-          ls -la indexd_ffi/bindings/swift/Sources/SiaSDK/
+          ls -la Sources/SiaSDK/
+          ls -la indexd_ffi/bindings/swift/build/
+          ls -la indexd_ffi/bindings/swift/build/SiaSDKFFI.xcframework/
 
   release:
     name: Create GitHub Release
@@ -142,44 +143,10 @@ jobs:
           CHECKSUM=$(cat checksum.txt)
           echo "SiaSDKFFI-${{ github.event.inputs.version }}.xcframework.zip: $CHECKSUM" > CHECKSUMS.txt
 
-      - name: Generate Package.swift for release
-        run: |
-          VERSION="${{ github.event.inputs.version }}"
-          CHECKSUM=$(cat dist/checksum.txt)
-          cat > dist/Package.swift << EOF
-          // swift-tools-version: 5.9
-          // SiaSDK Swift Package - Version $VERSION
-          // Add this package via: https://github.com/SiaFoundation/sia-sdk-rs
-          import PackageDescription
-
-          let package = Package(
-              name: "SiaSDK",
-              platforms: [
-                  .iOS(.v13),
-                  .macOS(.v11)
-              ],
-              products: [
-                  .library(name: "SiaSDK", targets: ["SiaSDK"])
-              ],
-              targets: [
-                  .binaryTarget(
-                      name: "SiaSDKFFI",
-                      url: "https://github.com/SiaFoundation/sia-sdk-rs/releases/download/swift-v$VERSION/SiaSDKFFI-$VERSION.xcframework.zip",
-                      checksum: "$CHECKSUM"
-                  ),
-                  .target(
-                      name: "SiaSDK",
-                      dependencies: ["SiaSDKFFI"],
-                      path: "Sources/SiaSDK"
-                  )
-              ]
-          )
-          EOF
-
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: swift-v${{ github.event.inputs.version }}
+          tag_name: v${{ github.event.inputs.version }}
           name: SiaSDK Swift v${{ github.event.inputs.version }}
           body: |
             ## SiaSDK for Swift v${{ github.event.inputs.version }}
@@ -210,6 +177,5 @@ jobs:
           files: |
             dist/SiaSDKFFI-${{ github.event.inputs.version }}.xcframework.zip
             dist/CHECKSUMS.txt
-            dist/Package.swift
           draft: false
           prerelease: false

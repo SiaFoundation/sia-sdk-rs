@@ -18,7 +18,7 @@ SWIFT_MODULE="SiaSDK"
 SWIFT_DIR="$REPO_ROOT/indexd_ffi/bindings/swift"
 BUILD_DIR="$SWIFT_DIR/build"
 GEN_DIR="$SWIFT_DIR/generated"
-SDK_DIR="$SWIFT_DIR"
+PACKAGE_DIR="$REPO_ROOT"
 
 cd "$REPO_ROOT"
 
@@ -35,7 +35,8 @@ mkdir -p "$GEN_DIR"
 cargo run -p "$CRATE" --bin uniffi-bindgen -- \
     generate --library "target/release/${LIB}.dylib" \
     --language swift \
-    --out-dir "$GEN_DIR"
+    --out-dir "$GEN_DIR" \
+    --config "$REPO_ROOT/indexd_ffi/uniffi.toml"
 
 # Create fat binaries
 rm -rf "$BUILD_DIR"
@@ -69,15 +70,11 @@ xcodebuild -create-xcframework \
     -headers "$BUILD_DIR/macos/Headers" \
     -output "$BUILD_DIR/${FFI_MODULE}.xcframework"
 
-# Assemble Swift package
-# Only remove generated artifacts, keep committed files (Package.swift, podspec, etc.)
-rm -rf "$SDK_DIR/Sources" "$SDK_DIR/${FFI_MODULE}.xcframework"
-mkdir -p "$SDK_DIR/Sources/$SWIFT_MODULE"
+# Assemble Swift package sources at repo root
+mkdir -p "$PACKAGE_DIR/Sources/$SWIFT_MODULE"
+cp "$GEN_DIR/${SWIFT_MODULE}.swift" "$PACKAGE_DIR/Sources/$SWIFT_MODULE/"
 
-cp -r "$BUILD_DIR/${FFI_MODULE}.xcframework" "$SDK_DIR/"
-cp "$GEN_DIR/${SWIFT_MODULE}.swift" "$SDK_DIR/Sources/$SWIFT_MODULE/"
-
-echo "Swift package assembled at: $SDK_DIR"
+echo "Swift package sources updated at: $PACKAGE_DIR/Sources/$SWIFT_MODULE"
 
 # Distribution zip with checksum
 (cd "$BUILD_DIR" && zip -rq "${FFI_MODULE}.xcframework.zip" "${FFI_MODULE}.xcframework")
@@ -85,9 +82,9 @@ CHECKSUM=$(swift package compute-checksum "$BUILD_DIR/${FFI_MODULE}.xcframework.
 
 echo ""
 echo "=== Build Complete ==="
-echo "XCFramework: $SDK_DIR/${FFI_MODULE}.xcframework"
+echo "XCFramework: $BUILD_DIR/${FFI_MODULE}.xcframework"
 echo "Distribution zip: $BUILD_DIR/${FFI_MODULE}.xcframework.zip"
 echo "Checksum: $CHECKSUM"
 echo ""
-echo "To use locally, add this to your Package.swift dependencies:"
-echo "  .package(path: \"path/to/indexd_ffi/bindings/swift\")"
+echo "To use locally, set SIA_SDK_USE_LOCAL_XCFRAMEWORK=1 and add this to your Package.swift dependencies:"
+echo "  .package(path: \"path/to/sia-sdk-rs\")"

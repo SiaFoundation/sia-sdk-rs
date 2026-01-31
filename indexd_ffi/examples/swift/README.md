@@ -15,13 +15,5 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch
 
 ```sh
 cd indexd_ffi/examples/swift/Example
-swift run
+SIA_SDK_USE_LOCAL_XCFRAMEWORK=1 swift run
 ```
-
-## What This Example Demonstrates
-
-- Setting up a logger
-- Creating a connection to the Sia indexer
-- Registering with a recovery phrase
-- Uploading data using packed uploads
-- Downloading data

@@ -10,7 +10,7 @@ Add SiaSDK to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/SiaFoundation/sia-sdk-rs", from: "1.0.0")
+    .package(url: "https://github.com/SiaFoundation/sia-sdk-rs", from: "0.3.0")
 ]
 ```
 
@@ -21,7 +21,7 @@ Or in Xcode: **File → Add Packages** → Enter repository URL.
 Add to your `Podfile`:
 
 ```ruby
-pod 'SiaSDK', '~> 1.0'
+pod 'SiaSDK', '~> 0.3'
 ```
 
 Then run `pod install`.
@@ -79,13 +79,16 @@ To build the XCFramework locally:
 # Install Rust targets
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin x86_64-apple-darwin
 
-# Build the XCFramework
+# Build the XCFramework and refresh Swift sources
 ./indexd_ffi/scripts/build-swift.sh
 ```
 
 This generates:
-- `indexd_ffi/bindings/swift/SiaSDKFFI.xcframework` - The binary framework
-- `indexd_ffi/bindings/swift/Sources/SiaSDK/SiaSDK.swift` - Generated Swift bindings
+- `indexd_ffi/bindings/swift/build/SiaSDKFFI.xcframework` - The binary framework
+- `Sources/SiaSDK/SiaSDK.swift` - Generated Swift bindings
+
+To use the locally-built XCFramework with SwiftPM, set:
+`SIA_SDK_USE_LOCAL_XCFRAMEWORK=1`
 
 ## License
 

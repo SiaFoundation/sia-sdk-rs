@@ -22,6 +22,10 @@ final class PrintLogger: Logger, @unchecked Sendable {
 }
 
 // MARK: - Reader/Writer Implementations
+//
+// NOTE: These implementations use @unchecked Sendable for simplicity in this
+// single-threaded example. For production code with concurrent access, use
+// proper synchronization (Actor, Mutex, or @MainActor isolation).
 
 final class BytesReader: Reader, @unchecked Sendable {
     private let data: Data
@@ -95,6 +99,8 @@ struct SiaSDKExample {
 
             if mnemonic.isEmpty {
                 mnemonic = generateRecoveryPhrase()
+                // WARNING: Never print recovery phrases in production code!
+                // This is only for demonstration purposes.
                 print("Generated mnemonic: \(mnemonic)")
             }
 
@@ -124,9 +130,12 @@ struct SiaSDKExample {
             print("Upload finished \(objects.count) objects in \(String(format: "%.2f", uploadElapsed))s")
 
             // Download example
+            guard let lastObject = objects.last else {
+                print("No objects were uploaded")
+                return
+            }
             let downloadStart = Date()
             let writer = BytesWriter()
-            let lastObject = objects.last!
             try await sdk.download(w: writer, object: lastObject, options: DownloadOptions())
             let downloadElapsed = Date().timeIntervalSince(downloadStart)
             let downloadedData = writer.getData()
