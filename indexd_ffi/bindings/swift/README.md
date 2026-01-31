@@ -2,30 +2,6 @@
 
 Swift bindings for Sia decentralized storage, built with Rust and UniFFI.
 
-## Installation
-
-### Swift Package Manager
-
-Add SiaSDK to your `Package.swift`:
-
-```swift
-dependencies: [
-    .package(url: "https://github.com/SiaFoundation/sia-sdk-rs", from: "0.3.0")
-]
-```
-
-Or in Xcode: **File → Add Packages** → Enter repository URL.
-
-### CocoaPods
-
-Add to your `Podfile`:
-
-```ruby
-pod 'SiaSDK', '~> 0.3'
-```
-
-Then run `pod install`.
-
 ## Requirements
 
 - iOS 13.0+ / macOS 11.0+
@@ -33,6 +9,32 @@ Then run `pod install`.
 - Xcode 15.0+
 
 ## Usage
+
+### Swift Package Manager
+
+```swift
+.package(url: "https://github.com/SiaFoundation/sia-sdk-rs", from: "0.3.0")
+```
+
+### CocoaPods
+
+```ruby
+pod 'SiaSDK', '~> 0.3'
+```
+
+### Local Development
+
+```sh
+# Install Rust targets (first time only)
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin x86_64-apple-darwin
+
+# Build and run example
+./indexd_ffi/scripts/build-swift.sh
+cd indexd_ffi/examples/swift/Example
+SIA_SDK_USE_LOCAL_XCFRAMEWORK=1 swift run
+```
+
+## Example
 
 ```swift
 import SiaSDK
@@ -70,25 +72,6 @@ let objects = try await upload.finalize()
 let writer = BytesWriter()
 try await sdk.download(w: writer, object: objects[0], options: DownloadOptions())
 ```
-
-## Building from Source
-
-To build the XCFramework locally:
-
-```sh
-# Install Rust targets
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin x86_64-apple-darwin
-
-# Build the XCFramework and refresh Swift sources
-./indexd_ffi/scripts/build-swift.sh
-```
-
-This generates:
-- `indexd_ffi/bindings/swift/build/SiaSDKFFI.xcframework` - The binary framework
-- `Sources/SiaSDK/SiaSDK.swift` - Generated Swift bindings
-
-To use the locally-built XCFramework with SwiftPM, set:
-`SIA_SDK_USE_LOCAL_XCFRAMEWORK=1`
 
 ## License
 
