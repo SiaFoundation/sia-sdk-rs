@@ -8,16 +8,17 @@ set -euo pipefail
 #                     aarch64-apple-darwin x86_64-apple-darwin
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 CRATE="indexd_ffi"
 LIB="libindexd_ffi"
 FFI_MODULE="SiaSDKFFI"
 SWIFT_MODULE="SiaSDK"
 
-BUILD_DIR="$SCRIPT_DIR/build"
-GEN_DIR="$SCRIPT_DIR/generated"
-SDK_DIR="$SCRIPT_DIR/SiaSDK"
+SWIFT_DIR="$REPO_ROOT/indexd_ffi/bindings/swift"
+BUILD_DIR="$SWIFT_DIR/build"
+GEN_DIR="$SWIFT_DIR/generated"
+SDK_DIR="$SWIFT_DIR"
 
 cd "$REPO_ROOT"
 
@@ -69,29 +70,24 @@ xcodebuild -create-xcframework \
     -output "$BUILD_DIR/${FFI_MODULE}.xcframework"
 
 # Assemble Swift package
-rm -rf "$SDK_DIR"
+# Only remove generated artifacts, keep committed files (Package.swift, podspec, etc.)
+rm -rf "$SDK_DIR/Sources" "$SDK_DIR/${FFI_MODULE}.xcframework"
 mkdir -p "$SDK_DIR/Sources/$SWIFT_MODULE"
 
 cp -r "$BUILD_DIR/${FFI_MODULE}.xcframework" "$SDK_DIR/"
 cp "$GEN_DIR/${SWIFT_MODULE}.swift" "$SDK_DIR/Sources/$SWIFT_MODULE/"
 
-cat > "$SDK_DIR/Package.swift" << 'EOF'
-// swift-tools-version: 5.9
-import PackageDescription
-
-let package = Package(
-    name: "SiaSDK",
-    platforms: [.iOS(.v13), .macOS(.v11)],
-    products: [
-        .library(name: "SiaSDK", targets: ["SiaSDK"])
-    ],
-    targets: [
-        .binaryTarget(name: "SiaSDKFFI", path: "SiaSDKFFI.xcframework"),
-        .target(name: "SiaSDK", dependencies: ["SiaSDKFFI"])
-    ]
-)
-EOF
+echo "Swift package assembled at: $SDK_DIR"
 
 # Distribution zip with checksum
 (cd "$BUILD_DIR" && zip -rq "${FFI_MODULE}.xcframework.zip" "${FFI_MODULE}.xcframework")
-swift package compute-checksum "$BUILD_DIR/${FFI_MODULE}.xcframework.zip"
+CHECKSUM=$(swift package compute-checksum "$BUILD_DIR/${FFI_MODULE}.xcframework.zip")
+
+echo ""
+echo "=== Build Complete ==="
+echo "XCFramework: $SDK_DIR/${FFI_MODULE}.xcframework"
+echo "Distribution zip: $BUILD_DIR/${FFI_MODULE}.xcframework.zip"
+echo "Checksum: $CHECKSUM"
+echo ""
+echo "To use locally, add this to your Package.swift dependencies:"
+echo "  .package(path: \"path/to/indexd_ffi/bindings/swift\")"
