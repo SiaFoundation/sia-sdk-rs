@@ -15,7 +15,7 @@ let package = Package(
         .executableTarget(
             name: "Example",
             dependencies: [
-                .product(name: "SiaSDK", package: "SiaSDK"),
+                .product(name: "SiaSDK", package: "sia-sdk-rs"),
             ],
             path: "Sources"
         )
