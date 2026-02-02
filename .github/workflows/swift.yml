@@ -7,10 +7,16 @@ on:
     paths:
       - 'indexd_ffi/**'
       - '.github/workflows/swift.yml'
+      - 'Package.swift'
+      - 'Sources/SiaSDK/**'
+      - 'SiaSDK.podspec'
   pull_request:
     paths:
       - 'indexd_ffi/**'
       - '.github/workflows/swift.yml'
+      - 'Package.swift'
+      - 'Sources/SiaSDK/**'
+      - 'SiaSDK.podspec'
   workflow_dispatch:
     inputs:
       publish:

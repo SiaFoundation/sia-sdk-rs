@@ -20,6 +20,9 @@ Pod::Spec.new do |s|
 
   s.swift_version = '5.9'
 
+  # System frameworks required by the Rust FFI
+  s.frameworks = ['Security', 'SystemConfiguration']
+
   # The pre-built XCFramework containing the Rust FFI (downloaded in prepare_command)
   s.vendored_frameworks = 'SiaSDKFFI.xcframework'
 
@@ -32,10 +35,27 @@ Pod::Spec.new do |s|
   }
 
   s.prepare_command = <<-CMD
-    # Download and extract the pre-built XCFramework from the GitHub release
-    XCFRAMEWORK_URL="https://github.com/SiaFoundation/sia-sdk-rs/releases/download/v#{s.version}/SiaSDKFFI-#{s.version}.xcframework.zip"
-    curl -L -o SiaSDKFFI.xcframework.zip "$XCFRAMEWORK_URL"
+    set -euo pipefail
+    VERSION="0.3.0"
+    BASE_URL="https://github.com/SiaFoundation/sia-sdk-rs/releases/download/v${VERSION}"
+
+    # Download the XCFramework and checksum file
+    curl -L -o SiaSDKFFI.xcframework.zip "${BASE_URL}/SiaSDKFFI-${VERSION}.xcframework.zip"
+    curl -L -o CHECKSUMS.txt "${BASE_URL}/CHECKSUMS.txt"
+
+    # Verify the checksum before extracting
+    EXPECTED_CHECKSUM=$(grep "SiaSDKFFI-${VERSION}.xcframework.zip" CHECKSUMS.txt | cut -d: -f2 | tr -d ' ')
+    ACTUAL_CHECKSUM=$(shasum -a 256 SiaSDKFFI.xcframework.zip | cut -d' ' -f1)
+
+    if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
+      echo "Checksum verification failed!"
+      echo "Expected: $EXPECTED_CHECKSUM"
+      echo "Actual:   $ACTUAL_CHECKSUM"
+      exit 1
+    fi
+
+    # Extract and clean up
     unzip -q -o SiaSDKFFI.xcframework.zip
-    rm SiaSDKFFI.xcframework.zip
+    rm SiaSDKFFI.xcframework.zip CHECKSUMS.txt
   CMD
 end
