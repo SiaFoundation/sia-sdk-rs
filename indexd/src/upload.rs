@@ -130,6 +130,10 @@ impl PackedUpload {
                 slabs.extend_from_slice(&uploaded_slabs[slabs_start as usize..slabs_end as usize]);
 
                 slabs[0].offset = (upload.start % self.slab_size) as u32;
+                if slabs.len() > 1 {
+                    // if spanning multiple slabs, adjust first slab's length
+                    slabs[0].length = (self.slab_size - slabs[0].offset as u64) as u32;
+                }
                 let last_slab_index = (n - 1) as usize;
                 let last_slab_offset = slabs[last_slab_index].offset as u64;
                 slabs[last_slab_index].length =
