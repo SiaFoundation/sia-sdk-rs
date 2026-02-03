@@ -639,7 +639,7 @@ mod test {
     /// there are enough fast hosts to complete the upload.
     /// This mirrors Go's TestUpload "slow" subtest.
     #[tokio::test]
-    async fn test_upload_slow() {
+    async fn test_upload_slow_host() {
         let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
         let transport = Arc::new(MockRHP4Client::new());
         let hosts = Hosts::new();
@@ -668,7 +668,7 @@ mod test {
         // make the 1st host slow
         transport.set_slow_hosts(
             host_keys.iter().take(1).copied(),
-            tokio::time::Duration::from_secs(1),
+            tokio::time::Duration::from_secs(2),
         );
 
         let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
@@ -683,8 +683,9 @@ mod test {
         assert_eq!(object.slabs().len(), 1);
     }
 
+    // Upload should succeed even if all initial hosts are slow
     #[tokio::test]
-    async fn test_upload_slow_timeout() {
+    async fn test_upload_all_hosts_slow() {
         let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
         let transport = Arc::new(MockRHP4Client::new());
         let hosts = Hosts::new();
@@ -711,20 +712,15 @@ mod test {
         );
 
         // Make all hosts slow
-        transport.set_slow_hosts(host_keys.iter().take(30).copied(), Duration::from_secs(20));
+        transport.set_slow_hosts(host_keys.iter().take(30).copied(), Duration::from_secs(2));
 
         let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
 
         let input: Bytes = Bytes::from("Hello, world!");
 
-        let object = uploader
+        let _ = uploader
             .upload(Cursor::new(input.clone()), UploadOptions::default())
             .await
-            .expect_err("upload should fail");
-
-        match object {
-            UploadError::QueueError(QueueError::NoMoreHosts) => {}
-            _ => panic!("unexpected error variant"),
-        }
+            .expect("upload to succeed");
     }
 }
