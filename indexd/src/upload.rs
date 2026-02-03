@@ -217,6 +217,7 @@ where
         Duration::from_secs((15 + (attempts as u64 * 2)).max(120))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn upload_slab_shard(
         permit: OwnedSemaphorePermit,
         transport: T,
