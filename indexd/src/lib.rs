@@ -429,40 +429,41 @@ mod test {
         let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
         let downloader = MockDownloader::new(hosts.clone(), transport.clone(), app_key.clone());
 
+        let small_input = Bytes::from("Hello, world!");
+
         let mut large_input = BytesMut::zeroed(SLAB_SIZE as usize + 18); // 1 full slab + 18 bytes
         rand::rng().fill_bytes(&mut large_input);
         let large_input = large_input.freeze();
 
-        let small_input = Bytes::from("Hello, world!");
-
         let mut packed_upload = uploader.upload_packed(UploadOptions::default());
         packed_upload
-            .add(Cursor::new(large_input.clone()))
+            .add(Cursor::new(small_input.clone()))
             .await
             .expect("add 1 to complete");
         packed_upload
-            .add(Cursor::new(small_input.clone()))
+            .add(Cursor::new(large_input.clone()))
             .await
             .expect("add 2 to complete");
 
         let objects = packed_upload.finalize().await.expect("upload to finish");
         assert_eq!(objects.len(), 2);
 
-        // The first object should have 2 slabs, since it overflows
-        assert_eq!(objects[0].slabs().len(), 2);
-        assert_eq!(objects[1].slabs().len(), 1);
+        // The first object should have 1 slab
+        assert_eq!(objects[0].slabs().len(), 1);
+        assert_eq!(objects[1].slabs().len(), 2);
 
-        // the first slab of obj[0] should be the full length. the second slab should be the remaining 18 bytes.
-        assert_eq!(objects[0].size(), SLAB_SIZE + 18);
+        // obj 0 should be the small input
+        assert_eq!(objects[0].size(), 13);
         assert_eq!(objects[0].slabs()[0].offset, 0);
-        assert_eq!(objects[0].slabs()[0].length, SLAB_SIZE as u32);
-        assert_eq!(objects[0].slabs()[1].offset, 0);
-        assert_eq!(objects[0].slabs()[1].length, 18);
+        assert_eq!(objects[0].slabs()[0].length, 13);
 
-        // obj 1 should be the small input with a single slab, but offset by 18 bytes since it comes after the large input
-        assert_eq!(objects[1].size(), 13);
-        assert_eq!(objects[1].slabs()[0].offset, 18);
-        assert_eq!(objects[1].slabs()[0].length, 13);
+        // obj 1 should be the large input. The first slab starts at offset 13 so
+        // its length must be SLAB_SIZE - 13. The second slab has the remaining bytes.
+        assert_eq!(objects[1].size(), SLAB_SIZE + 18);
+        assert_eq!(objects[1].slabs()[0].offset, 13);
+        assert_eq!(objects[1].slabs()[0].length, (SLAB_SIZE - 13) as u32);
+        assert_eq!(objects[1].slabs()[1].offset, 0);
+        assert_eq!(objects[1].slabs()[1].length, 18 + 13);
 
         let mut output = BytesMut::zeroed(objects[0].size() as usize);
         downloader
@@ -474,7 +475,7 @@ mod test {
             .await
             .expect("download to complete");
 
-        assert_eq!(output.freeze(), large_input);
+        assert_eq!(output.freeze(), small_input);
 
         let mut output = BytesMut::zeroed(objects[1].size() as usize);
         downloader
@@ -486,7 +487,7 @@ mod test {
             .await
             .expect("download to complete");
 
-        assert_eq!(output.freeze(), small_input);
+        assert_eq!(output.freeze(), large_input);
     }
 
     #[tokio::test]
