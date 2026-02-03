@@ -18,7 +18,7 @@ base64 = "0.22.1"
 bip39 = "2.2.2"
 blake2 = "0.10.6"
 blake2b_simd = "1.0.4"
-bytes = "1.11.0"
+bytes = "1.11.1"
 chacha20 = "0.9.1"
 chrono = { version = "0.4.43", features = ["serde"] }
 ed25519-dalek = "2.2.0"
