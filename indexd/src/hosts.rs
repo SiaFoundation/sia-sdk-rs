@@ -359,6 +359,20 @@ impl HostQueue {
         Ok((host_key, attempts + 1))
     }
 
+    pub fn pop_n(&self, n: usize) -> Result<Vec<(PublicKey, usize)>, QueueError> {
+        let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
+        if inner.hosts.len() < n {
+            return Err(QueueError::NoMoreHosts);
+        }
+        let mut result = Vec::with_capacity(n);
+        for _ in 0..n {
+            let host_key = inner.hosts.pop_front().ok_or(QueueError::NoMoreHosts)?;
+            let attempts = inner.attempts.get(&host_key).cloned().unwrap_or(0);
+            result.push((host_key, attempts + 1));
+        }
+        Ok(result)
+    }
+
     pub fn retry(&self, host: PublicKey) -> Result<(), QueueError> {
         let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
         inner.hosts.push_back(host);
