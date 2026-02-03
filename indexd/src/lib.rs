@@ -661,6 +661,7 @@ mod test {
                     country_code: "US".to_string(),
                     latitude: 0.0,
                     longitude: 0.0,
+                    good_for_upload: true,
                 })
                 .collect(),
         );
@@ -707,6 +708,7 @@ mod test {
                     country_code: "US".to_string(),
                     latitude: 0.0,
                     longitude: 0.0,
+                    good_for_upload: true,
                 })
                 .collect(),
         );
