@@ -11,5 +11,3 @@ This fixes a race condition in the upload logic that could happen when the amoun
 This changes the upload behavior so that each shard has a host assigned before any upload begins.
 
 A `set_slow_hosts` method was added to the `MockRHP4Client` to allow easily testing these conditions. This mimics a similar mechanism from the Go SDK.
-
-This additionally addresses https://github.com/SiaFoundation/sia-sdk-rs/issues/251 because it was such a minor change. 
