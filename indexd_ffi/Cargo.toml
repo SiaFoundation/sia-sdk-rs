@@ -15,7 +15,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 [dependencies]
 async-trait = "0.1.89"
 base64 = "0.22.1"
-bytes = "1.11.0"
+bytes = "1.11.1"
 indexd = { version = "0.2.0", path = "../indexd" }
 log = "0.4.29"
 rand = "0.9.2"
