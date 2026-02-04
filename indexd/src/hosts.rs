@@ -333,9 +333,10 @@ impl Hosts {
 pub enum QueueError {
     #[error("no more hosts available")]
     NoMoreHosts,
+    #[error("not enough initial hosts")]
+    InsufficientHosts,
     #[error("client closed")]
     Closed,
-
     #[error("internal mutex error")]
     MutexError,
 }
