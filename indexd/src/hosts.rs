@@ -584,6 +584,7 @@ mod test {
         );
     }
 
+    #[test]
     fn test_host_queue_pop_n() {
         let hosts: Vec<_> = (0..5)
             .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
