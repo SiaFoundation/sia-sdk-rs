@@ -249,9 +249,14 @@ impl Hosts {
         }
     }
 
-    pub fn available(&self) -> usize {
+    /// Returns the number of known hosts that are good for upload.
+    pub fn available_for_upload(&self) -> usize {
         let inner = self.inner.read().unwrap();
-        inner.hosts.len()
+        inner
+            .hosts
+            .iter()
+            .filter(|(_, h)| h.good_for_upload)
+            .count()
     }
 
     /// Returns a list of all known hosts, sorted by priority.
@@ -322,9 +327,10 @@ impl Hosts {
 pub enum QueueError {
     #[error("no more hosts available")]
     NoMoreHosts,
+    #[error("not enough initial hosts")]
+    InsufficientHosts,
     #[error("client closed")]
     Closed,
-
     #[error("internal mutex error")]
     MutexError,
 }

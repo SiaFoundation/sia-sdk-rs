@@ -291,6 +291,13 @@ where
     ) -> Result<Vec<Slab>, UploadError> {
         let data_shards = options.data_shards as usize;
         let parity_shards = options.parity_shards as usize;
+        let total_shards = data_shards + parity_shards;
+
+        // fail fast if there aren't enough hosts before doing any encoding
+        if hosts.available_for_upload() < total_shards {
+            return Err(QueueError::InsufficientHosts.into());
+        }
+
         let semaphore = Arc::new(Semaphore::new(options.max_inflight));
 
         // use a buffered reader since the erasure coder reads 64 bytes at a time.

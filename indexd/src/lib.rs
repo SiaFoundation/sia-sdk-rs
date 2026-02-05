@@ -615,7 +615,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_upload_timeout_no_hosts() {
+    async fn test_upload_no_hosts() {
         let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
         let transport = Arc::new(MockRHP4Client::new());
         let hosts = Hosts::new();
@@ -630,7 +630,7 @@ mod test {
             .expect_err("upload to fail");
 
         match err {
-            UploadError::QueueError(QueueError::NoMoreHosts) => (),
+            UploadError::QueueError(QueueError::InsufficientHosts) => (),
             _ => panic!(),
         }
     }
@@ -724,5 +724,49 @@ mod test {
             .upload(Cursor::new(input.clone()), UploadOptions::default())
             .await
             .expect("upload to succeed");
+    }
+
+    #[tokio::test]
+    async fn test_upload_not_enough_hosts_good_for_upload() {
+        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
+        let transport = Arc::new(MockRHP4Client::new());
+        let hosts = Hosts::new();
+
+        // Create 30 hosts: 10 good for upload, 20 not good for upload
+        let host_keys: Vec<_> = (0..30)
+            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
+            .collect();
+
+        hosts.update(
+            host_keys
+                .iter()
+                .enumerate()
+                .map(|(i, pk)| Host {
+                    public_key: *pk,
+                    addresses: vec![NetAddress {
+                        protocol: sia::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: i < 10,
+                })
+                .collect(),
+        );
+
+        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
+
+        let input: Bytes = Bytes::from("Hello, world!");
+
+        let err = uploader
+            .upload(Cursor::new(input.clone()), UploadOptions::default())
+            .await
+            .expect_err("upload to fail");
+
+        match err {
+            UploadError::QueueError(QueueError::InsufficientHosts) => (),
+            _ => panic!(),
+        }
     }
 }
