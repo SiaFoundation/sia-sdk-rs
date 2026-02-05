@@ -249,12 +249,6 @@ impl Hosts {
         }
     }
 
-    /// Returns the total number of known hosts (including those not good for upload).
-    pub fn available(&self) -> usize {
-        let inner = self.inner.read().unwrap();
-        inner.hosts.len()
-    }
-
     /// Returns the number of known hosts that are good for upload.
     pub fn available_for_upload(&self) -> usize {
         let inner = self.inner.read().unwrap();
