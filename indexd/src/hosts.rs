@@ -359,6 +359,20 @@ impl HostQueue {
         Ok((host_key, attempts + 1))
     }
 
+    pub fn pop_n(&self, n: usize) -> Result<Vec<(PublicKey, usize)>, QueueError> {
+        let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
+        if inner.hosts.len() < n {
+            return Err(QueueError::NoMoreHosts);
+        }
+        let mut result = Vec::with_capacity(n);
+        for _ in 0..n {
+            let host_key = inner.hosts.pop_front().ok_or(QueueError::NoMoreHosts)?;
+            let attempts = inner.attempts.get(&host_key).cloned().unwrap_or(0);
+            result.push((host_key, attempts + 1));
+        }
+        Ok(result)
+    }
+
     pub fn retry(&self, host: PublicKey) -> Result<(), QueueError> {
         let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
         inner.hosts.push_back(host);
@@ -568,5 +582,64 @@ mod test {
             queue.pop_front().is_err(),
             "queue should only have one host"
         );
+    }
+
+    #[test]
+    fn test_host_queue_pop_n() {
+        let hosts: Vec<_> = (0..5)
+            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
+            .collect();
+        let queue = HostQueue::new(hosts.clone());
+
+        // pop 3 hosts
+        let popped = queue.pop_n(3).expect("should pop 3 hosts");
+        assert_eq!(popped.len(), 3);
+        assert_eq!(popped[0].0, hosts[0]);
+        assert_eq!(popped[1].0, hosts[1]);
+        assert_eq!(popped[2].0, hosts[2]);
+
+        // all should have attempts = 1
+        assert!(popped.iter().all(|(_, attempts)| *attempts == 1));
+
+        // pop remaining 2
+        let popped = queue.pop_n(2).expect("should pop 2 hosts");
+        assert_eq!(popped.len(), 2);
+        assert_eq!(popped[0].0, hosts[3]);
+        assert_eq!(popped[1].0, hosts[4]);
+
+        // queue should be empty
+        assert!(matches!(queue.pop_front(), Err(QueueError::NoMoreHosts)));
+    }
+
+    #[test]
+    fn test_host_queue_pop_n_not_enough_hosts() {
+        let hosts: Vec<_> = (0..3)
+            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
+            .collect();
+        let queue = HostQueue::new(hosts.clone());
+
+        // try to pop more than available
+        let result = queue.pop_n(5);
+        assert!(matches!(result, Err(QueueError::NoMoreHosts)));
+
+        // queue should be unchanged - can still pop all 3
+        let popped = queue.pop_n(3).expect("should pop 3");
+        assert_eq!(popped.len(), 3);
+    }
+
+    #[test]
+    fn test_host_queue_pop_n_zero() {
+        let hosts: Vec<_> = (0..3)
+            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
+            .collect();
+        let queue = HostQueue::new(hosts);
+
+        // pop 0 hosts should succeed with empty vec
+        let popped = queue.pop_n(0).expect("should succeed");
+        assert!(popped.is_empty());
+
+        // queue should be unchanged - can still pop 3
+        let popped = queue.pop_n(3).expect("should pop 3");
+        assert_eq!(popped.len(), 3);
     }
 }
