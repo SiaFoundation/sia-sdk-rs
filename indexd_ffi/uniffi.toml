@@ -1,0 +1,9 @@
+[bindings.swift]
+# Public Swift API module name (what consumers import)
+module_name = "SiaSDK"
+
+# Low-level C FFI module name (what the generated Swift imports)
+ffi_module_name = "SiaSDKFFI"
+
+# Make the file stem match the module name for predictable outputs
+ffi_module_filename = "SiaSDKFFI"
