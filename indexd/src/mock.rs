@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -18,17 +18,36 @@ use crate::{
 
 pub struct MockRHP4Client {
     sectors: RwLock<HashMap<PublicKey, HashMap<Hash256, Bytes>>>,
+    slow_hosts: RwLock<HashSet<PublicKey>>,
+    slow_delay: RwLock<Duration>,
 }
 
 impl MockRHP4Client {
     pub fn new() -> Self {
         Self {
             sectors: RwLock::new(HashMap::new()),
+            slow_hosts: RwLock::new(HashSet::new()),
+            slow_delay: RwLock::new(Duration::ZERO),
         }
     }
 
     pub fn clear(&self) {
         self.sectors.write().unwrap().clear();
+    }
+
+    /// Sets the given hosts as "slow" - they will sleep for the specified duration
+    /// before completing any write_sector or read_sector operation.
+    pub fn set_slow_hosts(&self, hosts: impl IntoIterator<Item = PublicKey>, delay: Duration) {
+        let mut slow = self.slow_hosts.write().unwrap();
+        slow.clear();
+        slow.extend(hosts);
+        *self.slow_delay.write().unwrap() = delay;
+    }
+
+    /// Clears all slow host settings.
+    pub fn reset_slow_hosts(&self) {
+        self.slow_hosts.write().unwrap().clear();
+        *self.slow_delay.write().unwrap() = Duration::ZERO;
     }
 }
 
@@ -53,6 +72,19 @@ impl RHP4Client for Arc<MockRHP4Client> {
         _: &PrivateKey,
         sector: Bytes,
     ) -> Result<Hash256, rhp4::Error> {
+        // Check if this host is configured as slow
+        let slow_delay = {
+            let slow_hosts = self.slow_hosts.read().unwrap();
+            if slow_hosts.contains(&host_key) {
+                Some(*self.slow_delay.read().unwrap())
+            } else {
+                None
+            }
+        };
+        if let Some(delay) = slow_delay {
+            sleep(delay).await;
+        }
+
         sleep(Duration::from_millis(3)).await; // simulate network latency ~ 10Gbps
         let sector_root = rhp::sector_root(&sector);
         let mut sectors = self.sectors.write().unwrap();

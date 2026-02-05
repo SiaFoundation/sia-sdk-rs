@@ -217,6 +217,7 @@ where
         Duration::from_secs((15 + (attempts as u64 * 2)).max(120))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn upload_slab_shard(
         permit: OwnedSemaphorePermit,
         transport: T,
@@ -225,8 +226,9 @@ where
         data: Bytes,
         shard_index: usize,
         progress_tx: Option<mpsc::UnboundedSender<()>>,
+        initial_host: (PublicKey, usize),
     ) -> Result<(usize, Sector), UploadError> {
-        let (host_key, attempts) = hosts.pop_front()?;
+        let (host_key, attempts) = initial_host;
         let mut write_timeout = Self::upload_timeout(attempts); // mutable so that it can be adjusted on retries
         let mut tasks = JoinSet::new();
         tasks.spawn(Self::upload_shard(
@@ -331,6 +333,8 @@ where
                 let slab_key: EncryptionKey = rand::random::<[u8; 32]>().into();
 
                 let host_queue = hosts.upload_queue();
+                // reserve one host per shard upfront to guarantee each shard has at least one host
+                let reserved_hosts = host_queue.pop_n(shards.len())?;
                 let owned_slab_key = Arc::new(slab_key.clone());
                 let mut shard_upload_tasks = JoinSet::new();
                 for (shard_index, mut shard) in shards.into_iter().enumerate() {
@@ -340,6 +344,7 @@ where
                     let transport = transport.clone();
                     let host_queue = host_queue.clone();
                     let progress_tx = progress_tx.clone();
+                    let initial_host = reserved_hosts[shard_index];
                     // spawn a task to encrypt and upload each shard for this slab.
                     shard_upload_tasks.spawn(async move {
                         let shard = spawn_blocking(move || {
@@ -354,6 +359,7 @@ where
                             shard.into(),
                             shard_index,
                             progress_tx,
+                            initial_host,
                         ).await
                     });
                 }
