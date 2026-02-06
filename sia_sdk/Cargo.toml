@@ -1,6 +1,6 @@
 [package]
 name = "sia_sdk"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 repository = "https://github.com/SiaFoundation/sia-sdk-rs"
 license = "MIT"
@@ -34,7 +34,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde-big-array = "0.5.1"
 serde_json = "1.0.149"
 sha2 = "0.10.9"
-sia-sdk-derive = { version = "0.0.6", path = "../sia_derive" }
+sia-sdk-derive = { version = "0.0.7", path = "../sia_derive" }
 thiserror = "2.0.18"
 tokio = { version = "1.49.0", features = [
     "macros",
