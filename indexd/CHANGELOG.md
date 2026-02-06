@@ -1,3 +1,27 @@
+## 0.2.1 (2026-02-06)
+
+### Fixes
+
+#### Check if we have enough hosts prior to encoding in upload_slabs
+
+##261 by @Alrighttt
+
+Fixes https://github.com/SiaFoundation/sia-sdk-rs/issues/251
+
+- Added an `available_for_upload` method that returns the amount of known hosts marked `good_for_upload`.
+- Added a check in `upload_slabs` that verifies we have enough good hosts prior to encoding any data. 
+- Adds a variant to `QueueError` for `upload_slabs`'s new failure case. This enables testing for this new case specifically.
+
+#### Fix upload racing race conditon
+
+##258 by @Alrighttt
+
+This fixes a race condition in the upload logic that could happen when the amount of healthy hosts is nearly the same as the amount of shards. This could happen when the racing mechanism was triggered prior to all of the initial shards being assigned a host. The slow hosts would be consumed from the HostQueue without completing the upload. This would cause a latter shard to hit a QueueError::NoMoreHosts error.
+
+This changes the upload behavior so that each shard has a host assigned before any upload begins.
+
+A `set_slow_hosts` method was added to the `MockRHP4Client` to allow easily testing these conditions. This mimics a similar mechanism from the Go SDK.
+
 ## 0.2.0 (2026-01-28)
 
 ### Breaking Changes

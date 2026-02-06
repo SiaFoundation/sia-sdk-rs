@@ -1327,7 +1327,7 @@ dependencies = [
 
 [[package]]
 name = "indexd"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64",
  "blake2",
@@ -1359,7 +1359,7 @@ dependencies = [
 
 [[package]]
 name = "indexd_ffi"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2414,7 +2414,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "sia-sdk-derive"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2423,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "sia_sdk"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64",
  "bip39",
