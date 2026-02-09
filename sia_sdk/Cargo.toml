@@ -19,7 +19,7 @@ bip39 = "2.2.2"
 blake2 = "0.10.6"
 blake2b_simd = "1.0.4"
 bytes = "1.11.1"
-chacha20 = "0.9.1"
+chacha20 = "0.10.0"
 chrono = { version = "0.4.43", features = ["serde"] }
 ed25519-dalek = "2.2.0"
 futures = "0.3.31"
@@ -55,7 +55,7 @@ tokio = { version = "1.49.0", features = [
     "io-util",
 ] }
 rustls-platform-verifier = "0.6.2"
-rand = "0.9.2"
+rand = "0.10.0"
 
 [[bench]]
 name = "merkle_root"
