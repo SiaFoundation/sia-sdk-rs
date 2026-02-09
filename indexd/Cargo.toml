@@ -21,7 +21,7 @@ serde_json = "1.0.149"
 thiserror = "2.0.18"
 sia_sdk = { path = "../sia_sdk", version = "0.2.0" }
 tokio = { version = "1.49.0", features = ["fs", "sync", "io-util", "macros", "rt"] }
-rand = "0.9.2"
+rand = "0.10.0"
 blake2b_simd = "1.0.4"
 url = { version = "2.5.8", features = ["serde"] }
 log = "0.4.29"
@@ -40,7 +40,7 @@ hkdf = "0.12.4"
 base64 = "0.22.1"
 
 [dev-dependencies]
-criterion = { version = "0.8.1", features = ["async_tokio"] }
+criterion = { version = "0.8.2", features = ["async_tokio"] }
 httptest = "0.16.4"
 rustls-platform-verifier = "0.6.2"
 tokio = { version = "1.49.0", features = ["macros"] }

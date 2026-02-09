@@ -164,7 +164,7 @@ impl ErasureCoder {
 
 #[cfg(test)]
 mod tests {
-    use rand::RngCore;
+    use rand::Rng;
 
     use super::*;
 

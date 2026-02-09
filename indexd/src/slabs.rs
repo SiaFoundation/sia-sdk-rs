@@ -1,6 +1,4 @@
 use chrono::{DateTime, Utc};
-use rand::TryRngCore;
-use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 use serde_with::base64::Base64;
@@ -342,12 +340,8 @@ impl Object {
 
 impl Default for Object {
     fn default() -> Self {
-        let mut data_key: [u8; 32] = [0; 32];
-        OsRng.try_fill_bytes(&mut data_key).unwrap();
-        let mut meta_key: [u8; 32] = [0; 32];
-        OsRng.try_fill_bytes(&mut meta_key).unwrap();
         Object {
-            data_key: EncryptionKey::from(data_key),
+            data_key: EncryptionKey::from(rand::random::<[u8; 32]>()),
             slabs: Vec::new(),
             metadata: Vec::new(),
             created_at: Utc::now(),

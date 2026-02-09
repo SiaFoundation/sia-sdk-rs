@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use indexd::mock::{MockDownloader, MockRHP4Client, MockUploader};
 use indexd::{DownloadOptions, Hosts, Object, UploadOptions};
-use rand::RngCore;
+use rand::Rng;
 use sia::rhp::{Host, SECTOR_SIZE};
 use sia::signing::PrivateKey;
 use sia::types::v2::NetAddress;
