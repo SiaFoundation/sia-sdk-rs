@@ -308,7 +308,7 @@ impl SDK {
 #[cfg(test)]
 mod test {
     use bytes::{Bytes, BytesMut};
-    use rand::RngCore;
+    use rand::Rng;
     use sia::rhp::SECTOR_SIZE;
     use sia::types::v2::NetAddress;
     use std::io::Cursor;

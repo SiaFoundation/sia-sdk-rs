@@ -1,14 +1,11 @@
 use crate::encoding::{SiaDecodable, SiaEncodable};
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
-use chacha20::cipher::{
-    KeyIvInit, StreamCipher, StreamCipherCoreWrapper, StreamCipherError, StreamCipherSeek,
-};
-use chacha20::{XChaCha20, XChaChaCore};
+use chacha20::XChaCha20;
+use chacha20::cipher::inout::InOutBuf;
+use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherError, StreamCipherSeek};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use sha2::digest::consts::{B0, B1};
-use sha2::digest::typenum::{UInt, UTerm};
 use sia_derive::{SiaDecode, SiaEncode};
 use tokio::io::{AsyncRead, AsyncWrite};
 use zeroize::ZeroizeOnDrop;
@@ -170,8 +167,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
 }
 
 struct Chacha20Cipher {
-    #[allow(clippy::type_complexity)]
-    inner: StreamCipherCoreWrapper<XChaChaCore<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B1>, B0>>>,
+    inner: XChaCha20,
     key: EncryptionKey,
     nonce: [u8; 24],
     offset: u64,
@@ -200,16 +196,19 @@ impl Chacha20Cipher {
 }
 
 impl StreamCipher for Chacha20Cipher {
-    fn try_apply_keystream_inout(
-        &mut self,
-        buf: chacha20::cipher::inout::InOutBuf<'_, '_, u8>,
-    ) -> std::result::Result<(), StreamCipherError> {
+    fn check_remaining(&self, _data_len: usize) -> Result<(), StreamCipherError> {
+        // we handle nonce rotation, so we can always process more data.
+        Ok(())
+    }
+
+    fn unchecked_apply_keystream_inout(&mut self, buf: InOutBuf<'_, '_, u8>) {
         let remaining_keystream =
             Self::MAX_BYTES_PER_NONCE - (self.offset % Self::MAX_BYTES_PER_NONCE);
 
         if buf.len() as u64 <= remaining_keystream {
             self.offset += buf.len() as u64;
-            return self.inner.try_apply_keystream_inout(buf);
+            self.inner.apply_keystream_inout(buf);
+            return;
         }
 
         // we can't process the entire buffer with the current nonce, so we need
@@ -218,7 +217,7 @@ impl StreamCipher for Chacha20Cipher {
 
         // the first part can be processed with the current nonce
         self.offset += first.len() as u64;
-        self.inner.try_apply_keystream_inout(first)?;
+        self.inner.apply_keystream_inout(first);
 
         // update nonce and reinitialize cipher
         self.nonce = Self::nonce_for_offset(self.offset);
@@ -226,13 +225,18 @@ impl StreamCipher for Chacha20Cipher {
 
         // encrypt the second part
         self.offset += second.len() as u64;
-        self.inner.try_apply_keystream_inout(second)
+        self.inner.apply_keystream_inout(second);
+    }
+
+    fn unchecked_write_keystream(&mut self, buf: &mut [u8]) {
+        buf.fill(0);
+        self.unchecked_apply_keystream(buf);
     }
 }
 
 #[cfg(test)]
 mod test {
-    use rand::RngCore;
+    use rand::Rng;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::rhp::SECTOR_SIZE;
