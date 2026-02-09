@@ -87,6 +87,9 @@ struct ObjectUpload {
 /// A packed upload allows multiple objects to be uploaded together in a single upload. This can be more
 /// efficient than uploading each object separately if the size of the object is less than the minimum
 /// slab size.
+///
+/// The caller must call [cancel](Self::cancel) or [finalize](Self::finalize) to complete the upload and
+/// release resources.
 pub struct PackedUpload {
     slab_size: u64,
     length: u64,
@@ -110,6 +113,16 @@ impl PackedUpload {
     /// Returns the cumulative length of all objects currently in the upload.
     pub fn length(&self) -> u64 {
         self.length
+    }
+
+    /// Returns the optimal size of each slab.
+    pub fn slab_size(&self) -> u64 {
+        self.slab_size
+    }
+
+    /// Returns the number of slabs after the upload is finalized.
+    pub fn slabs(&self) -> u64 {
+        self.length.div_ceil(self.slab_size)
     }
 
     /// Finalizes the upload and returns the resulting objects. This will wait for all readers
@@ -142,6 +155,11 @@ impl PackedUpload {
                 Ok(object)
             })
             .collect()
+    }
+
+    /// Cancels an in progress packed upload.
+    pub fn cancel(self) {
+        self.upload_handle.abort();
     }
 
     /// Adds a new object to the upload. The data will be read until EOF and packed into
