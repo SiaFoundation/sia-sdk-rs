@@ -300,4 +300,43 @@ mod test {
             assert_eq!(plaintext, data);
         }
     }
+
+    // Direct port of Go SDK's sdk/encrypt_test.go:TestEncryptRoundtrip
+    #[tokio::test]
+    async fn test_encrypt_roundtrip() {
+        const MAX_BYTES_PER_NONCE: usize = u32::MAX as usize * 64;
+
+        let mut data = [0u8; 4096];
+        rand::rng().fill_bytes(&mut data);
+
+        let key = EncryptionKey::from(rand::random::<[u8; 32]>());
+
+        for offset in [
+            0,
+            16,
+            31,
+            63,
+            64,
+            96,
+            128,
+            2048,
+            4096,
+            MAX_BYTES_PER_NONCE - 127,
+            MAX_BYTES_PER_NONCE - 128,
+            MAX_BYTES_PER_NONCE - 63,
+            MAX_BYTES_PER_NONCE - 64,
+            MAX_BYTES_PER_NONCE,
+            2 * MAX_BYTES_PER_NONCE,
+        ] {
+            let mut reader = CipherReader::new(data.as_ref(), key.clone(), offset);
+            let mut ciphertext = vec![0u8; data.len()];
+            reader.read_exact(&mut ciphertext).await.unwrap();
+
+            let mut writer = CipherWriter::new(Vec::new(), key.clone(), offset);
+            writer.write_all(&ciphertext).await.unwrap();
+            let plaintext = writer.inner;
+
+            assert_eq!(plaintext, data, "roundtrip failed at offset {offset}");
+        }
+    }
 }
