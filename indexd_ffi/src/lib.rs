@@ -574,7 +574,6 @@ impl From<indexd::app_client::Account> for Account {
 enum PackedUploadAction {
     Add(Arc<dyn Reader>, oneshot::Sender<Result<u64, UploadError>>),
     Finalize(oneshot::Sender<Result<Vec<indexd::Object>, UploadError>>),
-    Cancel,
 }
 
 /// A packed upload allows multiple objects to be uploaded together in a single upload. This can be more
@@ -582,7 +581,7 @@ enum PackedUploadAction {
 /// slab size.
 #[derive(uniffi::Object)]
 pub struct PackedUpload {
-    _upload_task: AbortOnDropHandle<()>,
+    upload_task: AbortOnDropHandle<()>,
     tx: mpsc::Sender<PackedUploadAction>,
     slab_size: u64,
     length: Arc<AtomicU64>,
@@ -637,11 +636,7 @@ impl PackedUpload {
         if self.closed.swap(true, Ordering::AcqRel) {
             return Err(UploadError::Closed);
         }
-        let tx = self.tx.clone();
-        let _ = spawn(async move {
-            let _ = tx.send(PackedUploadAction::Cancel).await;
-        })
-        .await;
+        self.upload_task.abort();
         Ok(())
     }
 
@@ -775,16 +770,12 @@ impl SDK {
                         let _ = finalize_tx.send(result);
                         return;
                     }
-                    PackedUploadAction::Cancel => {
-                        return;
-                    }
                 }
             }
         });
 
-        // this needs to be in a spawn to ensure a tokio runtime is available since `upload_packed` spawns a task
         PackedUpload {
-            _upload_task: upload_task,
+            upload_task,
             tx: action_tx,
             slab_size: slab_size as u64,
             length,

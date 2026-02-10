@@ -125,6 +125,11 @@ impl PackedUpload {
         self.length.div_ceil(self.slab_size)
     }
 
+    /// Cancels the upload.
+    pub fn cancel(self) {
+        self.upload_handle.abort();
+    }
+
     /// Finalizes the upload and returns the resulting objects. This will wait for all readers
     /// to finish and all slabs to be uploaded before returning. The resulting objects will contain the metadata needed to download the objects.
     ///
