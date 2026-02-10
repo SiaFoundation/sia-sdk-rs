@@ -6,14 +6,15 @@ use bytes::Bytes;
 use log::debug;
 use sia::encryption::{EncryptionKey, encrypt_shard};
 use sia::erasure_coding::{self, ErasureCoder};
-use sia::rhp;
+use sia::rhp::{self, SECTOR_SIZE};
 use sia::signing::{PrivateKey, PublicKey};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, SimplexStream, WriteHalf, copy, simplex};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio::task::{JoinHandle, JoinSet, spawn_blocking};
+use tokio::task::{JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
 use tokio::time::{Instant, sleep, timeout};
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::hosts::{HostQueue, QueueError};
 use crate::rhp4::RHP4Client;
@@ -88,14 +89,13 @@ struct ObjectUpload {
 /// efficient than uploading each object separately if the size of the object is less than the minimum
 /// slab size.
 ///
-/// The caller must call [cancel](Self::cancel) or [finalize](Self::finalize) to complete the upload and
-/// release resources.
+/// The caller must call [finalize](Self::finalize) to complete the upload.
 pub struct PackedUpload {
     slab_size: u64,
     length: u64,
     writer: WriteHalf<SimplexStream>,
     objects: Vec<ObjectUpload>,
-    upload_handle: JoinHandle<Result<Vec<Slab>, UploadError>>,
+    upload_handle: AbortOnDropHandle<Result<Vec<Slab>, UploadError>>,
 }
 
 impl PackedUpload {
@@ -155,11 +155,6 @@ impl PackedUpload {
                 Ok(object)
             })
             .collect()
-    }
-
-    /// Cancels an in progress packed upload.
-    pub fn cancel(self) {
-        self.upload_handle.abort();
     }
 
     /// Adds a new object to the upload. The data will be read until EOF and packed into
@@ -242,6 +237,7 @@ where
         hosts: HostQueue,
         account_key: Arc<PrivateKey>,
         data: Bytes,
+        slab_index: usize,
         shard_index: usize,
         progress_tx: Option<mpsc::UnboundedSender<()>>,
         initial_host: (PublicKey, usize),
@@ -272,7 +268,7 @@ where
                             return Ok((shard_index, sector));
                         }
                         Err(e) => {
-                            debug!("shard {shard_index} upload failed {e:?}");
+                            debug!("slab {slab_index} shard {shard_index} upload failed {e:?}");
                             if tasks.is_empty() {
                                 let (host_key, attempts) = hosts.pop_front()?;
                                 write_timeout = Self::upload_timeout(attempts);
@@ -289,7 +285,7 @@ where
                         let account_key = account_key.clone();
                         tasks.spawn(async move {
                             let _racer = racer; // hold the permit until the task completes
-                            debug!("racing slow host for shard {shard_index}");
+                            debug!("slab {slab_index} shard {shard_index} racing slow host");
                             let (host_key, attempts) = hosts.pop_front()?;
                             let write_timeout = Self::upload_timeout(attempts);
                             Self::upload_shard(transport.clone(), hosts.clone(), host_key, account_key, data, write_timeout).await
@@ -316,25 +312,41 @@ where
             return Err(QueueError::InsufficientHosts.into());
         }
 
-        let semaphore = Arc::new(Semaphore::new(options.max_inflight));
+        // hard cap all shard uploads including races
+        let shard_sema = Arc::new(Semaphore::new(options.max_inflight));
+        // cap number of "active" slabs to limit memory usage.
+        let slab_sema = Arc::new(Semaphore::new(
+            options
+                .max_inflight
+                .div_ceil(total_shards)
+                .saturating_add(1),
+        ));
 
         // use a buffered reader since the erasure coder reads 64 bytes at a time.
-        let r = BufReader::new(r);
+        let mut r = BufReader::new(r);
         let mut slab_upload_tasks = JoinSet::new();
         let rs = Arc::new(ErasureCoder::new(data_shards, parity_shards).unwrap());
         let mut slab_index: usize = 0;
-        let mut shard_rx = rs.shard_reader(r);
-        while let Some(res) = shard_rx.recv().await {
-            let (mut shards, length) = res?;
+        loop {
+            let slab_permit = slab_sema.clone().acquire_owned().await?;
+            let mut shards = vec![vec![0u8; SECTOR_SIZE]; total_shards];
+            let length =
+                ErasureCoder::read_slab_shards(&mut r, options.data_shards as usize, &mut shards)
+                    .await?;
+            if length == 0 {
+                break; // EoF
+            }
+
             let app_key = app_key.clone();
             let hosts = hosts.clone();
             let transport = transport.clone();
-            let semaphore = semaphore.clone();
-            let rs = rs.clone();
             let progress_tx = options.shard_uploaded.clone();
+            let rs = rs.clone();
+            let shard_sema = shard_sema.clone();
 
-            // spawn a task to upload all shards for this slab.
             slab_upload_tasks.spawn(async move {
+                let _slab_guard = slab_permit;
+
                 // note: it may seem like a good idea to start uploading the data shards
                 // while the parity shards are being calculated, but this also forces
                 // cloning the rather large shards and ends up being a net performance
@@ -345,7 +357,8 @@ where
                 let shards = spawn_blocking(move || -> erasure_coding::Result<Vec<Vec<u8>>> {
                     rs.encode_shards(&mut shards)?;
                     Ok(shards)
-                }).await??;
+                })
+                .await??;
 
                 // generate a unique encryption key for the slab
                 let slab_key: EncryptionKey = rand::random::<[u8; 32]>().into();
@@ -354,11 +367,12 @@ where
                 // reserve one host per shard upfront to guarantee each shard has at least one host
                 let reserved_hosts = host_queue.pop_n(shards.len())?;
                 let owned_slab_key = Arc::new(slab_key.clone());
+                let start_time = Instant::now();
                 let mut shard_upload_tasks = JoinSet::new();
                 for (shard_index, mut shard) in shards.into_iter().enumerate() {
                     let app_key = app_key.clone();
                     let owned_slab_key = owned_slab_key.clone();
-                    let permit = semaphore.clone().acquire_owned().await?;
+                    let permit = shard_sema.clone().acquire_owned().await?;
                     let transport = transport.clone();
                     let host_queue = host_queue.clone();
                     let progress_tx = progress_tx.clone();
@@ -368,17 +382,20 @@ where
                         let shard = spawn_blocking(move || {
                             encrypt_shard(&owned_slab_key, shard_index as u8, 0, &mut shard);
                             shard
-                        }).await?;
+                        })
+                        .await?;
                         Self::upload_slab_shard(
                             permit,
                             transport,
                             host_queue,
                             app_key,
                             shard.into(),
+                            slab_index,
                             shard_index,
                             progress_tx,
                             initial_host,
-                        ).await
+                        )
+                        .await
                     });
                 }
 
@@ -399,6 +416,7 @@ where
                         }
                     };
                 }
+                debug!("slab {slab_index} uploaded in {:?}", Instant::now().duration_since(start_time));
                 Ok((slab_index, Slab {
                     sectors: slab_sectors.into_iter().map(|s| s.unwrap()).collect(),
                     encryption_key: slab_key,
@@ -475,10 +493,10 @@ where
             length: 0,
             writer,
             objects: Vec::new(),
-            upload_handle: tokio::spawn(async move {
+            upload_handle: AbortOnDropHandle::new(tokio::spawn(async move {
                 let slabs = Self::upload_slabs(transport, hosts, app_key, reader, options).await?;
                 Ok(slabs)
-            }),
+            })),
         }
     }
 }

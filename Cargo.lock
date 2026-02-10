@@ -887,7 +887,6 @@ checksum = "65bc07b1a8bc7c85c5f2e110c476c7389b4554ba72af57d8445ea63a576b0876"
 dependencies = [
  "futures-channel",
  "futures-core",
- "futures-executor",
  "futures-io",
  "futures-sink",
  "futures-task",
@@ -909,17 +908,6 @@ name = "futures-core"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05f29059c0c2090612e8d742178b0580d2dc940c837851ad723096f87af6663e"
-
-[[package]]
-name = "futures-executor"
-version = "0.3.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e28d1d997f585e54aebc3f97d39e72338912123a67330d723fdbb564d646c9f"
-dependencies = [
- "futures-core",
- "futures-task",
- "futures-util",
-]
 
 [[package]]
 name = "futures-io"
@@ -1430,7 +1418,6 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "criterion",
- "futures",
  "hex",
  "hkdf",
  "httptest",
@@ -2438,15 +2425,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde-big-array"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11fc7cc2c76d73e0f27ee52abbd64eec84d46f370c88371120433196934e4b7f"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "serde_core"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2570,9 +2548,7 @@ dependencies = [
  "chrono",
  "criterion",
  "ed25519-dalek",
- "futures",
  "hex",
- "log",
  "num-bigint",
  "num-rational",
  "num-traits",
@@ -2581,7 +2557,6 @@ dependencies = [
  "reed-solomon-erasure",
  "rustls-platform-verifier",
  "serde",
- "serde-big-array",
  "serde_json",
  "sha2",
  "sia-sdk-derive",

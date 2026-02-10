@@ -100,7 +100,7 @@ async def main():
 
     i = 0
     data = None
-    while upload.slabs() < 10:
+    while upload.slabs() < 4:
         data = urandom(randint(1024, 1024 * 1024))
         reader = BytesReader(data)
         add_start = datetime.now(timezone.utc)

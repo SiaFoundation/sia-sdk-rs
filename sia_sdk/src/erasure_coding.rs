@@ -2,7 +2,6 @@ use crate::rhp::{SECTOR_SIZE, SEGMENT_SIZE};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use thiserror::Error;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -86,7 +85,7 @@ impl ErasureCoder {
         Ok(())
     }
 
-    async fn read_slab_shards<R: AsyncRead + Unpin>(
+    pub async fn read_slab_shards<R: AsyncRead + Unpin>(
         r: &mut R,
         data_shards: usize,
         shards: &mut [Vec<u8>],
@@ -116,37 +115,6 @@ impl ErasureCoder {
             }
         }
         Ok(data_size)
-    }
-
-    // Reads data from the given reader into a vector of shards, returning a stream of shard batches.
-    // Each batch contains the shards for a single slab, along with the total size of the data read.
-    pub fn shard_reader<R: AsyncRead + Send + Unpin + 'static>(
-        &self,
-        mut r: R,
-    ) -> mpsc::Receiver<Result<(Vec<Vec<u8>>, usize)>> {
-        let (tx, rx) = mpsc::channel(1);
-        let data_shards = self.data_shards;
-        let total_shards = self.data_shards + self.parity_shards;
-        tokio::spawn(async move {
-            loop {
-                let mut shards = vec![vec![0u8; SECTOR_SIZE]; total_shards];
-                match Self::read_slab_shards(&mut r, data_shards, &mut shards).await {
-                    Ok(size) => {
-                        if size == 0 {
-                            break;
-                        }
-                        if tx.send(Ok((shards, size))).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        break;
-                    }
-                };
-            }
-        });
-        rx
     }
 
     /// read_shards reads data from the given reader into a vector of shards.

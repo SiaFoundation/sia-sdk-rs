@@ -776,13 +776,10 @@ impl SDK {
                         return;
                     }
                     PackedUploadAction::Cancel => {
-                        packed_upload.cancel();
                         return;
                     }
                 }
             }
-            // in case the packed upload is dropped without calling finalize or cancel
-            packed_upload.cancel();
         });
 
         // this needs to be in a spawn to ensure a tokio runtime is available since `upload_packed` spawns a task

@@ -25,10 +25,9 @@ rand = "0.10.0"
 blake2b_simd = "1.0.4"
 url = { version = "2.5.8", features = ["serde"] }
 log = "0.4.29"
-# avoid rustls-platform-verifier until https://github.com/rustls/rustls-platform-verifier/issues/115 is resolved 
+# avoid rustls-platform-verifier until https://github.com/rustls/rustls-platform-verifier/issues/115 is resolved
 quinn = { version = "0.11.9", default-features = false, features = ["bloom", "log", "runtime-tokio", "rustls-ring"] }
 bytes = "1.11.1"
-futures = "0.3.31"
 tokio-util = { version = "0.7.18", features = ["rt"] }
 priority-queue = "2.7.0"
 serde_with = {version = "3.16.1", features = ["base64"]}
