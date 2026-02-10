@@ -389,6 +389,47 @@ mod test {
         );
     }
 
+    /// Tests ObjectID of a SealedObject
+    /// Port of objects_test.go:TestObjectID
+    #[test]
+    fn test_sealed_object_id_golden() {
+        let mut encryption_key = [0u8; 32];
+        encryption_key[..3].copy_from_slice(&[4, 5, 6]);
+        let mut sector_root = [0u8; 32];
+        sector_root[..3].copy_from_slice(&[7, 8, 9]);
+        let mut public_key = [0u8; 32];
+        public_key[..3].copy_from_slice(&[10, 11, 12]);
+        let mut data_signature = [0u8; 64];
+        data_signature[..3].copy_from_slice(&[22, 23, 24]);
+        let mut metadata_signature = [0u8; 64];
+        metadata_signature[..3].copy_from_slice(&[24, 23, 22]);
+
+        let sealed = SealedObject {
+            encrypted_data_key: vec![1, 2, 3],
+            encrypted_metadata_key: vec![3, 2, 1],
+            slabs: vec![Slab {
+                encryption_key: encryption_key.into(),
+                min_shards: 1,
+                sectors: vec![Sector {
+                    root: sector_root.into(),
+                    host_key: PublicKey::new(public_key),
+                }],
+                offset: 131415,
+                length: 161718,
+            }],
+            encrypted_metadata: vec![19, 20, 21],
+            data_signature: Signature::new(data_signature),
+            metadata_signature: Signature::new(metadata_signature),
+            created_at: DateTime::from_timestamp(25, 26).unwrap(),
+            updated_at: DateTime::from_timestamp(27, 28).unwrap(),
+        };
+
+        assert_eq!(
+            hash_256!("92b456fd0320c6595cf40280fafde2e3c549e09f6e7168ebdd963500830f50b5"),
+            sealed.id()
+        )
+    }
+
     /// tests Slab.digest against a reference digest
     #[test]
     fn test_slab_digest() {
