@@ -22,6 +22,9 @@ use crate::{Hosts, Object, Sector, Slab};
 
 #[derive(Debug, Error)]
 pub enum UploadError {
+    #[error("invalid options {0}")]
+    InvalidOptions(String),
+
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
 
@@ -308,6 +311,19 @@ where
         r: R,
         options: UploadOptions,
     ) -> Result<Vec<Slab>, UploadError> {
+        if options.data_shards == 0 {
+            return Err(UploadError::InvalidOptions(
+                "data_shards must be greater than 0".to_string(),
+            ));
+        } else if options.parity_shards == 0 {
+            return Err(UploadError::InvalidOptions(
+                "parity_shards must be greater than 0".to_string(),
+            ));
+        } else if options.max_inflight == 0 {
+            return Err(UploadError::InvalidOptions(
+                "max_inflight must be greater than 0".to_string(),
+            ));
+        }
         let data_shards = options.data_shards as usize;
         let parity_shards = options.parity_shards as usize;
         let total_shards = data_shards + parity_shards;
