@@ -1,3 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["sia_sdk", "sia_derive", "indexd", "indexd_ffi"]
+
+# CPU-intensive operations (erasure coding, hashing, encryption) are
+# ~100x slower without optimizations. Some tests will be extremely
+# slow without this.
+[profile.dev.package.sia_sdk]
+opt-level = 3
