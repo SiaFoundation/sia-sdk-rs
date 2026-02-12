@@ -36,7 +36,7 @@ pub struct ApprovedState {
 /// A builder for creating an SDK instance.
 pub struct Builder<S> {
     state: S,
-    client: Client,
+    client: Arc<dyn AppClient>,
 }
 
 /// Errors that can occur during the SDK building process.
@@ -72,7 +72,7 @@ impl Builder<DisconnectedState> {
         let client = Client::new(indexer_url)?;
         Ok(Self {
             state: DisconnectedState,
-            client,
+            client: Arc::new(client),
         })
     }
 
