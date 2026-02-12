@@ -10,7 +10,7 @@ pub use slabs::*;
 mod hosts;
 pub use hosts::*;
 
-use crate::app_client::{Account, ObjectsCursor};
+use crate::app_client::{Account, AppClient, ObjectsCursor};
 use sia::rhp::Host;
 use sia::types::Hash256;
 use thiserror::Error;

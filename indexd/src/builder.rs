@@ -10,7 +10,7 @@ use sia::types::Hash256;
 use thiserror::Error;
 use url::Url;
 
-use crate::app_client::{self, Client, RegisterAppRequest};
+use crate::app_client::{self, AppClient, Client, RegisterAppRequest};
 use crate::object_encryption::derive;
 use crate::{SDK, quic};
 

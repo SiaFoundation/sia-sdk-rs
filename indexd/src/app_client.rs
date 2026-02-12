@@ -193,283 +193,12 @@ pub struct Client {
     url: Url,
 }
 
-#[async_trait]
-pub trait AppClient: Send + Sync {
-    async fn check_app_authenticated(&self, app_key: &PrivateKey) -> Result<bool, Error>;
-
-    async fn request_app_connection(
-        &self,
-        opts: &RegisterAppRequest,
-    ) -> Result<RegisterAppResponse, Error>;
-
-    async fn check_request_status(&self, status_url: Url) -> Result<Option<Hash256>, Error>;
-
-    async fn register_app(&self, app_key: &PrivateKey, register_url: Url) -> Result<(), Error>;
-
-    async fn hosts(&self, app_key: &PrivateKey, query: HostQuery) -> Result<Vec<Host>, Error>;
-
-    async fn object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<SealedObject, Error>;
-
-    async fn objects(
-        &self,
-        app_key: &PrivateKey,
-        cursor: Option<ObjectsCursor>,
-        limit: Option<usize>,
-    ) -> Result<Vec<SealedObjectEvent>, Error>;
-
-    async fn save_object(&self, app_key: &PrivateKey, object: &SealedObject) -> Result<(), Error>;
-
-    async fn delete_object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<(), Error>;
-
-    async fn slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<PinnedSlab, Error>;
-
-    async fn slab_ids(
-        &self,
-        app_key: &PrivateKey,
-        offset: Option<u64>,
-        limit: Option<u64>,
-    ) -> Result<Vec<Hash256>, Error>;
-
-    async fn pin_slabs(
-        &self,
-        app_key: &PrivateKey,
-        slabs: Vec<SlabPinParams>,
-    ) -> Result<Vec<Hash256>, Error>;
-
-    async fn pin_slab(&self, app_key: &PrivateKey, slab: SlabPinParams) -> Result<Hash256, Error>;
-
-    async fn unpin_slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<(), Error>;
-
-    async fn prune_slabs(&self, app_key: &PrivateKey) -> Result<(), Error>;
-
-    async fn account(&self, app_key: &PrivateKey) -> Result<Account, Error>;
-
-    fn shared_object_url(
-        &self,
-        app_key: &PrivateKey,
-        object: &Object,
-        valid_until: DateTime<Utc>,
-    ) -> Result<Url, Error>;
-
-    async fn shared_object(&self, share_url: Url) -> Result<Object, Error>;
-}
-
-/// A placeholder type that implements serde::Deserialize for endpoints that
-/// return no content.
-struct EmptyResponse;
-
-impl<'de> serde::Deserialize<'de> for EmptyResponse {
-    fn deserialize<D>(_: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Ok(EmptyResponse)
-    }
-}
-
 impl Client {
     pub fn new<U: IntoUrl>(base_url: U) -> Result<Self, Error> {
         Ok(Self {
             client: reqwest::Client::new(),
             url: base_url.into_url()?,
         })
-    }
-
-    /// Checks if the application is authenticated with the indexer. It returns
-    /// true if authenticated, false if not, and an error if the request fails.
-    pub async fn check_app_authenticated(&self, app_key: &PrivateKey) -> Result<bool, Error> {
-        let url = self.url.join("auth/check")?;
-        let query_params = self.sign(
-            app_key,
-            &url,
-            Method::GET,
-            None,
-            Utc::now() + Duration::from_secs(60),
-        );
-        let resp = self
-            .client
-            .get(url)
-            .timeout(Duration::from_secs(15))
-            .query(&query_params)
-            .send()
-            .await?;
-        match resp.status() {
-            StatusCode::UNAUTHORIZED => Ok(false),
-            StatusCode::NO_CONTENT => Ok(true),
-            _ => Err(Error::Api(resp.text().await?)),
-        }
-    }
-
-    /// Requests an application connection to the indexer.
-    pub async fn request_app_connection(
-        &self,
-        opts: &RegisterAppRequest,
-    ) -> Result<RegisterAppResponse, Error> {
-        self.post_json("auth/connect", None, Some(opts)).await
-    }
-
-    /// Checks if an auth request has been approved.
-    ///
-    /// If approved, it returns the user secret used
-    /// to derive the application key.
-    ///
-    /// If the auth request is still pending, it returns None.
-    pub async fn check_request_status(&self, status_url: Url) -> Result<Option<Hash256>, Error> {
-        let resp = self
-            .client
-            .get(status_url)
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await?;
-        match resp.status() {
-            StatusCode::OK => {
-                if let Ok(status) = resp.json::<AuthConnectStatusResponse>().await {
-                    if status.approved {
-                        Ok(status.user_secret)
-                    } else {
-                        Ok(None)
-                    }
-                } else {
-                    Err(Error::Api("invalid response format".to_string()))
-                }
-            }
-            StatusCode::NOT_FOUND => Err(Error::UserRejected),
-            _ => Err(Error::Api(resp.text().await?)),
-        }
-    }
-
-    /// Registers the application key with the indexer.
-    pub async fn register_app(&self, app_key: &PrivateKey, register_url: Url) -> Result<(), Error> {
-        let query_params = self.sign(
-            app_key,
-            &register_url,
-            Method::POST,
-            None,
-            Utc::now() + Duration::from_secs(60),
-        );
-        let resp = self
-            .client
-            .post(register_url)
-            .timeout(Duration::from_secs(15))
-            .query(&query_params)
-            .send()
-            .await?;
-        match resp.status() {
-            StatusCode::NO_CONTENT => Ok(()),
-            _ => Err(Error::Api(resp.text().await?)),
-        }
-    }
-
-    /// Returns all usable hosts.
-    ///
-    /// # Arguments
-    /// * `query` - Parameters to control the hosts listing.
-    pub async fn hosts(&self, app_key: &PrivateKey, query: HostQuery) -> Result<Vec<Host>, Error> {
-        self.get_json("hosts", Some(app_key), Some(&query)).await
-    }
-
-    /// Retrieves an object from the indexer by its key.
-    pub async fn object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<SealedObject, Error> {
-        self.get_json::<_, ()>(&format!("objects/{key}"), Some(app_key), None)
-            .await
-    }
-
-    /// Fetches a list of objects from the indexer. Can be paginated using the
-    /// cursor and limit arguments.
-    pub async fn objects(
-        &self,
-        app_key: &PrivateKey,
-        cursor: Option<ObjectsCursor>,
-        limit: Option<usize>,
-    ) -> Result<Vec<SealedObjectEvent>, Error> {
-        let mut query_params = Vec::new();
-        if let Some(limit) = limit {
-            query_params.push(("limit", limit.to_string()));
-        }
-        if let Some(ObjectsCursor { after, id }) = cursor {
-            query_params.push(("after", after.to_rfc3339())); // indexd expects RFC3339
-            query_params.push(("key", id.to_string()));
-        }
-        self.get_json::<_, _>("objects", Some(app_key), Some(&query_params))
-            .await
-    }
-
-    /// Saves an object to the indexer.
-    pub async fn save_object(
-        &self,
-        app_key: &PrivateKey,
-        object: &SealedObject,
-    ) -> Result<(), Error> {
-        self.post_json::<_, EmptyResponse>("objects", Some(app_key), Some(object))
-            .await
-            .map(|_| ())
-    }
-
-    /// Deletes an object from the indexer by its key.
-    pub async fn delete_object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<(), Error> {
-        self.delete(&format!("objects/{key}"), app_key).await
-    }
-
-    /// Retrieves a slab from the indexer by its ID.
-    pub async fn slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<PinnedSlab, Error> {
-        self.get_json::<_, ()>(&format!("slabs/{slab_id}"), Some(app_key), None)
-            .await
-    }
-
-    /// Fetches the digests of slabs associated with the account. It supports
-    /// pagination through the provided options.
-    pub async fn slab_ids(
-        &self,
-        app_key: &PrivateKey,
-        offset: Option<u64>,
-        limit: Option<u64>,
-    ) -> Result<Vec<Hash256>, Error> {
-        #[derive(Serialize)]
-        struct QueryParams {
-            offset: Option<u64>,
-            limit: Option<u64>,
-        }
-        let params = QueryParams { offset, limit };
-        self.get_json("slabs", Some(app_key), Some(&params)).await
-    }
-
-    /// Pins slabs to the indexer.
-    pub async fn pin_slabs(
-        &self,
-        app_key: &PrivateKey,
-        slabs: Vec<SlabPinParams>,
-    ) -> Result<Vec<Hash256>, Error> {
-        self.post_json("slabs", Some(app_key), Some(&slabs)).await
-    }
-
-    /// Pin a slab to the indexer.
-    pub async fn pin_slab(
-        &self,
-        app_key: &PrivateKey,
-        slab: SlabPinParams,
-    ) -> Result<Hash256, Error> {
-        self.pin_slabs(app_key, vec![slab])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or(Error::Custom("no slab digest".to_string()))
-    }
-
-    /// Unpins a slab from the indexer.
-    pub async fn unpin_slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<(), Error> {
-        self.delete(&format!("slabs/{slab_id}"), app_key).await
-    }
-
-    /// Unpins slabs not used by any object on the account.
-    pub async fn prune_slabs(&self, app_key: &PrivateKey) -> Result<(), Error> {
-        self.post_json::<(), EmptyResponse>("slabs/prune", Some(app_key), None)
-            .await
-            .map(|_| ())
-    }
-
-    /// Account returns the current account.
-    pub async fn account(&self, app_key: &PrivateKey) -> Result<Account, Error> {
-        self.get_json::<_, ()>("account", Some(app_key), None).await
     }
 
     /// Helper to send a signed DELETE request.
@@ -590,6 +319,290 @@ impl Client {
         state.finalize().into()
     }
 
+    fn sign(
+        &self,
+        app_key: &PrivateKey,
+        url: &Url,
+        method: Method,
+        body: Option<&[u8]>,
+        valid_until: DateTime<Utc>,
+    ) -> [(&'static str, String); 3] {
+        let hash = Self::request_hash(url, method, body, valid_until);
+        let public_key = app_key.public_key();
+        let signature = app_key.sign(hash.as_ref());
+        [
+            (QUERY_PARAM_VALID_UNTIL, valid_until.timestamp().to_string()),
+            (QUERY_PARAM_CREDENTIAL, URL_SAFE.encode(public_key)),
+            (QUERY_PARAM_SIGNATURE, URL_SAFE.encode(signature.as_ref())),
+        ]
+    }
+}
+
+#[async_trait]
+pub trait AppClient: Send + Sync {
+    async fn check_app_authenticated(&self, app_key: &PrivateKey) -> Result<bool, Error>;
+
+    async fn request_app_connection(
+        &self,
+        opts: &RegisterAppRequest,
+    ) -> Result<RegisterAppResponse, Error>;
+
+    async fn check_request_status(&self, status_url: Url) -> Result<Option<Hash256>, Error>;
+
+    async fn register_app(&self, app_key: &PrivateKey, register_url: Url) -> Result<(), Error>;
+
+    async fn hosts(&self, app_key: &PrivateKey, query: HostQuery) -> Result<Vec<Host>, Error>;
+
+    async fn object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<SealedObject, Error>;
+
+    async fn objects(
+        &self,
+        app_key: &PrivateKey,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SealedObjectEvent>, Error>;
+
+    async fn save_object(&self, app_key: &PrivateKey, object: &SealedObject) -> Result<(), Error>;
+
+    async fn delete_object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<(), Error>;
+
+    async fn slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<PinnedSlab, Error>;
+
+    async fn slab_ids(
+        &self,
+        app_key: &PrivateKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Hash256>, Error>;
+
+    async fn pin_slabs(
+        &self,
+        app_key: &PrivateKey,
+        slabs: Vec<SlabPinParams>,
+    ) -> Result<Vec<Hash256>, Error>;
+
+    async fn pin_slab(&self, app_key: &PrivateKey, slab: SlabPinParams) -> Result<Hash256, Error>;
+
+    async fn unpin_slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<(), Error>;
+
+    async fn prune_slabs(&self, app_key: &PrivateKey) -> Result<(), Error>;
+
+    async fn account(&self, app_key: &PrivateKey) -> Result<Account, Error>;
+
+    fn shared_object_url(
+        &self,
+        app_key: &PrivateKey,
+        object: &Object,
+        valid_until: DateTime<Utc>,
+    ) -> Result<Url, Error>;
+
+    async fn shared_object(&self, share_url: Url) -> Result<Object, Error>;
+}
+
+/// A placeholder type that implements serde::Deserialize for endpoints that
+/// return no content.
+struct EmptyResponse;
+
+impl<'de> serde::Deserialize<'de> for EmptyResponse {
+    fn deserialize<D>(_: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(EmptyResponse)
+    }
+}
+
+#[async_trait]
+impl AppClient for Client {
+    /// Checks if the application is authenticated with the indexer. It returns
+    /// true if authenticated, false if not, and an error if the request fails.
+    async fn check_app_authenticated(&self, app_key: &PrivateKey) -> Result<bool, Error> {
+        let url = self.url.join("auth/check")?;
+        let query_params = self.sign(
+            app_key,
+            &url,
+            Method::GET,
+            None,
+            Utc::now() + Duration::from_secs(60),
+        );
+        let resp = self
+            .client
+            .get(url)
+            .timeout(Duration::from_secs(15))
+            .query(&query_params)
+            .send()
+            .await?;
+        match resp.status() {
+            StatusCode::UNAUTHORIZED => Ok(false),
+            StatusCode::NO_CONTENT => Ok(true),
+            _ => Err(Error::Api(resp.text().await?)),
+        }
+    }
+
+    /// Requests an application connection to the indexer.
+    async fn request_app_connection(
+        &self,
+        opts: &RegisterAppRequest,
+    ) -> Result<RegisterAppResponse, Error> {
+        self.post_json("auth/connect", None, Some(opts)).await
+    }
+
+    /// Checks if an auth request has been approved.
+    ///
+    /// If approved, it returns the user secret used
+    /// to derive the application key.
+    ///
+    /// If the auth request is still pending, it returns None.
+    async fn check_request_status(&self, status_url: Url) -> Result<Option<Hash256>, Error> {
+        let resp = self
+            .client
+            .get(status_url)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await?;
+        match resp.status() {
+            StatusCode::OK => {
+                if let Ok(status) = resp.json::<AuthConnectStatusResponse>().await {
+                    if status.approved {
+                        Ok(status.user_secret)
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Err(Error::Api("invalid response format".to_string()))
+                }
+            }
+            StatusCode::NOT_FOUND => Err(Error::UserRejected),
+            _ => Err(Error::Api(resp.text().await?)),
+        }
+    }
+
+    /// Registers the application key with the indexer.
+    async fn register_app(&self, app_key: &PrivateKey, register_url: Url) -> Result<(), Error> {
+        let query_params = self.sign(
+            app_key,
+            &register_url,
+            Method::POST,
+            None,
+            Utc::now() + Duration::from_secs(60),
+        );
+        let resp = self
+            .client
+            .post(register_url)
+            .timeout(Duration::from_secs(15))
+            .query(&query_params)
+            .send()
+            .await?;
+        match resp.status() {
+            StatusCode::NO_CONTENT => Ok(()),
+            _ => Err(Error::Api(resp.text().await?)),
+        }
+    }
+
+    /// Returns all usable hosts.
+    ///
+    /// # Arguments
+    /// * `query` - Parameters to control the hosts listing.
+    async fn hosts(&self, app_key: &PrivateKey, query: HostQuery) -> Result<Vec<Host>, Error> {
+        self.get_json("hosts", Some(app_key), Some(&query)).await
+    }
+
+    /// Retrieves an object from the indexer by its key.
+    async fn object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<SealedObject, Error> {
+        self.get_json::<_, ()>(&format!("objects/{key}"), Some(app_key), None)
+            .await
+    }
+
+    /// Fetches a list of objects from the indexer. Can be paginated using the
+    /// cursor and limit arguments.
+    async fn objects(
+        &self,
+        app_key: &PrivateKey,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SealedObjectEvent>, Error> {
+        let mut query_params = Vec::new();
+        if let Some(limit) = limit {
+            query_params.push(("limit", limit.to_string()));
+        }
+        if let Some(ObjectsCursor { after, id }) = cursor {
+            query_params.push(("after", after.to_rfc3339())); // indexd expects RFC3339
+            query_params.push(("key", id.to_string()));
+        }
+        self.get_json::<_, _>("objects", Some(app_key), Some(&query_params))
+            .await
+    }
+
+    /// Saves an object to the indexer.
+    async fn save_object(&self, app_key: &PrivateKey, object: &SealedObject) -> Result<(), Error> {
+        self.post_json::<_, EmptyResponse>("objects", Some(app_key), Some(object))
+            .await
+            .map(|_| ())
+    }
+
+    /// Deletes an object from the indexer by its key.
+    async fn delete_object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<(), Error> {
+        self.delete(&format!("objects/{key}"), app_key).await
+    }
+
+    /// Retrieves a slab from the indexer by its ID.
+    async fn slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<PinnedSlab, Error> {
+        self.get_json::<_, ()>(&format!("slabs/{slab_id}"), Some(app_key), None)
+            .await
+    }
+
+    /// Fetches the digests of slabs associated with the account. It supports
+    /// pagination through the provided options.
+    async fn slab_ids(
+        &self,
+        app_key: &PrivateKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Hash256>, Error> {
+        #[derive(Serialize)]
+        struct QueryParams {
+            offset: Option<u64>,
+            limit: Option<u64>,
+        }
+        let params = QueryParams { offset, limit };
+        self.get_json("slabs", Some(app_key), Some(&params)).await
+    }
+
+    /// Pins slabs to the indexer.
+    async fn pin_slabs(
+        &self,
+        app_key: &PrivateKey,
+        slabs: Vec<SlabPinParams>,
+    ) -> Result<Vec<Hash256>, Error> {
+        self.post_json("slabs", Some(app_key), Some(&slabs)).await
+    }
+
+    /// Pin a slab to the indexer.
+    async fn pin_slab(&self, app_key: &PrivateKey, slab: SlabPinParams) -> Result<Hash256, Error> {
+        self.pin_slabs(app_key, vec![slab])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(Error::Custom("no slab digest".to_string()))
+    }
+
+    /// Unpins a slab from the indexer.
+    async fn unpin_slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<(), Error> {
+        self.delete(&format!("slabs/{slab_id}"), app_key).await
+    }
+
+    /// Unpins slabs not used by any object on the account.
+    async fn prune_slabs(&self, app_key: &PrivateKey) -> Result<(), Error> {
+        self.post_json::<(), EmptyResponse>("slabs/prune", Some(app_key), None)
+            .await
+            .map(|_| ())
+    }
+
+    /// Account returns the current account.
+    async fn account(&self, app_key: &PrivateKey) -> Result<Account, Error> {
+        self.get_json::<_, ()>("account", Some(app_key), None).await
+    }
+
     /// Creates a signed url that can be shared with others
     /// to give read access to a single object. An expired
     /// link does not necessarily remove access to an object.
@@ -597,7 +610,7 @@ impl Client {
     /// # Arguments
     /// - `object` the object to create the link for
     /// - `valid_until` the time the link expires
-    pub fn shared_object_url(
+    fn shared_object_url(
         &self,
         app_key: &PrivateKey,
         object: &Object,
@@ -632,7 +645,7 @@ impl Client {
     /// # Returns
     /// A tuple with the object metadata and encryption key to decrypt
     /// the user metadata.
-    pub async fn shared_object(&self, mut share_url: Url) -> Result<Object, Error> {
+    async fn shared_object(&self, mut share_url: Url) -> Result<Object, Error> {
         let encryption_key = match share_url.fragment() {
             Some(fragment) => {
                 let fragment = match fragment.strip_prefix("encryption_key=") {
@@ -662,24 +675,6 @@ impl Client {
             shared_object.slabs.clone(),
             Vec::new(),
         ))
-    }
-
-    fn sign(
-        &self,
-        app_key: &PrivateKey,
-        url: &Url,
-        method: Method,
-        body: Option<&[u8]>,
-        valid_until: DateTime<Utc>,
-    ) -> [(&'static str, String); 3] {
-        let hash = Self::request_hash(url, method, body, valid_until);
-        let public_key = app_key.public_key();
-        let signature = app_key.sign(hash.as_ref());
-        [
-            (QUERY_PARAM_VALID_UNTIL, valid_until.timestamp().to_string()),
-            (QUERY_PARAM_CREDENTIAL, URL_SAFE.encode(public_key)),
-            (QUERY_PARAM_SIGNATURE, URL_SAFE.encode(signature.as_ref())),
-        ]
     }
 }
 
