@@ -101,6 +101,19 @@ impl RHP4Client for Arc<MockRHP4Client> {
         offset: usize,
         length: usize,
     ) -> Result<Bytes, rhp4::Error> {
+        // Check if this host is configured as slow
+        let slow_delay = {
+            let slow_hosts = self.slow_hosts.read().unwrap();
+            if slow_hosts.contains(&host_key) {
+                Some(*self.slow_delay.read().unwrap())
+            } else {
+                None
+            }
+        };
+        if let Some(delay) = slow_delay {
+            sleep(delay).await;
+        }
+
         let sector = {
             let sectors = self.sectors.read().unwrap();
             let host_sectors = sectors
