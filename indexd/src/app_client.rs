@@ -2,6 +2,7 @@ use base64::engine::general_purpose::URL_SAFE;
 use base64::prelude::*;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use blake2::Digest;
 use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode};
@@ -190,6 +191,67 @@ struct SharedObjectResponse {
 pub struct Client {
     client: reqwest::Client,
     url: Url,
+}
+
+#[async_trait]
+pub trait AppClient: Send + Sync {
+    async fn check_app_authenticated(&self, app_key: &PrivateKey) -> Result<bool, Error>;
+
+    async fn request_app_connection(
+        &self,
+        opts: &RegisterAppRequest,
+    ) -> Result<RegisterAppResponse, Error>;
+
+    async fn check_request_status(&self, status_url: Url) -> Result<Option<Hash256>, Error>;
+
+    async fn register_app(&self, app_key: &PrivateKey, register_url: Url) -> Result<(), Error>;
+
+    async fn hosts(&self, app_key: &PrivateKey, query: HostQuery) -> Result<Vec<Host>, Error>;
+
+    async fn object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<SealedObject, Error>;
+
+    async fn objects(
+        &self,
+        app_key: &PrivateKey,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SealedObjectEvent>, Error>;
+
+    async fn save_object(&self, app_key: &PrivateKey, object: &SealedObject) -> Result<(), Error>;
+
+    async fn delete_object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<(), Error>;
+
+    async fn slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<PinnedSlab, Error>;
+
+    async fn slab_ids(
+        &self,
+        app_key: &PrivateKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Hash256>, Error>;
+
+    async fn pin_slabs(
+        &self,
+        app_key: &PrivateKey,
+        slabs: Vec<SlabPinParams>,
+    ) -> Result<Vec<Hash256>, Error>;
+
+    async fn pin_slab(&self, app_key: &PrivateKey, slab: SlabPinParams) -> Result<Hash256, Error>;
+
+    async fn unpin_slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<(), Error>;
+
+    async fn prune_slabs(&self, app_key: &PrivateKey) -> Result<(), Error>;
+
+    async fn account(&self, app_key: &PrivateKey) -> Result<Account, Error>;
+
+    fn shared_object_url(
+        &self,
+        app_key: &PrivateKey,
+        object: &Object,
+        valid_until: DateTime<Utc>,
+    ) -> Result<Url, Error>;
+
+    async fn shared_object(&self, share_url: Url) -> Result<Object, Error>;
 }
 
 /// A placeholder type that implements serde::Deserialize for endpoints that

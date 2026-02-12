@@ -1411,6 +1411,7 @@ dependencies = [
 name = "indexd"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "base64",
  "blake2",
  "blake2b_simd",
