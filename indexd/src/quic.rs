@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use core::fmt::Debug;
@@ -460,6 +461,7 @@ impl Client {
     }
 }
 
+#[async_trait]
 impl RHP4Client for Client {
     async fn host_prices(
         &self,

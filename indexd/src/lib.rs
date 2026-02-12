@@ -59,7 +59,7 @@ pub enum Error {
 pub struct SDK {
     app_key: Arc<PrivateKey>,
     api_client: Arc<dyn AppClient>,
-    downloader: Downloader<quic::Client>,
+    downloader: Downloader,
     uploader: Uploader<quic::Client>,
 }
 
@@ -76,7 +76,8 @@ impl SDK {
 
         let transport = quic::Client::new(tls_config, hosts.clone())?;
 
-        let downloader = Downloader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let downloader =
+            Downloader::new(hosts.clone(), Arc::new(transport.clone()), app_key.clone());
         let uploader = Uploader::new(hosts.clone(), transport.clone(), app_key.clone());
         Ok(Self {
             app_key,
