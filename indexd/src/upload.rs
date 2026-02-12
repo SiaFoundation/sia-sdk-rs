@@ -185,17 +185,14 @@ impl PackedUpload {
 }
 
 #[derive(Clone)]
-pub(crate) struct Uploader<T: RHP4Client> {
+pub(crate) struct Uploader {
     app_key: Arc<PrivateKey>,
     hosts: Hosts,
-    transport: T,
+    transport: Arc<dyn RHP4Client>,
 }
 
-impl<T> Uploader<T>
-where
-    T: RHP4Client + Send + Sync + Clone + 'static,
-{
-    pub fn new(hosts: Hosts, transport: T, app_key: Arc<PrivateKey>) -> Self {
+impl Uploader {
+    pub fn new(hosts: Hosts, transport: Arc<dyn RHP4Client>, app_key: Arc<PrivateKey>) -> Self {
         Uploader {
             app_key,
             hosts,
@@ -204,7 +201,7 @@ where
     }
 
     async fn upload_shard(
-        transport: T,
+        transport: Arc<dyn RHP4Client>,
         hosts: HostQueue,
         host_key: PublicKey,
         account_key: Arc<PrivateKey>,
@@ -241,7 +238,7 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn upload_slab_shard(
         permit: OwnedSemaphorePermit,
-        transport: T,
+        transport: Arc<dyn RHP4Client>,
         hosts: HostQueue,
         account_key: Arc<PrivateKey>,
         data: Bytes,
@@ -305,7 +302,7 @@ where
     }
 
     async fn upload_slabs<R: AsyncRead + Unpin + Send + 'static>(
-        transport: T,
+        transport: Arc<dyn RHP4Client>,
         hosts: Hosts,
         app_key: Arc<PrivateKey>,
         r: R,

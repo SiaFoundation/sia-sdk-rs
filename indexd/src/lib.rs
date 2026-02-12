@@ -60,7 +60,7 @@ pub struct SDK {
     app_key: Arc<PrivateKey>,
     api_client: Arc<dyn AppClient>,
     downloader: Downloader,
-    uploader: Uploader<quic::Client>,
+    uploader: Uploader,
 }
 
 impl SDK {
@@ -78,7 +78,7 @@ impl SDK {
 
         let downloader =
             Downloader::new(hosts.clone(), Arc::new(transport.clone()), app_key.clone());
-        let uploader = Uploader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let uploader = Uploader::new(hosts.clone(), Arc::new(transport), app_key.clone());
         Ok(Self {
             app_key,
             api_client,
