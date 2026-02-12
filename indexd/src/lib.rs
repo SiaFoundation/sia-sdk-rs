@@ -58,7 +58,7 @@ pub enum Error {
 #[derive(Clone)]
 pub struct SDK {
     app_key: Arc<PrivateKey>,
-    api_client: app_client::Client,
+    api_client: Arc<dyn AppClient>,
     downloader: Downloader<quic::Client>,
     uploader: Uploader<quic::Client>,
 }
@@ -80,7 +80,7 @@ impl SDK {
         let uploader = Uploader::new(hosts.clone(), transport.clone(), app_key.clone());
         Ok(Self {
             app_key,
-            api_client,
+            api_client: Arc::new(api_client),
             downloader,
             uploader,
         })
