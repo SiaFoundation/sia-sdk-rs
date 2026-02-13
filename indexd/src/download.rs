@@ -9,7 +9,7 @@ use sia::erasure_coding::{self, ErasureCoder};
 use sia::rhp::SEGMENT_SIZE;
 use sia::signing::PrivateKey;
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
@@ -234,7 +234,7 @@ where
 
     /// Downloads the provided slabs and writes the decrypted data to the
     /// provided writer.
-    pub async fn download<W: AsyncWriteExt + Unpin>(
+    pub async fn download<W: AsyncWrite + Unpin>(
         &self,
         w: &mut W,
         object: &Object,

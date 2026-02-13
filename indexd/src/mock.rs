@@ -7,7 +7,7 @@ use chrono::Utc;
 use sia::rhp::{self, HostPrices};
 use sia::signing::{PrivateKey, PublicKey, Signature};
 use sia::types::{Currency, Hash256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::sleep;
 
 use crate::rhp4::{self, RHP4Client};
@@ -140,7 +140,7 @@ impl MockUploader {
         }
     }
 
-    pub async fn upload<R: AsyncReadExt + Send + Sync + Unpin + 'static>(
+    pub async fn upload<R: AsyncRead + Send + Sync + Unpin + 'static>(
         &self,
         r: R,
         options: UploadOptions,
@@ -164,7 +164,7 @@ impl MockDownloader {
         }
     }
 
-    pub async fn download<W: AsyncWriteExt + Send + Sync + Unpin>(
+    pub async fn download<W: AsyncWrite + Send + Sync + Unpin>(
         &self,
         w: &mut W,
         object: &Object,
