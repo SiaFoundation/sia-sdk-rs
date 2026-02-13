@@ -14,7 +14,7 @@ use crate::app_client::{Account, ObjectsCursor};
 use sia::rhp::Host;
 use sia::types::Hash256;
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 pub use reqwest::{IntoUrl, Url};
 
@@ -105,7 +105,7 @@ impl SDK {
     /// # Returns
     /// A new object containing the metadata needed to download the object. The object can be sealed and pinned to the
     /// indexer when ready.
-    pub async fn upload<R: AsyncReadExt + Unpin + Send + 'static>(
+    pub async fn upload<R: AsyncRead + Unpin + Send + 'static>(
         &self,
         reader: R,
         options: UploadOptions,
@@ -127,7 +127,7 @@ impl SDK {
     }
 
     /// Downloads an object using the provided writer and options.
-    pub async fn download<W: AsyncWriteExt + Unpin>(
+    pub async fn download<W: AsyncWrite + Unpin>(
         &self,
         w: &mut W,
         object: &Object,

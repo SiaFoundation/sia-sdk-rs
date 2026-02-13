@@ -1,7 +1,7 @@
 use super::Error as EncodingError;
 use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Duration, Utc};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub trait AsyncEncoder {
     type Error: From<EncodingError>;
@@ -24,7 +24,7 @@ pub trait AsyncSiaDecodable: Sized {
     fn decode_async<D: AsyncDecoder>(r: &mut D) -> impl Future<Output = Result<Self, D::Error>>;
 }
 
-impl<T: AsyncWriteExt + Unpin> AsyncEncoder for T {
+impl<T: AsyncWrite + Unpin> AsyncEncoder for T {
     type Error = EncodingError;
     async fn encode_buf(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
         self.write_all(buf).await?;
@@ -32,7 +32,7 @@ impl<T: AsyncWriteExt + Unpin> AsyncEncoder for T {
     }
 }
 
-impl<T: AsyncReadExt + Unpin> AsyncDecoder for T {
+impl<T: AsyncRead + Unpin> AsyncDecoder for T {
     type Error = EncodingError;
     async fn decode_buf(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
         self.read_exact(buf).await?;
