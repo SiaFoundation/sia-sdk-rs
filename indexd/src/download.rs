@@ -3,13 +3,14 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::AsyncWriteExt;
 use log::debug;
+use sia::AsyncWrite;
 use sia::encryption::{EncryptionKey, encrypt_shard};
 use sia::erasure_coding::{self, ErasureCoder};
 use sia::rhp::SEGMENT_SIZE;
 use sia::signing::PrivateKey;
 use thiserror::Error;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;

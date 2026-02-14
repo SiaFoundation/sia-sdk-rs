@@ -13,8 +13,8 @@ pub use hosts::*;
 use crate::app_client::{Account, ObjectsCursor};
 use sia::rhp::Host;
 use sia::types::Hash256;
+use sia::{AsyncRead, AsyncWrite};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
 
 pub use reqwest::{IntoUrl, Url};
 
@@ -308,10 +308,10 @@ impl SDK {
 #[cfg(test)]
 mod test {
     use bytes::{Bytes, BytesMut};
+    use futures_util::io::Cursor;
     use rand::Rng;
     use sia::rhp::SECTOR_SIZE;
     use sia::types::v2::NetAddress;
-    use std::io::Cursor;
     use std::time::Duration;
 
     use crate::mock::{MockDownloader, MockRHP4Client, MockUploader};

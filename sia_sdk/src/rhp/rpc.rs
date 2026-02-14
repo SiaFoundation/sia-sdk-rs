@@ -1220,8 +1220,8 @@ impl<T: Transport, S: RenterContractSigner, B: TransactionBuilder>
 mod test {
     use bytes::BytesMut;
     use chrono::DateTime;
-    use std::io::Cursor;
-    use tokio::io::AsyncWriteExt;
+    use futures_util::AsyncWriteExt;
+    use futures_util::io::Cursor;
 
     use super::*;
 

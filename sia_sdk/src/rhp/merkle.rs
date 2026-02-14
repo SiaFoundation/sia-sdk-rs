@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use crate::AsyncRead;
 use crate::encoding_async::{AsyncSiaDecodable, AsyncSiaEncodable};
 use crate::merkle::{self, Accumulator, LEAF_HASH_PREFIX, NODE_HASH_PREFIX, sum_leaf, sum_node};
 use crate::rhp::{LEAVES_PER_SECTOR, SECTOR_SIZE, SEGMENT_SIZE};
@@ -7,10 +8,10 @@ use crate::types::Hash256;
 use blake2b_simd::Params;
 use blake2b_simd::many::{HashManyJob, hash_many};
 use bytes::Bytes;
+use futures_util::{AsyncReadExt, io::BufReader};
 use rayon::prelude::*;
 use sia_derive::{AsyncSiaDecode, AsyncSiaEncode};
 use thiserror::Error;
-use tokio::io::{self, AsyncRead, AsyncReadExt};
 
 /// Calculates the Merkle root of a sector
 pub fn sector_root(sector: &[u8]) -> Hash256 {
@@ -89,7 +90,7 @@ pub enum ProofValidationError {
     InvalidProofRoot { expected: Hash256, actual: Hash256 },
 
     #[error("IO error: {0}")]
-    Io(#[from] io::Error),
+    Io(#[from] std::io::Error),
 
     #[error("The proof data is not segment aligned")]
     NotSegmentAligned,
@@ -206,7 +207,7 @@ pub async fn sector_root_from_reader<R: AsyncRead + Unpin>(
 ) -> Result<Hash256, ProofValidationError> {
     let mut acc = merkle::Accumulator::new();
     let r = r.take(SECTOR_SIZE as u64); // cap at a sector
-    let mut r = io::BufReader::new(r);
+    let mut r = BufReader::new(r);
 
     let mut leaf = [0u8; SEGMENT_SIZE];
     loop {

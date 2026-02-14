@@ -22,6 +22,8 @@ bytes = "1.11.1"
 chacha20 = { version = "0.10.0", features = ["xchacha"] }
 chrono = { version = "0.4.43", features = ["serde"] }
 ed25519-dalek = "2.2.0"
+futures-io = "0.3"
+futures-util = { version = "0.3", features = ["io"] }
 hex = "0.4.3"
 num-bigint = "0.4.6"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }
@@ -33,13 +35,7 @@ serde_json = "1.0.149"
 sha2 = "0.10.9"
 sia-sdk-derive = { version = "0.0.6", path = "../sia_derive" }
 thiserror = "2.0.18"
-tokio = { version = "1.49.0", features = [
-    "macros",
-    "rt",
-    "sync",
-    "io-util",
-    "time",
-] }
+tokio = { version = "1.49.0", features = ["sync"] }
 uint = "0.10.0"
 zeroize = { version = "1.8.1", features = ["zeroize_derive"] }
 
