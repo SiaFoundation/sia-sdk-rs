@@ -2550,6 +2550,7 @@ dependencies = [
  "chrono",
  "criterion",
  "ed25519-dalek",
+ "futures-channel",
  "futures-io",
  "futures-util",
  "hex",

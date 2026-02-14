@@ -1,10 +1,10 @@
 use crate::rhp::merkle;
 use bytes::Bytes;
+use futures_channel::oneshot;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::marker::PhantomData;
 use thiserror::Error;
-use tokio::sync::oneshot;
 
 use super::types::*;
 use crate::consensus::ChainState;
