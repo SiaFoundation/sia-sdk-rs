@@ -1,10 +1,10 @@
 use crate::rhp::merkle;
 use bytes::Bytes;
+use futures_channel::oneshot;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::marker::PhantomData;
 use thiserror::Error;
-use tokio::sync::oneshot;
 
 use super::types::*;
 use crate::consensus::ChainState;
@@ -1220,8 +1220,8 @@ impl<T: Transport, S: RenterContractSigner, B: TransactionBuilder>
 mod test {
     use bytes::BytesMut;
     use chrono::DateTime;
-    use std::io::Cursor;
-    use tokio::io::AsyncWriteExt;
+    use futures_util::AsyncWriteExt;
+    use futures_util::io::Cursor;
 
     use super::*;
 

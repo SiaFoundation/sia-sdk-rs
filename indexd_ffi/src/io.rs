@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
 use bytes::Bytes;
+use sia::{AsyncRead, AsyncWrite};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::compat::TokioAsyncReadCompatExt;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::PollSender;
 use tokio_util::task::AbortOnDropHandle;
@@ -72,7 +73,7 @@ pub(crate) fn adapt_ffi_reader(reader: Arc<dyn Reader>) -> impl AsyncRead + Unpi
         }
     });
 
-    StreamReader::new(ReceiverStream::new(rx))
+    StreamReader::new(ReceiverStream::new(rx)).compat()
 }
 
 /// A foreign writer that can be used to transfer data across FFI boundaries.
@@ -121,7 +122,7 @@ impl AsyncWrite for FFIWriter {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         self.sender.close();
 
         if let Some(join_handle) = self.join_handle.as_mut() {

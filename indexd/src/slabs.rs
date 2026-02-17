@@ -8,8 +8,8 @@ use sia::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use sia::encryption::{CipherReader, CipherWriter, EncryptionKey};
 use sia::signing::{PrivateKey, PublicKey, Signature};
 use sia::types::Hash256;
+use sia::{AsyncRead, AsyncWrite};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::object_encryption::{
     DecryptError, open_data_key, open_metadata, open_metadata_key, seal_data_key, seal_metadata,

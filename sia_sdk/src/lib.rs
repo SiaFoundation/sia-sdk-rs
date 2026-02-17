@@ -12,4 +12,6 @@ pub mod types;
 pub mod macros;
 pub(crate) mod merkle;
 
+pub use futures_io::{AsyncRead, AsyncWrite};
+
 extern crate self as sia;

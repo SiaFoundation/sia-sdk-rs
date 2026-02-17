@@ -1,6 +1,8 @@
 uniffi::setup_scaffolding!();
 
 use base64::prelude::*;
+use futures_util::AsyncWriteExt;
+use futures_util::io::BufWriter;
 use indexd::{SealedObjectError, Url};
 use log::debug;
 use sia::rhp::SECTOR_SIZE;
@@ -12,7 +14,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 use thiserror::Error;
-use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::runtime::{self, Runtime};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::AbortOnDropHandle;
@@ -862,7 +863,7 @@ impl SDK {
                 )
                 .await?;
             }
-            if let Err(e) = w.shutdown().await {
+            if let Err(e) = w.close().await {
                 debug!("error shutting down writer: {}", e);
             }
             Ok(())

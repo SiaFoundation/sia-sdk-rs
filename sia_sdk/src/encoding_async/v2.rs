@@ -1,7 +1,8 @@
 use super::Error as EncodingError;
+use crate::{AsyncRead, AsyncWrite};
 use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Duration, Utc};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use futures_util::io::{AsyncReadExt, AsyncWriteExt};
 
 pub trait AsyncEncoder {
     type Error: From<EncodingError>;

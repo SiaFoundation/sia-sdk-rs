@@ -3,17 +3,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures_util::AsyncWriteExt;
+use futures_util::io::{BufReader, copy};
 use log::debug;
+use sia::AsyncRead;
 use sia::encryption::{EncryptionKey, encrypt_shard};
 use sia::erasure_coding::{self, ErasureCoder};
 use sia::rhp::{self, SECTOR_SIZE};
 use sia::signing::{PrivateKey, PublicKey};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWriteExt, BufReader, SimplexStream, WriteHalf, copy, simplex};
+use tokio::io::{SimplexStream, WriteHalf, simplex};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::{JoinSet, spawn_blocking};
 use tokio::time::error::Elapsed;
 use tokio::time::{Instant, sleep, timeout};
+use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::hosts::{HostQueue, QueueError};
@@ -96,7 +100,7 @@ struct ObjectUpload {
 pub struct PackedUpload {
     slab_size: u64,
     length: u64,
-    writer: WriteHalf<SimplexStream>,
+    writer: Compat<WriteHalf<SimplexStream>>,
     objects: Vec<ObjectUpload>,
     upload_handle: AbortOnDropHandle<Result<Vec<Slab>, UploadError>>,
 }
@@ -138,7 +142,7 @@ impl PackedUpload {
     ///
     /// The caller must pin the resulting objects to the indexer when ready.
     pub async fn finalize(mut self) -> Result<Vec<Object>, UploadError> {
-        let _ = self.writer.shutdown().await; // ignore error
+        let _ = self.writer.close().await; // ignore error
         let uploaded_slabs = self.upload_handle.await??;
         self.objects
             .into_iter()
@@ -512,10 +516,11 @@ where
         PackedUpload {
             slab_size: options.data_shards as u64 * rhp::SECTOR_SIZE as u64,
             length: 0,
-            writer,
+            writer: writer.compat_write(),
             objects: Vec::new(),
             upload_handle: AbortOnDropHandle::new(tokio::spawn(async move {
-                let slabs = Self::upload_slabs(transport, hosts, app_key, reader, options).await?;
+                let slabs =
+                    Self::upload_slabs(transport, hosts, app_key, reader.compat(), options).await?;
                 Ok(slabs)
             })),
         }

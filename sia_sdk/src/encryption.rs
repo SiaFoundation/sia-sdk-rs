@@ -1,13 +1,14 @@
 use crate::encoding::{SiaDecodable, SiaEncodable};
+use crate::{AsyncRead, AsyncWrite};
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use chacha20::XChaCha20;
 use chacha20::cipher::inout::InOutBuf;
 use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherError, StreamCipherSeek};
+use futures_util::ready;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sia_derive::{SiaDecode, SiaEncode};
-use tokio::io::{AsyncRead, AsyncWrite};
 use zeroize::ZeroizeOnDrop;
 
 #[derive(SiaEncode, SiaDecode, Clone, Debug, ZeroizeOnDrop, PartialEq)]
@@ -110,15 +111,12 @@ impl<R: AsyncRead + Unpin> AsyncRead for CipherReader<R> {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        let initial_filled = buf.filled().len();
-        let poll = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
-
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let n = ready!(std::pin::Pin::new(&mut self.inner).poll_read(cx, buf))?;
         // apply the cipher to the newly read bytes
-        self.cipher
-            .apply_keystream(&mut buf.filled_mut()[initial_filled..]);
-        poll
+        self.cipher.apply_keystream(&mut buf[..n]);
+        std::task::Poll::Ready(Ok(n))
     }
 }
 
@@ -158,11 +156,11 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
         std::pin::Pin::new(&mut self.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(
+    fn poll_close(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        std::pin::Pin::new(&mut self.inner).poll_close(cx)
     }
 }
 
@@ -236,8 +234,8 @@ impl StreamCipher for Chacha20Cipher {
 
 #[cfg(test)]
 mod test {
+    use futures_util::{AsyncReadExt, AsyncWriteExt};
     use rand::Rng;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::rhp::SECTOR_SIZE;
 

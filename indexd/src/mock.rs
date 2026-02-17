@@ -7,7 +7,7 @@ use chrono::Utc;
 use sia::rhp::{self, HostPrices};
 use sia::signing::{PrivateKey, PublicKey, Signature};
 use sia::types::{Currency, Hash256};
-use tokio::io::{AsyncRead, AsyncWrite};
+use sia::{AsyncRead, AsyncWrite};
 use tokio::time::sleep;
 
 use crate::rhp4::{self, RHP4Client};
