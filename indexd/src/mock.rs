@@ -10,6 +10,8 @@ use sia::types::{Currency, Hash256};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::sleep;
 
+use async_trait::async_trait;
+
 use crate::rhp4::{self, RHP4Client};
 use crate::{
     DownloadError, DownloadOptions, Downloader, Hosts, Object, PackedUpload, UploadError,
@@ -51,7 +53,8 @@ impl MockRHP4Client {
     }
 }
 
-impl RHP4Client for Arc<MockRHP4Client> {
+#[async_trait]
+impl RHP4Client for MockRHP4Client {
     async fn host_prices(&self, _: PublicKey, _: bool) -> Result<HostPrices, rhp4::Error> {
         Ok(HostPrices {
             contract_price: Currency::zero(),
@@ -130,7 +133,7 @@ impl RHP4Client for Arc<MockRHP4Client> {
 }
 
 pub struct MockUploader {
-    uploader: Uploader<Arc<MockRHP4Client>>,
+    uploader: Uploader,
 }
 
 impl MockUploader {
@@ -154,7 +157,7 @@ impl MockUploader {
 }
 
 pub struct MockDownloader {
-    downloader: Downloader<Arc<MockRHP4Client>>,
+    downloader: Downloader,
 }
 
 impl MockDownloader {
