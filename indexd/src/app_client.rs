@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::DecryptError;
 use crate::slabs::Sector;
-use crate::{Object, PinnedSlab, SealedObject, Slab};
-use sia::signing::{PrivateKey, PublicKey};
+use crate::{Object, PinnedSlab, SealedObject, SharedObject, SharedObjectMetadata, Slab};
+use sia::signing::{PrivateKey, PublicKey, Signature};
 use sia::types::Hash256;
 use sia::types::v2::Protocol;
 
@@ -30,6 +30,11 @@ pub use reqwest::{IntoUrl, Url};
 const QUERY_PARAM_VALID_UNTIL: &str = "sv";
 const QUERY_PARAM_CREDENTIAL: &str = "sc";
 const QUERY_PARAM_SIGNATURE: &str = "ss";
+
+const SHARED_OBJECT_METADATA_KEY_PARAM: &str = "key";
+const SHARED_OBJECT_METADATA_NAME_PARAM: &str = "name";
+const SHARED_OBJECT_METADATA_CONTENT_TYPE_PARAM: &str = "type";
+const SHARED_OBJECT_METADATA_SIG_PARAM: &str = "sig";
 
 const SHARE_URL_SCHEME: &str = "sia";
 
@@ -540,12 +545,15 @@ impl Client {
     /// link does not necessarily remove access to an object.
     ///
     /// # Arguments
+    /// - `app_key` the application key to sign the url with
     /// - `object` the object to create the link for
+    /// - `metadata` the metadata to include in the link, which may be used to help applications identify the content
     /// - `valid_until` the time the link expires
     pub fn shared_object_url(
         &self,
         app_key: &PrivateKey,
         object: &Object,
+        metadata: SharedObjectMetadata,
         valid_until: DateTime<Utc>,
     ) -> Result<Url, Error> {
         // the Url crate does not allow "unsafe" scheme changes (https -> sia) because it's annoying.
@@ -556,15 +564,28 @@ impl Client {
         )
         .parse()?;
 
-        let params = self.sign(app_key, &url, Method::GET, None, valid_until);
-        url.set_fragment(Some(
-            format!(
-                "encryption_key={}",
-                URL_SAFE.encode(object.data_key().as_ref())
-            )
-            .as_str(),
-        ));
+        let mut fragment_params = form_urlencoded::Serializer::new(String::new());
+        // used to sign the url fragment so users can verify it hasn't been tampered with.
+        let mut h = Blake2b256::new();
+        macro_rules! append_meta {
+            ($key:expr, $value:expr) => {
+                h.update($key.as_bytes());
+                h.update($value.as_bytes());
+                fragment_params.append_pair($key, $value);
+            };
+        }
+        append_meta!(SHARED_OBJECT_METADATA_KEY_PARAM, &URL_SAFE.encode(object.data_key().as_ref()));
+        if let Some(name) = metadata.name {
+            append_meta!(SHARED_OBJECT_METADATA_NAME_PARAM, &name);
+        }
+        if let Some(content_type) = metadata.content_type {
+            append_meta!(SHARED_OBJECT_METADATA_CONTENT_TYPE_PARAM, &content_type);
+        }
+        let sig = app_key.sign(h.finalize().as_ref());
+        fragment_params.append_pair(SHARED_OBJECT_METADATA_SIG_PARAM, &URL_SAFE.encode(sig.as_ref()));
+        url.set_fragment(Some(&fragment_params.finish()));
 
+        let params = self.sign(app_key, &url, Method::GET, None, valid_until);
         let mut pairs = url.query_pairs_mut();
         for (key, value) in params {
             pairs.append_pair(key, value.as_str());
@@ -580,26 +601,63 @@ impl Client {
     ///
     /// # Returns
     /// The metadata needed to download the data
-    pub async fn shared_object(&self, mut share_url: Url) -> Result<Object, Error> {
+    pub async fn shared_object(&self, mut share_url: Url) -> Result<SharedObject, Error> {
         if share_url.scheme() != SHARE_URL_SCHEME {
             return Err(Error::Format(format!(
                 "invalid url scheme: expected {SHARE_URL_SCHEME}"
             )));
         }
-        let encryption_key = match share_url.fragment() {
-            Some(fragment) => {
-                let fragment = match fragment.strip_prefix("encryption_key=") {
-                    Some(fragment) => Ok(fragment),
-                    None => Err(Error::Format("missing encryption_key".into())),
-                }?;
-                let mut out = [0u8; 32];
-                URL_SAFE.decode_slice(fragment, &mut out).map_err(|_| {
-                    Error::Format("encryption key must be 32 hex-encoded bytes".into())
-                })?;
-                Ok(EncryptionKey::from(out))
+
+        let credential = share_url
+            .query_pairs()
+            .find(|(key, _)| key == QUERY_PARAM_CREDENTIAL)
+            .ok_or_else(|| Error::Format("missing public key query parameter".into()))?;
+        let public_key = PublicKey::new(decode_url_safe(credential.1.as_bytes(), "public key")?);
+
+        let mut name = None;
+        let mut content_type = None;
+        let mut encryption_key = None;
+        let mut signature = None;
+        let mut h = Blake2b256::new();
+        if let Some(fragment) = share_url.fragment() {
+            for (key, value) in form_urlencoded::parse(fragment.as_bytes()) {
+                // relies on fixed ordering of the parameters. Guaranteed by shared_object_url 
+                // since it uses form_urlencoded::Serializer which encodes parameters in 
+                // the order they were added.
+                if key != SHARED_OBJECT_METADATA_SIG_PARAM {
+                    h.update(key.as_bytes());
+                    h.update(value.as_bytes());
+                }
+
+                if key == SHARED_OBJECT_METADATA_KEY_PARAM {
+                    encryption_key = Some(EncryptionKey::from(decode_url_safe(
+                        value.as_bytes(),
+                        "encryption key",
+                    )?));
+                }  else if key == SHARED_OBJECT_METADATA_NAME_PARAM {
+                    name = Some(value.into_owned());
+                } else if key == SHARED_OBJECT_METADATA_CONTENT_TYPE_PARAM {
+                    content_type = Some(value.into_owned());
+                } else if key == SHARED_OBJECT_METADATA_SIG_PARAM {
+                    signature = Some(Signature::from(decode_url_safe(
+                        value.as_bytes(),
+                        "signature",
+                    )?));
+                } else {
+                    return Err(Error::Format(format!("unexpected parameter: {key}")));
+                }
             }
-            None => Err(Error::Format("missing encryption_key".into())),
-        }?;
+        } else {
+            return Err(Error::Format("missing url fragment".into()));
+        }
+
+        let encryption_key =
+            encryption_key.ok_or_else(|| Error::Format("missing encryption key".into()))?;
+        let signature = signature.ok_or_else(|| Error::Format("missing signature".into()))?;
+        if !public_key.verify(h.finalize().as_ref(), &signature) {
+            return Err(Error::Format("invalid signature".into()));
+        }
+
         share_url.set_fragment(None);
         // enforce indexer App APIs are served over https
         // the Url crate does not allow "unsafe" scheme changes (sia -> https) because it's annoying.
@@ -617,11 +675,10 @@ impl Client {
         )
         .await?;
 
-        Ok(Object::new(
-            encryption_key,
-            shared_object.slabs.clone(),
-            Vec::new(),
-        ))
+        Ok(SharedObject {
+            object: Object::new(encryption_key, shared_object.slabs.clone(), Vec::new()),
+            metadata: SharedObjectMetadata { name, content_type },
+        })
     }
 
     fn sign(
@@ -641,6 +698,17 @@ impl Client {
             (QUERY_PARAM_SIGNATURE, URL_SAFE.encode(signature.as_ref())),
         ]
     }
+}
+
+fn decode_url_safe<const N: usize>(value: &[u8], name: &str) -> Result<[u8; N], Error> {
+    let mut out = [0u8; N];
+    let n = URL_SAFE
+        .decode_slice(value, &mut out)
+        .map_err(|_| Error::Format(format!("invalid {name} encoding")))?;
+    if n != N {
+        return Err(Error::Format(format!("invalid {name} length")));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -782,7 +850,12 @@ mod tests {
         let client = Client::new(server.url("/").to_string()).unwrap();
         let valid_until = DateTime::from_timestamp_secs(123).unwrap() + Duration::from_secs(60);
         let share_url = client
-            .shared_object_url(&app_key, &object, valid_until)
+            .shared_object_url(
+                &app_key,
+                &object,
+                SharedObjectMetadata::default(),
+                valid_until,
+            )
             .unwrap();
 
         assert_eq!(share_url.scheme(), SHARE_URL_SCHEME);
@@ -798,8 +871,62 @@ mod tests {
         assert!(client.shared_object(invalid_url).await.is_err());
 
         let result = client.shared_object(share_url).await.unwrap();
-        assert_eq!(result.data_key(), &data_key);
-        assert_eq!(result.slabs(), &slabs);
+        assert_eq!(result.object.data_key(), &data_key);
+        assert_eq!(result.object.slabs(), &slabs);
+    }
+
+    #[tokio::test]
+    async fn test_shared_object_metadata() {
+        let data_key: EncryptionKey = [42u8; 32].into();
+        let slabs = vec![Slab {
+            encryption_key: [1u8; 32].into(),
+            min_shards: 1,
+            sectors: vec![Sector {
+                root: Hash256::new([2u8; 32]),
+                host_key: PublicKey::new([3u8; 32]),
+            }],
+            offset: 0,
+            length: 256,
+        }];
+        let object = Object::new(data_key.clone(), slabs.clone(), Vec::new());
+        let object_id = object.id();
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!("/objects/{object_id}/shared"),
+            ))
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(
+                        serde_json::to_string(&SharedObjectResponse {
+                            slabs: slabs.clone(),
+                            encrypted_metadata: None,
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&[0u8; 32]);
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        let valid_until = DateTime::from_timestamp_secs(123).unwrap() + Duration::from_secs(60);
+        let metadata = SharedObjectMetadata {
+            name: Some("test.txt".into()),
+            content_type: Some("text/plain".into()),
+        };
+        let share_url = client
+            .shared_object_url(&app_key, &object, metadata, valid_until)
+            .unwrap();
+
+        let result = client.shared_object(share_url).await.unwrap();
+        assert_eq!(result.object.data_key(), &data_key);
+        assert_eq!(result.object.slabs(), &slabs);
+        assert_eq!(result.metadata.name, Some("test.txt".into()));
+        assert_eq!(result.metadata.content_type, Some("text/plain".into()));
     }
 
     #[tokio::test]

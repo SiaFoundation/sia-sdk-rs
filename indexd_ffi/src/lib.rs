@@ -294,6 +294,18 @@ impl PinnedObject {
     }
 }
 
+#[derive(uniffi::Record)]
+pub struct SharedObjectMetadata {
+    pub name: Option<String>,
+    pub content_type: Option<String>,
+}
+
+#[derive(uniffi::Record)]
+pub struct SharedObject {
+    pub object: Arc<PinnedObject>,
+    pub metadata: SharedObjectMetadata,
+}
+
 /// A sealed object represents an object that has been encrypted
 /// for secure offline storage or processing. It can be opened using
 /// an app key to retrieve the original object.
@@ -995,24 +1007,36 @@ impl SDK {
     pub fn share_object(
         &self,
         object: Arc<PinnedObject>,
+        metadata: SharedObjectMetadata,
         valid_until: SystemTime,
     ) -> Result<String, Error> {
-        let u = self
-            .inner
-            .share_object(&object.object(), valid_until.into())?;
+        let u = self.inner.share_object(
+            &object.object(),
+            indexd::SharedObjectMetadata {
+                name: metadata.name,
+                content_type: metadata.content_type,
+            },
+            valid_until.into(),
+        )?;
         Ok(u.to_string())
     }
 
     /// Retrieves a shared object from a signed URL.
-    pub async fn shared_object(&self, shared_url: &str) -> Result<PinnedObject, Error> {
+    pub async fn shared_object(&self, shared_url: &str) -> Result<SharedObject, Error> {
         let shared_url: Url = shared_url
             .parse()
             .map_err(|e| Error::Custom(format!("{e}")))?;
         let sdk = self.inner.clone();
         spawn(async move {
             let object = sdk.shared_object(shared_url).await?;
-            Ok(PinnedObject {
-                inner: Arc::new(Mutex::new(object)),
+            Ok(SharedObject {
+                object: Arc::new(PinnedObject {
+                    inner: Arc::new(Mutex::new(object.object)),
+                }),
+                metadata: SharedObjectMetadata {
+                    name: object.metadata.name,
+                    content_type: object.metadata.content_type,
+                },
             })
         })
         .await?
