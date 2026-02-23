@@ -252,9 +252,14 @@ impl SDK {
     /// # Arguments
     /// * `object` - The object to share.
     /// * `valid_until` - The time until which the shared URL is valid.
-    pub fn share_object(&self, object: &Object, valid_until: DateTime<Utc>) -> Result<Url, Error> {
+    pub fn share_object(
+        &self,
+        object: &Object,
+        metadata: SharedObjectMetadata,
+        valid_until: DateTime<Utc>,
+    ) -> Result<Url, Error> {
         self.api_client
-            .shared_object_url(&self.app_key, object, valid_until)
+            .shared_object_url(&self.app_key, object, metadata, valid_until)
             .map_err(|e| Error::App(format!("{e:?}")))
     }
 
@@ -262,7 +267,7 @@ impl SDK {
     ///
     /// # Arguments
     /// * `share_url` - The URL of the shared object.
-    pub async fn shared_object<U: IntoUrl>(&self, share_url: U) -> Result<Object, Error> {
+    pub async fn shared_object<U: IntoUrl>(&self, share_url: U) -> Result<SharedObject, Error> {
         let share_url = share_url
             .into_url()
             .map_err(|e| Error::App(format!("{e:?}")))?;

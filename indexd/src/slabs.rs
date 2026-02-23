@@ -350,6 +350,17 @@ impl Default for Object {
     }
 }
 
+#[derive(Default)]
+pub struct SharedObjectMetadata {
+    pub name: Option<String>,
+    pub content_type: Option<String>,
+}
+
+pub struct SharedObject {
+    pub object: Object,
+    pub metadata: SharedObjectMetadata,
+}
+
 pub(crate) fn object_id(slabs: &[Slab]) -> Hash256 {
     let mut state = Blake2b256::default();
     for slab in slabs.iter() {
