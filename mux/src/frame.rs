@@ -88,12 +88,51 @@ pub fn append_frame(buf: &mut Vec<u8>, h: FrameHeader, payload: &[u8]) {
     buf.extend_from_slice(payload);
 }
 
-/// Trait for sequential packet decryption. The handshake module will provide
-/// the concrete implementation (`seqCipher`).
+/// Trait for sequential packet encryption/decryption.
 pub(crate) trait PacketCipher {
     /// Decrypts `buf` in place, returning the length of the plaintext.
     /// The plaintext occupies `buf[..len]` after decryption.
     fn decrypt_in_place(&mut self, buf: &mut [u8]) -> Result<usize, io::Error>;
+
+    /// Encrypts `buf[..buf.len() - AEAD_TAG_SIZE]` in place, writing the
+    /// authentication tag into the remaining bytes. Infallible because AEAD
+    /// encryption cannot fail.
+    fn encrypt_in_place(&mut self, buf: &mut [u8]);
+}
+
+pub(crate) struct PacketWriter<W, C> {
+    writer: W,
+    cipher: C,
+    packet_size: usize,
+    buf: Vec<u8>,
+}
+
+impl<W: AsyncWrite + Unpin, C: PacketCipher> PacketWriter<W, C> {
+    pub fn new(writer: W, cipher: C, packet_size: usize) -> Self {
+        Self {
+            writer,
+            cipher,
+            packet_size,
+            buf: vec![0u8; packet_size * 10],
+        }
+    }
+
+    /// Encrypts `plaintext` into packets and writes them to the underlying
+    /// writer. The caller must ensure `plaintext.len()` is a multiple of
+    /// `max_frame_size` (`packet_size - AEAD_TAG_SIZE`).
+    pub async fn write_encrypted(&mut self, plaintext: &[u8]) -> Result<(), io::Error> {
+        let max_frame_size = self.packet_size - AEAD_TAG_SIZE;
+        let num_packets = plaintext.len() / max_frame_size;
+        for i in 0..num_packets {
+            let packet = &mut self.buf[i * self.packet_size..][..self.packet_size];
+            packet[..max_frame_size]
+                .copy_from_slice(&plaintext[i * max_frame_size..][..max_frame_size]);
+            self.cipher.encrypt_in_place(packet);
+        }
+        self.writer
+            .write_all(&self.buf[..num_packets * self.packet_size])
+            .await
+    }
 }
 
 pub(crate) struct PacketReader<R, C> {
