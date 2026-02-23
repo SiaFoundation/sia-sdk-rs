@@ -6,6 +6,12 @@ use std::io;
 
 use chacha20poly1305::aead::AeadInPlace;
 use chacha20poly1305::aead::generic_array::GenericArray;
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
+
+use ed25519_dalek::{Verifier, VerifyingKey};
+use x25519_dalek::{EphemeralSecret, PublicKey};
+
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use std::time::Duration;
 
@@ -120,6 +126,96 @@ pub(crate) enum ConnSettingsError {
     TimeoutTooLong(Duration),
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum HandshakeError {
+    #[error("could not write handshake request: {0}")]
+    WriteRequest(io::Error),
+    #[error("could not read handshake response: {0}")]
+    ReadResponse(io::Error),
+    #[error("invalid signature: {0}")]
+    InvalidSignature(ed25519_dalek::SignatureError),
+    #[error("could not decrypt settings response: {0}")]
+    DecryptSettings(io::Error),
+    #[error("peer sent unacceptable settings: {0}")]
+    UnacceptableSettings(#[from] ConnSettingsError),
+    #[error("could not write settings: {0}")]
+    WriteSettings(io::Error),
+}
+
+pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
+    conn: &mut T,
+    their_key: &VerifyingKey,
+    our_settings: ConnSettings,
+) -> Result<(SeqCipher, ConnSettings), HandshakeError> {
+    let our_secret = EphemeralSecret::random_from_rng(rand_core::OsRng);
+    let our_xpk = PublicKey::from(&our_secret);
+
+    // write our X25519 public key
+    conn.write_all(our_xpk.as_bytes())
+        .await
+        .map_err(HandshakeError::WriteRequest)?;
+
+    // read their X25519 public key + Ed25519 signature + encrypted settings
+    let mut buf = vec![0u8; 32 + 64 + CONN_SETTINGS_SIZE + AEAD_TAG_SIZE];
+    conn.read_exact(&mut buf)
+        .await
+        .map_err(HandshakeError::ReadResponse)?;
+
+    // verify signature over (our_xpk || their_xpk)
+    let their_xpk = PublicKey::from(<[u8; 32]>::try_from(&buf[..32]).expect("slice is 32 bytes"));
+    let mut msg = [0u8; 64];
+    msg[..32].copy_from_slice(our_xpk.as_bytes());
+    msg[32..].copy_from_slice(&buf[..32]);
+    let sig = ed25519_dalek::Signature::from_slice(&buf[32..96])
+        .map_err(HandshakeError::InvalidSignature)?;
+    their_key
+        .verify(&msg, &sig)
+        .map_err(HandshakeError::InvalidSignature)?;
+
+    // derive shared secret via X25519
+    let shared_secret = our_secret.diffie_hellman(&their_xpk);
+
+    // derive symmetric key = BLAKE2b-256(secret || our_xpk || their_xpk)
+    let key = blake2b_simd::Params::new()
+        .hash_length(32)
+        .to_state()
+        .update(shared_secret.as_bytes())
+        .update(our_xpk.as_bytes())
+        .update(their_xpk.as_bytes())
+        .finalize();
+    let aead = ChaCha20Poly1305::new(GenericArray::from_slice(key.as_bytes()));
+    let mut cipher = SeqCipher {
+        aead,
+        our_nonce: [0u8; AEAD_NONCE_SIZE],
+        their_nonce: [0u8; AEAD_NONCE_SIZE],
+    };
+    // initiator flips their_nonce high bit
+    cipher.their_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
+
+    // decrypt their settings
+    let plaintext_len = cipher
+        .decrypt_in_place(&mut buf[96..])
+        .map_err(HandshakeError::DecryptSettings)?;
+    let their_settings = ConnSettings::try_from(&buf[96..96 + plaintext_len]).map_err(|_| {
+        HandshakeError::DecryptSettings(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid settings payload",
+        ))
+    })?;
+    let merged = merge_settings(our_settings, their_settings)?;
+
+    // encrypt and write our settings
+    let settings_bytes: [u8; CONN_SETTINGS_SIZE] = our_settings.into();
+    let mut settings_buf = vec![0u8; CONN_SETTINGS_SIZE + AEAD_TAG_SIZE];
+    settings_buf[..CONN_SETTINGS_SIZE].copy_from_slice(&settings_bytes);
+    cipher.encrypt_in_place(&mut settings_buf);
+    conn.write_all(&settings_buf)
+        .await
+        .map_err(HandshakeError::WriteSettings)?;
+
+    Ok((cipher, merged))
+}
+
 pub(crate) fn merge_settings(
     ours: ConnSettings,
     theirs: ConnSettings,
@@ -144,6 +240,8 @@ pub(crate) fn merge_settings(
 #[cfg(test)]
 mod tests {
     use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
+    use ed25519_dalek::Signer;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
 
@@ -280,5 +378,143 @@ mod tests {
         };
         let result = merge_settings(ConnSettings::default(), short);
         assert!(matches!(result, Err(ConnSettingsError::TimeoutTooShort(_))));
+    }
+
+    /// Simulates the responder (acceptor) side of the handshake for testing
+    /// `initiate_handshake`. Returns the settings the initiator sent.
+    async fn mock_handshake_responder(
+        conn: &mut tokio::io::DuplexStream,
+        signing_key: &ed25519_dalek::SigningKey,
+        responder_settings: ConnSettings,
+    ) -> ConnSettings {
+        // read initiator's X25519 public key
+        let mut initiator_xpk_bytes = [0u8; 32];
+        conn.read_exact(&mut initiator_xpk_bytes).await.unwrap();
+        let initiator_xpk = PublicKey::from(initiator_xpk_bytes);
+
+        // generate responder X25519 keypair and derive shared secret
+        let responder_secret = EphemeralSecret::random_from_rng(rand_core::OsRng);
+        let responder_xpk = PublicKey::from(&responder_secret);
+        let shared_secret = responder_secret.diffie_hellman(&initiator_xpk);
+
+        // key = BLAKE2b-256(secret || initiator_xpk || responder_xpk)
+        let key = blake2b_simd::Params::new()
+            .hash_length(32)
+            .to_state()
+            .update(shared_secret.as_bytes())
+            .update(&initiator_xpk_bytes)
+            .update(responder_xpk.as_bytes())
+            .finalize();
+        let aead = ChaCha20Poly1305::new(GenericArray::from_slice(key.as_bytes()));
+        let mut cipher = SeqCipher {
+            aead,
+            our_nonce: [0u8; AEAD_NONCE_SIZE],
+            their_nonce: [0u8; AEAD_NONCE_SIZE],
+        };
+        // responder flips our_nonce high bit
+        cipher.our_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
+
+        // sign (initiator_xpk || responder_xpk)
+        let mut msg = [0u8; 64];
+        msg[..32].copy_from_slice(&initiator_xpk_bytes);
+        msg[32..].copy_from_slice(responder_xpk.as_bytes());
+        let sig = signing_key.sign(&msg);
+
+        // build response: responder_xpk (32) + signature (64) + encrypted settings
+        let mut response = vec![0u8; 32 + 64 + CONN_SETTINGS_SIZE + AEAD_TAG_SIZE];
+        response[..32].copy_from_slice(responder_xpk.as_bytes());
+        response[32..96].copy_from_slice(&sig.to_bytes());
+        let settings_bytes: [u8; CONN_SETTINGS_SIZE] = responder_settings.into();
+        response[96..96 + CONN_SETTINGS_SIZE].copy_from_slice(&settings_bytes);
+        cipher.encrypt_in_place(&mut response[96..]);
+        conn.write_all(&response).await.unwrap();
+
+        // read and decrypt initiator's encrypted settings
+        let mut settings_buf = vec![0u8; CONN_SETTINGS_SIZE + AEAD_TAG_SIZE];
+        conn.read_exact(&mut settings_buf).await.unwrap();
+        let plaintext_len = cipher.decrypt_in_place(&mut settings_buf).unwrap();
+        ConnSettings::try_from(&settings_buf[..plaintext_len]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn initiate_handshake_success() {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let (mut client, mut server) = tokio::io::duplex(1024);
+
+        let responder = tokio::spawn(async move {
+            mock_handshake_responder(&mut server, &signing_key, ConnSettings::default()).await
+        });
+
+        let (_, merged) = initiate_handshake(&mut client, &verifying_key, ConnSettings::default())
+            .await
+            .unwrap();
+
+        let initiator_settings = responder.await.unwrap();
+        assert_eq!(merged, ConnSettings::default());
+        assert_eq!(initiator_settings, ConnSettings::default());
+    }
+
+    #[tokio::test]
+    async fn initiate_handshake_merges_settings() {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let (mut client, mut server) = tokio::io::duplex(1024);
+
+        let smaller_settings = ConnSettings {
+            packet_size: 2000,
+            max_timeout: Duration::from_secs(5 * 60),
+        };
+        let responder = tokio::spawn(async move {
+            mock_handshake_responder(&mut server, &signing_key, smaller_settings).await
+        });
+
+        let (_, merged) = initiate_handshake(&mut client, &verifying_key, ConnSettings::default())
+            .await
+            .unwrap();
+
+        let _ = responder.await.unwrap();
+        assert_eq!(merged.packet_size, 2000);
+        assert_eq!(merged.max_timeout, Duration::from_secs(5 * 60));
+    }
+
+    #[tokio::test]
+    async fn initiate_handshake_invalid_signature() {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        // use a *different* verifying key so signature verification fails
+        let wrong_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        let wrong_verifying_key = wrong_key.verifying_key();
+        let (mut client, mut server) = tokio::io::duplex(1024);
+
+        tokio::spawn(async move {
+            // We don't care if the responder panics after the initiator rejects
+            let _ =
+                mock_handshake_responder(&mut server, &signing_key, ConnSettings::default()).await;
+        });
+
+        let result =
+            initiate_handshake(&mut client, &wrong_verifying_key, ConnSettings::default()).await;
+        assert!(matches!(result, Err(HandshakeError::InvalidSignature(_))));
+    }
+
+    #[tokio::test]
+    async fn initiate_handshake_rejects_bad_settings() {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let (mut client, mut server) = tokio::io::duplex(1024);
+
+        let bad_settings = ConnSettings {
+            packet_size: 500, // below minimum of 1220
+            max_timeout: Duration::from_secs(5 * 60),
+        };
+        tokio::spawn(async move {
+            let _ = mock_handshake_responder(&mut server, &signing_key, bad_settings).await;
+        });
+
+        let result = initiate_handshake(&mut client, &verifying_key, ConnSettings::default()).await;
+        assert!(matches!(
+            result,
+            Err(HandshakeError::UnacceptableSettings(_))
+        ));
     }
 }
