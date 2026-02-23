@@ -557,7 +557,6 @@ impl Client {
         .parse()?;
 
         let params = self.sign(app_key, &url, Method::GET, None, valid_until);
-        url.set_scheme(SHARE_URL_SCHEME).unwrap();
         url.set_fragment(Some(
             format!(
                 "encryption_key={}",
