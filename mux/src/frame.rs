@@ -1,7 +1,7 @@
 use std::io;
 use std::ops::Range;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Frame flags.
 pub const FLAG_FIRST: u16 = 1 << 0; // first frame in stream
@@ -39,6 +39,8 @@ pub(crate) enum PacketReaderError {
     UnexpectedEof,
     #[error("buffer too small ({0} bytes, need at least {FRAME_HEADER_SIZE})")]
     BufferTooSmall(usize),
+    #[error("invalid frame header: {0}")]
+    InvalidHeader(#[from] FrameHeaderError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
