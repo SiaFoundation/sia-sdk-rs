@@ -1678,6 +1678,10 @@ dependencies = [
 [[package]]
 name = "mux"
 version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tokio",
+]
 
 [[package]]
 name = "nom"
