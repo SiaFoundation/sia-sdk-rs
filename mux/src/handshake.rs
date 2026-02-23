@@ -8,8 +8,10 @@ use chacha20poly1305::aead::AeadInPlace;
 use chacha20poly1305::aead::generic_array::GenericArray;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
 
-use ed25519_dalek::{Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey, SIGNATURE_LENGTH};
 use x25519_dalek::{EphemeralSecret, PublicKey};
+
+const X25519_PUBLIC_KEY_SIZE: usize = 32;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -134,12 +136,20 @@ pub(crate) enum HandshakeError {
     ReadResponse(io::Error),
     #[error("invalid signature: {0}")]
     InvalidSignature(ed25519_dalek::SignatureError),
-    #[error("could not decrypt settings response: {0}")]
+    #[error("could not decrypt settings: {0}")]
     DecryptSettings(io::Error),
+    #[error("invalid settings payload: {0}")]
+    InvalidSettings(ConnSettingsError),
     #[error("peer sent unacceptable settings: {0}")]
-    UnacceptableSettings(#[from] ConnSettingsError),
+    UnacceptableSettings(ConnSettingsError),
     #[error("could not write settings: {0}")]
     WriteSettings(io::Error),
+    #[error("could not read handshake request: {0}")]
+    ReadRequest(io::Error),
+    #[error("could not write handshake response: {0}")]
+    WriteResponse(io::Error),
+    #[error("could not read settings response: {0}")]
+    ReadSettings(io::Error),
 }
 
 pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
@@ -156,17 +166,22 @@ pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
         .map_err(HandshakeError::WriteRequest)?;
 
     // read their X25519 public key + Ed25519 signature + encrypted settings
-    let mut buf = vec![0u8; 32 + 64 + CONN_SETTINGS_SIZE + AEAD_TAG_SIZE];
+    const SIG_START: usize = X25519_PUBLIC_KEY_SIZE;
+    const SETTINGS_START: usize = X25519_PUBLIC_KEY_SIZE + SIGNATURE_LENGTH;
+    let mut buf = vec![0u8; SETTINGS_START + CONN_SETTINGS_SIZE + AEAD_TAG_SIZE];
     conn.read_exact(&mut buf)
         .await
         .map_err(HandshakeError::ReadResponse)?;
 
     // verify signature over (our_xpk || their_xpk)
-    let their_xpk = PublicKey::from(<[u8; 32]>::try_from(&buf[..32]).expect("slice is 32 bytes"));
-    let mut msg = [0u8; 64];
-    msg[..32].copy_from_slice(our_xpk.as_bytes());
-    msg[32..].copy_from_slice(&buf[..32]);
-    let sig = ed25519_dalek::Signature::from_slice(&buf[32..96])
+    let their_xpk = PublicKey::from(
+        <[u8; X25519_PUBLIC_KEY_SIZE]>::try_from(&buf[..X25519_PUBLIC_KEY_SIZE])
+            .expect("slice is 32 bytes"),
+    );
+    let mut msg = [0u8; X25519_PUBLIC_KEY_SIZE * 2];
+    msg[..X25519_PUBLIC_KEY_SIZE].copy_from_slice(our_xpk.as_bytes());
+    msg[X25519_PUBLIC_KEY_SIZE..].copy_from_slice(&buf[..X25519_PUBLIC_KEY_SIZE]);
+    let sig = ed25519_dalek::Signature::from_slice(&buf[SIG_START..SETTINGS_START])
         .map_err(HandshakeError::InvalidSignature)?;
     their_key
         .verify(&msg, &sig)
@@ -194,15 +209,12 @@ pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
 
     // decrypt their settings
     let plaintext_len = cipher
-        .decrypt_in_place(&mut buf[96..])
+        .decrypt_in_place(&mut buf[SETTINGS_START..])
         .map_err(HandshakeError::DecryptSettings)?;
-    let their_settings = ConnSettings::try_from(&buf[96..96 + plaintext_len]).map_err(|_| {
-        HandshakeError::DecryptSettings(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid settings payload",
-        ))
-    })?;
-    let merged = merge_settings(our_settings, their_settings)?;
+    let their_settings = ConnSettings::try_from(&buf[SETTINGS_START..SETTINGS_START + plaintext_len])
+        .map_err(HandshakeError::InvalidSettings)?;
+    let merged = merge_settings(our_settings, their_settings)
+        .map_err(HandshakeError::UnacceptableSettings)?;
 
     // encrypt and write our settings
     let settings_bytes: [u8; CONN_SETTINGS_SIZE] = our_settings.into();
@@ -212,6 +224,76 @@ pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
     conn.write_all(&settings_buf)
         .await
         .map_err(HandshakeError::WriteSettings)?;
+
+    Ok((cipher, merged))
+}
+
+pub(crate) async fn accept_handshake<T: AsyncRead + AsyncWrite + Unpin>(
+    conn: &mut T,
+    our_key: &SigningKey,
+    our_settings: ConnSettings,
+) -> Result<(SeqCipher, ConnSettings), HandshakeError> {
+    let our_secret = EphemeralSecret::random_from_rng(rand_core::OsRng);
+    let our_xpk = PublicKey::from(&our_secret);
+
+    // read initiator's X25519 public key
+    let mut their_xpk_bytes = [0u8; X25519_PUBLIC_KEY_SIZE];
+    conn.read_exact(&mut their_xpk_bytes)
+        .await
+        .map_err(HandshakeError::ReadRequest)?;
+    let their_xpk = PublicKey::from(their_xpk_bytes);
+
+    // derive shared secret via X25519
+    let shared_secret = our_secret.diffie_hellman(&their_xpk);
+
+    // derive symmetric key = BLAKE2b-256(secret || initiator_xpk || responder_xpk)
+    let key = blake2b_simd::Params::new()
+        .hash_length(32)
+        .to_state()
+        .update(shared_secret.as_bytes())
+        .update(&their_xpk_bytes)
+        .update(our_xpk.as_bytes())
+        .finalize();
+    let aead = ChaCha20Poly1305::new(GenericArray::from_slice(key.as_bytes()));
+    let mut cipher = SeqCipher {
+        aead,
+        our_nonce: [0u8; AEAD_NONCE_SIZE],
+        their_nonce: [0u8; AEAD_NONCE_SIZE],
+    };
+    // responder flips our_nonce high bit
+    cipher.our_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
+
+    // sign (initiator_xpk || responder_xpk)
+    let mut msg = [0u8; X25519_PUBLIC_KEY_SIZE * 2];
+    msg[..X25519_PUBLIC_KEY_SIZE].copy_from_slice(&their_xpk_bytes);
+    msg[X25519_PUBLIC_KEY_SIZE..].copy_from_slice(our_xpk.as_bytes());
+    let sig = our_key.sign(&msg);
+
+    // write response: our_xpk + signature + encrypted settings
+    const SIG_START: usize = X25519_PUBLIC_KEY_SIZE;
+    const SETTINGS_START: usize = X25519_PUBLIC_KEY_SIZE + SIGNATURE_LENGTH;
+    let mut buf = vec![0u8; SETTINGS_START + CONN_SETTINGS_SIZE + AEAD_TAG_SIZE];
+    buf[..X25519_PUBLIC_KEY_SIZE].copy_from_slice(our_xpk.as_bytes());
+    buf[SIG_START..SETTINGS_START].copy_from_slice(&sig.to_bytes());
+    let settings_bytes: [u8; CONN_SETTINGS_SIZE] = our_settings.into();
+    buf[SETTINGS_START..SETTINGS_START + CONN_SETTINGS_SIZE].copy_from_slice(&settings_bytes);
+    cipher.encrypt_in_place(&mut buf[SETTINGS_START..]);
+    conn.write_all(&buf)
+        .await
+        .map_err(HandshakeError::WriteResponse)?;
+
+    // read and decrypt initiator's settings
+    let mut settings_buf = vec![0u8; CONN_SETTINGS_SIZE + AEAD_TAG_SIZE];
+    conn.read_exact(&mut settings_buf)
+        .await
+        .map_err(HandshakeError::ReadSettings)?;
+    let plaintext_len = cipher
+        .decrypt_in_place(&mut settings_buf)
+        .map_err(HandshakeError::DecryptSettings)?;
+    let their_settings = ConnSettings::try_from(&settings_buf[..plaintext_len])
+        .map_err(HandshakeError::InvalidSettings)?;
+    let merged = merge_settings(our_settings, their_settings)
+        .map_err(HandshakeError::UnacceptableSettings)?;
 
     Ok((cipher, merged))
 }
@@ -242,8 +324,16 @@ mod tests {
     use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
     use ed25519_dalek::Signer;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use x25519_dalek::StaticSecret;
 
     use super::*;
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
 
     fn test_cipher_pair() -> (SeqCipher, SeqCipher) {
         let key = [0x42u8; 32];
@@ -388,7 +478,7 @@ mod tests {
         responder_settings: ConnSettings,
     ) -> ConnSettings {
         // read initiator's X25519 public key
-        let mut initiator_xpk_bytes = [0u8; 32];
+        let mut initiator_xpk_bytes = [0u8; X25519_PUBLIC_KEY_SIZE];
         conn.read_exact(&mut initiator_xpk_bytes).await.unwrap();
         let initiator_xpk = PublicKey::from(initiator_xpk_bytes);
 
@@ -415,18 +505,21 @@ mod tests {
         cipher.our_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
 
         // sign (initiator_xpk || responder_xpk)
-        let mut msg = [0u8; 64];
-        msg[..32].copy_from_slice(&initiator_xpk_bytes);
-        msg[32..].copy_from_slice(responder_xpk.as_bytes());
+        let mut msg = [0u8; X25519_PUBLIC_KEY_SIZE * 2];
+        msg[..X25519_PUBLIC_KEY_SIZE].copy_from_slice(&initiator_xpk_bytes);
+        msg[X25519_PUBLIC_KEY_SIZE..].copy_from_slice(responder_xpk.as_bytes());
         let sig = signing_key.sign(&msg);
 
-        // build response: responder_xpk (32) + signature (64) + encrypted settings
-        let mut response = vec![0u8; 32 + 64 + CONN_SETTINGS_SIZE + AEAD_TAG_SIZE];
-        response[..32].copy_from_slice(responder_xpk.as_bytes());
-        response[32..96].copy_from_slice(&sig.to_bytes());
+        // build response: responder_xpk + signature + encrypted settings
+        const SIG_START: usize = X25519_PUBLIC_KEY_SIZE;
+        const SETTINGS_START: usize = X25519_PUBLIC_KEY_SIZE + SIGNATURE_LENGTH;
+        let mut response = vec![0u8; SETTINGS_START + CONN_SETTINGS_SIZE + AEAD_TAG_SIZE];
+        response[..X25519_PUBLIC_KEY_SIZE].copy_from_slice(responder_xpk.as_bytes());
+        response[SIG_START..SETTINGS_START].copy_from_slice(&sig.to_bytes());
         let settings_bytes: [u8; CONN_SETTINGS_SIZE] = responder_settings.into();
-        response[96..96 + CONN_SETTINGS_SIZE].copy_from_slice(&settings_bytes);
-        cipher.encrypt_in_place(&mut response[96..]);
+        response[SETTINGS_START..SETTINGS_START + CONN_SETTINGS_SIZE]
+            .copy_from_slice(&settings_bytes);
+        cipher.encrypt_in_place(&mut response[SETTINGS_START..]);
         conn.write_all(&response).await.unwrap();
 
         // read and decrypt initiator's encrypted settings
@@ -516,5 +609,141 @@ mod tests {
             result,
             Err(HandshakeError::UnacceptableSettings(_))
         ));
+    }
+
+    /// Cross-language test vectors generated from the Go implementation.
+    /// Uses fixed X25519 and Ed25519 keys to verify byte-level compatibility
+    /// of key derivation, AEAD encryption, and Ed25519 signatures.
+    ///
+    /// Counterpart: v3/handshake_interop_test.go TestHandshakeInteropVectors
+    // FIXME Alright remove this once we can actually confirm interoperability via real handshakes
+    // between Go and Rust implementations
+    #[test]
+    fn handshake_interop_vectors() {
+        // Fixed keys (same as Go test)
+        let initiator_xsk = StaticSecret::from([0x01u8; 32]);
+        let responder_xsk = StaticSecret::from([0x02u8; 32]);
+        let responder_ed_key = ed25519_dalek::SigningKey::from_bytes(&[0x03u8; 32]);
+
+        // X25519 public keys
+        let initiator_xpk = PublicKey::from(&initiator_xsk);
+        let responder_xpk = PublicKey::from(&responder_xsk);
+        assert_eq!(
+            initiator_xpk.as_bytes(),
+            hex("a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209").as_slice(),
+        );
+        assert_eq!(
+            responder_xpk.as_bytes(),
+            hex("ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59").as_slice(),
+        );
+
+        // Ed25519 public key
+        assert_eq!(
+            responder_ed_key.verifying_key().as_bytes(),
+            hex("ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1").as_slice(),
+        );
+
+        // Shared secret (same from either perspective)
+        let shared_secret_r = responder_xsk.diffie_hellman(&initiator_xpk);
+        let shared_secret_i = initiator_xsk.diffie_hellman(&responder_xpk);
+        assert_eq!(shared_secret_r.as_bytes(), shared_secret_i.as_bytes());
+        assert_eq!(
+            shared_secret_r.as_bytes(),
+            hex("2ed76ab549b1e73c031eb49c9448f0798aea81b698279a0c3dc3e49fbfc4b953").as_slice(),
+        );
+
+        // Derived key = BLAKE2b-256(secret || initiator_xpk || responder_xpk)
+        let key = blake2b_simd::Params::new()
+            .hash_length(32)
+            .to_state()
+            .update(shared_secret_r.as_bytes())
+            .update(initiator_xpk.as_bytes())
+            .update(responder_xpk.as_bytes())
+            .finalize();
+        assert_eq!(
+            key.as_bytes(),
+            hex("aed23a79205772234ac29a04bdaf79b4384eec870dc9b4453e09f08e3338851a").as_slice(),
+        );
+
+        // Encoded default settings (packet_size=4320, max_timeout=1200000ms)
+        let settings = ConnSettings::default();
+        let settings_bytes: [u8; CONN_SETTINGS_SIZE] = settings.into();
+        assert_eq!(&settings_bytes, hex("e0100000804f1200").as_slice());
+
+        // --- Responder side ---
+        let aead = ChaCha20Poly1305::new(GenericArray::from_slice(key.as_bytes()));
+        let mut rc = SeqCipher {
+            aead,
+            our_nonce: [0u8; AEAD_NONCE_SIZE],
+            their_nonce: [0u8; AEAD_NONCE_SIZE],
+        };
+        rc.our_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
+
+        // Encrypt settings
+        let mut responder_enc = vec![0u8; CONN_SETTINGS_SIZE + AEAD_TAG_SIZE];
+        responder_enc[..CONN_SETTINGS_SIZE].copy_from_slice(&settings_bytes);
+        rc.encrypt_in_place(&mut responder_enc);
+        assert_eq!(
+            responder_enc,
+            hex("860bc7ecde1dd64fbe31793ffe5108ede85fedb42ed4b101"),
+        );
+
+        // Sign (initiator_xpk || responder_xpk)
+        let mut msg = [0u8; X25519_PUBLIC_KEY_SIZE * 2];
+        msg[..X25519_PUBLIC_KEY_SIZE].copy_from_slice(initiator_xpk.as_bytes());
+        msg[X25519_PUBLIC_KEY_SIZE..].copy_from_slice(responder_xpk.as_bytes());
+        let sig = responder_ed_key.sign(&msg);
+        assert_eq!(
+            &sig.to_bytes(),
+            hex(
+                "dc14a99c32a8631f0ea8834091f0478d5d632bdaa32eb73cc67f106585b32a32\
+                 a8a0992508fbd74c08eb20f5fb8622c8e700c31cf2da5cfb07ecb4392033b90d"
+            )
+            .as_slice(),
+        );
+
+        // Full responder wire: xpk + sig + encrypted_settings
+        let mut responder_wire =
+            Vec::with_capacity(X25519_PUBLIC_KEY_SIZE + SIGNATURE_LENGTH + CONN_SETTINGS_SIZE + AEAD_TAG_SIZE);
+        responder_wire.extend_from_slice(responder_xpk.as_bytes());
+        responder_wire.extend_from_slice(&sig.to_bytes());
+        responder_wire.extend_from_slice(&responder_enc);
+        assert_eq!(
+            responder_wire,
+            hex(
+                "ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59\
+                 dc14a99c32a8631f0ea8834091f0478d5d632bdaa32eb73cc67f106585b32a32\
+                 a8a0992508fbd74c08eb20f5fb8622c8e700c31cf2da5cfb07ecb4392033b90d\
+                 860bc7ecde1dd64fbe31793ffe5108ede85fedb42ed4b101"
+            ),
+        );
+
+        // --- Initiator side ---
+        let iaead = ChaCha20Poly1305::new(GenericArray::from_slice(key.as_bytes()));
+        let mut ic = SeqCipher {
+            aead: iaead,
+            our_nonce: [0u8; AEAD_NONCE_SIZE],
+            their_nonce: [0u8; AEAD_NONCE_SIZE],
+        };
+        ic.their_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
+
+        // Decrypt responder's settings
+        let mut dec_buf = responder_enc.clone();
+        let pt_len = ic.decrypt_in_place(&mut dec_buf).unwrap();
+        assert_eq!(&dec_buf[..pt_len], &settings_bytes);
+
+        // Encrypt initiator's settings
+        let mut initiator_enc = vec![0u8; CONN_SETTINGS_SIZE + AEAD_TAG_SIZE];
+        initiator_enc[..CONN_SETTINGS_SIZE].copy_from_slice(&settings_bytes);
+        ic.encrypt_in_place(&mut initiator_enc);
+        assert_eq!(
+            initiator_enc,
+            hex("f7ebc7f275b662fc7d59951bd5205703cf38ad13239efc27"),
+        );
+
+        // Responder decrypts initiator's settings
+        let mut dec_buf2 = initiator_enc.clone();
+        let pt_len2 = rc.decrypt_in_place(&mut dec_buf2).unwrap();
+        assert_eq!(&dec_buf2[..pt_len2], &settings_bytes);
     }
 }
