@@ -20,7 +20,7 @@ blake2 = "0.10.6"
 blake2b_simd = "1.0.4"
 bytes = "1.11.1"
 chacha20 = { version = "0.10.0", features = ["xchacha"] }
-chrono = { version = "0.4.43", features = ["serde"] }
+chrono = { version = "0.4.44", features = ["serde"] }
 ed25519-dalek = "2.2.0"
 hex = "0.4.3"
 num-bigint = "0.4.6"
