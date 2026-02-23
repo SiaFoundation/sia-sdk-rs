@@ -31,6 +31,8 @@ const QUERY_PARAM_VALID_UNTIL: &str = "sv";
 const QUERY_PARAM_CREDENTIAL: &str = "sc";
 const QUERY_PARAM_SIGNATURE: &str = "ss";
 
+const SHARE_URL_SCHEME: &str = "sia";
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("indexd responded with an error: {0}")]
@@ -541,11 +543,16 @@ impl Client {
         object: &Object,
         valid_until: DateTime<Utc>,
     ) -> Result<Url, Error> {
-        let mut url = self
-            .url
-            .join(format!("objects/{}/shared", object.id()).as_str())?;
+        // the Url crate does not allow "unsafe" scheme changes (https -> sia) because it's annoying.
+        let mut url: Url = format!(
+            "{SHARE_URL_SCHEME}://{}/objects/{}/shared",
+            self.url.authority(),
+            object.id()
+        )
+        .parse()?;
 
         let params = self.sign(app_key, &url, Method::GET, None, valid_until);
+        url.set_scheme(SHARE_URL_SCHEME).unwrap();
         url.set_fragment(Some(
             format!(
                 "encryption_key={}",
@@ -568,9 +575,13 @@ impl Client {
     /// `share_url` a pre-signed url for the App objects API
     ///
     /// # Returns
-    /// A tuple with the object metadata and encryption key to decrypt
-    /// the user metadata.
+    /// The metadata needed to download the data
     pub async fn shared_object(&self, mut share_url: Url) -> Result<Object, Error> {
+        if share_url.scheme() != SHARE_URL_SCHEME {
+            return Err(Error::Format(format!(
+                "invalid url scheme: expected {SHARE_URL_SCHEME}"
+            )));
+        }
         let encryption_key = match share_url.fragment() {
             Some(fragment) => {
                 let fragment = match fragment.strip_prefix("encryption_key=") {
@@ -586,6 +597,13 @@ impl Client {
             None => Err(Error::Format("missing encryption_key".into())),
         }?;
         share_url.set_fragment(None);
+        // enforce indexer App APIs are served over https
+        // the Url crate does not allow "unsafe" scheme changes (sia -> https) because it's annoying.
+        let share_url: Url = format!(
+            "https://{}",
+            share_url.as_str().strip_prefix("sia://").unwrap()
+        )
+        .parse()?;
         let shared_object: SharedObjectResponse = Self::handle_response(
             self.client
                 .get(share_url)
