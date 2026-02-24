@@ -33,10 +33,6 @@ pub(crate) enum PacketReaderError {
     ReadPayload(io::Error),
     #[error("peer sent too-large frame ({0} bytes)")]
     FrameTooLarge(u16),
-    #[error("decryption failed: {0}")]
-    Decrypt(io::Error),
-    #[error("unexpected EOF reading packet")]
-    UnexpectedEof,
     #[error("buffer too small ({0} bytes, need at least {FRAME_HEADER_SIZE})")]
     BufferTooSmall(usize),
     #[error("invalid frame header: {0}")]
