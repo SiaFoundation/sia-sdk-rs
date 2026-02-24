@@ -8,7 +8,7 @@ use chacha20poly1305::aead::AeadInPlace;
 use chacha20poly1305::aead::generic_array::GenericArray;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
 
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey, SIGNATURE_LENGTH};
+use ed25519_dalek::{SIGNATURE_LENGTH, Signer, SigningKey, Verifier, VerifyingKey};
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
 const X25519_PUBLIC_KEY_SIZE: usize = 32;
@@ -21,10 +21,11 @@ use thiserror::Error;
 
 use crate::frame::{AEAD_NONCE_SIZE, AEAD_TAG_SIZE, FRAME_HEADER_SIZE, PacketCipher};
 
+#[derive(Clone)]
 pub(crate) struct SeqCipher {
     aead: chacha20poly1305::ChaCha20Poly1305,
-    our_nonce: [u8; AEAD_NONCE_SIZE],
-    their_nonce: [u8; AEAD_NONCE_SIZE],
+    pub(crate) our_nonce: [u8; AEAD_NONCE_SIZE],
+    pub(crate) their_nonce: [u8; AEAD_NONCE_SIZE],
 }
 
 /// Increments the first 8 bytes of a nonce as a little-endian u64.
