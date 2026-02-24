@@ -115,7 +115,7 @@ impl TryFrom<&[u8]> for ConnSettings {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum ConnSettingsError {
+pub enum ConnSettingsError {
     #[error("buffer too short for connection settings")]
     BufferTooShort,
     #[error("requested packet size ({0}) is too small")]
@@ -129,7 +129,7 @@ pub(crate) enum ConnSettingsError {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum HandshakeError {
+pub enum HandshakeError {
     #[error("could not write handshake request: {0}")]
     WriteRequest(io::Error),
     #[error("could not read handshake response: {0}")]
