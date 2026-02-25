@@ -11,6 +11,12 @@ jobs:
     runs-on: tenki-standard-autoscale
     steps:
       - uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Build Go interop helper
+        run: cd mux/testutil/go-interop && go build -o interop .
       - name: Setup Environment
         run: |
           rustup update stable
