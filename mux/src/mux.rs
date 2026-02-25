@@ -306,6 +306,14 @@ impl AsyncRead for Stream {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
 
+        // Peer doesn't know this stream exists until we write the first frame.
+        if !this.established {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "read called before write on newly-dialed stream",
+            )));
+        }
+
         // Drain leftover read_buf first
         if !this.read_buf.is_empty() {
             let n = buf.remaining().min(this.read_buf.len());
