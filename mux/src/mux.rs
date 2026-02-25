@@ -4,7 +4,6 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
-use std::time::Instant;
 
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -107,7 +106,7 @@ struct ClosingStreamEntry {
     /// Number of frames received since closure (flood detection).
     frame_count: u16,
     /// When the stream was closed, used for periodic cleanup.
-    closed: Instant,
+    closed: time::Instant,
 }
 
 /// Central registry of all active and recently-closed streams for a mux.
@@ -275,7 +274,7 @@ impl Stream {
                 self.id,
                 ClosingStreamEntry {
                     frame_count: 0,
-                    closed: Instant::now(),
+                    closed: time::Instant::now(),
                 },
             );
         }
@@ -655,7 +654,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(
             }
             _ = cleanup_timer.tick() => {
                 let mut reg = registry.lock().unwrap();
-                let now = Instant::now();
+                let now = time::Instant::now();
                 reg.closing.retain(|_, cs| now.duration_since(cs.closed) < CLOSING_STREAM_CLEANUP_INTERVAL);
                 continue;
             }
