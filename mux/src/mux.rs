@@ -13,8 +13,8 @@ use tokio::time;
 use tokio_util::sync::PollSender;
 
 use crate::frame::{
-    FLAG_ERROR, FLAG_FIRST, FLAG_LAST, FrameHeader, ID_KEEPALIVE, ID_LOWEST_STREAM,
-    PacketReader, PacketReaderError, PacketWriter, append_frame,
+    FLAG_ERROR, FLAG_FIRST, FLAG_LAST, FrameHeader, ID_KEEPALIVE, ID_LOWEST_STREAM, PacketReader,
+    PacketReaderError, PacketWriter, append_frame,
 };
 use crate::handshake::{ConnSettings, SeqCipher};
 
