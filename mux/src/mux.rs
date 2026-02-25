@@ -315,13 +315,13 @@ impl AsyncRead for Stream {
         }
 
         // Check deadline
-        if let Some(deadline) = this.read_deadline {
-            if time::Instant::now() >= deadline {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "read deadline exceeded",
-                )));
-            }
+        if let Some(deadline) = this.read_deadline
+            && time::Instant::now() >= deadline
+        {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "read deadline exceeded",
+            )));
         }
 
         // Poll for next data from read loop
@@ -375,13 +375,13 @@ impl AsyncWrite for Stream {
         }
 
         // Check deadline
-        if let Some(deadline) = this.write_deadline {
-            if time::Instant::now() >= deadline {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "write deadline exceeded",
-                )));
-            }
+        if let Some(deadline) = this.write_deadline
+            && time::Instant::now() >= deadline
+        {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "write deadline exceeded",
+            )));
         }
 
         // Reserve capacity on the write channel
@@ -479,7 +479,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             Ok((h, p)) => (h, p.to_vec()),
             Err(e) => {
                 let err =
-                    if is_conn_close_error(&io::Error::new(io::ErrorKind::Other, e.to_string())) {
+                    if is_conn_close_error(&io::Error::other(e.to_string())) {
                         MuxError::PeerClosedConn
                     } else {
                         MuxError::Io(e.to_string())
@@ -592,10 +592,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 if accept_tx.send(stream).await.is_err() {
                     return; // mux shutting down
                 }
-                if let Some(tx) = data_tx {
-                    if tx.send(payload).await.is_err() {
-                        continue; // stream was closed
-                    }
+                if let Some(tx) = data_tx
+                    && tx.send(payload).await.is_err()
+                {
+                    continue; // stream was closed
                 }
             }
             ReadAction::Fatal(err) => {
@@ -622,7 +622,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(
     // Skip the immediate first tick
     keepalive_timer.reset();
 
-    let mut cleanup_timer = time::interval(time::Duration::from(CLOSING_STREAM_CLEANUP_INTERVAL));
+    let mut cleanup_timer = time::interval(CLOSING_STREAM_CLEANUP_INTERVAL);
     cleanup_timer.reset();
 
     let max_frame_size = settings.max_frame_size();
