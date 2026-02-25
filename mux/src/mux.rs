@@ -33,7 +33,7 @@ const WRITE_CHANNEL_CAPACITY: usize = 10;
 /// Backpressure limit for incoming streams waiting to be accepted.
 const ACCEPT_CHANNEL_CAPACITY: usize = 256;
 
-/// Errors relating to stream or mux shutdown.
+/// Errors produced by mux and stream operations.
 #[derive(Debug, Clone, Error)]
 pub enum MuxError {
     #[error("underlying connection was closed")]
@@ -83,32 +83,45 @@ fn is_conn_close_error(err: &io::Error) -> bool {
     )
 }
 
+/// A single frame queued for transmission by the write loop.
 struct WriteFrame {
     header: FrameHeader,
     payload: Vec<u8>,
 }
 
+/// Commands sent to the write loop via the shared channel.
 enum WriteCmd {
+    /// Enqueue a frame for encryption and transmission.
     Frame(WriteFrame),
+    /// Gracefully shut down the write loop, signalling completion via the sender.
     Shutdown(oneshot::Sender<()>),
 }
 
 /// Per-stream handle held by the read loop to deliver data and signal closure.
 struct StreamHandle {
+    /// Channel for delivering frame payloads to the stream's reader.
     data_tx: mpsc::Sender<Vec<u8>>,
+    /// Shared slot set when the stream is closed, communicating the reason to the reader.
     close_err: Arc<StdMutex<Option<MuxError>>>,
 }
 
+/// Tracks a recently-closed stream to absorb in-flight frames from the peer.
 struct ClosingStreamEntry {
+    /// Number of frames received since closure (flood detection).
     frame_count: u16,
+    /// When the stream was closed, used for periodic cleanup.
     closed: Instant,
 }
 
+/// Central registry of all active and recently-closed streams for a mux.
 struct StreamRegistry {
+    /// Active streams indexed by stream ID.
     streams: HashMap<u32, StreamHandle>,
+    /// Recently-closed streams kept around to absorb straggler frames.
     closing: HashMap<u32, ClosingStreamEntry>,
 }
 
+/// Join handles for the background read and write loop tasks.
 struct TaskHandles {
     read_handle: tokio::task::JoinHandle<()>,
     write_handle: tokio::task::JoinHandle<()>,
@@ -145,7 +158,7 @@ impl Mux {
         }
 
         let id = self.next_id.fetch_add(2, Ordering::Relaxed);
-        // Wraparound when nextID grows too large
+        // Wraparound when next_id grows too large
         if id >= u32::MAX >> 2 {
             let parity = id & 1;
             self.next_id
@@ -189,7 +202,7 @@ impl Mux {
         // Set fatal error on all streams
         set_fatal_error(&self.registry, MuxError::ClosedConn);
 
-        // Wait for tasks to complete
+        // Abort background tasks
         if let Some(handles) = self.tasks.lock().await.take() {
             handles.read_handle.abort();
             handles.write_handle.abort();
@@ -243,7 +256,7 @@ impl Stream {
         }
         self.closed = true;
 
-        // Send flagLast frame
+        // Send FLAG_LAST frame
         let h = FrameHeader {
             id: self.id,
             length: 0,
@@ -452,7 +465,7 @@ enum ReadAction {
     },
     /// Fatal error — terminate the read loop.
     Fatal(MuxError),
-    /// Frame was handled inline (closing stream, keepalive, etc.) — continue.
+    /// Frame was handled inline (stream closure, absorbing straggler frames) — continue.
     Continue,
 }
 
