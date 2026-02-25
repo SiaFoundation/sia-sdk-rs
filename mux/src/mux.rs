@@ -58,18 +58,15 @@ pub enum MuxError {
     PeerError(String),
 }
 
+/// Required because [`AsyncRead`] and [`AsyncWrite`] trait methods return `io::Result`.
 impl From<MuxError> for io::Error {
     fn from(e: MuxError) -> Self {
-        match e {
-            MuxError::ClosedConn | MuxError::ClosedStream => {
-                io::Error::new(io::ErrorKind::ConnectionAborted, e)
-            }
-            MuxError::PeerClosedStream | MuxError::PeerClosedConn => {
-                io::Error::new(io::ErrorKind::ConnectionReset, e)
-            }
-            MuxError::Io(ref msg) => io::Error::new(io::ErrorKind::Other, msg.clone()),
-            _ => io::Error::new(io::ErrorKind::Other, e),
-        }
+        let kind = match &e {
+            MuxError::ClosedConn | MuxError::ClosedStream => io::ErrorKind::ConnectionAborted,
+            MuxError::PeerClosedStream | MuxError::PeerClosedConn => io::ErrorKind::ConnectionReset,
+            _ => io::ErrorKind::Other,
+        };
+        io::Error::new(kind, e)
     }
 }
 
