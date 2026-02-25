@@ -12,8 +12,8 @@ use tokio::time;
 use tokio_util::sync::PollSender;
 
 use crate::frame::{
-    FLAG_ERROR, FLAG_FIRST, FLAG_LAST, FrameHeader, ID_KEEPALIVE, ID_LOWEST_STREAM, PacketReader,
-    PacketWriter, append_frame,
+    FLAG_ERROR, FLAG_FIRST, FLAG_LAST, FrameHeader, ID_KEEPALIVE, ID_LOWEST_STREAM,
+    PacketReader, PacketReaderError, PacketWriter, append_frame,
 };
 use crate::handshake::{ConnSettings, SeqCipher};
 
@@ -79,6 +79,18 @@ fn is_conn_close_error(err: &io::Error) -> bool {
     )
 }
 
+/// Checks whether a [`PacketReaderError`] represents a connection closure by
+/// inspecting the underlying [`io::Error`] kind directly (rather than
+/// round-tripping through a string which loses the kind).
+fn packet_reader_error_is_conn_close(err: &PacketReaderError) -> bool {
+    match err {
+        PacketReaderError::ReadHeader(e) | PacketReaderError::ReadPayload(e) => {
+            is_conn_close_error(e)
+        }
+        _ => false,
+    }
+}
+
 /// A single frame queued for transmission by the write loop.
 struct WriteFrame {
     header: FrameHeader,
@@ -115,6 +127,8 @@ struct StreamRegistry {
     streams: HashMap<u32, StreamHandle>,
     /// Recently-closed streams kept around to absorb straggler frames.
     closing: HashMap<u32, ClosingStreamEntry>,
+    /// Sticky fatal error set by the read or write loop.
+    err: Option<MuxError>,
 }
 
 /// Join handles for the background read and write loop tasks.
@@ -189,11 +203,18 @@ impl Mux {
     }
 
     /// Close the mux, flushing any buffered writes first.
+    ///
+    /// Returns `Ok(())` if the mux was healthy or had already been closed by
+    /// either side. Returns `Err` with the pre-existing error if the mux had
+    /// failed for another reason (e.g. stream flood, I/O error).
     pub async fn close(self) -> Result<(), MuxError> {
         // Send shutdown command to write loop and wait for it to flush
         let (tx, rx) = oneshot::channel();
         let _ = self.write_tx.send(WriteCmd::Shutdown(tx)).await;
         let _ = rx.await;
+
+        // Snapshot any pre-existing fatal error before we overwrite it.
+        let prior_err = self.registry.lock().unwrap().err.clone();
 
         // Set fatal error on all streams
         set_fatal_error(&self.registry, MuxError::ClosedConn);
@@ -204,7 +225,10 @@ impl Mux {
             handles.write_handle.abort();
         }
 
-        Ok(())
+        match prior_err {
+            None | Some(MuxError::ClosedConn) | Some(MuxError::PeerClosedConn) => Ok(()),
+            Some(e) => Err(e),
+        }
     }
 }
 
@@ -295,6 +319,36 @@ impl Stream {
     /// Check for a sticky close error.
     fn check_close_err(&self) -> Option<MuxError> {
         self.close_err.lock().unwrap().clone()
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
+
+        // Best-effort FLAG_LAST — non-blocking so it's safe in Drop.
+        let _ = self.write_tx.try_send(WriteCmd::Frame(WriteFrame {
+            header: FrameHeader {
+                id: self.id,
+                length: 0,
+                flags: FLAG_LAST,
+            },
+            payload: Vec::new(),
+        }));
+
+        // Move from active to closing in the registry.
+        let mut reg = self.registry.lock().unwrap();
+        reg.streams.remove(&self.id);
+        reg.closing.insert(
+            self.id,
+            ClosingStreamEntry {
+                frame_count: 0,
+                closed: time::Instant::now(),
+            },
+        );
     }
 }
 
@@ -524,7 +578,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
         let (h, payload) = match reader.next_frame(&mut frame_buf).await {
             Ok((h, p)) => (h, p.to_vec()),
             Err(e) => {
-                let err = if is_conn_close_error(&io::Error::other(e.to_string())) {
+                let err = if packet_reader_error_is_conn_close(&e) {
                     MuxError::PeerClosedConn
                 } else {
                     MuxError::Io(e.to_string())
@@ -760,6 +814,9 @@ async fn pad_and_write<W: AsyncWrite + Unpin>(
 
 fn set_fatal_error(registry: &Arc<StdMutex<StreamRegistry>>, err: MuxError) {
     let mut reg = registry.lock().unwrap();
+    if reg.err.is_none() {
+        reg.err = Some(err.clone());
+    }
     for (_, handle) in reg.streams.drain() {
         *handle.close_err.lock().unwrap() = Some(err.clone());
         // handle.data_tx is dropped here, closing the channel
@@ -786,6 +843,7 @@ pub(crate) fn new_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     let registry = Arc::new(StdMutex::new(StreamRegistry {
         streams: HashMap::new(),
         closing: HashMap::new(),
+        err: None,
     }));
 
     let read_registry = registry.clone();
@@ -977,6 +1035,36 @@ mod tests {
 
         // Use AsyncWrite::shutdown instead of Stream::close
         stream.shutdown().await.unwrap();
+        dial_mux.close().await.unwrap();
+        accept_handle.await.unwrap();
+    }
+
+    /// Verify that dropping a stream without calling close() still sends
+    /// FLAG_LAST to the peer (best-effort via try_send in Drop).
+    #[tokio::test]
+    async fn drop_sends_flag_last() {
+        let (dial_mux, accept_mux) = new_testing_pair().await;
+
+        let accept_handle = tokio::spawn(async move {
+            let mut stream = accept_mux.accept_stream().await.unwrap();
+            let mut buf = vec![0u8; 1024];
+            let n = stream.read(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"drop test");
+            // Peer drops without close — should still see EOF.
+            let n = stream.read(&mut buf).await.unwrap();
+            assert_eq!(n, 0, "expected EOF after peer drop");
+            stream.close().await.unwrap();
+            accept_mux.close().await.unwrap();
+        });
+
+        {
+            let mut stream = dial_mux.dial_stream().unwrap();
+            stream.write_all(b"drop test").await.unwrap();
+            // stream is dropped here without close()
+        }
+
+        // Give the write loop a moment to flush the FLAG_LAST frame.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         dial_mux.close().await.unwrap();
         accept_handle.await.unwrap();
     }
