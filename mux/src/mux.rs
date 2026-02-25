@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -199,6 +200,7 @@ impl Mux {
             closed: false,
             read_deadline: None,
             write_deadline: None,
+            deadline_sleep: Box::pin(time::sleep(time::Duration::ZERO)),
         })
     }
 
@@ -250,6 +252,10 @@ pub struct Stream {
     closed: bool,
     read_deadline: Option<time::Instant>,
     write_deadline: Option<time::Instant>,
+    /// Pinned timer reused across polls to avoid spawning a new task per
+    /// Pending return. Reset to the active deadline; polled alongside the
+    /// data/write channel so the waker fires when the deadline expires.
+    deadline_sleep: Pin<Box<time::Sleep>>,
 }
 
 impl Stream {
@@ -407,13 +413,9 @@ impl AsyncRead for Stream {
                 }
             }
             Poll::Pending => {
-                // If we have a deadline, register a timer to wake us
                 if let Some(deadline) = this.read_deadline {
-                    let waker = cx.waker().clone();
-                    tokio::spawn(async move {
-                        time::sleep_until(deadline).await;
-                        waker.wake();
-                    });
+                    this.deadline_sleep.as_mut().reset(deadline);
+                    let _ = this.deadline_sleep.as_mut().poll(cx);
                 }
                 Poll::Pending
             }
@@ -455,11 +457,8 @@ impl AsyncWrite for Stream {
             }
             Poll::Pending => {
                 if let Some(deadline) = this.write_deadline {
-                    let waker = cx.waker().clone();
-                    tokio::spawn(async move {
-                        time::sleep_until(deadline).await;
-                        waker.wake();
-                    });
+                    this.deadline_sleep.as_mut().reset(deadline);
+                    let _ = this.deadline_sleep.as_mut().poll(cx);
                 }
                 return Poll::Pending;
             }
@@ -646,6 +645,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         closed: false,
                         read_deadline: None,
                         write_deadline: None,
+                        deadline_sleep: Box::pin(time::sleep(time::Duration::ZERO)),
                     };
 
                     let initial_tx = if !payload.is_empty() {
