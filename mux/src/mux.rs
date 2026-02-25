@@ -434,10 +434,48 @@ impl AsyncWrite for Stream {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        this.closed = true;
-        Poll::Ready(Ok(()))
+        if this.closed {
+            return Poll::Ready(Ok(()));
+        }
+
+        // Reserve capacity on the write channel so we can send FLAG_LAST.
+        match this.poll_sender.poll_reserve(cx) {
+            Poll::Ready(Ok(())) => {
+                let frame = WriteCmd::Frame(WriteFrame {
+                    header: FrameHeader {
+                        id: this.id,
+                        length: 0,
+                        flags: FLAG_LAST,
+                    },
+                    payload: Vec::new(),
+                });
+                let _ = this.poll_sender.send_item(frame);
+
+                // Move from streams to closing in the registry
+                {
+                    let mut reg = this.registry.lock().unwrap();
+                    reg.streams.remove(&this.id);
+                    reg.closing.insert(
+                        this.id,
+                        ClosingStreamEntry {
+                            frame_count: 0,
+                            closed: time::Instant::now(),
+                        },
+                    );
+                }
+
+                this.closed = true;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(_)) => {
+                // Write loop is gone; just mark closed.
+                this.closed = true;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -899,6 +937,38 @@ mod tests {
         stream.set_read_deadline(None);
 
         stream.close().await.unwrap();
+        dial_mux.close().await.unwrap();
+        accept_handle.await.unwrap();
+    }
+
+    /// Verify that `AsyncWrite::shutdown()` sends FLAG_LAST so the peer
+    /// observes a clean EOF instead of hanging forever.
+    #[tokio::test]
+    async fn shutdown_sends_flag_last() {
+        let (dial_mux, accept_mux) = new_testing_pair().await;
+
+        let accept_handle = tokio::spawn(async move {
+            let mut stream = accept_mux.accept_stream().await.unwrap();
+            let mut buf = vec![0u8; 1024];
+            let n = stream.read(&mut buf).await.unwrap();
+            stream.write_all(&buf[..n]).await.unwrap();
+            // Wait for peer to close — should see EOF, not hang.
+            let n = stream.read(&mut buf).await.unwrap();
+            assert_eq!(n, 0, "expected EOF after peer shutdown");
+            stream.close().await.unwrap();
+            accept_mux.close().await.unwrap();
+        });
+
+        let mut stream = dial_mux.dial_stream().unwrap();
+        let msg = b"shutdown test";
+        stream.write_all(msg).await.unwrap();
+
+        let mut buf = vec![0u8; 1024];
+        let n = stream.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], msg);
+
+        // Use AsyncWrite::shutdown instead of Stream::close
+        stream.shutdown().await.unwrap();
         dial_mux.close().await.unwrap();
         accept_handle.await.unwrap();
     }
