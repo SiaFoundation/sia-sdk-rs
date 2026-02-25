@@ -96,11 +96,7 @@ async fn go_server_rust_client_many_streams() {
 
             let mut buf = vec![0u8; 1024];
             let n = stream.read(&mut buf).await.unwrap();
-            assert_eq!(
-                &buf[..n],
-                msg.as_bytes(),
-                "stream {i}: echo mismatch"
-            );
+            assert_eq!(&buf[..n], msg.as_bytes(), "stream {i}: echo mismatch");
 
             stream.close().await.unwrap();
         }));
@@ -190,8 +186,8 @@ async fn rust_server_go_client_basic_echo() {
             .args([
                 "echo-client",
                 &format!("127.0.0.1:{port}"),
-                "1",    // 1 stream
-                "256",  // 256-byte message
+                "1",   // 1 stream
+                "256", // 256-byte message
             ])
             .output()
             .expect("failed to spawn Go echo-client")
@@ -255,8 +251,8 @@ async fn rust_server_go_client_many_streams() {
             .args([
                 "echo-client",
                 &format!("127.0.0.1:{port}"),
-                "50",    // 50 concurrent streams
-                "1024",  // 1KB messages
+                "50",   // 50 concurrent streams
+                "1024", // 1KB messages
             ])
             .output()
             .expect("failed to spawn Go echo-client")

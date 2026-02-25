@@ -212,8 +212,9 @@ pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
     let plaintext_len = cipher
         .decrypt_in_place(&mut buf[SETTINGS_START..])
         .map_err(HandshakeError::DecryptSettings)?;
-    let their_settings = ConnSettings::try_from(&buf[SETTINGS_START..SETTINGS_START + plaintext_len])
-        .map_err(HandshakeError::InvalidSettings)?;
+    let their_settings =
+        ConnSettings::try_from(&buf[SETTINGS_START..SETTINGS_START + plaintext_len])
+            .map_err(HandshakeError::InvalidSettings)?;
     let merged = merge_settings(our_settings, their_settings)
         .map_err(HandshakeError::UnacceptableSettings)?;
 
@@ -704,8 +705,9 @@ mod tests {
         );
 
         // Full responder wire: xpk + sig + encrypted_settings
-        let mut responder_wire =
-            Vec::with_capacity(X25519_PUBLIC_KEY_SIZE + SIGNATURE_LENGTH + CONN_SETTINGS_SIZE + AEAD_TAG_SIZE);
+        let mut responder_wire = Vec::with_capacity(
+            X25519_PUBLIC_KEY_SIZE + SIGNATURE_LENGTH + CONN_SETTINGS_SIZE + AEAD_TAG_SIZE,
+        );
         responder_wire.extend_from_slice(responder_xpk.as_bytes());
         responder_wire.extend_from_slice(&sig.to_bytes());
         responder_wire.extend_from_slice(&responder_enc);
