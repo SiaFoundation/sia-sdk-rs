@@ -478,12 +478,11 @@ async fn read_loop<R: AsyncRead + Unpin>(
         let (h, payload) = match reader.next_frame(&mut frame_buf).await {
             Ok((h, p)) => (h, p.to_vec()),
             Err(e) => {
-                let err =
-                    if is_conn_close_error(&io::Error::other(e.to_string())) {
-                        MuxError::PeerClosedConn
-                    } else {
-                        MuxError::Io(e.to_string())
-                    };
+                let err = if is_conn_close_error(&io::Error::other(e.to_string())) {
+                    MuxError::PeerClosedConn
+                } else {
+                    MuxError::Io(e.to_string())
+                };
                 set_fatal_error(&registry, err);
                 return;
             }
