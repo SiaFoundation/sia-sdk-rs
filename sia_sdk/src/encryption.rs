@@ -129,8 +129,6 @@ pub struct CipherWriter<W: AsyncWrite> {
     buf: Vec<u8>,
     // offset into buf where unwritten encrypted data begins
     buf_pos: usize,
-    // number of plaintext bytes that produced the current buf contents
-    plaintext_len: usize,
 }
 
 impl<W: AsyncWrite> CipherWriter<W> {
@@ -140,7 +138,6 @@ impl<W: AsyncWrite> CipherWriter<W> {
             cipher: Chacha20Cipher::new(key, offset as u64),
             buf: Vec::new(),
             buf_pos: 0,
-            plaintext_len: 0,
         }
     }
 }
@@ -172,9 +169,10 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
                 return Poll::Pending;
             }
             // All encrypted data drained; reset and report plaintext length consumed
+            let plaintext_len = this.buf.len();
             this.buf.clear();
             this.buf_pos = 0;
-            return Poll::Ready(Ok(this.plaintext_len));
+            return Poll::Ready(Ok(plaintext_len));
         }
 
         if buf.is_empty() {
@@ -182,7 +180,6 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
         }
 
         // Encrypt new data into the buffer
-        this.plaintext_len = buf.len();
         this.buf.resize(buf.len(), 0);
         this.buf_pos = 0;
         this.buf.copy_from_slice(buf);
