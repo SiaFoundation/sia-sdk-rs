@@ -177,30 +177,29 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
             return Poll::Ready(Ok(0));
         }
 
-        // Encrypt new data into the buffer
+        // Encrypt new data into the buffer. Once apply_keystream is called the
+        // cipher has advanced, so this data is committed — we must report it as
+        // accepted regardless of whether the inner write completes immediately.
         this.buf.resize(buf.len(), 0);
         this.buf_pos = 0;
         this.buf.copy_from_slice(buf);
         this.cipher.apply_keystream(&mut this.buf);
 
-        // Try to write the encrypted data
-        let n = ready!(std::pin::Pin::new(&mut this.inner).poll_write(cx, &this.buf))?;
-        if n == 0 {
-            return Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::WriteZero,
-                "write zero",
-            )));
+        // Eagerly try to write; if inner isn't ready, data stays buffered
+        // for drain / poll_flush.
+        match std::pin::Pin::new(&mut this.inner).poll_write(cx, &this.buf) {
+            Poll::Ready(Ok(n)) if n > 0 => {
+                this.buf_pos = n;
+                if this.buf_pos == this.buf.len() {
+                    this.buf.clear();
+                    this.buf_pos = 0;
+                }
+            }
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            _ => {} // Pending or Ok(0): data stays in buf
         }
-        this.buf_pos = n;
-        if this.buf_pos == this.buf.len() {
-            this.buf.clear();
-            this.buf_pos = 0;
-            Poll::Ready(Ok(buf.len()))
-        } else {
-            // Partial write; re-wake to drain the rest before accepting new plaintext
-            cx.waker().wake_by_ref();
-            Poll::Pending
-        }
+
+        Poll::Ready(Ok(buf.len()))
     }
 
     fn poll_flush(
