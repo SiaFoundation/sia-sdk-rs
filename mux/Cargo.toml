@@ -2,6 +2,12 @@
 name = "mux"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/SiaFoundation/sia-sdk-rs"
+license = "MIT"
+description = "Encrypted stream multiplexer for Sia peer-to-peer communication"
+authors = ["The Sia Foundation"]
+categories = ["cryptography::cryptocurrencies"]
+keywords = ["sia", "decentralized", "blockchain", "depin", "storage"]
 
 [dependencies]
 thiserror = "2.0.18"
