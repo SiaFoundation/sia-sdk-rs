@@ -502,6 +502,7 @@ mod test {
             };
             let mut writer = CipherWriter::new(short, key.clone(), 0);
             writer.write_all(&ciphertext).await.unwrap();
+            writer.flush().await.unwrap();
             assert_eq!(
                 writer.inner.inner, data,
                 "short write failed with max_bytes={max_bytes}"
@@ -530,6 +531,7 @@ mod test {
         };
         let mut writer = CipherWriter::new(pending, key.clone(), 0);
         writer.write_all(&ciphertext).await.unwrap();
+        writer.flush().await.unwrap();
         assert_eq!(writer.inner.inner, data);
     }
 
@@ -554,6 +556,7 @@ mod test {
             };
             let mut writer = CipherWriter::new(short, key.clone(), offset);
             writer.write_all(&ciphertext).await.unwrap();
+            writer.flush().await.unwrap();
             assert_eq!(
                 writer.inner.inner, data,
                 "short write + offset failed at offset={offset}"
