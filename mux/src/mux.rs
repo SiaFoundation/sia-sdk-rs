@@ -812,6 +812,10 @@ async fn pad_and_write<W: AsyncWrite + Unpin>(
     writer.write_encrypted(buf).await
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 fn set_fatal_error(registry: &Arc<StdMutex<StreamRegistry>>, err: MuxError) {
     let mut reg = registry.lock().unwrap();
     if reg.err.is_none() {
@@ -876,6 +880,10 @@ pub(crate) fn new_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         })),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
