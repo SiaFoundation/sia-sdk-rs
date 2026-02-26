@@ -31,6 +31,13 @@ const QUERY_PARAM_VALID_UNTIL: &str = "sv";
 const QUERY_PARAM_CREDENTIAL: &str = "sc";
 const QUERY_PARAM_SIGNATURE: &str = "ss";
 
+const SHARE_URL_SCHEME: &str = "sia";
+
+#[cfg(not(test))]
+const SHARE_URL_FETCH_SCHEME: &str = "https";
+#[cfg(test)]
+const SHARE_URL_FETCH_SCHEME: &str = "http";
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("indexd responded with an error: {0}")]
@@ -178,7 +185,7 @@ pub struct Account {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SharedObjectResponse {
     pub slabs: Vec<Slab>,
@@ -541,9 +548,13 @@ impl Client {
         object: &Object,
         valid_until: DateTime<Utc>,
     ) -> Result<Url, Error> {
-        let mut url = self
-            .url
-            .join(format!("objects/{}/shared", object.id()).as_str())?;
+        // the Url crate does not allow "unsafe" scheme changes (https -> sia) because it's annoying.
+        let mut url: Url = format!(
+            "{SHARE_URL_SCHEME}://{}/objects/{}/shared",
+            self.url.authority(),
+            object.id()
+        )
+        .parse()?;
 
         let params = self.sign(app_key, &url, Method::GET, None, valid_until);
         url.set_fragment(Some(
@@ -568,9 +579,13 @@ impl Client {
     /// `share_url` a pre-signed url for the App objects API
     ///
     /// # Returns
-    /// A tuple with the object metadata and encryption key to decrypt
-    /// the user metadata.
+    /// The metadata needed to download the data
     pub async fn shared_object(&self, mut share_url: Url) -> Result<Object, Error> {
+        if share_url.scheme() != SHARE_URL_SCHEME {
+            return Err(Error::Format(format!(
+                "invalid url scheme: expected {SHARE_URL_SCHEME}"
+            )));
+        }
         let encryption_key = match share_url.fragment() {
             Some(fragment) => {
                 let fragment = match fragment.strip_prefix("encryption_key=") {
@@ -586,6 +601,13 @@ impl Client {
             None => Err(Error::Format("missing encryption_key".into())),
         }?;
         share_url.set_fragment(None);
+        // enforce indexer App APIs are served over https
+        // the Url crate does not allow "unsafe" scheme changes (sia -> https) because it's annoying.
+        let share_url: Url = format!(
+            "{SHARE_URL_FETCH_SCHEME}://{}",
+            share_url.as_str().strip_prefix("sia://").unwrap()
+        )
+        .parse()?;
         let shared_object: SharedObjectResponse = Self::handle_response(
             self.client
                 .get(share_url)
@@ -718,6 +740,66 @@ mod tests {
                 URL_SAFE.encode(signature!("7411fc80f920cb098690498133be075cd43bf6385fc8348fe1946e29d909891680d45651dfb0a6fd9f7196a971816c21441852362680f2fe4cb935de8f90380b").as_ref()),
             )
         );
+    }
+
+    #[tokio::test]
+    async fn test_shared_object_roundtrip() {
+        let data_key: EncryptionKey = [42u8; 32].into();
+        let slabs = vec![Slab {
+            encryption_key: [1u8; 32].into(),
+            min_shards: 1,
+            sectors: vec![Sector {
+                root: Hash256::new([2u8; 32]),
+                host_key: PublicKey::new([3u8; 32]),
+            }],
+            offset: 0,
+            length: 256,
+        }];
+        let object = Object::new(data_key.clone(), slabs.clone(), Vec::new());
+        let object_id = object.id();
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!("/objects/{object_id}/shared"),
+            ))
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(
+                        serde_json::to_string(&SharedObjectResponse {
+                            slabs: slabs.clone(),
+                            encrypted_metadata: None,
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&[0u8; 32]);
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        let valid_until = DateTime::from_timestamp_secs(123).unwrap() + Duration::from_secs(60);
+        let share_url = client
+            .shared_object_url(&app_key, &object, valid_until)
+            .unwrap();
+
+        assert_eq!(share_url.scheme(), SHARE_URL_SCHEME);
+        assert_eq!(share_url.path(), format!("/objects/{object_id}/shared"));
+
+        // ensure it returns an error if the scheme is wrong
+        let invalid_url: Url = share_url
+            .clone()
+            .as_str()
+            .replace("sia://", "http://")
+            .parse()
+            .unwrap();
+        assert!(client.shared_object(invalid_url).await.is_err());
+
+        let result = client.shared_object(share_url).await.unwrap();
+        assert_eq!(result.data_key(), &data_key);
+        assert_eq!(result.slabs(), &slabs);
     }
 
     #[tokio::test]
