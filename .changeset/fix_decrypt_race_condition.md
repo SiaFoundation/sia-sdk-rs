@@ -1,8 +1,8 @@
 ---
+indexd_ffi: patch
+sia_sdk_derive: patch
 indexd: patch
 sia_sdk: patch
-sia_sdk_derive: patch
-indexd_ffi: patch
 ---
 
 # fix decrypt race condition
