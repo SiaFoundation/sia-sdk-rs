@@ -151,7 +151,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
         use std::task::Poll;
         let this = self.get_mut();
 
-        // If we have leftover encrypted data from a previous call, drain it first
+        // Drain any leftover encrypted data from a previous call before accepting new data
         if this.buf_pos < this.buf.len() {
             let n = ready!(
                 std::pin::Pin::new(&mut this.inner).poll_write(cx, &this.buf[this.buf_pos..])
@@ -168,11 +168,9 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
-            // All encrypted data drained; reset and report plaintext length consumed
-            let plaintext_len = this.buf.len();
+            // All drained; reset and fall through to accept new data
             this.buf.clear();
             this.buf_pos = 0;
-            return Poll::Ready(Ok(plaintext_len));
         }
 
         if buf.is_empty() {
