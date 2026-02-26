@@ -262,6 +262,30 @@ impl<R: AsyncRead + Unpin, C: PacketCipher> PacketReader<R, C> {
 mod tests {
     use super::*;
 
+    /// XOR cipher for testing PacketWriter/PacketReader round-trips.
+    struct TestCipher {
+        key: u8,
+    }
+
+    impl PacketCipher for TestCipher {
+        fn decrypt_in_place(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
+            let pt_len = buf.len() - AEAD_TAG_SIZE;
+            for b in &mut buf[..pt_len] {
+                *b ^= self.key;
+            }
+            Ok(pt_len)
+        }
+
+        fn encrypt_in_place(&mut self, buf: &mut [u8]) {
+            let pt_len = buf.len() - AEAD_TAG_SIZE;
+            for b in &mut buf[..pt_len] {
+                *b ^= self.key;
+            }
+            buf[pt_len..].fill(0xFF);
+        }
+    }
+
+    // Verifies that encoding and decoding a FrameHeader preserves all fields.
     #[test]
     fn frame_header_roundtrip_header() {
         let h = FrameHeader {
@@ -280,6 +304,7 @@ mod tests {
         assert_eq!(decoded, h);
     }
 
+    // Verifies that the keepalive stream ID (0) round-trips correctly.
     #[test]
     fn frame_header_roundtrip_keepalive() {
         let h = FrameHeader {
@@ -296,6 +321,7 @@ mod tests {
         assert_eq!(decoded, h);
     }
 
+    // Verifies that decoding a too-short buffer returns an error.
     #[test]
     fn frame_header_decode_too_short() {
         let buf = [0u8; 4];
@@ -303,6 +329,7 @@ mod tests {
         assert!(matches!(result, Err(FrameHeaderError::BufferTooShort)));
     }
 
+    // Verifies that append_frame produces a valid header followed by the payload.
     #[test]
     fn append_frame_builds_correct_bytes() {
         let h = FrameHeader {
@@ -324,5 +351,139 @@ mod tests {
         assert_ne!(decoded.flags & FLAG_ERROR, 0);
         assert_eq!(decoded.flags & FLAG_FIRST, 0);
         assert_eq!(&buf[FRAME_HEADER_SIZE..], b"hello");
+    }
+
+    // Verifies that a single packet encrypted by PacketWriter can be decrypted by PacketReader.
+    #[tokio::test]
+    async fn packet_writer_reader_single_packet() {
+        const PACKET_SIZE: usize = 64;
+        const MAX_FRAME: usize = PACKET_SIZE - AEAD_TAG_SIZE;
+
+        let (w, r) = tokio::io::duplex(65536);
+        let mut writer = PacketWriter::new(w, TestCipher { key: 0xAA }, PACKET_SIZE);
+        let mut reader = PacketReader::new(r, TestCipher { key: 0xAA }, PACKET_SIZE);
+
+        let mut plaintext = vec![0u8; MAX_FRAME];
+        plaintext[..13].copy_from_slice(b"hello, world!");
+
+        writer.write_encrypted(&plaintext).await.unwrap();
+        drop(writer);
+
+        let mut buf = vec![0u8; MAX_FRAME];
+        let n = reader.read(&mut buf).await.unwrap();
+        assert_eq!(n, MAX_FRAME);
+        assert_eq!(&buf[..13], b"hello, world!");
+        assert_eq!(&buf[13..], &vec![0u8; MAX_FRAME - 13]);
+    }
+
+    // Verifies that patterned data spanning multiple packets survives the encrypt/decrypt round-trip.
+    #[tokio::test]
+    async fn packet_writer_reader_multiple_packets() {
+        const PACKET_SIZE: usize = 64;
+        const MAX_FRAME: usize = PACKET_SIZE - AEAD_TAG_SIZE;
+        const NUM_PACKETS: usize = 5;
+
+        let (w, r) = tokio::io::duplex(65536);
+        let mut writer = PacketWriter::new(w, TestCipher { key: 0xDD }, PACKET_SIZE);
+        let mut reader = PacketReader::new(r, TestCipher { key: 0xDD }, PACKET_SIZE);
+
+        let mut plaintext = vec![0u8; MAX_FRAME * NUM_PACKETS];
+        for (i, b) in plaintext.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+
+        writer.write_encrypted(&plaintext).await.unwrap();
+        drop(writer);
+
+        let mut result = vec![0u8; plaintext.len()];
+        let mut total = 0;
+        while total < result.len() {
+            let n = reader.read(&mut result[total..]).await.unwrap();
+            assert!(n > 0, "read returned 0 before all data consumed");
+            total += n;
+        }
+        assert_eq!(result, plaintext);
+    }
+
+    // Verifies that a full frame (header + payload + padding) can be written and read back via next_frame.
+    #[tokio::test]
+    async fn packet_writer_reader_frame_roundtrip() {
+        const PACKET_SIZE: usize = 128;
+        const MAX_FRAME: usize = PACKET_SIZE - AEAD_TAG_SIZE;
+
+        let (w, r) = tokio::io::duplex(65536);
+        let mut writer = PacketWriter::new(w, TestCipher { key: 0xBB }, PACKET_SIZE);
+        let mut reader = PacketReader::new(r, TestCipher { key: 0xBB }, PACKET_SIZE);
+
+        // Build a frame: header + payload, padded to packet plaintext size
+        let header = FrameHeader {
+            id: 300,
+            length: 5,
+            flags: FLAG_FIRST,
+        };
+        let header_bytes: [u8; FRAME_HEADER_SIZE] = header.into();
+
+        let mut plaintext = vec![0u8; MAX_FRAME];
+        plaintext[..FRAME_HEADER_SIZE].copy_from_slice(&header_bytes);
+        plaintext[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + 5].copy_from_slice(b"hello");
+
+        writer.write_encrypted(&plaintext).await.unwrap();
+        drop(writer);
+
+        let mut buf = vec![0u8; MAX_FRAME];
+        let (h, payload) = reader.next_frame(&mut buf).await.unwrap();
+        assert_eq!(h.id, 300);
+        assert_eq!(h.length, 5);
+        assert_eq!(h.flags, FLAG_FIRST);
+        assert_eq!(payload, b"hello");
+    }
+
+    // Verifies that multiple frames across separate packets are read in order with correct padding skips.
+    #[tokio::test]
+    async fn packet_writer_reader_multiple_frames() {
+        const PACKET_SIZE: usize = 128;
+        const MAX_FRAME: usize = PACKET_SIZE - AEAD_TAG_SIZE;
+
+        let (w, r) = tokio::io::duplex(65536);
+        let mut writer = PacketWriter::new(w, TestCipher { key: 0xCC }, PACKET_SIZE);
+        let mut reader = PacketReader::new(r, TestCipher { key: 0xCC }, PACKET_SIZE);
+
+        let h1 = FrameHeader {
+            id: 256,
+            length: 3,
+            flags: FLAG_FIRST,
+        };
+        let h2 = FrameHeader {
+            id: 257,
+            length: 6,
+            flags: FLAG_LAST,
+        };
+
+        // Two frames, each in its own packet
+        let mut plaintext = vec![0u8; MAX_FRAME * 2];
+
+        let h1_bytes: [u8; FRAME_HEADER_SIZE] = h1.into();
+        plaintext[..FRAME_HEADER_SIZE].copy_from_slice(&h1_bytes);
+        plaintext[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + 3].copy_from_slice(b"foo");
+
+        let h2_bytes: [u8; FRAME_HEADER_SIZE] = h2.into();
+        plaintext[MAX_FRAME..MAX_FRAME + FRAME_HEADER_SIZE].copy_from_slice(&h2_bytes);
+        plaintext[MAX_FRAME + FRAME_HEADER_SIZE..MAX_FRAME + FRAME_HEADER_SIZE + 6]
+            .copy_from_slice(b"barbaz");
+
+        writer.write_encrypted(&plaintext).await.unwrap();
+        drop(writer);
+
+        let mut buf = vec![0u8; MAX_FRAME];
+
+        let (rh1, rp1) = reader.next_frame(&mut buf).await.unwrap();
+        assert_eq!(rh1.id, 256);
+        assert_eq!(rh1.flags, FLAG_FIRST);
+        assert_eq!(rp1, b"foo");
+
+        let (rh2, rp2) = reader.next_frame(&mut buf).await.unwrap();
+        assert_eq!(rh2.id, 257);
+        assert_eq!(rh2.flags, FLAG_LAST);
+        assert_eq!(rp2, b"barbaz");
     }
 }

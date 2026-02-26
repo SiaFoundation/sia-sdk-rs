@@ -12,3 +12,6 @@ keywords = ["sia", "decentralized", "blockchain", "depin", "storage"]
 [dependencies]
 thiserror = "2.0.18"
 tokio = { version = "1", features = ["io-util"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
