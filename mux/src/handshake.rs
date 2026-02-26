@@ -616,10 +616,6 @@ mod tests {
     /// Cross-language test vectors generated from the Go implementation.
     /// Uses fixed X25519 and Ed25519 keys to verify byte-level compatibility
     /// of key derivation, AEAD encryption, and Ed25519 signatures.
-    ///
-    /// Counterpart: v3/handshake_interop_test.go TestHandshakeInteropVectors
-    // FIXME Alright remove this once we can actually confirm interoperability via real handshakes
-    // between Go and Rust implementations
     #[test]
     fn handshake_interop_vectors() {
         // Fixed keys (same as Go test)
