@@ -177,6 +177,10 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
             return Poll::Ready(Ok(this.plaintext_len));
         }
 
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
         // Encrypt new data into the buffer
         this.plaintext_len = buf.len();
         this.buf.resize(buf.len(), 0);
