@@ -6,7 +6,7 @@ repository = "https://github.com/SiaFoundation/sia-sdk-rs"
 license = "MIT"
 description = "Encrypted stream multiplexer for Sia peer-to-peer communication"
 authors = ["The Sia Foundation"]
-categories = ["cryptography::cryptocurrencies"]
+categories = ["network-programming", "cryptography"]
 keywords = ["sia", "decentralized", "blockchain", "depin", "storage"]
 
 [dependencies]
