@@ -7,6 +7,7 @@ use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherError, StreamCipherS
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sia_derive::{SiaDecode, SiaEncode};
+use std::task::ready;
 use tokio::io::{AsyncRead, AsyncWrite};
 use zeroize::ZeroizeOnDrop;
 
@@ -126,6 +127,8 @@ pub struct CipherWriter<W: AsyncWrite> {
     inner: W,
     cipher: Chacha20Cipher,
     buf: Vec<u8>,
+    // offset into buf where unwritten encrypted data begins
+    buf_pos: usize,
 }
 
 impl<W: AsyncWrite> CipherWriter<W> {
@@ -134,6 +137,7 @@ impl<W: AsyncWrite> CipherWriter<W> {
             inner,
             cipher: Chacha20Cipher::new(key, offset as u64),
             buf: Vec::new(),
+            buf_pos: 0,
         }
     }
 }
@@ -144,18 +148,80 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
+        use std::task::Poll;
         let this = self.get_mut();
+
+        // Drain any leftover encrypted data from a previous call before accepting new data
+        if this.buf_pos < this.buf.len() {
+            let n = ready!(
+                std::pin::Pin::new(&mut this.inner).poll_write(cx, &this.buf[this.buf_pos..])
+            )?;
+            if n == 0 {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "write zero",
+                )));
+            }
+            this.buf_pos += n;
+            if this.buf_pos < this.buf.len() {
+                // Still have encrypted bytes to flush; re-wake and return Pending
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            // All drained; reset and fall through to accept new data
+            this.buf.clear();
+            this.buf_pos = 0;
+        }
+
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        // Encrypt new data into the buffer. Once apply_keystream is called the
+        // cipher has advanced, so this data is committed — we must report it as
+        // accepted regardless of whether the inner write completes immediately.
         this.buf.resize(buf.len(), 0);
+        this.buf_pos = 0;
         this.buf.copy_from_slice(buf);
         this.cipher.apply_keystream(&mut this.buf);
-        std::pin::Pin::new(&mut this.inner).poll_write(cx, &this.buf)
+
+        // Eagerly try to write; if inner isn't ready, data stays buffered
+        // for drain / poll_flush.
+        match std::pin::Pin::new(&mut this.inner).poll_write(cx, &this.buf) {
+            Poll::Ready(Ok(n)) if n > 0 => {
+                this.buf_pos = n;
+                if this.buf_pos == this.buf.len() {
+                    this.buf.clear();
+                    this.buf_pos = 0;
+                }
+            }
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            _ => {} // Pending or Ok(0): data stays in buf
+        }
+
+        Poll::Ready(Ok(buf.len()))
     }
 
     fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        let this = self.get_mut();
+        while this.buf_pos < this.buf.len() {
+            let n = ready!(
+                std::pin::Pin::new(&mut this.inner).poll_write(cx, &this.buf[this.buf_pos..])
+            )?;
+            if n == 0 {
+                return std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "write zero",
+                )));
+            }
+            this.buf_pos += n;
+        }
+        this.buf.clear();
+        this.buf_pos = 0;
+        std::pin::Pin::new(&mut this.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(
@@ -337,6 +403,164 @@ mod test {
             let plaintext = writer.inner;
 
             assert_eq!(plaintext, data, "roundtrip failed at offset {offset}");
+        }
+    }
+
+    /// A writer that accepts at most `max_bytes_per_write` bytes per poll_write
+    /// call, simulating short writes from a slow or buffered inner writer.
+    struct ShortWriter {
+        inner: Vec<u8>,
+        max_bytes_per_write: usize,
+    }
+
+    impl AsyncWrite for ShortWriter {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            let n = buf.len().min(self.max_bytes_per_write);
+            self.inner.extend_from_slice(&buf[..n]);
+            std::task::Poll::Ready(Ok(n))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A writer that returns Poll::Pending on every other poll_write call,
+    /// simulating an async file writer whose internal spawn_blocking task
+    /// hasn't completed yet.
+    struct PendingWriter {
+        inner: Vec<u8>,
+        call_count: usize,
+    }
+
+    impl AsyncWrite for PendingWriter {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.call_count += 1;
+            if self.call_count % 2 == 1 {
+                // Odd calls return Pending
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            } else {
+                // Even calls succeed
+                self.inner.extend_from_slice(buf);
+                std::task::Poll::Ready(Ok(buf.len()))
+            }
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Tests that CipherWriter produces correct output when the inner writer
+    /// only accepts a few bytes at a time (short writes).
+    #[tokio::test]
+    async fn test_cipher_writer_short_writes() {
+        let key = EncryptionKey::from(rand::random::<[u8; 32]>());
+        let mut data = vec![0u8; 4096];
+        rand::rng().fill_bytes(&mut data);
+
+        // Encrypt with CipherReader
+        let mut reader = CipherReader::new(data.as_slice(), key.clone(), 0);
+        let mut ciphertext = vec![0u8; data.len()];
+        reader.read_exact(&mut ciphertext).await.unwrap();
+
+        // Decrypt with CipherWriter wrapping a ShortWriter that only accepts
+        // small chunks, forcing write_all to retry with remaining bytes.
+        for max_bytes in [1, 7, 13, 31, 64, 100, 512] {
+            let short = ShortWriter {
+                inner: Vec::new(),
+                max_bytes_per_write: max_bytes,
+            };
+            let mut writer = CipherWriter::new(short, key.clone(), 0);
+            writer.write_all(&ciphertext).await.unwrap();
+            writer.flush().await.unwrap();
+            assert_eq!(
+                writer.inner.inner, data,
+                "short write failed with max_bytes={max_bytes}"
+            );
+        }
+    }
+
+    /// Tests that CipherWriter produces correct output when the inner writer
+    /// returns Poll::Pending on alternating calls, simulating tokio::fs::File
+    /// behavior that caused the original decryption bug.
+    #[tokio::test]
+    async fn test_cipher_writer_pending_writes() {
+        let key = EncryptionKey::from(rand::random::<[u8; 32]>());
+        let mut data = vec![0u8; 4096];
+        rand::rng().fill_bytes(&mut data);
+
+        // Encrypt
+        let mut reader = CipherReader::new(data.as_slice(), key.clone(), 0);
+        let mut ciphertext = vec![0u8; data.len()];
+        reader.read_exact(&mut ciphertext).await.unwrap();
+
+        // Decrypt through a writer that returns Pending every other call
+        let pending = PendingWriter {
+            inner: Vec::new(),
+            call_count: 0,
+        };
+        let mut writer = CipherWriter::new(pending, key.clone(), 0);
+        writer.write_all(&ciphertext).await.unwrap();
+        writer.flush().await.unwrap();
+        assert_eq!(writer.inner.inner, data);
+    }
+
+    /// Tests that CipherWriter handles combined short writes + Pending at
+    /// various offsets (exercises nonce rotation under adversarial I/O).
+    #[tokio::test]
+    async fn test_cipher_writer_short_writes_with_offset() {
+        const MAX_BYTES_PER_NONCE: usize = u32::MAX as usize * 64;
+
+        let key = EncryptionKey::from(rand::random::<[u8; 32]>());
+        let mut data = vec![0u8; 4096];
+        rand::rng().fill_bytes(&mut data);
+
+        for offset in [0, 64, 2048, MAX_BYTES_PER_NONCE - 64, MAX_BYTES_PER_NONCE] {
+            let mut reader = CipherReader::new(data.as_slice(), key.clone(), offset);
+            let mut ciphertext = vec![0u8; data.len()];
+            reader.read_exact(&mut ciphertext).await.unwrap();
+
+            let short = ShortWriter {
+                inner: Vec::new(),
+                max_bytes_per_write: 37, // prime-sized to misalign with blocks
+            };
+            let mut writer = CipherWriter::new(short, key.clone(), offset);
+            writer.write_all(&ciphertext).await.unwrap();
+            writer.flush().await.unwrap();
+            assert_eq!(
+                writer.inner.inner, data,
+                "short write + offset failed at offset={offset}"
+            );
         }
     }
 }
