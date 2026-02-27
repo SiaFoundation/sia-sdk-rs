@@ -1,7 +1,8 @@
 use crate::rhp::{SECTOR_SIZE, SEGMENT_SIZE};
+use crate::{AsyncRead, AsyncWrite};
+use futures_util::{AsyncReadExt, AsyncWriteExt};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use thiserror::Error;
-use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -9,7 +10,7 @@ pub enum Error {
     ReedSolomon(#[from] reed_solomon_erasure::Error),
 
     #[error("IO error: {0}")]
-    Io(#[from] io::Error),
+    Io(#[from] std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

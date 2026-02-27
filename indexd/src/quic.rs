@@ -23,12 +23,13 @@ use sia::rhp::{
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use sia::types::v2::Protocol;
+use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::{Hosts, RHP4Client};
 
 struct Stream {
-    send: SendStream,
-    recv: RecvStream,
+    send: Compat<SendStream>,
+    recv: Compat<RecvStream>,
 }
 
 #[derive(Debug, Error)]
@@ -62,6 +63,7 @@ impl AsyncDecoder for Stream {
     type Error = RHP4Error;
     async fn decode_buf(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
         self.recv
+            .get_mut()
             .read_exact(buf)
             .await
             .map_err(|e| RHP4Error::Transport(e.to_string()))
@@ -78,6 +80,7 @@ impl Transport for Stream {
 
     async fn write_bytes(&mut self, data: Bytes) -> Result<(), Self::Error> {
         self.send
+            .get_mut()
             .write_chunk(data)
             .await
             .map_err(|e| RHP4Error::Transport(e.to_string()))
@@ -318,7 +321,10 @@ impl ClientInner {
         let (send, recv) = conn.open_bi().await.inspect_err(|_| {
             self.open_conns.write().unwrap().remove(&host);
         })?;
-        Ok(Stream { send, recv })
+        Ok(Stream {
+            send: send.compat_write(),
+            recv: recv.compat(),
+        })
     }
 
     async fn host_prices(&self, host_key: PublicKey) -> Result<HostPrices, RHP4Error> {
