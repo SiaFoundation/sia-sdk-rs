@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["sia_sdk", "sia_derive", "indexd", "indexd_ffi"]
+members = ["sia_sdk", "sia_derive", "indexd", "indexd_ffi", "mux"]
 
 # CPU-intensive operations (erasure coding, hashing, encryption) are
 # ~100x slower without optimizations. Some tests will be extremely
