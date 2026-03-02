@@ -102,7 +102,6 @@ pub(crate) struct PacketWriter<W, C> {
     writer: W,
     cipher: C,
     packet_size: usize,
-    buf: Vec<u8>,
 }
 
 impl<W: AsyncWrite + Unpin, C: PacketCipher> PacketWriter<W, C> {
@@ -111,25 +110,31 @@ impl<W: AsyncWrite + Unpin, C: PacketCipher> PacketWriter<W, C> {
             writer,
             cipher,
             packet_size,
-            buf: vec![0u8; packet_size * 10],
         }
     }
 
-    /// Encrypts `plaintext` into packets and writes them to the underlying
-    /// writer. The caller must ensure `plaintext.len()` is a multiple of
+    /// Encrypts `buf` in place and writes the resulting packets to the
+    /// underlying writer. The caller must ensure `buf.len()` is a multiple of
     /// `max_frame_size` (`packet_size - AEAD_TAG_SIZE`).
-    pub async fn write_encrypted(&mut self, plaintext: &[u8]) -> Result<(), io::Error> {
+    pub async fn write_encrypted(&mut self, buf: &mut Vec<u8>) -> Result<(), io::Error> {
         let max_frame_size = self.packet_size - AEAD_TAG_SIZE;
-        let num_packets = plaintext.len() / max_frame_size;
-        for i in 0..num_packets {
-            let packet = &mut self.buf[i * self.packet_size..][..self.packet_size];
-            packet[..max_frame_size]
-                .copy_from_slice(&plaintext[i * max_frame_size..][..max_frame_size]);
-            self.cipher.encrypt_in_place(packet);
+        let num_packets = buf.len() / max_frame_size;
+        let total_size = num_packets * self.packet_size;
+        buf.resize(total_size, 0);
+
+        // Work backwards so that shifting plaintext rightward (to make room
+        // for tags) never overwrites data we haven't processed yet.
+        for i in (0..num_packets).rev() {
+            let src_start = i * max_frame_size;
+            let dst_start = i * self.packet_size;
+            if src_start != dst_start {
+                buf.copy_within(src_start..src_start + max_frame_size, dst_start);
+            }
+            self.cipher
+                .encrypt_in_place(&mut buf[dst_start..dst_start + self.packet_size]);
         }
-        self.writer
-            .write_all(&self.buf[..num_packets * self.packet_size])
-            .await
+
+        self.writer.write_all(buf).await
     }
 }
 
@@ -366,7 +371,7 @@ mod tests {
         let mut plaintext = vec![0u8; MAX_FRAME];
         plaintext[..13].copy_from_slice(b"hello, world!");
 
-        writer.write_encrypted(&plaintext).await.unwrap();
+        writer.write_encrypted(&mut plaintext).await.unwrap();
         drop(writer);
 
         let mut buf = vec![0u8; MAX_FRAME];
@@ -391,18 +396,19 @@ mod tests {
         for (i, b) in plaintext.iter_mut().enumerate() {
             *b = (i % 251) as u8;
         }
+        let expected = plaintext.clone();
 
-        writer.write_encrypted(&plaintext).await.unwrap();
+        writer.write_encrypted(&mut plaintext).await.unwrap();
         drop(writer);
 
-        let mut result = vec![0u8; plaintext.len()];
+        let mut result = vec![0u8; expected.len()];
         let mut total = 0;
         while total < result.len() {
             let n = reader.read(&mut result[total..]).await.unwrap();
             assert!(n > 0, "read returned 0 before all data consumed");
             total += n;
         }
-        assert_eq!(result, plaintext);
+        assert_eq!(result, expected);
     }
 
     // Verifies that a full frame (header + payload + padding) can be written and read back via next_frame.
@@ -427,7 +433,7 @@ mod tests {
         plaintext[..FRAME_HEADER_SIZE].copy_from_slice(&header_bytes);
         plaintext[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + 5].copy_from_slice(b"hello");
 
-        writer.write_encrypted(&plaintext).await.unwrap();
+        writer.write_encrypted(&mut plaintext).await.unwrap();
         drop(writer);
 
         let mut buf = vec![0u8; MAX_FRAME];
@@ -471,7 +477,7 @@ mod tests {
         plaintext[MAX_FRAME + FRAME_HEADER_SIZE..MAX_FRAME + FRAME_HEADER_SIZE + 6]
             .copy_from_slice(b"barbaz");
 
-        writer.write_encrypted(&plaintext).await.unwrap();
+        writer.write_encrypted(&mut plaintext).await.unwrap();
         drop(writer);
 
         let mut buf = vec![0u8; MAX_FRAME];
