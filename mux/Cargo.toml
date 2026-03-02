@@ -10,6 +10,7 @@ categories = ["network-programming", "cryptography"]
 keywords = ["sia", "decentralized", "blockchain", "depin", "storage"]
 
 [dependencies]
+bytes = "1"
 blake2b_simd = "1.0.4"
 chacha20poly1305 = "0.10.1"
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }

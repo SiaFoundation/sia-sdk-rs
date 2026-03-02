@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 
+use bytes::Bytes;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
@@ -95,7 +96,7 @@ fn packet_reader_error_is_conn_close(err: &PacketReaderError) -> bool {
 /// A single frame queued for transmission by the write loop.
 struct WriteFrame {
     header: FrameHeader,
-    payload: Vec<u8>,
+    payload: Bytes,
 }
 
 /// Commands sent to the write loop via the shared channel.
@@ -109,7 +110,7 @@ enum WriteCmd {
 /// Per-stream handle held by the read loop to deliver data and signal closure.
 struct StreamHandle {
     /// Channel for delivering frame payloads to the stream's reader.
-    data_tx: mpsc::Sender<Vec<u8>>,
+    data_tx: mpsc::Sender<Bytes>,
     /// Shared slot set when the stream is closed, communicating the reason to the reader.
     close_err: Arc<StdMutex<Option<MuxError>>>,
 }
@@ -195,7 +196,7 @@ impl Mux {
             write_tx,
             registry: self.registry.clone(),
             settings: self.settings,
-            read_buf: Vec::new(),
+            read_buf: Bytes::new(),
             established: false,
             closed: false,
             read_deadline: None,
@@ -241,13 +242,13 @@ impl Mux {
 /// A Stream is a duplex connection multiplexed over a single connection.
 pub struct Stream {
     id: u32,
-    data_rx: mpsc::Receiver<Vec<u8>>,
+    data_rx: mpsc::Receiver<Bytes>,
     close_err: Arc<StdMutex<Option<MuxError>>>,
     write_tx: mpsc::Sender<WriteCmd>,
     poll_sender: PollSender<WriteCmd>,
     registry: Arc<StdMutex<StreamRegistry>>,
     settings: ConnSettings,
-    read_buf: Vec<u8>,
+    read_buf: Bytes,
     established: bool,
     closed: bool,
     read_deadline: Option<time::Instant>,
@@ -292,7 +293,7 @@ impl Stream {
             .write_tx
             .send(WriteCmd::Frame(WriteFrame {
                 header: h,
-                payload: Vec::new(),
+                payload: Bytes::new(),
             }))
             .await;
 
@@ -342,7 +343,7 @@ impl Drop for Stream {
                 length: 0,
                 flags: FLAG_LAST,
             },
-            payload: Vec::new(),
+            payload: Bytes::new(),
         }));
 
         // Move from active to closing in the registry.
@@ -378,7 +379,7 @@ impl AsyncRead for Stream {
         if !this.read_buf.is_empty() {
             let n = buf.remaining().min(this.read_buf.len());
             buf.put_slice(&this.read_buf[..n]);
-            this.read_buf.drain(..n);
+            let _ = this.read_buf.split_to(n);
             return Poll::Ready(Ok(()));
         }
 
@@ -398,7 +399,7 @@ impl AsyncRead for Stream {
                 let n = buf.remaining().min(data.len());
                 buf.put_slice(&data[..n]);
                 if n < data.len() {
-                    this.read_buf = data[n..].to_vec();
+                    this.read_buf = data.slice(n..);
                 }
                 Poll::Ready(Ok(()))
             }
@@ -479,7 +480,7 @@ impl AsyncWrite for Stream {
                 length: n as u16,
                 flags,
             },
-            payload: buf[..n].to_vec(),
+            payload: Bytes::copy_from_slice(&buf[..n]),
         });
 
         match this.poll_sender.send_item(frame) {
@@ -510,7 +511,7 @@ impl AsyncWrite for Stream {
                         length: 0,
                         flags: FLAG_LAST,
                     },
-                    payload: Vec::new(),
+                    payload: Bytes::new(),
                 });
                 let _ = this.poll_sender.send_item(frame);
 
@@ -548,15 +549,15 @@ impl AsyncWrite for Stream {
 enum ReadAction {
     /// Send data to an existing stream.
     SendData {
-        tx: mpsc::Sender<Vec<u8>>,
-        payload: Vec<u8>,
+        tx: mpsc::Sender<Bytes>,
+        payload: Bytes,
     },
     /// A new stream was created; send it to the accept channel, then optionally
     /// deliver initial payload data.
     NewStream {
         stream: Stream,
-        data_tx: Option<mpsc::Sender<Vec<u8>>>,
-        payload: Vec<u8>,
+        data_tx: Option<mpsc::Sender<Bytes>>,
+        payload: Bytes,
     },
     /// Fatal error — terminate the read loop.
     Fatal(MuxError),
@@ -575,7 +576,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
 
     loop {
         let (h, payload) = match reader.next_frame(&mut frame_buf).await {
-            Ok((h, p)) => (h, p.to_vec()),
+            Ok((h, p)) => (h, Bytes::copy_from_slice(p)),
             Err(e) => {
                 let err = if packet_reader_error_is_conn_close(&e) {
                     MuxError::PeerClosedConn
@@ -640,7 +641,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         write_tx: stream_write_tx,
                         registry: registry.clone(),
                         settings,
-                        read_buf: Vec::new(),
+                        read_buf: Bytes::new(),
                         established: true,
                         closed: false,
                         read_deadline: None,
