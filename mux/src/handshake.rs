@@ -11,8 +11,6 @@ use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
 use ed25519_dalek::{SIGNATURE_LENGTH, Signer, SigningKey, Verifier, VerifyingKey};
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
-const X25519_PUBLIC_KEY_SIZE: usize = 32;
-
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use std::time::Duration;
@@ -20,6 +18,8 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::frame::{AEAD_NONCE_SIZE, AEAD_TAG_SIZE, FRAME_HEADER_SIZE, PacketCipher};
+
+const X25519_PUBLIC_KEY_SIZE: usize = 32;
 
 #[derive(Clone)]
 pub(crate) struct SeqCipher {
