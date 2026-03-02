@@ -19,7 +19,7 @@ bytes = "1.11.1"
 indexd = { version = "0.2.0", path = "../indexd" }
 log = "0.4.29"
 rand = "0.10.0"
-rustls = { version = "0.23.36", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls = { version = "0.23.37", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 sia_sdk = { version = "0.2.0", path = "../sia_sdk" }
 thiserror = "2.0.18"
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync"] }
