@@ -67,7 +67,7 @@ impl PacketCipher for SeqCipher {
         let tag = self
             .aead
             .seal_in_place_separate_tag(nonce, Aad::empty(), &mut buf[..plaintext_len])
-            .expect("encryption cannot fail");
+            .expect("LessSafeKey + ChaCha20-Poly1305 seal cannot fail");
         buf[plaintext_len..].copy_from_slice(tag.as_ref());
         inc_nonce(&mut self.our_nonce);
     }
