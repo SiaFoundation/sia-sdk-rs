@@ -662,8 +662,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(
     // Skip the immediate first tick
     keepalive_timer.reset();
 
-    let mut cleanup_timer = time::interval(CLOSING_STREAM_CLEANUP_INTERVAL);
-    cleanup_timer.reset();
+    let mut last_cleanup = time::Instant::now();
 
     let max_frame_size = settings.max_frame_size();
     // Local buffer swapped with the shared write_buf each iteration.
@@ -683,12 +682,6 @@ async fn write_loop<W: AsyncWrite + Unpin>(
             tokio::select! {
                 _ = notified => {}
                 _ = keepalive_timer.tick() => {}
-                _ = cleanup_timer.tick() => {
-                    let mut s = mux_state.lock().unwrap();
-                    let now = time::Instant::now();
-                    s.closing.retain(|_, cs| now.duration_since(cs.closed) < CLOSING_STREAM_CLEANUP_INTERVAL);
-                    continue;
-                }
             }
         }
 
@@ -715,6 +708,14 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                     },
                     &[],
                 );
+            }
+
+            // Clean up expired closing entries unconditionally so they
+            // don't accumulate during sustained write activity.
+            let now = time::Instant::now();
+            if now.duration_since(last_cleanup) >= CLOSING_STREAM_CLEANUP_INTERVAL {
+                s.closing.retain(|_, cs| now.duration_since(cs.closed) < CLOSING_STREAM_CLEANUP_INTERVAL);
+                last_cleanup = now;
             }
 
             // Wake all backpressure-blocked writers
