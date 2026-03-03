@@ -113,7 +113,9 @@ struct MuxState {
     /// swaps it out, encrypts, and writes to the connection.
     write_buf: Vec<u8>,
     /// Wakers for streams blocked due to write buffer backpressure.
-    buffer_wakers: Vec<Waker>,
+    /// Wake-one: write_loop wakes the front; each successful writer
+    /// chain-wakes the next.
+    buffer_wakers: VecDeque<Waker>,
 
     /// Active streams indexed by stream ID.
     streams: HashMap<u32, Arc<StdMutex<StreamState>>>,
@@ -458,7 +460,7 @@ impl AsyncWrite for Stream {
         // Backpressure check
         let max_buf_size = max_payload * MAX_WRITE_BUF_FACTOR;
         if s.write_buf.len() + frame_size > max_buf_size {
-            s.buffer_wakers.push(cx.waker().clone());
+            s.buffer_wakers.push_back(cx.waker().clone());
             drop(s);
             if let Some(deadline) = this.write_deadline {
                 let sleep = this
@@ -485,6 +487,15 @@ impl AsyncWrite for Stream {
 
         // Single copy: directly into shared write buffer
         append_frame(&mut s.write_buf, header, &buf[..n]);
+
+        // Chain-wake: if there's still buffer space, wake the next
+        // backpressured writer so it can append without waiting for
+        // the write loop to drain.
+        if s.write_buf.len() + frame_size <= max_buf_size {
+            if let Some(w) = s.buffer_wakers.pop_front() {
+                w.wake();
+            }
+        }
 
         drop(s);
 
@@ -718,8 +729,9 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                 last_cleanup = now;
             }
 
-            // Wake all backpressure-blocked writers
-            for w in s.buffer_wakers.drain(..) {
+            // Wake one backpressure-blocked writer. That writer will
+            // chain-wake the next after it successfully appends its frame.
+            if let Some(w) = s.buffer_wakers.pop_front() {
                 w.wake();
             }
 
@@ -799,7 +811,7 @@ pub(crate) fn new_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     let max_frame_size = settings.max_frame_size();
     let mux_state = Arc::new(StdMutex::new(MuxState {
         write_buf: Vec::with_capacity(max_frame_size * 10),
-        buffer_wakers: Vec::new(),
+        buffer_wakers: VecDeque::new(),
         streams: HashMap::new(),
         closing: HashMap::new(),
         accept_queue: VecDeque::new(),
