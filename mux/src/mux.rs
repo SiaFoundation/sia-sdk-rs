@@ -1132,4 +1132,91 @@ mod tests {
         dial_mux.close().await.unwrap();
         accept_handle.await.unwrap();
     }
+
+    /// Verifies that the mux tolerates straggler frames for a closed stream
+    /// (below MAX_CLOSED_FRAMES) but kills the connection when the threshold
+    /// is exceeded (stream flood).
+    #[tokio::test]
+    async fn stream_flood_detection() {
+        // MAX_CLOSED_FRAMES is 1000. Each write() call produces one frame, and
+        // dropping the stream without close() adds one FLAG_LAST frame via Drop.
+
+        // --- Below threshold: mux survives ---
+        {
+            let (dial_mux, accept_mux) = new_testing_pair().await;
+
+            let accept_handle = tokio::spawn(async move {
+                let mut stream = accept_mux.accept_stream().await.unwrap();
+                let mut buf = [0u8; 16];
+                let _ = stream.read(&mut buf).await;
+                // Wait for the dialer's FLAG_LAST to arrive
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                // Write 999 frames. Drop will add 1 more (FLAG_LAST) = 1000 total.
+                // frame_count >= 1000 triggers flood, so 999 frames should be the
+                // last safe value. The Drop adds frame 1000, which triggers flood.
+                // To stay below, we need 998 writes + 1 Drop = 999 < 1000.
+                let payload = [0u8; 64];
+                for _ in 0..998 {
+                    let _ = stream.write(&payload).await;
+                }
+                // stream is dropped here → sends FLAG_LAST (frame 999)
+                // 999 total frames < 1000 threshold
+                drop(stream);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                accept_mux
+            });
+
+            let mut stream = dial_mux.dial_stream().unwrap();
+            stream.write_all(b"hello").await.unwrap();
+            stream.close().unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            // Mux should still be alive
+            let mut stream2 = dial_mux.dial_stream().expect("mux should survive 999 straggler frames");
+            stream2.write_all(b"still alive").await.unwrap();
+            stream2.close().unwrap();
+
+            let accept_mux = accept_handle.await.unwrap();
+            accept_mux.close().await.unwrap();
+            dial_mux.close().await.unwrap();
+        }
+
+        // --- At threshold: mux dies with StreamFlood ---
+        {
+            let (dial_mux, accept_mux) = new_testing_pair().await;
+
+            let accept_handle = tokio::spawn(async move {
+                let mut stream = accept_mux.accept_stream().await.unwrap();
+                let mut buf = [0u8; 16];
+                let _ = stream.read(&mut buf).await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                // 999 writes + 1 Drop FLAG_LAST = 1000 total → triggers flood
+                let payload = [0u8; 64];
+                for _ in 0..999 {
+                    if stream.write(&payload).await.is_err() {
+                        break;
+                    }
+                }
+                // stream dropped → FLAG_LAST = frame 1000 → triggers flood
+                drop(stream);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                accept_mux
+            });
+
+            let mut stream = dial_mux.dial_stream().unwrap();
+            stream.write_all(b"hello").await.unwrap();
+            stream.close().unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            // Mux should be dead
+            let result = dial_mux.dial_stream();
+            assert!(result.is_err(), "expected mux to be dead from stream flood");
+
+            let accept_mux = accept_handle.await.unwrap();
+            let _ = accept_mux.close().await;
+            let _ = dial_mux.close().await;
+        }
+    }
 }
