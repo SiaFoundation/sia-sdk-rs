@@ -122,16 +122,21 @@ impl<W: AsyncWrite + Unpin, C: PacketCipher> PacketWriter<W, C> {
         let total_size = num_packets * self.packet_size;
         buf.resize(total_size, 0);
 
-        // Work backwards so that shifting plaintext rightward (to make room
-        // for tags) never overwrites data we haven't processed yet.
-        for i in (0..num_packets).rev() {
+        // Pass 1 (backwards): shift each plaintext block rightward to its
+        // final position, making room for the AEAD tag that follows each
+        // block. Working backwards prevents overwrites.
+        for i in (1..num_packets).rev() {
             let src_start = i * max_frame_size;
             let dst_start = i * self.packet_size;
-            if src_start != dst_start {
-                buf.copy_within(src_start..src_start + max_frame_size, dst_start);
-            }
+            buf.copy_within(src_start..src_start + max_frame_size, dst_start);
+        }
+
+        // Pass 2 (forwards): encrypt each packet in order so that the
+        // sequential nonce matches the reader's decryption order.
+        for i in 0..num_packets {
+            let start = i * self.packet_size;
             self.cipher
-                .encrypt_in_place(&mut buf[dst_start..dst_start + self.packet_size]);
+                .encrypt_in_place(&mut buf[start..start + self.packet_size]);
         }
 
         self.writer.write_all(buf).await
