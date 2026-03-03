@@ -62,6 +62,11 @@ fn inc_nonce(nonce: &mut [u8; AEAD_NONCE_SIZE]) {
 
 impl PacketCipher for SeqCipher {
     fn encrypt_in_place(&mut self, buf: &mut [u8]) {
+        debug_assert!(
+            buf.len() >= AEAD_TAG_SIZE,
+            "encrypt_in_place: buffer too short ({} bytes, need at least {AEAD_TAG_SIZE})",
+            buf.len()
+        );
         let plaintext_len = buf.len() - AEAD_TAG_SIZE;
         let nonce = Nonce::assume_unique_for_key(self.our_nonce);
         let tag = self

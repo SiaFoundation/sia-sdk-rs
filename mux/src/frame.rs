@@ -95,6 +95,12 @@ pub(crate) trait PacketCipher {
     /// Encrypts `buf[..buf.len() - AEAD_TAG_SIZE]` in place, writing the
     /// authentication tag into the remaining bytes. Infallible because AEAD
     /// encryption cannot fail.
+    ///
+    /// # Panics
+    ///
+    /// `buf` must be at least `AEAD_TAG_SIZE` (16) bytes long. Passing a
+    /// shorter buffer causes a usize underflow when computing the plaintext
+    /// length, which is caught by a `debug_assert` in the implementation.
     fn encrypt_in_place(&mut self, buf: &mut [u8]);
 }
 
