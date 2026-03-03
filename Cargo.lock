@@ -1690,6 +1690,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
