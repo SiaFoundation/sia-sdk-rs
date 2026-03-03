@@ -104,7 +104,6 @@ pub(crate) struct PacketWriter<W, C> {
     packet_size: usize,
     /// Reusable output buffer for encryption. Separate from the plaintext
     /// buffer so we can do a single forward copy+encrypt pass (like Go)
-    /// instead of a backwards shift + forward encrypt.
     enc_buf: Vec<u8>,
 }
 
