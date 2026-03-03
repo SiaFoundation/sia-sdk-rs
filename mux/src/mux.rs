@@ -207,7 +207,7 @@ impl Mux {
             closed: false,
             read_deadline: None,
             write_deadline: None,
-            deadline_sleep: Box::pin(time::sleep(time::Duration::ZERO)),
+            deadline_sleep: None,
         })
     }
 
@@ -272,7 +272,7 @@ pub struct Stream {
     /// Pinned timer reused across polls to avoid spawning a new task per
     /// Pending return. Reset to the active deadline; polled alongside the
     /// data/write channel so the waker fires when the deadline expires.
-    deadline_sleep: Pin<Box<time::Sleep>>,
+    deadline_sleep: Option<Pin<Box<time::Sleep>>>,
 }
 
 impl Stream {
@@ -409,8 +409,11 @@ impl AsyncRead for Stream {
         drop(ss);
 
         if let Some(deadline) = this.read_deadline {
-            this.deadline_sleep.as_mut().reset(deadline);
-            let _ = this.deadline_sleep.as_mut().poll(cx);
+            let sleep = this
+                .deadline_sleep
+                .get_or_insert_with(|| Box::pin(time::sleep_until(deadline)));
+            sleep.as_mut().reset(deadline);
+            let _ = sleep.as_mut().poll(cx);
         }
 
         Poll::Pending
@@ -460,8 +463,11 @@ impl AsyncWrite for Stream {
             s.buffer_wakers.push(cx.waker().clone());
             drop(s);
             if let Some(deadline) = this.write_deadline {
-                this.deadline_sleep.as_mut().reset(deadline);
-                let _ = this.deadline_sleep.as_mut().poll(cx);
+                let sleep = this
+                    .deadline_sleep
+                    .get_or_insert_with(|| Box::pin(time::sleep_until(deadline)));
+                sleep.as_mut().reset(deadline);
+                let _ = sleep.as_mut().poll(cx);
             }
             return Poll::Pending;
         }
@@ -610,7 +616,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         closed: false,
                         read_deadline: None,
                         write_deadline: None,
-                        deadline_sleep: Box::pin(time::sleep(time::Duration::ZERO)),
+                        deadline_sleep: None,
                     };
 
                     s.accept_queue.push_back(stream);

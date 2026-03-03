@@ -77,14 +77,11 @@ fn bench_mux(c: &mut Criterion) {
                 let (dial_mux, accept_mux) = runtime.block_on(new_testing_pair());
                 spawn_discard_server(&runtime, accept_mux);
 
-                // Pre-open streams (matching the Go pattern where each goroutine
-                // opens one stream and writes b.N times).
-                // dial_stream() needs a Tokio runtime context for the timer.
-                let mut streams: Vec<_> = runtime.block_on(async {
-                    (0..num_streams)
-                        .map(|_| dial_mux.dial_stream().unwrap())
-                        .collect()
-                });
+                // Pre-open streams and write sequentially (Go writes concurrently
+                // via goroutines).
+                let mut streams: Vec<_> = (0..num_streams)
+                    .map(|_| dial_mux.dial_stream().unwrap())
+                    .collect();
                 let buf = vec![0u8; buf_size];
 
                 b.iter(|| {
