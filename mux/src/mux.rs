@@ -343,7 +343,6 @@ impl Drop for Stream {
             flags: FLAG_LAST,
         };
 
-        // Vec append always succeeds (unlike channel try_send which could fail).
         let mut s = self.mux_state.lock().unwrap();
         append_frame(&mut s.write_buf, header, &[]);
         s.streams.remove(&self.id);
@@ -449,7 +448,6 @@ impl AsyncWrite for Stream {
         let n = buf.len().min(max_payload);
         let frame_size = FRAME_HEADER_SIZE + n;
 
-        // Lock mux state (microsecond hold time)
         let mut s = this.mux_state.lock().unwrap();
 
         // Check fatal error
@@ -1034,7 +1032,7 @@ mod tests {
     }
 
     /// Verify that dropping a stream without calling close() still sends
-    /// FLAG_LAST to the peer (best-effort via try_send in Drop).
+    /// FLAG_LAST to the peer via the shared write buffer in Drop.
     #[tokio::test]
     async fn drop_sends_flag_last() {
         let (dial_mux, accept_mux) = new_testing_pair().await;
