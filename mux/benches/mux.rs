@@ -45,18 +45,17 @@ async fn new_testing_pair_with_settings(settings: ConnSettings) -> (Mux, Mux) {
 }
 
 /// Spawn a task that accepts streams and discards all data.
-/// Returns a handle that resolves to the Mux for explicit cleanup.
-fn spawn_discard_server(rt: &Runtime, mux: Mux) -> tokio::task::JoinHandle<Mux> {
+fn spawn_discard_server(rt: &Runtime, mux: Mux) {
     rt.spawn(async move {
         loop {
             let Ok(mut stream) = mux.accept_stream().await else {
-                return mux;
+                return;
             };
             tokio::spawn(async move {
                 let _ = copy(&mut stream, &mut sink()).await;
             });
         }
-    })
+    });
 }
 
 fn bench_mux(c: &mut Criterion) {
@@ -76,7 +75,7 @@ fn bench_mux(c: &mut Criterion) {
             &num_streams,
             |b, &num_streams| {
                 let (dial_mux, accept_mux) = runtime.block_on(new_testing_pair());
-                let server = spawn_discard_server(&runtime, accept_mux);
+                spawn_discard_server(&runtime, accept_mux);
 
                 // Pre-open streams and write sequentially (Go writes concurrently
                 // via goroutines).
@@ -99,7 +98,6 @@ fn bench_mux(c: &mut Criterion) {
                     }
                     drop(streams);
                     let _ = dial_mux.close().await;
-                    let _ = server.await.unwrap().close().await;
                 });
             },
         );
@@ -131,7 +129,7 @@ fn bench_packets(c: &mut Criterion) {
             |b, &buf_size| {
                 let (dial_mux, accept_mux) =
                     runtime.block_on(new_testing_pair_with_settings(settings));
-                let server = spawn_discard_server(&runtime, accept_mux);
+                spawn_discard_server(&runtime, accept_mux);
                 let mut stream = runtime.block_on(async {
                     let mut s = dial_mux.dial_stream().unwrap();
                     s.write_all(&[0u8]).await.unwrap();
@@ -148,7 +146,6 @@ fn bench_packets(c: &mut Criterion) {
                 runtime.block_on(async {
                     let _ = stream.close();
                     let _ = dial_mux.close().await;
-                    let _ = server.await.unwrap().close().await;
                 });
             },
         );
