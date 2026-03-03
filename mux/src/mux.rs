@@ -572,11 +572,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
     registry: Arc<StdMutex<StreamRegistry>>,
     settings: ConnSettings,
 ) {
-    let mut frame_buf = vec![0u8; settings.max_payload_size()];
-
     loop {
-        let (h, payload) = match reader.next_frame(&mut frame_buf).await {
-            Ok((h, p)) => (h, Bytes::copy_from_slice(p)),
+        let (h, payload) = match reader.next_frame().await {
+            Ok(frame) => frame,
             Err(e) => {
                 let err = if packet_reader_error_is_conn_close(&e) {
                     MuxError::PeerClosedConn
