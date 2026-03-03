@@ -1,5 +1,5 @@
 use bytes::{Bytes, BytesMut};
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main, black_box};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use indexd::mock::{MockDownloader, MockRHP4Client, MockUploader};
 use indexd::{DownloadOptions, Hosts, Object, UploadOptions};
 use rand::Rng;
