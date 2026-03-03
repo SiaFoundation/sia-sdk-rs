@@ -502,33 +502,7 @@ impl AsyncWrite for Stream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        if this.closed {
-            return Poll::Ready(Ok(()));
-        }
-
-        let header = FrameHeader {
-            id: this.id,
-            length: 0,
-            flags: FLAG_LAST,
-        };
-
-        {
-            let mut s = this.mux_state.lock().unwrap();
-            append_frame(&mut s.write_buf, header, &[]);
-            s.streams.remove(&this.id);
-            s.closing.insert(
-                this.id,
-                ClosingStreamEntry {
-                    frame_count: 0,
-                    closed: time::Instant::now(),
-                },
-            );
-        }
-
-        this.write_notify.notify_one();
-        this.closed = true;
-        Poll::Ready(Ok(()))
+        Poll::Ready(self.get_mut().close().map_err(Into::into))
     }
 }
 
