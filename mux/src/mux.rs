@@ -293,7 +293,7 @@ impl Stream {
     }
 
     /// Gracefully close this stream. Sends FLAG_LAST to the peer.
-    pub async fn close(&mut self) -> Result<(), MuxError> {
+    pub fn close(&mut self) -> Result<(), MuxError> {
         if self.closed {
             return Ok(());
         }
@@ -902,7 +902,7 @@ mod tests {
             let mut buf = vec![0u8; 1024];
             let n = stream.read(&mut buf).await.unwrap();
             stream.write_all(&buf[..n]).await.unwrap();
-            stream.close().await.unwrap();
+            stream.close().unwrap();
             accept_mux.close().await.unwrap();
         });
 
@@ -915,7 +915,7 @@ mod tests {
         let n = stream.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], msg);
 
-        stream.close().await.unwrap();
+        stream.close().unwrap();
         dial_mux.close().await.unwrap();
         accept_handle.await.unwrap();
     }
@@ -933,7 +933,7 @@ mod tests {
                     let mut buf = vec![0u8; 1024];
                     let n = stream.read(&mut buf).await.unwrap();
                     stream.write_all(&buf[..n]).await.unwrap();
-                    stream.close().await.unwrap();
+                    stream.close().unwrap();
                 });
             }
             // Wait a bit for all streams to finish, then close
@@ -951,7 +951,7 @@ mod tests {
                 let mut buf = vec![0u8; 1024];
                 let n = stream.read(&mut buf).await.unwrap();
                 assert_eq!(&buf[..n], msg.as_bytes());
-                stream.close().await.unwrap();
+                stream.close().unwrap();
             }));
         }
 
@@ -994,7 +994,7 @@ mod tests {
         // Clear deadline — set to None
         stream.set_read_deadline(None);
 
-        stream.close().await.unwrap();
+        stream.close().unwrap();
         dial_mux.close().await.unwrap();
         accept_handle.await.unwrap();
     }
@@ -1013,7 +1013,7 @@ mod tests {
             // Wait for peer to close — should see EOF, not hang.
             let n = stream.read(&mut buf).await.unwrap();
             assert_eq!(n, 0, "expected EOF after peer shutdown");
-            stream.close().await.unwrap();
+            stream.close().unwrap();
             accept_mux.close().await.unwrap();
         });
 
@@ -1045,7 +1045,7 @@ mod tests {
             // Peer drops without close — should still see EOF.
             let n = stream.read(&mut buf).await.unwrap();
             assert_eq!(n, 0, "expected EOF after peer drop");
-            stream.close().await.unwrap();
+            stream.close().unwrap();
             accept_mux.close().await.unwrap();
         });
 
@@ -1089,7 +1089,7 @@ mod tests {
             }
         }
 
-        stream.close().await.unwrap();
+        stream.close().unwrap();
         let accept_mux = server.await.unwrap();
         accept_mux.close().await.unwrap();
         dial_mux.close().await.unwrap();

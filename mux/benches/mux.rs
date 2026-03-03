@@ -95,7 +95,7 @@ fn bench_mux(c: &mut Criterion) {
 
                 runtime.block_on(async {
                     for s in &mut streams {
-                        let _ = s.close().await;
+                        let _ = s.close();
                     }
                     drop(streams);
                     let _ = dial_mux.close().await;
@@ -145,7 +145,7 @@ fn bench_packets(c: &mut Criterion) {
                 });
 
                 runtime.block_on(async {
-                    let _ = stream.close().await;
+                    let _ = stream.close();
                     let _ = dial_mux.close().await;
                     let _ = server.await.unwrap().close().await;
                 });
