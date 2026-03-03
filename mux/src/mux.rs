@@ -478,10 +478,10 @@ impl AsyncWrite for Stream {
         // Chain-wake: if there's still buffer space, wake the next
         // backpressured writer so it can append without waiting for
         // the write loop to drain.
-        if s.write_buf.len() + frame_size <= max_buf_size {
-            if let Some(w) = s.buffer_wakers.pop_front() {
-                w.wake();
-            }
+        if s.write_buf.len() + frame_size <= max_buf_size
+            && let Some(w) = s.buffer_wakers.pop_front()
+        {
+            w.wake();
         }
 
         drop(s);
@@ -712,7 +712,9 @@ async fn write_loop<W: AsyncWrite + Unpin>(
             // don't accumulate during sustained write activity.
             let now = time::Instant::now();
             if now.duration_since(last_cleanup) >= CLOSING_STREAM_CLEANUP_INTERVAL {
-                s.closing.retain(|_, cs| now.duration_since(cs.closed) < CLOSING_STREAM_CLEANUP_INTERVAL);
+                s.closing.retain(|_, cs| {
+                    now.duration_since(cs.closed) < CLOSING_STREAM_CLEANUP_INTERVAL
+                });
                 last_cleanup = now;
             }
 
