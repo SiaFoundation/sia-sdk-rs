@@ -88,11 +88,38 @@ pub(crate) const CONN_SETTINGS_SIZE: usize = 4 + 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnSettings {
-    pub packet_size: u32,
-    pub max_timeout: Duration,
+    pub(crate) packet_size: u32,
+    pub(crate) max_timeout: Duration,
 }
 
 impl ConnSettings {
+    pub fn new(packet_size: u32, max_timeout: Duration) -> Result<Self, ConnSettingsError> {
+        if packet_size < 1220 {
+            return Err(ConnSettingsError::PacketSizeTooSmall(packet_size));
+        }
+        if packet_size > 32768 {
+            return Err(ConnSettingsError::PacketSizeTooLarge(packet_size));
+        }
+        if max_timeout < Duration::from_secs(2 * 60) {
+            return Err(ConnSettingsError::TimeoutTooShort(max_timeout));
+        }
+        if max_timeout > Duration::from_secs(2 * 60 * 60) {
+            return Err(ConnSettingsError::TimeoutTooLong(max_timeout));
+        }
+        Ok(Self {
+            packet_size,
+            max_timeout,
+        })
+    }
+
+    pub fn packet_size(&self) -> u32 {
+        self.packet_size
+    }
+
+    pub fn max_timeout(&self) -> Duration {
+        self.max_timeout
+    }
+
     pub fn max_frame_size(&self) -> usize {
         self.packet_size as usize - AEAD_TAG_SIZE
     }

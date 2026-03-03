@@ -13,7 +13,7 @@ use crate::handshake::{HandshakeError, accept_handshake, initiate_handshake};
 use crate::mux::new_mux;
 
 // Re-export key public types.
-pub use crate::handshake::{ConnSettings, IPV6_MTU};
+pub use crate::handshake::{ConnSettings, ConnSettingsError, IPV6_MTU};
 pub use crate::mux::{Mux, MuxError, Stream};
 
 const OUR_VERSION: u8 = 3;

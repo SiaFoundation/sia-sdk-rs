@@ -117,10 +117,11 @@ fn bench_packets(c: &mut Criterion) {
     let mut group = c.benchmark_group("packets");
 
     for multiplier in [1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20] {
-        let settings = ConnSettings {
-            packet_size: IPV6_MTU * multiplier,
-            ..Default::default()
-        };
+        let settings = ConnSettings::new(
+            IPV6_MTU * multiplier,
+            ConnSettings::default().max_timeout(),
+        )
+        .unwrap();
         let buf_size = settings.max_payload_size();
         group.throughput(Throughput::Bytes(buf_size as u64));
 
