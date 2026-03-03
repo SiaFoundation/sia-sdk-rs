@@ -1,5 +1,5 @@
 use bytes::{Bytes, BytesMut};
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main, black_box};
 use indexd::mock::{MockDownloader, MockRHP4Client, MockUploader};
 use indexd::{DownloadOptions, Hosts, Object, UploadOptions};
 use rand::Rng;
@@ -105,18 +105,25 @@ fn upload_benchmark(c: &mut Criterion) {
         BenchmarkId::new("upload", "90 inflight"),
         &input,
         |b, input| {
-            b.to_async(&runtime).iter(|| async {
-                upload_object(
-                    uploader.clone(),
-                    input.clone(),
-                    UploadOptions {
-                        max_inflight: 90,
-                        ..Default::default()
-                    },
-                )
-                .await;
+            let transport = transport.clone();
+            b.to_async(&runtime).iter(|| {
+                let transport = transport.clone();
+                let uploader = uploader.clone();
+                let input = input.clone();
+                async move {
+                    let obj = upload_object(
+                        uploader,
+                        input,
+                        UploadOptions {
+                            max_inflight: 90,
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                    transport.clear();
+                    black_box(obj)
+                }
             });
-            transport.clear();
         },
     );
 
@@ -124,26 +131,40 @@ fn upload_benchmark(c: &mut Criterion) {
         BenchmarkId::new("upload", "10 inflight"),
         &input,
         |b, input| {
-            b.to_async(&runtime).iter(|| async {
-                upload_object(
-                    uploader.clone(),
-                    input.clone(),
-                    UploadOptions {
-                        max_inflight: 10,
-                        ..Default::default()
-                    },
-                )
-                .await;
+            let transport = transport.clone();
+            b.to_async(&runtime).iter(|| {
+                let transport = transport.clone();
+                let uploader = uploader.clone();
+                let input = input.clone();
+                async move {
+                    let obj = upload_object(
+                        uploader,
+                        input,
+                        UploadOptions {
+                            max_inflight: 10,
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                    transport.clear();
+                    black_box(obj)
+                }
             });
-            transport.clear();
         },
     );
 
     large_group.bench_with_input(BenchmarkId::new("upload", "default"), &input, |b, input| {
-        b.to_async(&runtime).iter(|| async {
-            upload_object(uploader.clone(), input.clone(), UploadOptions::default()).await;
+        let transport = transport.clone();
+        b.to_async(&runtime).iter(|| {
+            let transport = transport.clone();
+            let uploader = uploader.clone();
+            let input = input.clone();
+            async move {
+                let obj = upload_object(uploader, input, UploadOptions::default()).await;
+                transport.clear();
+                black_box(obj)
+            }
         });
-        transport.clear();
     });
 
     let object = runtime.block_on(async {
@@ -219,7 +240,7 @@ fn upload_benchmark(c: &mut Criterion) {
                         .download(&mut w, &object, DownloadOptions::default())
                         .await
                         .expect("download to complete");
-                    total += w.ttfb().unwrap_or_else(|| w.start.elapsed());
+                    total += w.ttfb().expect("download produced no output");
                 }
                 total
             }
@@ -245,7 +266,7 @@ fn upload_benchmark(c: &mut Criterion) {
                         )
                         .await
                         .expect("download to complete");
-                    total += w.ttfb().unwrap_or_else(|| w.start.elapsed());
+                    total += w.ttfb().expect("download produced no output");
                 }
                 total
             }
