@@ -494,6 +494,9 @@ impl AsyncWrite for Stream {
         Poll::Ready(Ok(n))
     }
 
+    /// No-op. Writes are buffered in shared memory and flushed to the
+    /// wire asynchronously by the mux write loop; there is no mechanism
+    /// to block until a specific write has been transmitted.
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
