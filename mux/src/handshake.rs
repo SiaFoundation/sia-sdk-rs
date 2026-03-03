@@ -250,11 +250,15 @@ pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
         .update(our_xpk.as_bytes())
         .update(their_xpk.as_bytes())
         .finalize();
-    let key_bytes: [u8; 32] = key
-        .as_bytes()
-        .try_into()
-        .expect("blake2b output is 32 bytes");
-    let mut cipher = SeqCipher::new(&key_bytes);
+    let mut result = HandshakeResult {
+        key: key
+            .as_bytes()
+            .try_into()
+            .expect("blake2b output is 32 bytes"),
+        our_nonce: [0u8; AEAD_NONCE_SIZE],
+        their_nonce: [0u8; AEAD_NONCE_SIZE],
+    };
+    let mut cipher = SeqCipher::new(&result.key);
     // initiator flips their_nonce high bit
     cipher.their_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
 
@@ -277,11 +281,8 @@ pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
         .await
         .map_err(HandshakeError::WriteSettings)?;
 
-    let result = HandshakeResult {
-        key: key_bytes,
-        our_nonce: cipher.our_nonce,
-        their_nonce: cipher.their_nonce,
-    };
+    result.our_nonce = cipher.our_nonce;
+    result.their_nonce = cipher.their_nonce;
     Ok((result, merged))
 }
 
@@ -311,11 +312,15 @@ pub(crate) async fn accept_handshake<T: AsyncRead + AsyncWrite + Unpin>(
         .update(&their_xpk_bytes)
         .update(our_xpk.as_bytes())
         .finalize();
-    let key_bytes: [u8; 32] = key
-        .as_bytes()
-        .try_into()
-        .expect("blake2b output is 32 bytes");
-    let mut cipher = SeqCipher::new(&key_bytes);
+    let mut result = HandshakeResult {
+        key: key
+            .as_bytes()
+            .try_into()
+            .expect("blake2b output is 32 bytes"),
+        our_nonce: [0u8; AEAD_NONCE_SIZE],
+        their_nonce: [0u8; AEAD_NONCE_SIZE],
+    };
+    let mut cipher = SeqCipher::new(&result.key);
     // responder flips our_nonce high bit
     cipher.our_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
 
@@ -351,11 +356,8 @@ pub(crate) async fn accept_handshake<T: AsyncRead + AsyncWrite + Unpin>(
     let merged = merge_settings(our_settings, their_settings)
         .map_err(HandshakeError::UnacceptableSettings)?;
 
-    let result = HandshakeResult {
-        key: key_bytes,
-        our_nonce: cipher.our_nonce,
-        their_nonce: cipher.their_nonce,
-    };
+    result.our_nonce = cipher.our_nonce;
+    result.their_nonce = cipher.their_nonce;
     Ok((result, merged))
 }
 
