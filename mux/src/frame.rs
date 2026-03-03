@@ -102,6 +102,10 @@ pub(crate) struct PacketWriter<W, C> {
     writer: W,
     cipher: C,
     packet_size: usize,
+    /// Reusable output buffer for encryption. Separate from the plaintext
+    /// buffer so we can do a single forward copy+encrypt pass (like Go)
+    /// instead of a backwards shift + forward encrypt.
+    enc_buf: Vec<u8>,
 }
 
 impl<W: AsyncWrite + Unpin, C: PacketCipher> PacketWriter<W, C> {
@@ -110,36 +114,33 @@ impl<W: AsyncWrite + Unpin, C: PacketCipher> PacketWriter<W, C> {
             writer,
             cipher,
             packet_size,
+            enc_buf: Vec::new(),
         }
     }
 
-    /// Encrypts `buf` in place and writes the resulting packets to the
-    /// underlying writer. The caller must ensure `buf.len()` is a multiple of
-    /// `max_frame_size` (`packet_size - AEAD_TAG_SIZE`).
-    pub async fn write_encrypted(&mut self, buf: &mut Vec<u8>) -> Result<(), io::Error> {
+    /// Encrypts plaintext from `buf` into a separate output buffer and writes
+    /// the resulting packets to the underlying writer. The caller must ensure
+    /// `buf.len()` is a multiple of `max_frame_size` (`packet_size - AEAD_TAG_SIZE`).
+    pub async fn write_encrypted(&mut self, buf: &[u8]) -> Result<(), io::Error> {
         let max_frame_size = self.packet_size - AEAD_TAG_SIZE;
         let num_packets = buf.len() / max_frame_size;
         let total_size = num_packets * self.packet_size;
-        buf.resize(total_size, 0);
 
-        // Pass 1 (backwards): shift each plaintext block rightward to its
-        // final position, making room for the AEAD tag that follows each
-        // block. Working backwards prevents overwrites.
-        for i in (1..num_packets).rev() {
+        // Resize output buffer (reuses allocation across calls)
+        self.enc_buf.resize(total_size, 0);
+
+        // Single forward pass: copy each plaintext block into the output
+        // buffer (with gaps for AEAD tags) and encrypt in place.
+        for i in 0..num_packets {
             let src_start = i * max_frame_size;
             let dst_start = i * self.packet_size;
-            buf.copy_within(src_start..src_start + max_frame_size, dst_start);
-        }
-
-        // Pass 2 (forwards): encrypt each packet in order so that the
-        // sequential nonce matches the reader's decryption order.
-        for i in 0..num_packets {
-            let start = i * self.packet_size;
+            self.enc_buf[dst_start..dst_start + max_frame_size]
+                .copy_from_slice(&buf[src_start..src_start + max_frame_size]);
             self.cipher
-                .encrypt_in_place(&mut buf[start..start + self.packet_size]);
+                .encrypt_in_place(&mut self.enc_buf[dst_start..dst_start + self.packet_size]);
         }
 
-        self.writer.write_all(buf).await
+        self.writer.write_all(&self.enc_buf[..total_size]).await
     }
 }
 
@@ -376,7 +377,7 @@ mod tests {
         let mut plaintext = vec![0u8; MAX_FRAME];
         plaintext[..13].copy_from_slice(b"hello, world!");
 
-        writer.write_encrypted(&mut plaintext).await.unwrap();
+        writer.write_encrypted(&plaintext).await.unwrap();
         drop(writer);
 
         let mut buf = vec![0u8; MAX_FRAME];
@@ -403,7 +404,7 @@ mod tests {
         }
         let expected = plaintext.clone();
 
-        writer.write_encrypted(&mut plaintext).await.unwrap();
+        writer.write_encrypted(&plaintext).await.unwrap();
         drop(writer);
 
         let mut result = vec![0u8; expected.len()];
@@ -438,7 +439,7 @@ mod tests {
         plaintext[..FRAME_HEADER_SIZE].copy_from_slice(&header_bytes);
         plaintext[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + 5].copy_from_slice(b"hello");
 
-        writer.write_encrypted(&mut plaintext).await.unwrap();
+        writer.write_encrypted(&plaintext).await.unwrap();
         drop(writer);
 
         let (h, payload) = reader.next_frame().await.unwrap();
@@ -481,7 +482,7 @@ mod tests {
         plaintext[MAX_FRAME + FRAME_HEADER_SIZE..MAX_FRAME + FRAME_HEADER_SIZE + 6]
             .copy_from_slice(b"barbaz");
 
-        writer.write_encrypted(&mut plaintext).await.unwrap();
+        writer.write_encrypted(&plaintext).await.unwrap();
         drop(writer);
 
         let (rh1, rp1) = reader.next_frame().await.unwrap();
