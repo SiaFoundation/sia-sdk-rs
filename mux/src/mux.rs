@@ -299,6 +299,17 @@ impl Stream {
         if self.closed {
             return Ok(());
         }
+        let err = self.send_close_frame();
+        match err {
+            Some(MuxError::PeerClosedConn | MuxError::ClosedConn) | None => Ok(()),
+            Some(e) => Err(e),
+        }
+    }
+
+    /// Append a FLAG_LAST frame to the write buffer, move the stream from
+    /// active to closing, and notify the write loop. Returns any pre-existing
+    /// fatal error from the mux.
+    fn send_close_frame(&mut self) -> Option<MuxError> {
         self.closed = true;
 
         let header = FrameHeader {
@@ -307,9 +318,9 @@ impl Stream {
             flags: FLAG_LAST,
         };
 
-        {
+        let err = {
             let mut s = self.mux_state.lock().unwrap();
-            let result_err = s.err.clone();
+            let err = s.err.clone();
             append_frame(&mut s.write_buf, header, &[]);
             s.streams.remove(&self.id);
             s.closing.insert(
@@ -319,16 +330,11 @@ impl Stream {
                     closed: time::Instant::now(),
                 },
             );
-            if let Some(err) = result_err {
-                return match err {
-                    MuxError::PeerClosedConn | MuxError::ClosedConn => Ok(()),
-                    e => Err(e),
-                };
-            }
-        }
+            err
+        };
 
         self.write_notify.notify_one();
-        Ok(())
+        err
     }
 }
 
@@ -337,26 +343,7 @@ impl Drop for Stream {
         if self.closed {
             return;
         }
-        self.closed = true;
-
-        let header = FrameHeader {
-            id: self.id,
-            length: 0,
-            flags: FLAG_LAST,
-        };
-
-        let mut s = self.mux_state.lock().unwrap();
-        append_frame(&mut s.write_buf, header, &[]);
-        s.streams.remove(&self.id);
-        s.closing.insert(
-            self.id,
-            ClosingStreamEntry {
-                frame_count: 0,
-                closed: time::Instant::now(),
-            },
-        );
-        drop(s);
-        self.write_notify.notify_one();
+        self.send_close_frame();
     }
 }
 
