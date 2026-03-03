@@ -11,10 +11,11 @@ use thiserror::Error;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::handshake::{ConnSettings, HandshakeError, accept_handshake, initiate_handshake};
+use crate::handshake::{HandshakeError, accept_handshake, initiate_handshake};
 use crate::mux::new_mux;
 
 // Re-export key public types.
+pub use crate::handshake::{ConnSettings, IPV6_MTU};
 pub use crate::mux::{Mux, MuxError, Stream};
 
 const OUR_VERSION: u8 = 3;
@@ -51,36 +52,49 @@ fn validate_peer_version(v: u8) -> Result<(), DialError> {
 
 /// Perform the mux handshake as the initiating (dialing) peer.
 pub async fn dial<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
-    mut conn: T,
+    conn: T,
     their_key: &VerifyingKey,
 ) -> Result<Mux, DialError> {
-    // Version exchange: dialer writes first, then reads.
+    dial_with_settings(conn, their_key, ConnSettings::default()).await
+}
+
+/// Perform the mux handshake as the initiating (dialing) peer with custom settings.
+pub async fn dial_with_settings<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    mut conn: T,
+    their_key: &VerifyingKey,
+    settings: ConnSettings,
+) -> Result<Mux, DialError> {
     conn.write_u8(OUR_VERSION)
         .await
         .map_err(DialError::WriteVersion)?;
     let their_version = conn.read_u8().await.map_err(DialError::ReadVersion)?;
     validate_peer_version(their_version)?;
 
-    let settings = ConnSettings::default();
     let (cipher, merged) = initiate_handshake(&mut conn, their_key, settings).await?;
     Ok(new_mux(conn, cipher, merged, 0))
 }
 
 /// Perform the mux handshake as the accepting (listening) peer.
 pub async fn accept<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
-    mut conn: T,
+    conn: T,
     our_key: &SigningKey,
 ) -> Result<Mux, DialError> {
-    // Version exchange: acceptor reads first, then writes.
+    accept_with_settings(conn, our_key, ConnSettings::default()).await
+}
+
+/// Perform the mux handshake as the accepting (listening) peer with custom settings.
+pub async fn accept_with_settings<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    mut conn: T,
+    our_key: &SigningKey,
+    settings: ConnSettings,
+) -> Result<Mux, DialError> {
     let their_version = conn.read_u8().await.map_err(DialError::ReadVersion)?;
     validate_peer_version(their_version)?;
     conn.write_u8(OUR_VERSION)
         .await
         .map_err(DialError::WriteVersion)?;
 
-    let settings = ConnSettings::default();
     let (cipher, merged) = accept_handshake(&mut conn, our_key, settings).await?;
-    // Acceptor uses odd stream IDs to avoid collisions with dialer
     Ok(new_mux(conn, cipher, merged, 1))
 }
 
@@ -92,10 +106,26 @@ pub async fn dial_anonymous<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     dial(conn, &ANON_VERIFYING_KEY).await
 }
 
+/// Dial without identity verification and with custom settings.
+pub async fn dial_anonymous_with_settings<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    conn: T,
+    settings: ConnSettings,
+) -> Result<Mux, DialError> {
+    dial_with_settings(conn, &ANON_VERIFYING_KEY, settings).await
+}
+
 /// Accept without identity verification (anonymous mode).
 /// The counterparty must initiate with [`dial_anonymous`].
 pub async fn accept_anonymous<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     conn: T,
 ) -> Result<Mux, DialError> {
     accept(conn, &ANON_SIGNING_KEY).await
+}
+
+/// Accept without identity verification and with custom settings.
+pub async fn accept_anonymous_with_settings<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    conn: T,
+    settings: ConnSettings,
+) -> Result<Mux, DialError> {
+    accept_with_settings(conn, &ANON_SIGNING_KEY, settings).await
 }
