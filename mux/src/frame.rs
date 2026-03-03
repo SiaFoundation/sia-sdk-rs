@@ -258,7 +258,7 @@ impl<R: AsyncRead + Unpin, C: PacketCipher> PacketReader<R, C> {
 
     /// Reads decrypted data into `p`. Reads and decrypts packets from the
     /// underlying reader as needed.
-    pub async fn read(&mut self, p: &mut [u8]) -> Result<usize, io::Error> {
+    async fn read(&mut self, p: &mut [u8]) -> Result<usize, io::Error> {
         if self.decrypted.is_empty() {
             self.ensure_decrypted(1).await?;
         }
