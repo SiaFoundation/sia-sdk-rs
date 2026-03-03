@@ -15,6 +15,14 @@ use crate::frame::{AEAD_NONCE_SIZE, AEAD_TAG_SIZE, FRAME_HEADER_SIZE, PacketCiph
 
 const X25519_PUBLIC_KEY_SIZE: usize = 32;
 
+/// Result of a successful handshake: the raw symmetric key and nonce
+/// configuration needed to construct read/write ciphers.
+pub(crate) struct HandshakeResult {
+    pub key: [u8; 32],
+    pub our_nonce: [u8; AEAD_NONCE_SIZE],
+    pub their_nonce: [u8; AEAD_NONCE_SIZE],
+}
+
 /// ChaCha20-Poly1305 cipher with sequential nonces for the mux packet protocol.
 ///
 /// Maintains separate send (`our_nonce`) and receive (`their_nonce`) counters,
@@ -24,30 +32,15 @@ const X25519_PUBLIC_KEY_SIZE: usize = 32;
 /// bidirectional nonce scheme.
 pub(crate) struct SeqCipher {
     aead: LessSafeKey,
-    key_bytes: [u8; 32],
     pub(crate) our_nonce: [u8; AEAD_NONCE_SIZE],
     pub(crate) their_nonce: [u8; AEAD_NONCE_SIZE],
 }
 
-impl Clone for SeqCipher {
-    fn clone(&self) -> Self {
-        let unbound =
-            UnboundKey::new(&CHACHA20_POLY1305, &self.key_bytes).expect("key bytes are valid");
-        Self {
-            aead: LessSafeKey::new(unbound),
-            key_bytes: self.key_bytes,
-            our_nonce: self.our_nonce,
-            their_nonce: self.their_nonce,
-        }
-    }
-}
-
 impl SeqCipher {
-    fn new(key: &[u8; 32]) -> Self {
+    pub(crate) fn new(key: &[u8; 32]) -> Self {
         let unbound = UnboundKey::new(&CHACHA20_POLY1305, key).expect("key is 32 bytes");
         Self {
             aead: LessSafeKey::new(unbound),
-            key_bytes: *key,
             our_nonce: [0u8; AEAD_NONCE_SIZE],
             their_nonce: [0u8; AEAD_NONCE_SIZE],
         }
@@ -212,7 +205,7 @@ pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
     conn: &mut T,
     their_key: &VerifyingKey,
     our_settings: ConnSettings,
-) -> Result<(SeqCipher, ConnSettings), HandshakeError> {
+) -> Result<(HandshakeResult, ConnSettings), HandshakeError> {
     let our_secret = EphemeralSecret::random_from_rng(rand_core::OsRng);
     let our_xpk = PublicKey::from(&our_secret);
 
@@ -254,11 +247,11 @@ pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
         .update(our_xpk.as_bytes())
         .update(their_xpk.as_bytes())
         .finalize();
-    let mut cipher = SeqCipher::new(
-        key.as_bytes()
-            .try_into()
-            .expect("blake2b output is 32 bytes"),
-    );
+    let key_bytes: [u8; 32] = key
+        .as_bytes()
+        .try_into()
+        .expect("blake2b output is 32 bytes");
+    let mut cipher = SeqCipher::new(&key_bytes);
     // initiator flips their_nonce high bit
     cipher.their_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
 
@@ -281,14 +274,19 @@ pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
         .await
         .map_err(HandshakeError::WriteSettings)?;
 
-    Ok((cipher, merged))
+    let result = HandshakeResult {
+        key: key_bytes,
+        our_nonce: cipher.our_nonce,
+        their_nonce: cipher.their_nonce,
+    };
+    Ok((result, merged))
 }
 
 pub(crate) async fn accept_handshake<T: AsyncRead + AsyncWrite + Unpin>(
     conn: &mut T,
     our_key: &SigningKey,
     our_settings: ConnSettings,
-) -> Result<(SeqCipher, ConnSettings), HandshakeError> {
+) -> Result<(HandshakeResult, ConnSettings), HandshakeError> {
     let our_secret = EphemeralSecret::random_from_rng(rand_core::OsRng);
     let our_xpk = PublicKey::from(&our_secret);
 
@@ -310,11 +308,11 @@ pub(crate) async fn accept_handshake<T: AsyncRead + AsyncWrite + Unpin>(
         .update(&their_xpk_bytes)
         .update(our_xpk.as_bytes())
         .finalize();
-    let mut cipher = SeqCipher::new(
-        key.as_bytes()
-            .try_into()
-            .expect("blake2b output is 32 bytes"),
-    );
+    let key_bytes: [u8; 32] = key
+        .as_bytes()
+        .try_into()
+        .expect("blake2b output is 32 bytes");
+    let mut cipher = SeqCipher::new(&key_bytes);
     // responder flips our_nonce high bit
     cipher.our_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
 
@@ -350,7 +348,12 @@ pub(crate) async fn accept_handshake<T: AsyncRead + AsyncWrite + Unpin>(
     let merged = merge_settings(our_settings, their_settings)
         .map_err(HandshakeError::UnacceptableSettings)?;
 
-    Ok((cipher, merged))
+    let result = HandshakeResult {
+        key: key_bytes,
+        our_nonce: cipher.our_nonce,
+        their_nonce: cipher.their_nonce,
+    };
+    Ok((result, merged))
 }
 
 pub(crate) fn merge_settings(

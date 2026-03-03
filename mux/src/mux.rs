@@ -16,7 +16,7 @@ use crate::frame::{
     FLAG_ERROR, FLAG_FIRST, FLAG_LAST, FRAME_HEADER_SIZE, FrameHeader, ID_KEEPALIVE,
     ID_LOWEST_STREAM, PacketReader, PacketReaderError, PacketWriter, append_frame,
 };
-use crate::handshake::{ConnSettings, SeqCipher};
+use crate::handshake::{ConnSettings, HandshakeResult, SeqCipher};
 
 /// Grace period before removing a closed stream from tracking.
 const CLOSING_STREAM_CLEANUP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -784,15 +784,21 @@ fn set_fatal_error(mux_state: &Arc<StdMutex<MuxState>>, err: MuxError) {
 
 pub(crate) fn new_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     conn: T,
-    cipher: SeqCipher,
+    mut result: HandshakeResult,
     settings: ConnSettings,
     id_offset: u32,
 ) -> Mux {
     let (read_half, write_half) = tokio::io::split(conn);
 
-    // Clone cipher: one for reading (decrypt), one for writing (encrypt)
-    let read_cipher = cipher.clone();
-    let write_cipher = cipher;
+    // Construct independent read/write ciphers from the raw key, then zeroize it.
+    // The writer only uses our_nonce (encrypt), the reader only uses their_nonce (decrypt).
+    let mut read_cipher = SeqCipher::new(&result.key);
+    read_cipher.our_nonce = result.our_nonce;
+    read_cipher.their_nonce = result.their_nonce;
+    let mut write_cipher = SeqCipher::new(&result.key);
+    write_cipher.our_nonce = result.our_nonce;
+    write_cipher.their_nonce = result.their_nonce;
+    result.key.fill(0);
 
     let packet_reader = PacketReader::new(read_half, read_cipher, settings.packet_size as usize);
     let packet_writer = PacketWriter::new(write_half, write_cipher, settings.packet_size as usize);

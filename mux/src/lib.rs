@@ -68,8 +68,8 @@ pub async fn dial_with_settings<T: AsyncRead + AsyncWrite + Unpin + Send + 'stat
     let their_version = conn.read_u8().await.map_err(DialError::ReadVersion)?;
     validate_peer_version(their_version)?;
 
-    let (cipher, merged) = initiate_handshake(&mut conn, their_key, settings).await?;
-    Ok(new_mux(conn, cipher, merged, 0))
+    let (result, merged) = initiate_handshake(&mut conn, their_key, settings).await?;
+    Ok(new_mux(conn, result, merged, 0))
 }
 
 /// Perform the mux handshake as the accepting (listening) peer.
@@ -92,8 +92,8 @@ pub async fn accept_with_settings<T: AsyncRead + AsyncWrite + Unpin + Send + 'st
         .await
         .map_err(DialError::WriteVersion)?;
 
-    let (cipher, merged) = accept_handshake(&mut conn, our_key, settings).await?;
-    Ok(new_mux(conn, cipher, merged, 1))
+    let (result, merged) = accept_handshake(&mut conn, our_key, settings).await?;
+    Ok(new_mux(conn, result, merged, 1))
 }
 
 /// Dial without identity verification (anonymous mode).
