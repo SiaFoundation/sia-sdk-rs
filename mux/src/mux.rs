@@ -784,21 +784,21 @@ fn set_fatal_error(mux_state: &Arc<StdMutex<MuxState>>, err: MuxError) {
 
 pub(crate) fn new_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     conn: T,
-    mut result: HandshakeResult,
+    result: HandshakeResult,
     settings: ConnSettings,
     id_offset: u32,
 ) -> Mux {
     let (read_half, write_half) = tokio::io::split(conn);
 
-    // Construct independent read/write ciphers from the raw key, then zeroize it.
+    // Construct independent read/write ciphers from the raw key.
     // The writer only uses our_nonce (encrypt), the reader only uses their_nonce (decrypt).
+    // HandshakeResult is ZeroizeOnDrop so key material is cleared when `result` drops.
     let mut read_cipher = SeqCipher::new(&result.key);
     read_cipher.our_nonce = result.our_nonce;
     read_cipher.their_nonce = result.their_nonce;
     let mut write_cipher = SeqCipher::new(&result.key);
     write_cipher.our_nonce = result.our_nonce;
     write_cipher.their_nonce = result.their_nonce;
-    result.key.fill(0);
 
     let packet_reader = PacketReader::new(read_half, read_cipher, settings.packet_size as usize);
     let packet_writer = PacketWriter::new(write_half, write_cipher, settings.packet_size as usize);

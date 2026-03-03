@@ -11,12 +11,15 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
 use crate::frame::{AEAD_NONCE_SIZE, AEAD_TAG_SIZE, FRAME_HEADER_SIZE, PacketCipher};
 
 const X25519_PUBLIC_KEY_SIZE: usize = 32;
 
 /// Result of a successful handshake: the raw symmetric key and nonce
 /// configuration needed to construct read/write ciphers.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct HandshakeResult {
     pub key: [u8; 32],
     pub our_nonce: [u8; AEAD_NONCE_SIZE],
