@@ -1,17 +1,9 @@
-// chacha20poly1305 0.10.x re-exports generic-array 0.x which is deprecated.
-// Remove this allow when upgrading to chacha20poly1305 0.11.0 stable.
-#![allow(deprecated)]
-
 use std::io;
 
-use chacha20poly1305::aead::AeadInPlace;
-use chacha20poly1305::aead::generic_array::GenericArray;
-use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
+use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 
 use ed25519_dalek::{SIGNATURE_LENGTH, Signer, SigningKey, Verifier, VerifyingKey};
 use x25519_dalek::{EphemeralSecret, PublicKey};
-
-const X25519_PUBLIC_KEY_SIZE: usize = 32;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -19,13 +11,43 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
 use crate::frame::{AEAD_NONCE_SIZE, AEAD_TAG_SIZE, FRAME_HEADER_SIZE, PacketCipher};
 
-#[derive(Clone)]
+const X25519_PUBLIC_KEY_SIZE: usize = 32;
+
+/// Result of a successful handshake: the raw symmetric key and nonce
+/// configuration needed to construct read/write ciphers.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct HandshakeResult {
+    pub key: [u8; 32],
+    pub our_nonce: [u8; AEAD_NONCE_SIZE],
+    pub their_nonce: [u8; AEAD_NONCE_SIZE],
+}
+
+/// ChaCha20-Poly1305 cipher with sequential nonces for the mux packet protocol.
+///
+/// Maintains separate send (`our_nonce`) and receive (`their_nonce`) counters,
+/// each incremented after every encrypt/decrypt. The handshake sets initial
+/// nonce values with a flipped high bit to distinguish directions. Uses
+/// `LessSafeKey` because `ring`'s safer key types don't support this
+/// bidirectional nonce scheme.
 pub(crate) struct SeqCipher {
-    aead: chacha20poly1305::ChaCha20Poly1305,
+    aead: LessSafeKey,
     pub(crate) our_nonce: [u8; AEAD_NONCE_SIZE],
     pub(crate) their_nonce: [u8; AEAD_NONCE_SIZE],
+}
+
+impl SeqCipher {
+    pub(crate) fn new(key: &[u8; 32]) -> Self {
+        let unbound = UnboundKey::new(&CHACHA20_POLY1305, key).expect("key is 32 bytes");
+        Self {
+            aead: LessSafeKey::new(unbound),
+            our_nonce: [0u8; AEAD_NONCE_SIZE],
+            their_nonce: [0u8; AEAD_NONCE_SIZE],
+        }
+    }
 }
 
 /// Increments the first 8 bytes of a nonce as a little-endian u64.
@@ -36,40 +58,74 @@ fn inc_nonce(nonce: &mut [u8; AEAD_NONCE_SIZE]) {
 
 impl PacketCipher for SeqCipher {
     fn encrypt_in_place(&mut self, buf: &mut [u8]) {
+        debug_assert!(
+            buf.len() >= AEAD_TAG_SIZE,
+            "encrypt_in_place: buffer too short ({} bytes, need at least {AEAD_TAG_SIZE})",
+            buf.len()
+        );
         let plaintext_len = buf.len() - AEAD_TAG_SIZE;
-        let nonce = GenericArray::from_slice(&self.our_nonce);
+        let nonce = Nonce::assume_unique_for_key(self.our_nonce);
         let tag = self
             .aead
-            .encrypt_in_place_detached(nonce, &[], &mut buf[..plaintext_len])
-            .expect("encryption cannot fail");
-        buf[plaintext_len..].copy_from_slice(&tag);
+            .seal_in_place_separate_tag(nonce, Aad::empty(), &mut buf[..plaintext_len])
+            .expect("LessSafeKey + ChaCha20-Poly1305 seal cannot fail");
+        buf[plaintext_len..].copy_from_slice(tag.as_ref());
         inc_nonce(&mut self.our_nonce);
     }
 
     fn decrypt_in_place(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
-        let plaintext_len = buf.len() - AEAD_TAG_SIZE;
-        let nonce = GenericArray::from_slice(&self.their_nonce);
-        let (ct, tag_bytes) = buf.split_at_mut(plaintext_len);
-        let tag = GenericArray::from_slice(tag_bytes);
+        debug_assert!(
+            buf.len() >= AEAD_TAG_SIZE,
+            "decrypt_in_place: buffer too short ({} bytes, need at least {AEAD_TAG_SIZE})",
+            buf.len()
+        );
+        let nonce = Nonce::assume_unique_for_key(self.their_nonce);
         self.aead
-            .decrypt_in_place_detached(nonce, &[], ct, tag)
+            .open_in_place(nonce, Aad::empty(), buf)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "AEAD decryption failed"))?;
         inc_nonce(&mut self.their_nonce);
-        Ok(plaintext_len)
+        Ok(buf.len() - AEAD_TAG_SIZE)
     }
 }
 
-const IPV6_MTU: u32 = 1440; // 1500-byte Ethernet frame - 40-byte IPv6 header - 20-byte TCP header
+pub const IPV6_MTU: u32 = 1440; // 1500-byte Ethernet frame - 40-byte IPv6 header - 20-byte TCP header
 
 pub(crate) const CONN_SETTINGS_SIZE: usize = 4 + 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ConnSettings {
-    pub packet_size: u32,
-    pub max_timeout: Duration,
+pub struct ConnSettings {
+    pub(crate) packet_size: u32,
+    pub(crate) max_timeout: Duration,
 }
 
 impl ConnSettings {
+    pub fn new(packet_size: u32, max_timeout: Duration) -> Result<Self, ConnSettingsError> {
+        if packet_size < 1220 {
+            return Err(ConnSettingsError::PacketSizeTooSmall(packet_size));
+        }
+        if packet_size > 32768 {
+            return Err(ConnSettingsError::PacketSizeTooLarge(packet_size));
+        }
+        if max_timeout < Duration::from_secs(2 * 60) {
+            return Err(ConnSettingsError::TimeoutTooShort(max_timeout));
+        }
+        if max_timeout > Duration::from_secs(2 * 60 * 60) {
+            return Err(ConnSettingsError::TimeoutTooLong(max_timeout));
+        }
+        Ok(Self {
+            packet_size,
+            max_timeout,
+        })
+    }
+
+    pub fn packet_size(&self) -> u32 {
+        self.packet_size
+    }
+
+    pub fn max_timeout(&self) -> Duration {
+        self.max_timeout
+    }
+
     pub fn max_frame_size(&self) -> usize {
         self.packet_size as usize - AEAD_TAG_SIZE
     }
@@ -157,7 +213,7 @@ pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
     conn: &mut T,
     their_key: &VerifyingKey,
     our_settings: ConnSettings,
-) -> Result<(SeqCipher, ConnSettings), HandshakeError> {
+) -> Result<(HandshakeResult, ConnSettings), HandshakeError> {
     let our_secret = EphemeralSecret::random_from_rng(rand_core::OsRng);
     let our_xpk = PublicKey::from(&our_secret);
 
@@ -199,12 +255,15 @@ pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
         .update(our_xpk.as_bytes())
         .update(their_xpk.as_bytes())
         .finalize();
-    let aead = ChaCha20Poly1305::new(GenericArray::from_slice(key.as_bytes()));
-    let mut cipher = SeqCipher {
-        aead,
+    let mut result = HandshakeResult {
+        key: key
+            .as_bytes()
+            .try_into()
+            .expect("blake2b output is 32 bytes"),
         our_nonce: [0u8; AEAD_NONCE_SIZE],
         their_nonce: [0u8; AEAD_NONCE_SIZE],
     };
+    let mut cipher = SeqCipher::new(&result.key);
     // initiator flips their_nonce high bit
     cipher.their_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
 
@@ -227,14 +286,16 @@ pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
         .await
         .map_err(HandshakeError::WriteSettings)?;
 
-    Ok((cipher, merged))
+    result.our_nonce = cipher.our_nonce;
+    result.their_nonce = cipher.their_nonce;
+    Ok((result, merged))
 }
 
 pub(crate) async fn accept_handshake<T: AsyncRead + AsyncWrite + Unpin>(
     conn: &mut T,
     our_key: &SigningKey,
     our_settings: ConnSettings,
-) -> Result<(SeqCipher, ConnSettings), HandshakeError> {
+) -> Result<(HandshakeResult, ConnSettings), HandshakeError> {
     let our_secret = EphemeralSecret::random_from_rng(rand_core::OsRng);
     let our_xpk = PublicKey::from(&our_secret);
 
@@ -256,12 +317,15 @@ pub(crate) async fn accept_handshake<T: AsyncRead + AsyncWrite + Unpin>(
         .update(&their_xpk_bytes)
         .update(our_xpk.as_bytes())
         .finalize();
-    let aead = ChaCha20Poly1305::new(GenericArray::from_slice(key.as_bytes()));
-    let mut cipher = SeqCipher {
-        aead,
+    let mut result = HandshakeResult {
+        key: key
+            .as_bytes()
+            .try_into()
+            .expect("blake2b output is 32 bytes"),
         our_nonce: [0u8; AEAD_NONCE_SIZE],
         their_nonce: [0u8; AEAD_NONCE_SIZE],
     };
+    let mut cipher = SeqCipher::new(&result.key);
     // responder flips our_nonce high bit
     cipher.our_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
 
@@ -297,7 +361,9 @@ pub(crate) async fn accept_handshake<T: AsyncRead + AsyncWrite + Unpin>(
     let merged = merge_settings(our_settings, their_settings)
         .map_err(HandshakeError::UnacceptableSettings)?;
 
-    Ok((cipher, merged))
+    result.our_nonce = cipher.our_nonce;
+    result.their_nonce = cipher.their_nonce;
+    Ok((result, merged))
 }
 
 pub(crate) fn merge_settings(
@@ -323,7 +389,6 @@ pub(crate) fn merge_settings(
 
 #[cfg(test)]
 mod tests {
-    use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
     use ed25519_dalek::Signer;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use x25519_dalek::StaticSecret;
@@ -339,18 +404,8 @@ mod tests {
 
     fn test_cipher_pair() -> (SeqCipher, SeqCipher) {
         let key = [0x42u8; 32];
-        let aead1 = ChaCha20Poly1305::new(GenericArray::from_slice(&key));
-        let aead2 = ChaCha20Poly1305::new(GenericArray::from_slice(&key));
-        let mut c1 = SeqCipher {
-            aead: aead1,
-            our_nonce: [0u8; AEAD_NONCE_SIZE],
-            their_nonce: [0u8; AEAD_NONCE_SIZE],
-        };
-        let mut c2 = SeqCipher {
-            aead: aead2,
-            our_nonce: [0u8; AEAD_NONCE_SIZE],
-            their_nonce: [0u8; AEAD_NONCE_SIZE],
-        };
+        let mut c1 = SeqCipher::new(&key);
+        let mut c2 = SeqCipher::new(&key);
         // flip nonces like the handshake does
         c2.our_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
         c1.their_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
@@ -497,12 +552,11 @@ mod tests {
             .update(&initiator_xpk_bytes)
             .update(responder_xpk.as_bytes())
             .finalize();
-        let aead = ChaCha20Poly1305::new(GenericArray::from_slice(key.as_bytes()));
-        let mut cipher = SeqCipher {
-            aead,
-            our_nonce: [0u8; AEAD_NONCE_SIZE],
-            their_nonce: [0u8; AEAD_NONCE_SIZE],
-        };
+        let mut cipher = SeqCipher::new(
+            key.as_bytes()
+                .try_into()
+                .expect("blake2b output is 32 bytes"),
+        );
         // responder flips our_nonce high bit
         cipher.our_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
 
@@ -673,12 +727,11 @@ mod tests {
         assert_eq!(&settings_bytes, hex("e0100000804f1200").as_slice());
 
         // --- Responder side ---
-        let aead = ChaCha20Poly1305::new(GenericArray::from_slice(key.as_bytes()));
-        let mut rc = SeqCipher {
-            aead,
-            our_nonce: [0u8; AEAD_NONCE_SIZE],
-            their_nonce: [0u8; AEAD_NONCE_SIZE],
-        };
+        let key_bytes: [u8; 32] = key
+            .as_bytes()
+            .try_into()
+            .expect("blake2b output is 32 bytes");
+        let mut rc = SeqCipher::new(&key_bytes);
         rc.our_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
 
         // Encrypt settings
@@ -722,12 +775,7 @@ mod tests {
         );
 
         // --- Initiator side ---
-        let iaead = ChaCha20Poly1305::new(GenericArray::from_slice(key.as_bytes()));
-        let mut ic = SeqCipher {
-            aead: iaead,
-            our_nonce: [0u8; AEAD_NONCE_SIZE],
-            their_nonce: [0u8; AEAD_NONCE_SIZE],
-        };
+        let mut ic = SeqCipher::new(&key_bytes);
         ic.their_nonce[AEAD_NONCE_SIZE - 1] ^= 0x80;
 
         // Decrypt responder's settings
