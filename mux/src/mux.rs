@@ -1173,7 +1173,9 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
             // Mux should still be alive
-            let mut stream2 = dial_mux.dial_stream().expect("mux should survive 999 straggler frames");
+            let mut stream2 = dial_mux
+                .dial_stream()
+                .expect("mux should survive 999 straggler frames");
             stream2.write_all(b"still alive").await.unwrap();
             stream2.close().unwrap();
 
