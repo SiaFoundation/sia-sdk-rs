@@ -15,6 +15,7 @@ blake2b_simd = "1.0.4"
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 ring = "0.17"
 rand_core = { version = "0.6", features = ["getrandom"] }
+ring = "0.17"
 thiserror = "2.0.18"
 tokio = { version = "1", features = ["io-util", "rt", "rt-multi-thread", "macros", "sync", "time", "net"] }
 tokio-util = "0.7.18"
