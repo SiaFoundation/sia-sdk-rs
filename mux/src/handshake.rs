@@ -74,6 +74,11 @@ impl PacketCipher for SeqCipher {
     }
 
     fn decrypt_in_place(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
+        debug_assert!(
+            buf.len() >= AEAD_TAG_SIZE,
+            "decrypt_in_place: buffer too short ({} bytes, need at least {AEAD_TAG_SIZE})",
+            buf.len()
+        );
         let nonce = Nonce::assume_unique_for_key(self.their_nonce);
         self.aead
             .open_in_place(nonce, Aad::empty(), buf)
