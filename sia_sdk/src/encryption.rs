@@ -7,7 +7,8 @@ use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherError, StreamCipherS
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sia_derive::{SiaDecode, SiaEncode};
-use std::task::ready;
+use std::pin::Pin;
+use std::task::{Context, Poll, ready};
 use tokio::io::{AsyncRead, AsyncWrite};
 use zeroize::ZeroizeOnDrop;
 
@@ -109,12 +110,12 @@ impl<R: AsyncRead> CipherReader<R> {
 
 impl<R: AsyncRead + Unpin> AsyncRead for CipherReader<R> {
     fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
+    ) -> Poll<std::io::Result<()>> {
         let initial_filled = buf.filled().len();
-        let poll = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+        let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
 
         // apply the cipher to the newly read bytes
         self.cipher
@@ -144,17 +145,16 @@ impl<W: AsyncWrite> CipherWriter<W> {
 
 impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
     fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        use std::task::Poll;
+    ) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
 
         // Drain any leftover encrypted data from a previous call before accepting new data
         if this.buf_pos < this.buf.len() {
             let n = ready!(
-                std::pin::Pin::new(&mut this.inner).poll_write(cx, &this.buf[this.buf_pos..])
+                Pin::new(&mut this.inner).poll_write(cx, &this.buf[this.buf_pos..])
             )?;
             if n == 0 {
                 return Poll::Ready(Err(std::io::Error::new(
@@ -187,7 +187,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
 
         // Eagerly try to write; if inner isn't ready, data stays buffered
         // for drain / poll_flush.
-        match std::pin::Pin::new(&mut this.inner).poll_write(cx, &this.buf) {
+        match Pin::new(&mut this.inner).poll_write(cx, &this.buf) {
             Poll::Ready(Ok(n)) if n > 0 => {
                 this.buf_pos = n;
                 if this.buf_pos == this.buf.len() {
@@ -203,16 +203,16 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
     }
 
     fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
         while this.buf_pos < this.buf.len() {
             let n = ready!(
-                std::pin::Pin::new(&mut this.inner).poll_write(cx, &this.buf[this.buf_pos..])
+                Pin::new(&mut this.inner).poll_write(cx, &this.buf[this.buf_pos..])
             )?;
             if n == 0 {
-                return std::task::Poll::Ready(Err(std::io::Error::new(
+                return Poll::Ready(Err(std::io::Error::new(
                     std::io::ErrorKind::WriteZero,
                     "write zero",
                 )));
@@ -221,14 +221,14 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
         }
         this.buf.clear();
         this.buf_pos = 0;
-        std::pin::Pin::new(&mut this.inner).poll_flush(cx)
+        Pin::new(&mut this.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
@@ -415,27 +415,27 @@ mod test {
 
     impl AsyncWrite for ShortWriter {
         fn poll_write(
-            mut self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
             buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
+        ) -> Poll<std::io::Result<usize>> {
             let n = buf.len().min(self.max_bytes_per_write);
             self.inner.extend_from_slice(&buf[..n]);
-            std::task::Poll::Ready(Ok(n))
+            Poll::Ready(Ok(n))
         }
 
         fn poll_flush(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Ok(()))
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
         }
 
         fn poll_shutdown(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Ok(()))
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
         }
     }
 
@@ -449,34 +449,34 @@ mod test {
 
     impl AsyncWrite for PendingWriter {
         fn poll_write(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
             buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
+        ) -> Poll<std::io::Result<usize>> {
             self.call_count += 1;
             if self.call_count % 2 == 1 {
                 // Odd calls return Pending
                 cx.waker().wake_by_ref();
-                std::task::Poll::Pending
+                Poll::Pending
             } else {
                 // Even calls succeed
                 self.inner.extend_from_slice(buf);
-                std::task::Poll::Ready(Ok(buf.len()))
+                Poll::Ready(Ok(buf.len()))
             }
         }
 
         fn poll_flush(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Ok(()))
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
         }
 
         fn poll_shutdown(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Ok(()))
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
         }
     }
 
