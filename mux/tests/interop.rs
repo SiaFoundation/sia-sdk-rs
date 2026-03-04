@@ -68,7 +68,7 @@ async fn go_server_rust_client_basic_echo() {
     let n = stream.read(&mut buf).await.unwrap();
     assert_eq!(&buf[..n], msg);
 
-    stream.close().await.unwrap();
+    stream.close().unwrap();
     mux.close().await.unwrap();
 
     // Give the Go process a moment to shut down gracefully
@@ -98,7 +98,7 @@ async fn go_server_rust_client_many_streams() {
             let n = stream.read(&mut buf).await.unwrap();
             assert_eq!(&buf[..n], msg.as_bytes(), "stream {i}: echo mismatch");
 
-            stream.close().await.unwrap();
+            stream.close().unwrap();
         }));
     }
 
@@ -132,7 +132,7 @@ async fn go_server_rust_client_large_payload() {
     stream.read_exact(&mut buf).await.unwrap();
     assert_eq!(buf, msg);
 
-    stream.close().await.unwrap();
+    stream.close().unwrap();
     mux.close().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -171,7 +171,7 @@ async fn rust_server_go_client_basic_echo() {
                                 Err(_) => break,
                             }
                         }
-                        let _ = stream.close().await;
+                        let _ = stream.close();
                     });
                 }
                 Err(_) => break,
@@ -237,7 +237,7 @@ async fn rust_server_go_client_many_streams() {
                                 Err(_) => break,
                             }
                         }
-                        let _ = stream.close().await;
+                        let _ = stream.close();
                     });
                 }
                 Err(_) => break,
