@@ -1090,8 +1090,12 @@ mod tests {
         let max_payload = settings.max_payload_size();
 
         // Test several sizes: exactly max, max+1, 3x max, and a non-aligned size.
-        let test_sizes: Vec<usize> =
-            vec![max_payload, max_payload + 1, max_payload * 3, max_payload * 3 + 7];
+        let test_sizes: Vec<usize> = vec![
+            max_payload,
+            max_payload + 1,
+            max_payload * 3,
+            max_payload * 3 + 7,
+        ];
         let test_sizes_clone = test_sizes.clone();
 
         let accept_handle = tokio::spawn(async move {
@@ -1111,8 +1115,7 @@ mod tests {
                     expected_size,
                     "server: size mismatch for write of {expected_size} bytes"
                 );
-                let expected: Vec<u8> =
-                    (0..expected_size).map(|i| (i % 251) as u8).collect();
+                let expected: Vec<u8> = (0..expected_size).map(|i| (i % 251) as u8).collect();
                 assert_eq!(
                     received, expected,
                     "server: content corrupted for write of {expected_size} bytes"
