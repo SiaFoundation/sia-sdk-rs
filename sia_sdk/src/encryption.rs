@@ -132,7 +132,7 @@ pub struct CipherWriter<W: AsyncWrite> {
     buf_pos: usize,
 }
 
-impl<W: AsyncWrite> CipherWriter<W> {
+impl<W: AsyncWrite + Unpin> CipherWriter<W> {
     pub fn new(inner: W, key: EncryptionKey, offset: usize) -> Self {
         Self {
             inner,
@@ -140,6 +140,24 @@ impl<W: AsyncWrite> CipherWriter<W> {
             buf: Vec::new(),
             buf_pos: 0,
         }
+    }
+
+    fn poll_drain(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        while self.buf_pos < self.buf.len() {
+            let n = ready!(
+                Pin::new(&mut self.inner).poll_write(cx, &self.buf[self.buf_pos..])
+            )?;
+            if n == 0 {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "write zero",
+                )));
+            }
+            self.buf_pos += n;
+        }
+        self.buf.clear();
+        self.buf_pos = 0;
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -151,31 +169,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
     ) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
 
-        // Drain any leftover encrypted data from a previous call before accepting new data
-        if this.buf_pos < this.buf.len() {
-            let n = ready!(
-                Pin::new(&mut this.inner).poll_write(cx, &this.buf[this.buf_pos..])
-            )?;
-            if n == 0 {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "write zero",
-                )));
-            }
-            this.buf_pos += n;
-            if this.buf_pos < this.buf.len() {
-                // Still have encrypted bytes to flush; re-wake and return Pending
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-            // All drained; reset and fall through to accept new data
-            this.buf.clear();
-            this.buf_pos = 0;
-        }
-
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
+        ready!(this.poll_drain(cx))?;
 
         // Encrypt new data into the buffer. Once apply_keystream is called the
         // cipher has advanced, so this data is committed — we must report it as
@@ -185,10 +179,14 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
         this.buf.copy_from_slice(buf);
         this.cipher.apply_keystream(&mut this.buf);
 
-        // Eagerly try to write; if inner isn't ready, data stays buffered
-        // for drain / poll_flush.
         match Pin::new(&mut this.inner).poll_write(cx, &this.buf) {
-            Poll::Ready(Ok(n)) if n > 0 => {
+            Poll::Ready(Ok(0)) => {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "write zero",
+                )));
+            }
+            Poll::Ready(Ok(n)) => {
                 this.buf_pos = n;
                 if this.buf_pos == this.buf.len() {
                     this.buf.clear();
@@ -196,9 +194,9 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
                 }
             }
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            _ => {} // Pending or Ok(0): data stays in buf
+            // apply_keystream has been called we must commit and report all the data as accepted even if the inner writer isn't ready yet
+            _ => {}
         }
-
         Poll::Ready(Ok(buf.len()))
     }
 
@@ -207,28 +205,17 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
         cx: &mut Context<'_>,
     ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
-        while this.buf_pos < this.buf.len() {
-            let n = ready!(
-                Pin::new(&mut this.inner).poll_write(cx, &this.buf[this.buf_pos..])
-            )?;
-            if n == 0 {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "write zero",
-                )));
-            }
-            this.buf_pos += n;
-        }
-        this.buf.clear();
-        this.buf_pos = 0;
+        ready!(this.poll_drain(cx))?;
         Pin::new(&mut this.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+        let this = self.get_mut();
+        ready!(this.poll_drain(cx))?;
+        Pin::new(&mut this.inner).poll_shutdown(cx)
     }
 }
 
@@ -424,17 +411,11 @@ mod test {
             Poll::Ready(Ok(n))
         }
 
-        fn poll_flush(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::io::Result<()>> {
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
             Poll::Ready(Ok(()))
         }
 
-        fn poll_shutdown(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::io::Result<()>> {
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
             Poll::Ready(Ok(()))
         }
     }
@@ -465,17 +446,11 @@ mod test {
             }
         }
 
-        fn poll_flush(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::io::Result<()>> {
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
             Poll::Ready(Ok(()))
         }
 
-        fn poll_shutdown(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::io::Result<()>> {
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
             Poll::Ready(Ok(()))
         }
     }
