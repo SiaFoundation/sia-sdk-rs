@@ -144,9 +144,7 @@ impl<W: AsyncWrite + Unpin> CipherWriter<W> {
 
     fn poll_drain(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         while self.buf_pos < self.buf.len() {
-            let n = ready!(
-                Pin::new(&mut self.inner).poll_write(cx, &self.buf[self.buf_pos..])
-            )?;
+            let n = ready!(Pin::new(&mut self.inner).poll_write(cx, &self.buf[self.buf_pos..]))?;
             if n == 0 {
                 return Poll::Ready(Err(std::io::Error::new(
                     std::io::ErrorKind::WriteZero,
@@ -200,19 +198,13 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
         Poll::Ready(Ok(buf.len()))
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
         ready!(this.poll_drain(cx))?;
         Pin::new(&mut this.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
         ready!(this.poll_drain(cx))?;
         Pin::new(&mut this.inner).poll_shutdown(cx)
