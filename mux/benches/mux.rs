@@ -68,7 +68,7 @@ fn bench_mux(c: &mut Criterion) {
 
     for num_streams in [1, 2, 10, 100, 500, 1000] {
         let mut group = c.benchmark_group("mux");
-        group.throughput(Throughput::Bytes((buf_size * num_streams) as u64));
+        group.throughput(Throughput::BytesDecimal((buf_size * num_streams) as u64));
 
         group.bench_with_input(
             BenchmarkId::from_parameter(num_streams),
@@ -119,7 +119,7 @@ fn bench_packets(c: &mut Criterion) {
             ConnSettings::new(IPV6_MTU * multiplier, ConnSettings::default().max_timeout())
                 .unwrap();
         let buf_size = settings.max_payload_size();
-        group.throughput(Throughput::Bytes(buf_size as u64));
+        group.throughput(Throughput::BytesDecimal(buf_size as u64));
 
         group.bench_with_input(
             BenchmarkId::new(format!("{IPV6_MTU}x{multiplier}"), buf_size),
