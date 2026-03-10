@@ -1686,6 +1686,8 @@ dependencies = [
  "ed25519-dalek",
  "rand_core 0.6.4",
  "ring",
+ "serde_json",
+ "sia_sdk",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

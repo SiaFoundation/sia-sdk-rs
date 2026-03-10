@@ -23,6 +23,8 @@ zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
+sia_sdk = { path = "../sia_sdk" }
+serde_json = "1"
 
 [[bench]]
 name = "mux"
