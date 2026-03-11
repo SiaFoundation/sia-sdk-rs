@@ -1731,4 +1731,26 @@ mod tests {
             "1b13d5dd22605af0573cae7fe9242c1ee83727c29798308b2b170864677b46d0"
         );
     }
+
+    #[tokio::test]
+    async fn test_account() {
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/account")).respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(r#"{"accountKey":"ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29","connectKey":"test-connect-key","maxPinnedData":1000,"pinnedData":500,"app":{"id":"0000000000000000000000000000000000000000000000000000000000000000","description":"test app","logoUrl":null,"serviceUrl":null},"lastUsed":"2024-01-01T00:00:00Z"}"#)
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&[0u8; 32]);
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        let account = client.account(&app_key).await.unwrap();
+
+        assert_eq!(account.connect_key, "test-connect-key");
+        assert_eq!(account.max_pinned_data, 1000);
+        assert_eq!(account.pinned_data, 500);
+    }
 }

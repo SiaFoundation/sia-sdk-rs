@@ -548,6 +548,7 @@ pub struct App {
 #[derive(uniffi::Record)]
 pub struct Account {
     pub account_key: String,
+    pub connect_key: String,
     pub max_pinned_data: u64,
     pub pinned_data: u64,
     pub app: App,
@@ -558,6 +559,7 @@ impl From<indexd::app_client::Account> for Account {
     fn from(a: indexd::app_client::Account) -> Self {
         Self {
             account_key: a.account_key.to_string(),
+            connect_key: a.connect_key,
             max_pinned_data: a.max_pinned_data,
             pinned_data: a.pinned_data,
             app: App {
