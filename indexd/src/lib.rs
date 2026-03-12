@@ -1,22 +1,37 @@
 use std::sync::Arc;
 
-use crate::app_client::{HostQuery, SlabPinParams};
+use crate::app_client::SlabPinParams;
 use crate::rhp4::RHP4Client;
 
-use chrono::{DateTime, Utc};
-use sia::signing::PrivateKey;
+use serde::Serialize;
 pub use slabs::*;
 
 mod hosts;
 pub use hosts::*;
-
-use crate::app_client::{Account, ObjectsCursor};
-use sia::rhp::Host;
-use sia::types::Hash256;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+pub use chrono::{DateTime, Utc};
 pub use reqwest::{IntoUrl, Url};
+#[doc(hidden)]
+pub use sia::macros::decode_hex_256;
+pub use sia::rhp::Host;
+pub use sia::seed::SeedError;
+pub use sia::signing::PrivateKey;
+pub use sia::types::Hash256;
+
+pub use app_client::{Account, HostQuery, ObjectsCursor};
+
+/// Generates a new BIP-39 12-word recovery phrase.
+pub fn generate_recovery_phrase() -> String {
+    sia::seed::Seed::from_seed(rand::random::<[u8; 16]>()).to_string()
+}
+
+/// Validates a BIP-39 recovery phrase.
+pub fn validate_recovery_phrase(phrase: &str) -> Result<(), SeedError> {
+    sia::seed::Seed::new(phrase)?;
+    Ok(())
+}
 
 mod rhp4;
 mod upload;
@@ -36,6 +51,43 @@ pub mod quic;
 
 mod builder;
 pub use builder::*;
+
+/// A unique identifier for an indexer application. It should be constant for an application.
+pub type AppID = Hash256;
+
+/// A macro to create an [AppID] from a literal hex string. The string must be 64 characters long.
+///
+/// ```
+/// use indexd::{AppID, app_id};
+///
+/// const MY_APP_ID: AppID = app_id!("0e90d697f5045a6593f1c43ebf79a369e2bc72cc5c7b6282f3b5aeb0de6e4005");
+/// ```
+#[macro_export]
+macro_rules! app_id {
+    ($text:literal) => {
+        $crate::Hash256::new($crate::decode_hex_256($text.as_bytes()))
+    };
+}
+
+/// Application metadata for registering with an indexer.
+///
+/// This should be defined as a constant in the application and passed to the [Builder] when creating an SDK instance.
+/// The metadata is used during registration to create the application on the indexer and should not change between
+/// runs of the application.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppMetadata {
+    #[serde(rename = "appID")]
+    pub id: AppID,
+    pub name: &'static str,
+    pub description: &'static str,
+    #[serde(rename = "serviceURL")]
+    pub service_url: &'static str,
+    #[serde(rename = "logoURL")]
+    pub logo_url: Option<&'static str>,
+    #[serde(rename = "callbackURL")]
+    pub callback_url: Option<&'static str>,
+}
 
 #[derive(Error, Debug)]
 pub enum Error {

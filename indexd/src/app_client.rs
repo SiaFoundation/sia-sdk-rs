@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::DecryptError;
 use crate::slabs::Sector;
-use crate::{Object, PinnedSlab, SealedObject, Slab};
+use crate::{AppMetadata, Object, PinnedSlab, SealedObject, Slab};
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use sia::types::v2::Protocol;
@@ -73,21 +73,6 @@ pub enum Error {
 pub struct AuthConnectStatusResponse {
     approved: bool,
     user_secret: Option<Hash256>,
-}
-
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RegisterAppRequest {
-    #[serde(rename = "appID")]
-    pub app_id: Hash256,
-    pub name: String,
-    pub description: String,
-    #[serde(rename = "serviceURL")]
-    pub service_url: Url,
-    #[serde(rename = "logoURL")]
-    pub logo_url: Option<Url>,
-    #[serde(rename = "callbackURL")]
-    pub callback_url: Option<Url>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -248,7 +233,7 @@ impl Client {
     /// Requests an application connection to the indexer.
     pub async fn request_app_connection(
         &self,
-        opts: &RegisterAppRequest,
+        opts: &AppMetadata,
     ) -> Result<RegisterAppResponse, Error> {
         self.post_json("auth/connect", None, Some(opts)).await
     }
@@ -651,7 +636,7 @@ mod tests {
     use sia::signing::Signature;
     use sia::{hash_256, public_key, signature};
 
-    use crate::object_id;
+    use crate::{AppID, object_id};
 
     use super::*;
     use httptest::http::Response;
@@ -1188,14 +1173,11 @@ mod tests {
     #[tokio::test]
     async fn test_request_app_connection() {
         let server = Server::run();
-        let app_id = {
-            let buf: [u8; 32] = rand::random();
-            Hash256::from(buf)
-        };
+        let app_id = AppID::from(rand::random::<[u8; 32]>());
         server.expect(
             Expectation::matching(all_of![
                 request::method_path("POST", "/auth/connect"),
-                request::body(format!(r#"{{"appID":"{app_id}","name":"name","description":"description","serviceURL":"https://service.com/","logoURL":"https://logo.com/","callbackURL":"https://callback.com/"}}"#)),
+                request::body(format!(r#"{{"appID":"{app_id}","name":"name","description":"description","serviceURL":"https://service.com","logoURL":"https://logo.com","callbackURL":"https://callback.com"}}"#)),
             ])
                 .respond_with(Response::builder().status(StatusCode::OK).body(r#"{"responseURL":"https://response.com", "registerURL":"https://response.com","statusURL":"https://status.com","expiration":"1970-01-01T01:01:40+01:00"}"#).unwrap()),
         );
@@ -1203,13 +1185,13 @@ mod tests {
         let client = Client::new(server.url("/").to_string()).unwrap();
 
         let resp = client
-            .request_app_connection(&RegisterAppRequest {
-                app_id,
-                name: "name".to_string(),
-                description: "description".to_string(),
-                service_url: "https://service.com".parse().unwrap(),
-                logo_url: Some("https://logo.com".parse().unwrap()),
-                callback_url: Some("https://callback.com".parse().unwrap()),
+            .request_app_connection(&AppMetadata {
+                id: app_id,
+                name: "name",
+                description: "description",
+                service_url: "https://service.com",
+                logo_url: Some("https://logo.com"),
+                callback_url: Some("https://callback.com"),
             })
             .await
             .unwrap();
