@@ -90,7 +90,7 @@ pub enum Error {
 #[uniffi(flat_error)]
 pub enum ConnectError {
     #[error("app client error: {0}")]
-    AppClient(#[from] indexd::app_client::Error),
+    AppClient(#[from] indexd::AppApiError),
     #[error("task error: {0}")]
     JoinError(#[from] tokio::task::JoinError),
     #[error("error: {0}")]
@@ -544,8 +544,8 @@ pub struct ObjectsCursor {
     pub after: SystemTime,
 }
 
-impl From<indexd::app_client::ObjectsCursor> for ObjectsCursor {
-    fn from(c: indexd::app_client::ObjectsCursor) -> Self {
+impl From<indexd::ObjectsCursor> for ObjectsCursor {
+    fn from(c: indexd::ObjectsCursor) -> Self {
         Self {
             id: c.id.to_string(),
             after: c.after.into(),
@@ -571,8 +571,8 @@ pub struct Account {
     pub last_used: SystemTime,
 }
 
-impl From<indexd::app_client::Account> for Account {
-    fn from(a: indexd::app_client::Account) -> Self {
+impl From<indexd::Account> for Account {
+    fn from(a: indexd::Account) -> Self {
         Self {
             account_key: a.account_key.to_string(),
             max_pinned_data: a.max_pinned_data,
@@ -910,7 +910,7 @@ impl SDK {
         limit: u32,
     ) -> Result<Vec<ObjectEvent>, Error> {
         let cursor = match cursor {
-            Some(c) => Some(indexd::app_client::ObjectsCursor {
+            Some(c) => Some(indexd::ObjectsCursor {
                 after: c.after.into(),
                 id: Hash256::from_str(c.id.as_str())?,
             }),

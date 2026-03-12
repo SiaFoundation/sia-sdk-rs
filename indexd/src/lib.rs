@@ -1,56 +1,43 @@
 use std::sync::Arc;
 
-use crate::app_client::SlabPinParams;
-use crate::rhp4::RHP4Client;
-
 use serde::Serialize;
-pub use slabs::*;
-
-mod hosts;
-pub use hosts::*;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::app_client::SlabPinParams;
+use crate::hosts::Hosts;
+use crate::rhp4::RHP4Client;
+
+mod app_client;
+mod builder;
+mod download;
+mod hosts;
+mod object_encryption;
+mod quic;
+mod rhp4;
+mod slabs;
+mod upload;
+
+#[cfg(any(test, feature = "mock"))]
+pub mod mock;
+
+// re-export types for easier access
 pub use chrono::{DateTime, Utc};
 pub use reqwest::{IntoUrl, Url};
 #[doc(hidden)]
 pub use sia::macros::decode_hex_256;
 pub use sia::rhp::Host;
 pub use sia::seed::SeedError;
-pub use sia::signing::PrivateKey;
+pub use sia::signing::{PrivateKey, PublicKey};
 pub use sia::types::Hash256;
+pub use sia::types::v2::Protocol;
 
-pub use app_client::{Account, HostQuery, ObjectsCursor};
-
-/// Generates a new BIP-39 12-word recovery phrase.
-pub fn generate_recovery_phrase() -> String {
-    sia::seed::Seed::from_seed(rand::random::<[u8; 16]>()).to_string()
-}
-
-/// Validates a BIP-39 recovery phrase.
-pub fn validate_recovery_phrase(phrase: &str) -> Result<(), SeedError> {
-    sia::seed::Seed::new(phrase)?;
-    Ok(())
-}
-
-mod rhp4;
-mod upload;
-pub use upload::*;
-
-mod download;
-pub use download::*;
-
-#[cfg(any(test, feature = "mock"))]
-pub mod mock;
-
-mod object_encryption;
-mod slabs;
-
-pub mod app_client;
-pub mod quic;
-
-mod builder;
+pub use app_client::{Account, App, Error as AppApiError, GeoLocation, HostQuery, ObjectsCursor};
 pub use builder::*;
+pub use download::*;
+pub use hosts::QueueError;
+pub use slabs::*;
+pub use upload::*;
 
 /// A unique identifier for an indexer application. It should be constant for an application.
 pub type AppID = Hash256;
@@ -89,6 +76,7 @@ pub struct AppMetadata {
     pub callback_url: Option<&'static str>,
 }
 
+/// Errors that can occur when using the SDK.
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("app error: {0}")]
@@ -107,6 +95,7 @@ pub enum Error {
     SealedObject(#[from] SealedObjectError),
 }
 
+/// The main interface with interacting with the Sia storage network. It provides methods for uploading and downloading objects, as well as managing hosts and account information.
 #[derive(Clone)]
 pub struct SDK {
     app_key: Arc<PrivateKey>,
@@ -357,6 +346,17 @@ impl SDK {
     }
 }
 
+/// Generates a new BIP-39 12-word recovery phrase.
+pub fn generate_recovery_phrase() -> String {
+    sia::seed::Seed::from_seed(rand::random::<[u8; 16]>()).to_string()
+}
+
+/// Validates a BIP-39 recovery phrase.
+pub fn validate_recovery_phrase(phrase: &str) -> Result<(), SeedError> {
+    sia::seed::Seed::new(phrase)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod test {
     use bytes::{Bytes, BytesMut};
@@ -376,9 +376,7 @@ mod test {
     async fn test_upload_download_packed() {
         let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
         let transport = Arc::new(MockRHP4Client::new());
-        let hosts = Hosts::new();
-
-        hosts.update(
+        transport.update_hosts(
             (0..60)
                 .map(|_| Host {
                     public_key: PrivateKey::from_seed(&rand::random()).public_key(),
@@ -394,8 +392,8 @@ mod test {
                 .collect(),
         );
 
-        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
-        let downloader = MockDownloader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let uploader = MockUploader::new(transport.clone(), app_key.clone());
+        let downloader = MockDownloader::new(transport.clone(), app_key.clone());
 
         let input: Bytes = Bytes::from("Hello, world!");
 
@@ -461,9 +459,7 @@ mod test {
     async fn test_upload_download_packed_spanning() {
         let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
         let transport = Arc::new(MockRHP4Client::new());
-        let hosts = Hosts::new();
-
-        hosts.update(
+        transport.update_hosts(
             (0..60)
                 .map(|_| Host {
                     public_key: PrivateKey::from_seed(&rand::random()).public_key(),
@@ -479,8 +475,8 @@ mod test {
                 .collect(),
         );
 
-        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
-        let downloader = MockDownloader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let uploader = MockUploader::new(transport.clone(), app_key.clone());
+        let downloader = MockDownloader::new(transport.clone(), app_key.clone());
 
         let small_input = Bytes::from("Hello, world!");
 
@@ -547,9 +543,7 @@ mod test {
     async fn test_upload_download_packed_exact() {
         let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
         let transport = Arc::new(MockRHP4Client::new());
-        let hosts = Hosts::new();
-
-        hosts.update(
+        transport.update_hosts(
             (0..60)
                 .map(|_| Host {
                     public_key: PrivateKey::from_seed(&rand::random()).public_key(),
@@ -565,8 +559,8 @@ mod test {
                 .collect(),
         );
 
-        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
-        let downloader = MockDownloader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let uploader = MockUploader::new(transport.clone(), app_key.clone());
+        let downloader = MockDownloader::new(transport.clone(), app_key.clone());
 
         let mut exact_input = BytesMut::zeroed(SLAB_SIZE as usize); // 1 full slab
         rand::rng().fill_bytes(&mut exact_input);
@@ -605,9 +599,7 @@ mod test {
     async fn test_upload_download() {
         let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
         let transport = Arc::new(MockRHP4Client::new());
-        let hosts = Hosts::new();
-
-        hosts.update(
+        transport.update_hosts(
             (0..60)
                 .map(|_| Host {
                     public_key: PrivateKey::from_seed(&rand::random()).public_key(),
@@ -623,8 +615,8 @@ mod test {
                 .collect(),
         );
 
-        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
-        let downloader = MockDownloader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let uploader = MockUploader::new(transport.clone(), app_key.clone());
+        let downloader = MockDownloader::new(transport.clone(), app_key.clone());
 
         let input: Bytes = Bytes::from("Hello, world!");
 
@@ -674,9 +666,7 @@ mod test {
 
         let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
         let transport = Arc::new(MockRHP4Client::new());
-        let hosts = Hosts::new();
-
-        hosts.update(
+        transport.update_hosts(
             (0..60)
                 .map(|_| Host {
                     public_key: PrivateKey::from_seed(&rand::random()).public_key(),
@@ -692,8 +682,8 @@ mod test {
                 .collect(),
         );
 
-        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
-        let downloader = MockDownloader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let uploader = MockUploader::new(transport.clone(), app_key.clone());
+        let downloader = MockDownloader::new(transport.clone(), app_key.clone());
 
         // Use default 10 data shards, so slab_size = 10 * SECTOR_SIZE
         let slab_size = 10 * SECTOR_SIZE as u64;
@@ -757,14 +747,13 @@ mod test {
     async fn test_download_slow_hosts() {
         let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
         let transport = Arc::new(MockRHP4Client::new());
-        let hosts = Hosts::new();
 
         // Create 30 hosts and track their public keys
         let host_keys: Vec<_> = (0..30)
             .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
             .collect();
 
-        hosts.update(
+        transport.update_hosts(
             host_keys
                 .iter()
                 .map(|pk| Host {
@@ -781,8 +770,8 @@ mod test {
                 .collect(),
         );
 
-        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
-        let downloader = MockDownloader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let uploader = MockUploader::new(transport.clone(), app_key.clone());
+        let downloader = MockDownloader::new(transport.clone(), app_key.clone());
 
         let input: Bytes = Bytes::from("Hello, world!");
 
@@ -814,9 +803,7 @@ mod test {
     async fn test_upload_no_hosts() {
         let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
         let transport = Arc::new(MockRHP4Client::new());
-        let hosts = Hosts::new();
-
-        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let uploader = MockUploader::new(transport.clone(), app_key.clone());
 
         let input: Bytes = Bytes::from("Hello, world!");
 
@@ -838,14 +825,13 @@ mod test {
     async fn test_upload_slow_host() {
         let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
         let transport = Arc::new(MockRHP4Client::new());
-        let hosts = Hosts::new();
 
         // Create 30 hosts and track their public keys
         let host_keys: Vec<_> = (0..30)
             .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
             .collect();
 
-        hosts.update(
+        transport.update_hosts(
             host_keys
                 .iter()
                 .map(|pk| Host {
@@ -868,7 +854,7 @@ mod test {
             tokio::time::Duration::from_secs(2),
         );
 
-        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let uploader = MockUploader::new(transport.clone(), app_key.clone());
 
         let input: Bytes = Bytes::from("Hello, world!");
 
@@ -885,14 +871,13 @@ mod test {
     async fn test_upload_all_hosts_slow() {
         let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
         let transport = Arc::new(MockRHP4Client::new());
-        let hosts = Hosts::new();
 
         // Create 30 hosts and track their public keys
         let host_keys: Vec<_> = (0..30)
             .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
             .collect();
 
-        hosts.update(
+        transport.update_hosts(
             host_keys
                 .iter()
                 .map(|pk| Host {
@@ -912,7 +897,7 @@ mod test {
         // Make all hosts slow
         transport.set_slow_hosts(host_keys.iter().take(30).copied(), Duration::from_secs(2));
 
-        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let uploader = MockUploader::new(transport.clone(), app_key.clone());
 
         let input: Bytes = Bytes::from("Hello, world!");
 
@@ -951,7 +936,7 @@ mod test {
                 .collect(),
         );
 
-        let uploader = MockUploader::new(hosts.clone(), transport.clone(), app_key.clone());
+        let uploader = MockUploader::new(transport.clone(), app_key.clone());
 
         let input: Bytes = Bytes::from("Hello, world!");
 
