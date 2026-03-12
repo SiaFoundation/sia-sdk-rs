@@ -89,7 +89,7 @@ pub struct RegisterAppResponse {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SlabPinParams {
+pub(crate) struct SlabPinParams {
     pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
@@ -129,12 +129,6 @@ impl Serialize for GeoLocation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum HostSort {
-    Distance(GeoLocation),
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct HostQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -162,7 +156,6 @@ pub struct App {
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub account_key: PublicKey,
-    pub connect_key: String,
     pub max_pinned_data: u64,
     pub pinned_data: u64,
     pub app: App,
@@ -346,23 +339,6 @@ impl Client {
             .await
     }
 
-    /// Fetches the digests of slabs associated with the account. It supports
-    /// pagination through the provided options.
-    pub async fn slab_ids(
-        &self,
-        app_key: &PrivateKey,
-        offset: Option<u64>,
-        limit: Option<u64>,
-    ) -> Result<Vec<Hash256>, Error> {
-        #[derive(Serialize)]
-        struct QueryParams {
-            offset: Option<u64>,
-            limit: Option<u64>,
-        }
-        let params = QueryParams { offset, limit };
-        self.get_json("slabs", Some(app_key), Some(&params)).await
-    }
-
     /// Pins slabs to the indexer.
     pub async fn pin_slabs(
         &self,
@@ -370,24 +346,6 @@ impl Client {
         slabs: Vec<SlabPinParams>,
     ) -> Result<Vec<Hash256>, Error> {
         self.post_json("slabs", Some(app_key), Some(&slabs)).await
-    }
-
-    /// Pin a slab to the indexer.
-    pub async fn pin_slab(
-        &self,
-        app_key: &PrivateKey,
-        slab: SlabPinParams,
-    ) -> Result<Hash256, Error> {
-        self.pin_slabs(app_key, vec![slab])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or(Error::Custom("no slab digest".to_string()))
-    }
-
-    /// Unpins a slab from the indexer.
-    pub async fn unpin_slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<(), Error> {
-        self.delete(&format!("slabs/{slab_id}"), app_key).await
     }
 
     /// Unpins slabs not used by any object on the account.
@@ -939,87 +897,6 @@ mod tests {
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string()).unwrap();
         assert_eq!(client.slab(&app_key, &slab.id).await.unwrap(), slab);
-    }
-
-    #[tokio::test]
-    async fn test_slab_ids() {
-        let slab_id = hash_256!("43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28");
-        let server = Server::run();
-
-        server.expect(
-            Expectation::matching(all_of![
-                request::method_path("GET", "/slabs"),
-                request::query(url_decoded(all_of![
-                    contains(("offset", "1")),
-                    contains(("limit", "2"))
-                ]))
-            ])
-            .respond_with(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .body(format!(r#"["{slab_id}","{slab_id}"]"#))
-                    .unwrap(),
-            ),
-        );
-
-        let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string()).unwrap();
-        assert_eq!(
-            client.slab_ids(&app_key, Some(1), Some(2)).await.unwrap(),
-            vec![slab_id, slab_id]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_pin_slab() {
-        let slab_id = hash_256!("43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28");
-        let slab = SlabPinParams {
-            encryption_key: [
-                186, 153, 179, 170, 159, 95, 101, 177, 15, 130, 58, 19, 138, 144, 9, 91, 181, 119,
-                38, 225, 209, 47, 149, 22, 157, 210, 16, 232, 10, 151, 186, 160,
-            ]
-            .into(),
-            min_shards: 1,
-            sectors: vec![Sector {
-                root: hash_256!("826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6"),
-                host_key: public_key!(
-                    "ed25519:910b22c360a1c67cb6a9a7371fa600c48e87d626b328669d01f34048ac3132fe"
-                ),
-            }],
-        };
-        let server = Server::run();
-
-        server.expect(
-            Expectation::matching(all_of![
-                request::method_path("POST", "/slabs"),
-                request::body(serde_json::to_string(&vec![slab.clone()]).unwrap())
-            ])
-            .respond_with(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .body("[\"43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28\"]")
-                    .unwrap(),
-            ),
-        );
-
-        let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string()).unwrap();
-        assert_eq!(client.pin_slab(&app_key, slab).await.unwrap(), slab_id);
-    }
-
-    #[tokio::test]
-    async fn test_unpin_slab() {
-        let slab_id = hash_256!("43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28");
-        let server = Server::run();
-
-        server.expect(
-            Expectation::matching(request::method_path("DELETE", format!("/slabs/{slab_id}")))
-                .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
-        );
-
-        let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string()).unwrap();
-        client.unpin_slab(&app_key, &slab_id).await.unwrap();
     }
 
     #[tokio::test]
