@@ -519,7 +519,6 @@ mod test {
     use std::time::Duration;
 
     use super::*;
-    use rustls_platform_verifier::ConfigVerifierExt;
     use sia::public_key;
     use sia::rhp::Host;
     use sia::types::v2::NetAddress;
@@ -527,17 +526,11 @@ mod test {
 
     #[tokio::test]
     async fn test_dialer() {
-        if rustls::crypto::CryptoProvider::get_default().is_none() {
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .unwrap();
-        }
+        use rustls_platform_verifier::ConfigVerifierExt;
 
         let host_key =
             public_key!("ed25519:36c8b07e61548a57e16dfabdfcc07dc157974a75010ab1684643d933e83fa7b1");
 
-        let client_config =
-            rustls::ClientConfig::with_platform_verifier().expect("Failed to create client config");
         let hosts = Hosts::new();
         hosts.update(vec![Host {
             public_key: host_key,
@@ -551,6 +544,9 @@ mod test {
             longitude: 0.0,
             good_for_upload: true,
         }]);
+
+        let client_config =
+            rustls::ClientConfig::with_platform_verifier().expect("Failed to create client config");
         let dialer = Client::new(client_config, hosts).expect("Failed to create dialer");
 
         let prices = dialer
