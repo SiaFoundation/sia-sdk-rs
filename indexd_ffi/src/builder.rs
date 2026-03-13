@@ -249,10 +249,12 @@ impl Builder {
         .await
     }
 
-    /// Requests a new connection for the application.
+    /// Requests connection approval for the application. The
+    /// user must approve the connection request for the app to be registered and receive an SDK instance.
     ///
-    /// # Arguments
-    /// * `app` - Details of the application requesting connection.
+    /// After calling this method, call [Builder::response_url] to get the URL that the user should
+    /// visit to approve the connection request, and [Builder::wait_for_approval] to wait for the
+    /// user to approve the connection request.
     pub async fn request_connection(&self) -> Result<Self, BuilderError> {
         self.with_state_transition(|state| async move {
             match state {

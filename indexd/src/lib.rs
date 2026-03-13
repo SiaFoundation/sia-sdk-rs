@@ -911,14 +911,12 @@ mod test {
     async fn test_upload_not_enough_hosts_good_for_upload() {
         let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
         let transport = Arc::new(MockRHP4Client::new());
-        let hosts = Hosts::new();
-
         // Create 30 hosts: 10 good for upload, 20 not good for upload
         let host_keys: Vec<_> = (0..30)
             .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
             .collect();
 
-        hosts.update(
+        transport.update_hosts(
             host_keys
                 .iter()
                 .enumerate()
