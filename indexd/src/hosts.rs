@@ -185,7 +185,7 @@ struct HostsInner {
 ///
 /// It can be safely shared across threads and cloned.
 #[derive(Debug, Clone)]
-pub struct Hosts {
+pub(crate) struct Hosts {
     inner: Arc<RwLock<HostsInner>>,
 }
 
@@ -196,7 +196,7 @@ impl Default for Hosts {
 }
 
 impl Hosts {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HostsInner {
                 hosts: HashMap::new(),
@@ -205,7 +205,7 @@ impl Hosts {
         }
     }
 
-    pub fn addresses(&self, host_key: &PublicKey) -> Option<Vec<NetAddress>> {
+    pub(crate) fn addresses(&self, host_key: &PublicKey) -> Option<Vec<NetAddress>> {
         let inner = self.inner.read().unwrap();
         inner.hosts.get(host_key).map(|h| h.addresses.clone())
     }
@@ -213,7 +213,7 @@ impl Hosts {
     /// Sorts a list of hosts according to their priority in the client's
     /// preferred hosts queue. The function `f` is used to extract the
     /// public key from each item.
-    pub fn prioritize<H, F>(&self, hosts: &mut [H], f: F)
+    pub(crate) fn prioritize<H, F>(&self, hosts: &mut [H], f: F)
     where
         F: Fn(&H) -> &PublicKey,
     {
@@ -230,7 +230,7 @@ impl Hosts {
     ///
     /// Existing hosts not in the new list are removed, but their metrics are retained
     /// in case they reappear later.
-    pub fn update(&self, hosts: Vec<Host>) {
+    pub(crate) fn update(&self, hosts: Vec<Host>) {
         let mut inner = self.inner.write().unwrap();
         inner.hosts.clear();
         for host in hosts {
@@ -250,7 +250,7 @@ impl Hosts {
     }
 
     /// Returns the number of known hosts that are good for upload.
-    pub fn available_for_upload(&self) -> usize {
+    pub(crate) fn available_for_upload(&self) -> usize {
         let inner = self.inner.read().unwrap();
         inner
             .hosts
@@ -259,23 +259,9 @@ impl Hosts {
             .count()
     }
 
-    /// Returns a list of all known hosts, sorted by priority.
-    pub fn hosts(&self) -> Vec<PublicKey> {
-        let inner = self.inner.read().unwrap();
-        let preferred_hosts = &inner.preferred_hosts;
-        let mut hosts = inner.hosts.iter().map(|h| *h.0).collect::<Vec<_>>();
-
-        hosts.sort_by(|a, b| {
-            preferred_hosts
-                .get_priority(b)
-                .cmp(&preferred_hosts.get_priority(a))
-        });
-        hosts
-    }
-
     /// Creates a queue of hosts that are good to upload to for sequential
     /// access sorted by priority.
-    pub fn upload_queue(&self) -> HostQueue {
+    pub(crate) fn upload_queue(&self) -> HostQueue {
         let inner = self.inner.read().unwrap();
         let preferred_hosts = &inner.preferred_hosts;
         let mut hosts = inner
@@ -293,7 +279,7 @@ impl Hosts {
     }
 
     /// Adds a failure for the given host, updating its metrics and priority.
-    pub fn add_failure(&self, host_key: &PublicKey) {
+    pub(crate) fn add_failure(&self, host_key: &PublicKey) {
         let mut inner = self.inner.write().unwrap();
         inner
             .preferred_hosts
@@ -303,7 +289,7 @@ impl Hosts {
     }
 
     /// Adds a read sample for the given host, updating its metrics and priority.
-    pub fn add_read_sample(&self, host_key: &PublicKey, duration: Duration) {
+    pub(crate) fn add_read_sample(&self, host_key: &PublicKey, duration: Duration) {
         let mut inner = self.inner.write().unwrap();
         inner
             .preferred_hosts
@@ -313,7 +299,7 @@ impl Hosts {
     }
 
     /// Adds a write sample for the given host, updating its metrics and priority.
-    pub fn add_write_sample(&self, host_key: &PublicKey, duration: Duration) {
+    pub(crate) fn add_write_sample(&self, host_key: &PublicKey, duration: Duration) {
         let mut inner = self.inner.write().unwrap();
         inner
             .preferred_hosts
@@ -343,12 +329,12 @@ struct HostQueueInner {
 
 /// A thread-safe queue of host public keys.
 #[derive(Debug, Clone)]
-pub struct HostQueue {
+pub(crate) struct HostQueue {
     inner: Arc<Mutex<HostQueueInner>>,
 }
 
 impl HostQueue {
-    pub fn new(hosts: Vec<PublicKey>) -> Self {
+    pub(crate) fn new(hosts: Vec<PublicKey>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(HostQueueInner {
                 hosts: VecDeque::from(hosts),
