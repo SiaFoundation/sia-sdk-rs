@@ -66,12 +66,32 @@ macro_rules! app_id {
 pub struct AppMetadata {
     #[serde(rename = "appID")]
     pub id: AppID,
+    /// A human-readable name for the application. This is used for display purposes on the indexer
+    /// and should be unique to avoid confusion with other applications.
+    /// 
+    /// Max length 128 characters.
     pub name: &'static str,
+    /// A brief description of the application. This is used for display purposes on the indexer
+    /// and should be concise and informative.
+    /// 
+    /// Max length 1024 characters.
     pub description: &'static str,
     #[serde(rename = "serviceURL")]
+    /// A URL where the application can be accessed or contacted. This is used for display purposes on the indexer
+    /// and should be a valid URL that points to the application's website or support page.
+    /// 
+    /// Max length 1024 characters.
     pub service_url: &'static str,
     #[serde(rename = "logoURL")]
+    /// An optional URL pointing to the application's logo. This is used for display purposes on the indexer
+    /// and should be a valid URL that points to an image file (e.g., PNG, JPEG) that represents the application's logo.
+    /// 
+    /// Max length 1024 characters.
     pub logo_url: Option<&'static str>,
+
+    /// An optional URL the indexer will call after the application is authorized
+    /// 
+    /// Max length 1024 characters.
     #[serde(rename = "callbackURL")]
     pub callback_url: Option<&'static str>,
 }
