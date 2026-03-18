@@ -460,6 +460,7 @@ impl Client {
     }
 }
 
+#[async_trait]
 impl RHP4Client for Client {
     async fn host_prices(
         &self,
