@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use core::fmt::Debug;
@@ -14,7 +15,8 @@ use tokio::net::lookup_host;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 
-use crate::rhp4::Error as RHP4Error;
+use crate::rhp4::{Error as RHP4Error, RHP4Transport};
+use crate::{Hosts, RHP4Client};
 use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, VarInt};
 use sia::encoding_async::AsyncDecoder;
 use sia::rhp::{
@@ -23,8 +25,6 @@ use sia::rhp::{
 use sia::signing::{PrivateKey, PublicKey};
 use sia::types::Hash256;
 use sia::types::v2::Protocol;
-
-use crate::{Hosts, RHP4Client};
 
 struct Stream {
     send: SendStream,
