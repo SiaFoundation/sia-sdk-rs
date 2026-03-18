@@ -515,6 +515,12 @@ impl RHP4Client for Client {
     }
 }
 
+impl RHP4Transport for Client {
+    fn supported_protocols(&self) -> &[&str] {
+        &["quic"]
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::time::Duration;
