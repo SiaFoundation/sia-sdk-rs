@@ -11,18 +11,18 @@ use ed25519_dalek::VerifyingKey;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use mux::{DialError, MuxError};
 use sia::encoding::Error as EncodingError;
 use sia::encoding_async::AsyncDecoder;
 use sia::rhp::{self, RPCRequest, RPCResponse, RPCSettings, Transport};
 use sia::signing::PublicKey;
+use sia_mux::{DialError, MuxError};
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
     #[error("mux: {0}")]
     Mux(#[from] MuxError),
     #[error("handshake: {0}")]
-    Handshake(#[from] mux::handshake::HandshakeError),
+    Handshake(#[from] sia_mux::handshake::HandshakeError),
     #[error("rhp: {0}")]
     Rhp(#[from] rhp::Error),
     #[error("io: {0}")]
@@ -34,7 +34,7 @@ enum Error {
 }
 
 /// Wraps a mux [`Stream`](mux::Stream) to implement [`Transport`].
-struct MuxTransport(mux::Stream);
+struct MuxTransport(sia_mux::Stream);
 
 impl AsyncDecoder for MuxTransport {
     type Error = Error;
@@ -92,14 +92,14 @@ async fn main() -> Result<(), Error> {
     // Establish mux
     let m = if anonymous {
         eprintln!("performing anonymous mux handshake...");
-        mux::dial_anonymous(tcp).await?
+        sia_mux::dial_anonymous(tcp).await?
     } else {
         let key_str = args.get(2).expect("missing host public key (ed25519:...)");
         let sia_key: PublicKey = key_str.parse().expect("invalid public key format");
         let bytes: [u8; 32] = sia_key.into();
         let vk = VerifyingKey::from_bytes(&bytes).expect("invalid ed25519 key");
         eprintln!("performing mux handshake (verifying host key)...");
-        mux::dial(tcp, &vk).await?
+        sia_mux::dial(tcp, &vk).await?
     };
     eprintln!("mux established");
 

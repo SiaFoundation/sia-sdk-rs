@@ -58,7 +58,7 @@ async fn go_server_rust_client_basic_echo() {
     let addr = format!("127.0.0.1:{port}");
 
     let conn = tokio::net::TcpStream::connect(&addr).await.unwrap();
-    let mux = mux::dial_anonymous(conn).await.unwrap();
+    let mux = sia_mux::dial_anonymous(conn).await.unwrap();
 
     let mut stream = mux.dial_stream().unwrap();
     let msg = b"hello from rust to go!";
@@ -83,7 +83,7 @@ async fn go_server_rust_client_many_streams() {
     let addr = format!("127.0.0.1:{port}");
 
     let conn = tokio::net::TcpStream::connect(&addr).await.unwrap();
-    let mux = mux::dial_anonymous(conn).await.unwrap();
+    let mux = sia_mux::dial_anonymous(conn).await.unwrap();
 
     let num_streams = 50;
     let mut handles = Vec::new();
@@ -119,7 +119,7 @@ async fn go_server_rust_client_large_payload() {
     let addr = format!("127.0.0.1:{port}");
 
     let conn = tokio::net::TcpStream::connect(&addr).await.unwrap();
-    let mux = mux::dial_anonymous(conn).await.unwrap();
+    let mux = sia_mux::dial_anonymous(conn).await.unwrap();
 
     let mut stream = mux.dial_stream().unwrap();
 
@@ -152,7 +152,7 @@ async fn rust_server_go_client_basic_echo() {
 
     let server_handle = tokio::spawn(async move {
         let (conn, _) = listener.accept().await.unwrap();
-        let mux = mux::accept_anonymous(conn).await.unwrap();
+        let mux = sia_mux::accept_anonymous(conn).await.unwrap();
 
         // Accept and echo streams until the mux closes
         loop {
@@ -219,7 +219,7 @@ async fn rust_server_go_client_many_streams() {
 
     let server_handle = tokio::spawn(async move {
         let (conn, _) = listener.accept().await.unwrap();
-        let mux = mux::accept_anonymous(conn).await.unwrap();
+        let mux = sia_mux::accept_anonymous(conn).await.unwrap();
 
         loop {
             match mux.accept_stream().await {
