@@ -1,3 +1,14 @@
+## 0.4.0 (2026-03-18)
+
+### Breaking Changes
+
+- Added ephemeral key to authorization flow
+- Reduced the size of the pin object request. Up to 4TB of data can now be pinned in a single object.
+
+### Features
+
+- Added `ready` field to account.
+
 ## 0.3.0 (2026-03-16)
 
 ### Breaking Changes
