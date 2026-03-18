@@ -69,10 +69,10 @@ impl Default for DownloadOptions {
 }
 
 #[derive(Clone)]
-pub(crate) struct Downloader<T: RHP4Client> {
+pub(crate) struct Downloader {
     account_key: Arc<PrivateKey>,
     hosts: Hosts,
-    transport: T,
+    transport: Arc<dyn RHP4Client>,
 }
 
 struct SectorDownloadTask {
@@ -82,16 +82,13 @@ struct SectorDownloadTask {
     index: usize,
 }
 
-impl<T: RHP4Client> Downloader<T>
-where
-    T: Send + Sync + Clone + 'static,
-{
+impl Downloader {
     // helper to pair a sector with its erasure-coded index.
     // Required because [FuturesUnordered.push] does not
     // preserve ordering and doesn't play nice with closures.
     async fn try_download_sector(
         _permit: OwnedSemaphorePermit,
-        transport: T,
+        transport: Arc<dyn RHP4Client>,
         account_key: Arc<PrivateKey>,
         task: SectorDownloadTask,
     ) -> Result<(usize, Vec<u8>), DownloadError> {
@@ -107,7 +104,7 @@ where
         Ok((task.index, data.to_vec()))
     }
 
-    pub fn new(hosts: Hosts, transport: T, account_key: Arc<PrivateKey>) -> Self {
+    pub fn new(hosts: Hosts, transport: Arc<dyn RHP4Client>, account_key: Arc<PrivateKey>) -> Self {
         Self {
             account_key,
             hosts,

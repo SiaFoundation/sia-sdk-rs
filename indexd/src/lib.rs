@@ -120,8 +120,8 @@ pub enum Error {
 pub struct SDK {
     app_key: Arc<PrivateKey>,
     api_client: app_client::Client,
-    downloader: Downloader<quic::Client>,
-    uploader: Uploader<quic::Client>,
+    downloader: Downloader,
+    uploader: Uploader,
 }
 
 impl SDK {
