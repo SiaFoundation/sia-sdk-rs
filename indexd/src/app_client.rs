@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
 use serde_with::base64::Base64;
-use serde_with::serde_as;
+use serde_with::{DefaultOnNull, serde_as};
 use sia::blake2::Blake2b256;
 use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
@@ -147,6 +147,7 @@ pub struct HostQuery {
 #[serde(rename_all = "camelCase")]
 pub struct App {
     pub id: Hash256,
+    pub name: String,
     pub description: String,
     pub logo_url: Option<String>,
     pub service_url: Option<String>,
@@ -156,8 +157,17 @@ pub struct App {
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub account_key: PublicKey,
+    /// The maximum amount of data that can be pinned to the indexer for this account.
     pub max_pinned_data: u64,
+    /// The amount of data currently pinned to the indexer for this account. This
+    /// counts towards max pinned data.
     pub pinned_data: u64,
+    /// The amount of data after erasure encoding. This is the actual amount of data on the network.
+    pub pinned_size: u64,
+    /// Whether the account is ready to be used. After registering an app, the account may not be
+    /// immediately ready as the indexer needs to process the registration and sync with the network.
+    /// The account will become ready once it has propagated on the network.
+    pub ready: bool,
     pub app: App,
     pub last_used: DateTime<Utc>,
 }
@@ -176,6 +186,55 @@ struct SharedObjectResponse {
 struct RegisterAppRequest {
     pub app_key: PublicKey,
     pub signature: Signature,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ObjectSlab {
+    id: Hash256,
+    offset: u32,
+    length: u32,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PinObjectRequest {
+    id: Hash256,
+    #[serde_as(as = "Base64")]
+    encrypted_data_key: Vec<u8>,
+    slabs: Vec<ObjectSlab>,
+    data_signature: Signature,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde_as(as = "DefaultOnNull<Base64>")]
+    encrypted_metadata_key: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde_as(as = "DefaultOnNull<Base64>")]
+    encrypted_metadata: Vec<u8>,
+    metadata_signature: Signature,
+}
+
+impl From<&SealedObject> for PinObjectRequest {
+    fn from(obj: &SealedObject) -> Self {
+        PinObjectRequest {
+            id: obj.id(),
+            encrypted_data_key: obj.encrypted_data_key.clone(),
+            slabs: obj
+                .slabs
+                .iter()
+                .map(|s| ObjectSlab {
+                    id: s.digest(),
+                    offset: s.offset,
+                    length: s.length,
+                })
+                .collect(),
+            data_signature: obj.data_signature.clone(),
+            encrypted_metadata_key: obj.encrypted_metadata_key.clone(),
+            encrypted_metadata: obj.encrypted_metadata.clone(),
+            metadata_signature: obj.metadata_signature.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -343,13 +402,15 @@ impl Client {
             .await
     }
 
-    /// Saves an object to the indexer.
-    pub async fn save_object(
+    /// Pins an object to the indexer. If an object with the same ID already
+    /// exists for the account, it is overwritten.
+    pub async fn pin_object(
         &self,
         app_key: &PrivateKey,
         object: &SealedObject,
     ) -> Result<(), Error> {
-        self.post_json::<_, EmptyResponse>("objects", app_key, Some(object))
+        let req = PinObjectRequest::from(object);
+        self.post_json::<_, EmptyResponse>("objects", app_key, Some(&req))
             .await
             .map(|_| ())
     }
@@ -1686,7 +1747,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_object() {
+    async fn test_pin_object() {
         let object = SealedObject {
             encrypted_data_key: vec![1u8; 72],
             encrypted_metadata_key: vec![1u8; 72],
@@ -1723,17 +1784,19 @@ mod tests {
 
         let server = Server::run();
 
+        let pin_request = PinObjectRequest::from(&object);
+
         server.expect(
             Expectation::matching(all_of![
                 request::method_path("POST", "/objects"),
-                request::body(serde_json::to_string(&object).unwrap())
+                request::body(serde_json::to_string(&pin_request).unwrap())
             ])
             .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string()).unwrap();
-        client.save_object(&app_key, &object).await.unwrap();
+        client.pin_object(&app_key, &object).await.unwrap();
     }
 
     #[tokio::test]
