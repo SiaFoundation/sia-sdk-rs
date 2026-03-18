@@ -13,7 +13,7 @@ use url::Url;
 
 use crate::app_client::{self, Client};
 use crate::object_encryption::derive;
-use crate::{AppID, AppMetadata, SDK, quic};
+use crate::{AppID, AppMetadata, SDK};
 
 /// The initial state of the SDK builder, before connecting to the indexd service.
 pub struct DisconnectedState;
@@ -50,8 +50,8 @@ pub enum BuilderError {
     #[error("client error: {0}")]
     Client(#[from] app_client::Error),
 
-    #[error("quic error: {0}")]
-    QUIC(#[from] quic::ConnectError),
+    #[error("transport error: {0}")]
+    Transport(String),
 
     #[error("mnemonic error: {0}")]
     Mnemonic(#[from] seed::SeedError),
