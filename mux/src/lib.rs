@@ -1,3 +1,14 @@
+//! Encrypted stream multiplexer for Sia peer-to-peer communication.
+//!
+//! # Examples
+//!
+//! The `rpc_settings` example demonstrates dialing a Sia host and fetching its
+//! RHP4 settings over a multiplexed connection:
+//!
+//! ```bash
+//! cargo run --example rpc_settings -- <host_ip:port> <host_public_key>
+//! ```
+
 pub mod frame;
 pub mod handshake;
 pub mod mux;
