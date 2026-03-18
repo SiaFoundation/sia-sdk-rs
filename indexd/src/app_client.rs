@@ -166,7 +166,7 @@ pub struct Account {
     pub pinned_size: u64,
     /// Whether the account is ready to be used. After registering an app, the account may not be
     /// immediately ready as the indexer needs to process the registration and sync with the network.
-    /// The account will become ready once it has propogated on the network.
+    /// The account will become ready once it has propagated on the network.
     pub ready: bool,
     pub app: App,
     pub last_used: DateTime<Utc>,
