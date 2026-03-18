@@ -288,7 +288,7 @@ impl SDK {
     pub async fn update_object_metadata(&self, object: &Object) -> Result<(), Error> {
         let sealed = object.seal(&self.app_key);
         self.api_client
-            .save_object(&self.app_key, &sealed)
+            .pin_object(&self.app_key, &sealed)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())
@@ -351,7 +351,7 @@ impl SDK {
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
         self.api_client
-            .save_object(&self.app_key, &object.seal(&self.app_key))
+            .pin_object(&self.app_key, &object.seal(&self.app_key))
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())
