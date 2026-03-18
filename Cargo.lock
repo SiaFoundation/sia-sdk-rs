@@ -1482,7 +1482,7 @@ dependencies = [
 
 [[package]]
 name = "indexd"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "blake2",
@@ -1514,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "indexd_ffi"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2679,7 +2679,7 @@ dependencies = [
 
 [[package]]
 name = "sia_sdk"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64",
  "bip39",

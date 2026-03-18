@@ -1,3 +1,13 @@
+## 0.4.0 (2026-03-18)
+
+### Breaking Changes
+
+- Added ephemeral key to authorization flow
+
+### Features
+
+- Added `ready` field to account.
+
 ## 0.3.1 (2026-03-16)
 
 ### Features
