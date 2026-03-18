@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use log::debug;
+use rand::random;
 use reqwest::IntoUrl;
 use sia::seed::{self, Seed};
 use sia::signing::PrivateKey;
@@ -33,6 +34,7 @@ pub struct ApprovedState {
 
 /// A builder for creating an SDK instance.
 pub struct Builder<S> {
+    ephemeral_key: PrivateKey,
     state: S,
     client: Client,
     app_meta: AppMetadata,
@@ -111,6 +113,7 @@ impl Builder<DisconnectedState> {
         );
         let client = Client::new(indexer_url)?;
         Ok(Self {
+            ephemeral_key: PrivateKey::from_seed(&random::<[u8; 32]>()),
             state: DisconnectedState,
             client,
             app_meta,
@@ -146,8 +149,12 @@ impl Builder<DisconnectedState> {
     pub async fn request_connection(
         self,
     ) -> Result<Builder<RequestingApprovalState>, BuilderError> {
-        let resp = self.client.request_app_connection(&self.app_meta).await?;
+        let resp = self
+            .client
+            .request_app_connection(&self.ephemeral_key, &self.app_meta)
+            .await?;
         Ok(Builder {
+            ephemeral_key: self.ephemeral_key,
             app_meta: self.app_meta,
             state: RequestingApprovalState {
                 response_url: Url::parse(&resp.response_url)?,
@@ -183,10 +190,11 @@ impl Builder<RequestingApprovalState> {
 
             if let Some(user_secret) = self
                 .client
-                .check_request_status(self.state.status_url.clone())
+                .check_request_status(&self.ephemeral_key, self.state.status_url.clone())
                 .await?
             {
                 return Ok(Builder {
+                    ephemeral_key: self.ephemeral_key,
                     state: ApprovedState {
                         register_url: self.state.register_url.clone(),
                         user_secret,
@@ -212,7 +220,11 @@ impl Builder<ApprovedState> {
     pub async fn register(self, mnemonic: &str) -> Result<SDK, BuilderError> {
         let app_key = derive_app_key(mnemonic, &self.app_meta.id, &self.state.user_secret)?;
         self.client
-            .register_app(&app_key, self.state.register_url.clone())
+            .register_app(
+                &self.ephemeral_key,
+                &app_key,
+                self.state.register_url.clone(),
+            )
             .await?;
         SDK::new(self.client, Arc::new(app_key), self.tls_config).await
     }

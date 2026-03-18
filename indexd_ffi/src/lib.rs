@@ -556,6 +556,7 @@ impl From<indexd::ObjectsCursor> for ObjectsCursor {
 #[derive(uniffi::Record)]
 pub struct App {
     pub id: String,
+    pub name: String,
     pub description: String,
     pub service_url: Option<String>,
     pub logo_url: Option<String>,
@@ -565,8 +566,17 @@ pub struct App {
 #[derive(uniffi::Record)]
 pub struct Account {
     pub account_key: String,
+    /// The maximum amount of data that can be pinned to the indexer for this account.
     pub max_pinned_data: u64,
+    /// The amount of data currently pinned to the indexer for this account. This
+    /// counts towards max pinned data.
     pub pinned_data: u64,
+    /// The amount of data after erasure encoding. This is the actual amount of data on the network.
+    pub pinned_size: u64,
+    /// Whether the account is ready to be used. After registering an app, the account may not be
+    /// immediately ready as the indexer needs to process the registration and sync with the network.
+    /// The account will become ready once it has propagated on the network.
+    pub ready: bool,
     pub app: App,
     pub last_used: SystemTime,
 }
@@ -577,8 +587,11 @@ impl From<indexd::Account> for Account {
             account_key: a.account_key.to_string(),
             max_pinned_data: a.max_pinned_data,
             pinned_data: a.pinned_data,
+            pinned_size: a.pinned_size,
+            ready: a.ready,
             app: App {
                 id: a.app.id.to_string(),
+                name: a.app.name,
                 description: a.app.description,
                 service_url: a.app.service_url,
                 logo_url: a.app.logo_url,
