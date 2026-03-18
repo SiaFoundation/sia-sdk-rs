@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode};
 use serde_json::to_vec;
 use serde_with::base64::Base64;
-use serde_with::serde_as;
+use serde_with::{DefaultOnNull, serde_as};
 use sia::blake2::Blake2b256;
 use sia::encryption::EncryptionKey;
 use sia::rhp::Host;
@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::DecryptError;
 use crate::slabs::Sector;
-use crate::{Object, PinnedSlab, SealedObject, Slab};
-use sia::signing::{PrivateKey, PublicKey};
+use crate::{AppMetadata, Object, PinnedSlab, SealedObject, Slab};
+use sia::signing::{PrivateKey, PublicKey, Signature};
 use sia::types::Hash256;
 use sia::types::v2::Protocol;
 
@@ -77,21 +77,6 @@ pub struct AuthConnectStatusResponse {
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct RegisterAppRequest {
-    #[serde(rename = "appID")]
-    pub app_id: Hash256,
-    pub name: String,
-    pub description: String,
-    #[serde(rename = "serviceURL")]
-    pub service_url: Url,
-    #[serde(rename = "logoURL")]
-    pub logo_url: Option<Url>,
-    #[serde(rename = "callbackURL")]
-    pub callback_url: Option<Url>,
-}
-
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct RegisterAppResponse {
     #[serde(rename = "responseURL")]
     pub response_url: String,
@@ -104,7 +89,7 @@ pub struct RegisterAppResponse {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SlabPinParams {
+pub(crate) struct SlabPinParams {
     pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
@@ -144,12 +129,6 @@ impl Serialize for GeoLocation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum HostSort {
-    Distance(GeoLocation),
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct HostQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,6 +147,7 @@ pub struct HostQuery {
 #[serde(rename_all = "camelCase")]
 pub struct App {
     pub id: Hash256,
+    pub name: String,
     pub description: String,
     pub logo_url: Option<String>,
     pub service_url: Option<String>,
@@ -177,9 +157,17 @@ pub struct App {
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub account_key: PublicKey,
-    pub connect_key: String,
+    /// The maximum amount of data that can be pinned to the indexer for this account.
     pub max_pinned_data: u64,
+    /// The amount of data currently pinned to the indexer for this account. This
+    /// counts towards max pinned data.
     pub pinned_data: u64,
+    /// The amount of data after erasure encoding. This is the actual amount of data on the network.
+    pub pinned_size: u64,
+    /// Whether the account is ready to be used. After registering an app, the account may not be
+    /// immediately ready as the indexer needs to process the registration and sync with the network.
+    /// The account will become ready once it has propagated on the network.
+    pub ready: bool,
     pub app: App,
     pub last_used: DateTime<Utc>,
 }
@@ -191,6 +179,62 @@ struct SharedObjectResponse {
     pub slabs: Vec<Slab>,
     #[serde_as(as = "Option<Base64>")]
     pub encrypted_metadata: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterAppRequest {
+    pub app_key: PublicKey,
+    pub signature: Signature,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ObjectSlab {
+    id: Hash256,
+    offset: u32,
+    length: u32,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PinObjectRequest {
+    id: Hash256,
+    #[serde_as(as = "Base64")]
+    encrypted_data_key: Vec<u8>,
+    slabs: Vec<ObjectSlab>,
+    data_signature: Signature,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde_as(as = "DefaultOnNull<Base64>")]
+    encrypted_metadata_key: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde_as(as = "DefaultOnNull<Base64>")]
+    encrypted_metadata: Vec<u8>,
+    metadata_signature: Signature,
+}
+
+impl From<&SealedObject> for PinObjectRequest {
+    fn from(obj: &SealedObject) -> Self {
+        PinObjectRequest {
+            id: obj.id(),
+            encrypted_data_key: obj.encrypted_data_key.clone(),
+            slabs: obj
+                .slabs
+                .iter()
+                .map(|s| ObjectSlab {
+                    id: s.digest(),
+                    offset: s.offset,
+                    length: s.length,
+                })
+                .collect(),
+            data_signature: obj.data_signature.clone(),
+            encrypted_metadata_key: obj.encrypted_metadata_key.clone(),
+            encrypted_metadata: obj.encrypted_metadata.clone(),
+            metadata_signature: obj.metadata_signature.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -224,7 +268,7 @@ impl Client {
     /// true if authenticated, false if not, and an error if the request fails.
     pub async fn check_app_authenticated(&self, app_key: &PrivateKey) -> Result<bool, Error> {
         let url = self.url.join("auth/check")?;
-        let query_params = self.sign(
+        let query_params = sign(
             app_key,
             &url,
             Method::GET,
@@ -248,9 +292,11 @@ impl Client {
     /// Requests an application connection to the indexer.
     pub async fn request_app_connection(
         &self,
-        opts: &RegisterAppRequest,
+        ephemeral_key: &PrivateKey,
+        opts: &AppMetadata,
     ) -> Result<RegisterAppResponse, Error> {
-        self.post_json("auth/connect", None, Some(opts)).await
+        self.post_json("auth/connect", ephemeral_key, Some(opts))
+            .await
     }
 
     /// Checks if an auth request has been approved.
@@ -259,11 +305,24 @@ impl Client {
     /// to derive the application key.
     ///
     /// If the auth request is still pending, it returns None.
-    pub async fn check_request_status(&self, status_url: Url) -> Result<Option<Hash256>, Error> {
+    pub async fn check_request_status(
+        &self,
+        ephemeral_key: &PrivateKey,
+        status_url: Url,
+    ) -> Result<Option<Hash256>, Error> {
+        let query_params = sign(
+            ephemeral_key,
+            &status_url,
+            Method::GET,
+            None,
+            Utc::now() + Duration::from_secs(60),
+        );
+
         let resp = self
             .client
             .get(status_url)
             .timeout(Duration::from_secs(15))
+            .query(&query_params)
             .send()
             .await?;
         match resp.status() {
@@ -284,25 +343,29 @@ impl Client {
     }
 
     /// Registers the application key with the indexer.
-    pub async fn register_app(&self, app_key: &PrivateKey, register_url: Url) -> Result<(), Error> {
-        let query_params = self.sign(
-            app_key,
-            &register_url,
-            Method::POST,
-            None,
-            Utc::now() + Duration::from_secs(60),
-        );
-        let resp = self
-            .client
-            .post(register_url)
-            .timeout(Duration::from_secs(15))
-            .query(&query_params)
-            .send()
-            .await?;
-        match resp.status() {
-            StatusCode::NO_CONTENT => Ok(()),
-            _ => Err(Error::Api(resp.text().await?)),
-        }
+    pub async fn register_app(
+        &self,
+        signing_key: &PrivateKey,
+        app_key: &PrivateKey,
+        register_url: Url,
+    ) -> Result<(), Error> {
+        let segments = register_url
+            .path_segments()
+            .ok_or(Error::Format("invalid register url format".into()))?;
+        // ../auth/connect/:request_id/register
+        let request_id = segments
+            .rev()
+            .nth(1)
+            .ok_or(Error::Format("invalid register url format".into()))?;
+
+        let sig_hash = register_app_sig_hash(request_id, &signing_key.public_key());
+        let body = RegisterAppRequest {
+            app_key: app_key.public_key(),
+            signature: app_key.sign(sig_hash.as_ref()),
+        };
+        post_json::<_, EmptyResponse>(&self.client, register_url, signing_key, Some(&body))
+            .await
+            .map(|_| ())
     }
 
     /// Returns all usable hosts.
@@ -310,12 +373,12 @@ impl Client {
     /// # Arguments
     /// * `query` - Parameters to control the hosts listing.
     pub async fn hosts(&self, app_key: &PrivateKey, query: HostQuery) -> Result<Vec<Host>, Error> {
-        self.get_json("hosts", Some(app_key), Some(&query)).await
+        self.get_json("hosts", app_key, Some(&query)).await
     }
 
     /// Retrieves an object from the indexer by its key.
     pub async fn object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<SealedObject, Error> {
-        self.get_json::<_, ()>(&format!("objects/{key}"), Some(app_key), None)
+        self.get_json::<_, ()>(&format!("objects/{key}"), app_key, None)
             .await
     }
 
@@ -335,17 +398,19 @@ impl Client {
             query_params.push(("after", after.to_rfc3339())); // indexd expects RFC3339
             query_params.push(("key", id.to_string()));
         }
-        self.get_json::<_, _>("objects", Some(app_key), Some(&query_params))
+        self.get_json::<_, _>("objects", app_key, Some(&query_params))
             .await
     }
 
-    /// Saves an object to the indexer.
-    pub async fn save_object(
+    /// Pins an object to the indexer. If an object with the same ID already
+    /// exists for the account, it is overwritten.
+    pub async fn pin_object(
         &self,
         app_key: &PrivateKey,
         object: &SealedObject,
     ) -> Result<(), Error> {
-        self.post_json::<_, EmptyResponse>("objects", Some(app_key), Some(object))
+        let req = PinObjectRequest::from(object);
+        self.post_json::<_, EmptyResponse>("objects", app_key, Some(&req))
             .await
             .map(|_| ())
     }
@@ -357,25 +422,8 @@ impl Client {
 
     /// Retrieves a slab from the indexer by its ID.
     pub async fn slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<PinnedSlab, Error> {
-        self.get_json::<_, ()>(&format!("slabs/{slab_id}"), Some(app_key), None)
+        self.get_json::<_, ()>(&format!("slabs/{slab_id}"), app_key, None)
             .await
-    }
-
-    /// Fetches the digests of slabs associated with the account. It supports
-    /// pagination through the provided options.
-    pub async fn slab_ids(
-        &self,
-        app_key: &PrivateKey,
-        offset: Option<u64>,
-        limit: Option<u64>,
-    ) -> Result<Vec<Hash256>, Error> {
-        #[derive(Serialize)]
-        struct QueryParams {
-            offset: Option<u64>,
-            limit: Option<u64>,
-        }
-        let params = QueryParams { offset, limit };
-        self.get_json("slabs", Some(app_key), Some(&params)).await
     }
 
     /// Pins slabs to the indexer.
@@ -384,59 +432,25 @@ impl Client {
         app_key: &PrivateKey,
         slabs: Vec<SlabPinParams>,
     ) -> Result<Vec<Hash256>, Error> {
-        self.post_json("slabs", Some(app_key), Some(&slabs)).await
-    }
-
-    /// Pin a slab to the indexer.
-    pub async fn pin_slab(
-        &self,
-        app_key: &PrivateKey,
-        slab: SlabPinParams,
-    ) -> Result<Hash256, Error> {
-        self.pin_slabs(app_key, vec![slab])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or(Error::Custom("no slab digest".to_string()))
-    }
-
-    /// Unpins a slab from the indexer.
-    pub async fn unpin_slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<(), Error> {
-        self.delete(&format!("slabs/{slab_id}"), app_key).await
+        self.post_json("slabs", app_key, Some(&slabs)).await
     }
 
     /// Unpins slabs not used by any object on the account.
     pub async fn prune_slabs(&self, app_key: &PrivateKey) -> Result<(), Error> {
-        self.post_json::<(), EmptyResponse>("slabs/prune", Some(app_key), None)
+        self.post_json::<(), EmptyResponse>("slabs/prune", app_key, None)
             .await
             .map(|_| ())
     }
 
     /// Account returns the current account.
     pub async fn account(&self, app_key: &PrivateKey) -> Result<Account, Error> {
-        self.get_json::<_, ()>("account", Some(app_key), None).await
+        self.get_json::<_, ()>("account", app_key, None).await
     }
 
     /// Helper to send a signed DELETE request.
     async fn delete(&self, path: &str, app_key: &PrivateKey) -> Result<(), Error> {
         let url = self.url.join(path)?;
-        let query_params = self.sign(
-            app_key,
-            &url,
-            Method::DELETE,
-            None,
-            Utc::now() + Duration::from_secs(60),
-        );
-        Self::handle_response::<EmptyResponse>(
-            self.client
-                .delete(url)
-                .timeout(Duration::from_secs(15))
-                .query(&query_params)
-                .send()
-                .await?,
-        )
-        .await
-        .map(|_| ())
+        delete(&self.client, url, app_key).await
     }
 
     /// Helper to send a signed GET request and parse the JSON
@@ -444,31 +458,11 @@ impl Client {
     async fn get_json<D: DeserializeOwned, Q: Serialize + ?Sized>(
         &self,
         path: &str,
-        app_key: Option<&PrivateKey>,
+        signing_key: &PrivateKey,
         query_params: Option<&Q>,
     ) -> Result<D, Error> {
         let url = self.url.join(path)?;
-
-        let mut signing_params = None;
-        if let Some(app_key) = app_key {
-            let params = self.sign(
-                app_key,
-                &url,
-                Method::GET,
-                None,
-                Utc::now() + Duration::from_secs(60),
-            );
-            signing_params = Some(params);
-        }
-
-        let mut builder = self.client.get(url).timeout(Duration::from_secs(15));
-        if let Some(q) = query_params {
-            builder = builder.query(q); // optional query params
-        }
-        if let Some(signing_params) = &signing_params {
-            builder = builder.query(&signing_params);
-        }
-        Self::handle_response(builder.send().await?).await
+        get_json(&self.client, url, signing_key, query_params).await
     }
 
     /// Helper to either parse a successfully JSON response or return the error
@@ -486,53 +480,11 @@ impl Client {
     async fn post_json<S: Serialize, D: DeserializeOwned>(
         &self,
         path: &str,
-        app_key: Option<&PrivateKey>,
+        signing_key: &PrivateKey,
         body: Option<&S>,
     ) -> Result<D, Error> {
-        let body = body.and_then(|body| to_vec(body).ok());
         let url = self.url.join(path)?;
-
-        let mut query_params = None;
-        if let Some(app_key) = app_key {
-            query_params = Some(self.sign(
-                app_key,
-                &url,
-                Method::POST,
-                body.as_deref(),
-                Utc::now() + Duration::from_secs(60),
-            ));
-        }
-
-        let mut builder = self.client.post(url).timeout(Duration::from_secs(15));
-        if let Some(query_params) = &query_params {
-            builder = builder.query(&query_params);
-        }
-        if let Some(body) = body {
-            builder = builder.body(body);
-        }
-        Self::handle_response(builder.send().await?).await
-    }
-
-    fn request_hash(
-        url: &Url,
-        method: Method,
-        body: Option<&[u8]>,
-        valid_until: DateTime<Utc>,
-    ) -> Hash256 {
-        let host_port = url
-            .port()
-            .map_or(url.host_str().unwrap_or("localhost").to_string(), |port| {
-                format!("{}:{}", url.host_str().unwrap_or("localhost"), port)
-            });
-        let mut state = Blake2b256::new();
-        state.update(method.as_str().as_bytes());
-        state.update(host_port.as_bytes());
-        state.update(url.path().as_bytes());
-        state.update(valid_until.timestamp().to_le_bytes());
-        if let Some(body) = body {
-            state.update(body);
-        }
-        state.finalize().into()
+        post_json(&self.client, url, signing_key, body).await
     }
 
     /// Creates a signed url that can be shared with others
@@ -556,7 +508,7 @@ impl Client {
         )
         .parse()?;
 
-        let params = self.sign(app_key, &url, Method::GET, None, valid_until);
+        let params = sign(app_key, &url, Method::GET, None, valid_until);
         url.set_fragment(Some(
             format!(
                 "encryption_key={}",
@@ -623,24 +575,124 @@ impl Client {
             Vec::new(),
         ))
     }
+}
 
-    fn sign(
-        &self,
-        app_key: &PrivateKey,
-        url: &Url,
-        method: Method,
-        body: Option<&[u8]>,
-        valid_until: DateTime<Utc>,
-    ) -> [(&'static str, String); 3] {
-        let hash = Self::request_hash(url, method, body, valid_until);
-        let public_key = app_key.public_key();
-        let signature = app_key.sign(hash.as_ref());
-        [
-            (QUERY_PARAM_VALID_UNTIL, valid_until.timestamp().to_string()),
-            (QUERY_PARAM_CREDENTIAL, URL_SAFE.encode(public_key)),
-            (QUERY_PARAM_SIGNATURE, URL_SAFE.encode(signature.as_ref())),
-        ]
+fn request_hash(
+    url: &Url,
+    method: Method,
+    body: Option<&[u8]>,
+    valid_until: DateTime<Utc>,
+) -> Hash256 {
+    let host_port = url
+        .port()
+        .map_or(url.host_str().unwrap_or("localhost").to_string(), |port| {
+            format!("{}:{}", url.host_str().unwrap_or("localhost"), port)
+        });
+    let mut state = Blake2b256::new();
+    state.update(method.as_str().as_bytes());
+    state.update(host_port.as_bytes());
+    state.update(url.path().as_bytes());
+    state.update(valid_until.timestamp().to_le_bytes());
+    if let Some(body) = body {
+        state.update(body);
     }
+    state.finalize().into()
+}
+
+fn sign(
+    app_key: &PrivateKey,
+    url: &Url,
+    method: Method,
+    body: Option<&[u8]>,
+    valid_until: DateTime<Utc>,
+) -> [(&'static str, String); 3] {
+    let hash = request_hash(url, method, body, valid_until);
+    let public_key = app_key.public_key();
+    let signature = app_key.sign(hash.as_ref());
+    [
+        (QUERY_PARAM_VALID_UNTIL, valid_until.timestamp().to_string()),
+        (QUERY_PARAM_CREDENTIAL, URL_SAFE.encode(public_key)),
+        (QUERY_PARAM_SIGNATURE, URL_SAFE.encode(signature.as_ref())),
+    ]
+}
+
+async fn get_json<D: DeserializeOwned, Q: Serialize + ?Sized>(
+    client: &reqwest::Client,
+    url: Url,
+    signing_key: &PrivateKey,
+    query_params: Option<&Q>,
+) -> Result<D, Error> {
+    let signing_params = sign(
+        signing_key,
+        &url,
+        Method::GET,
+        None,
+        Utc::now() + Duration::from_secs(60),
+    );
+
+    let mut builder = client
+        .get(url)
+        .timeout(Duration::from_secs(15))
+        .query(&signing_params);
+    if let Some(q) = query_params {
+        builder = builder.query(q);
+    }
+    Client::handle_response(builder.send().await?).await
+}
+
+async fn post_json<S: Serialize, D: DeserializeOwned>(
+    client: &reqwest::Client,
+    url: Url,
+    signing_key: &PrivateKey,
+    body: Option<&S>,
+) -> Result<D, Error> {
+    let body = body.and_then(|body| to_vec(body).ok());
+    let params = &sign(
+        signing_key,
+        &url,
+        Method::POST,
+        body.as_deref(),
+        Utc::now() + Duration::from_secs(60),
+    );
+    let mut builder = client
+        .post(url)
+        .timeout(Duration::from_secs(15))
+        .query(params);
+    if let Some(body) = body {
+        builder = builder.body(body);
+    }
+    Client::handle_response(builder.send().await?).await
+}
+
+async fn delete(client: &reqwest::Client, url: Url, app_key: &PrivateKey) -> Result<(), Error> {
+    let query_params = sign(
+        app_key,
+        &url,
+        Method::DELETE,
+        None,
+        Utc::now() + Duration::from_secs(60),
+    );
+    Client::handle_response::<EmptyResponse>(
+        client
+            .delete(url)
+            .timeout(Duration::from_secs(15))
+            .query(&query_params)
+            .send()
+            .await?,
+    )
+    .await
+    .map(|_| ())
+}
+
+fn register_app_sig_hash(request_id: &str, ephemeral_key: &PublicKey) -> Hash256 {
+    const KEY_DOMAIN: &[u8] = b"registerAppKey";
+
+    Blake2b256::default()
+        .chain_update(KEY_DOMAIN)
+        .chain_update(ephemeral_key)
+        .chain_update(request_id.as_bytes())
+        .finalize()
+        .into()
 }
 
 #[cfg(test)]
@@ -651,12 +703,109 @@ mod tests {
     use sia::signing::Signature;
     use sia::{hash_256, public_key, signature};
 
-    use crate::object_id;
+    use crate::{AppID, object_id};
 
     use super::*;
     use httptest::http::Response;
     use httptest::matchers::*;
     use httptest::{Expectation, Server};
+
+    /// Validates a signed HTTP request by reconstructing the URL from the
+    /// request, then verifying the credential, signature, and expiration.
+    /// Panics if the signature is invalid.
+    fn validate_url_signature_request(
+        req: &httptest::http::Request<httptest::bytes::Bytes>,
+    ) -> PublicKey {
+        let host = req
+            .headers()
+            .get("host")
+            .expect("missing host header")
+            .to_str()
+            .expect("invalid host header");
+        let uri = req.uri();
+        let url: Url = format!("http://{}{}", host, uri)
+            .parse()
+            .expect("invalid url");
+        let method: Method = req.method().clone();
+        let body = req.body();
+        let body = if body.is_empty() {
+            None
+        } else {
+            Some(body.as_ref())
+        };
+
+        let query_pairs: std::collections::HashMap<_, _> = url.query_pairs().collect();
+
+        let credential_str = query_pairs
+            .get(QUERY_PARAM_CREDENTIAL)
+            .unwrap_or_else(|| panic!("missing {QUERY_PARAM_CREDENTIAL} parameter"));
+        let signature_str = query_pairs
+            .get(QUERY_PARAM_SIGNATURE)
+            .unwrap_or_else(|| panic!("missing {QUERY_PARAM_SIGNATURE} parameter"));
+        let valid_until_str = query_pairs
+            .get(QUERY_PARAM_VALID_UNTIL)
+            .unwrap_or_else(|| panic!("missing {QUERY_PARAM_VALID_UNTIL} parameter"));
+
+        // parse credential (public key)
+        let mut pk_bytes = [0u8; 32];
+        let n = URL_SAFE
+            .decode_slice(credential_str.as_bytes(), &mut pk_bytes)
+            .expect("invalid credential encoding");
+        assert_eq!(n, 32, "invalid credential length");
+        let pk = PublicKey::new(pk_bytes);
+
+        // parse signature
+        let mut sig_bytes = [0u8; 64];
+        let n = URL_SAFE
+            .decode_slice(signature_str.as_bytes(), &mut sig_bytes)
+            .expect("invalid signature encoding");
+        assert_eq!(n, 64, "invalid signature length");
+        let sig = Signature::from(sig_bytes);
+
+        // parse valid_until
+        let ts: i64 = valid_until_str.parse().expect("invalid timestamp");
+        let valid_until = DateTime::from_timestamp(ts, 0).expect("invalid timestamp");
+
+        assert!(valid_until >= Utc::now(), "signature expired");
+
+        // strip the auth query params to compute the hash over the original URL
+        let mut verify_url = url.clone();
+        {
+            let filtered: Vec<(String, String)> = verify_url
+                .query_pairs()
+                .filter(|(k, _)| {
+                    k != QUERY_PARAM_CREDENTIAL
+                        && k != QUERY_PARAM_SIGNATURE
+                        && k != QUERY_PARAM_VALID_UNTIL
+                })
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            if filtered.is_empty() {
+                verify_url.set_query(None);
+            } else {
+                verify_url.query_pairs_mut().clear().extend_pairs(&filtered);
+            }
+        }
+
+        let hash = request_hash(&verify_url, method, body, valid_until);
+        assert!(pk.verify(hash.as_ref(), &sig), "invalid signature");
+        pk
+    }
+
+    #[test]
+    fn test_register_app_sig_hash_golden() {
+        const REQUEST_ID: &str = "ebddc9385dace70f9a97cebce34134ac";
+        const EPHEMERAL_KEY: PublicKey =
+            public_key!("ed25519:9f5fb0b962f29497b3993e12c7a7880fbaf0cf52bad3620af0280895fdea8ece");
+        const EXPECTED_SIG_HASH: Hash256 =
+            hash_256!("3017354ace367561d4c568263463c17d3c16030c637734e12e9418be1f2f8e65");
+
+        assert_eq!(
+            register_app_sig_hash(REQUEST_ID, &EPHEMERAL_KEY),
+            EXPECTED_SIG_HASH,
+            "expected sig hash did not match"
+        );
+    }
 
     /// Ensures that our base64 url encoding is compatible with our Go implementation.
     #[test]
@@ -674,7 +823,7 @@ mod tests {
         let url = Url::parse("https://foo.bar/foo").unwrap();
         let valid_until = DateTime::from_timestamp_secs(123).unwrap();
         let body = b"hello world!";
-        let hash = Client::request_hash(&url, method, Some(body), valid_until);
+        let hash = request_hash(&url, method, Some(body), valid_until);
         assert_eq!(
             hash,
             hash_256!("a9f0bda1b97b7d44ae6369ac830851a115311bb59aa2d848beda6ae95d10ad18")
@@ -684,10 +833,9 @@ mod tests {
     #[test]
     fn test_sign() {
         let app_key = PrivateKey::from_seed(&[0u8; 32]);
-        let client = Client::new("https://foo.bar").unwrap();
 
         // with body
-        let params = client.sign(
+        let params = sign(
             &app_key,
             &"https://foo.bar/baz.jpg".parse().unwrap(),
             Method::POST,
@@ -713,7 +861,7 @@ mod tests {
         );
 
         // without body
-        let params = client.sign(
+        let params = sign(
             &app_key,
             &"https://foo.bar/baz.jpg".parse().unwrap(),
             Method::GET,
@@ -804,29 +952,42 @@ mod tests {
 
     #[tokio::test]
     async fn test_signed_auth() {
-        let server = Server::run();
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let expected_pk = app_key.public_key();
 
-        // expect 1 authenticated get and 1 authenticated post request
+        let server = Server::run();
         server.expect(
-            Expectation::matching(request::query(url_decoded(all_of![
-                contains((QUERY_PARAM_VALID_UNTIL, any())),
-                contains((QUERY_PARAM_CREDENTIAL, any())),
-                contains((QUERY_PARAM_SIGNATURE, any()))
-            ])))
-            .times(3)
-            .respond_with(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .body("{}")
-                    .unwrap(),
-            ),
+            Expectation::matching(
+                move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                    let pk = validate_url_signature_request(req);
+                    pk == expected_pk
+                },
+            )
+            .times(5)
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
         );
 
-        let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string()).unwrap();
-        let _: Result<(), _> = client.get_json::<_, ()>("", Some(&app_key), None).await;
-        let _: Result<(), _> = client.post_json::<(), ()>("", Some(&app_key), None).await;
-        let _: Result<(), _> = client.delete("", &app_key).await;
+        client
+            .get_json::<EmptyResponse, ()>("", &app_key, None)
+            .await
+            .expect("GET request failed");
+        client
+            .get_json::<EmptyResponse, _>("", &app_key, Some(&[("foo", "bar"), ("baz", "1")]))
+            .await
+            .expect("GET with query params failed");
+        client
+            .post_json::<[u8; 3], EmptyResponse>("", &app_key, Some(&[1u8, 2, 3]))
+            .await
+            .expect("POST with body failed");
+        client
+            .post_json::<(), EmptyResponse>("", &app_key, None)
+            .await
+            .expect("POST request failed");
+        client
+            .delete("", &app_key)
+            .await
+            .expect("DELETE request failed");
     }
 
     #[tokio::test]
@@ -957,87 +1118,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_slab_ids() {
-        let slab_id = hash_256!("43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28");
-        let server = Server::run();
-
-        server.expect(
-            Expectation::matching(all_of![
-                request::method_path("GET", "/slabs"),
-                request::query(url_decoded(all_of![
-                    contains(("offset", "1")),
-                    contains(("limit", "2"))
-                ]))
-            ])
-            .respond_with(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .body(format!(r#"["{slab_id}","{slab_id}"]"#))
-                    .unwrap(),
-            ),
-        );
-
-        let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string()).unwrap();
-        assert_eq!(
-            client.slab_ids(&app_key, Some(1), Some(2)).await.unwrap(),
-            vec![slab_id, slab_id]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_pin_slab() {
-        let slab_id = hash_256!("43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28");
-        let slab = SlabPinParams {
-            encryption_key: [
-                186, 153, 179, 170, 159, 95, 101, 177, 15, 130, 58, 19, 138, 144, 9, 91, 181, 119,
-                38, 225, 209, 47, 149, 22, 157, 210, 16, 232, 10, 151, 186, 160,
-            ]
-            .into(),
-            min_shards: 1,
-            sectors: vec![Sector {
-                root: hash_256!("826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6"),
-                host_key: public_key!(
-                    "ed25519:910b22c360a1c67cb6a9a7371fa600c48e87d626b328669d01f34048ac3132fe"
-                ),
-            }],
-        };
-        let server = Server::run();
-
-        server.expect(
-            Expectation::matching(all_of![
-                request::method_path("POST", "/slabs"),
-                request::body(serde_json::to_string(&vec![slab.clone()]).unwrap())
-            ])
-            .respond_with(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .body("[\"43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28\"]")
-                    .unwrap(),
-            ),
-        );
-
-        let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string()).unwrap();
-        assert_eq!(client.pin_slab(&app_key, slab).await.unwrap(), slab_id);
-    }
-
-    #[tokio::test]
-    async fn test_unpin_slab() {
-        let slab_id = hash_256!("43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28");
-        let server = Server::run();
-
-        server.expect(
-            Expectation::matching(request::method_path("DELETE", format!("/slabs/{slab_id}")))
-                .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
-        );
-
-        let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string()).unwrap();
-        client.unpin_slab(&app_key, &slab_id).await.unwrap();
-    }
-
-    #[tokio::test]
     async fn test_prune_slabs() {
         let server = Server::run();
 
@@ -1071,12 +1151,12 @@ mod tests {
 
         let expected_error = Error::Api("something went wrong".to_string());
         let get_error = client
-            .get_json::<(), ()>("", Some(&app_key), None)
+            .get_json::<(), ()>("", &app_key, None)
             .await
             .unwrap_err();
         assert_eq!(get_error.to_string(), expected_error.to_string());
         let post_error = client
-            .post_json::<(), ()>("", Some(&app_key), None)
+            .post_json::<(), ()>("", &app_key, None)
             .await
             .unwrap_err();
         assert_eq!(post_error.to_string(), expected_error.to_string());
@@ -1113,12 +1193,13 @@ mod tests {
         );
 
         let client = Client::new("https://foo.com").unwrap();
+        let ephemeral_key = PrivateKey::from_seed(&rand::random());
 
         // approved request
         let status_url: Url = server.url("/approved").to_string().parse().unwrap();
         assert_eq!(
             client
-                .check_request_status(status_url)
+                .check_request_status(&ephemeral_key, status_url)
                 .await
                 .unwrap()
                 .unwrap(),
@@ -1128,13 +1209,19 @@ mod tests {
         // rejected request
         let status_url: Url = server.url("/rejected").to_string().parse().unwrap();
         assert!(matches!(
-            client.check_request_status(status_url).await.unwrap_err(),
+            client
+                .check_request_status(&ephemeral_key, status_url)
+                .await
+                .unwrap_err(),
             Error::UserRejected,
         ));
 
         // other error
         let status_url: Url = server.url("/error").to_string().parse().unwrap();
-        let err = client.check_request_status(status_url).await.unwrap_err();
+        let err = client
+            .check_request_status(&ephemeral_key, status_url)
+            .await
+            .unwrap_err();
         assert_eq!(
             err.to_string(),
             "indexd responded with an error: something went wrong"
@@ -1188,29 +1275,29 @@ mod tests {
     #[tokio::test]
     async fn test_request_app_connection() {
         let server = Server::run();
-        let app_id = {
-            let buf: [u8; 32] = rand::random();
-            Hash256::from(buf)
-        };
+        let app_id = AppID::from(rand::random::<[u8; 32]>());
         server.expect(
             Expectation::matching(all_of![
                 request::method_path("POST", "/auth/connect"),
-                request::body(format!(r#"{{"appID":"{app_id}","name":"name","description":"description","serviceURL":"https://service.com/","logoURL":"https://logo.com/","callbackURL":"https://callback.com/"}}"#)),
+                request::body(format!(r#"{{"appID":"{app_id}","name":"name","description":"description","serviceURL":"https://service.com","logoURL":"https://logo.com","callbackURL":"https://callback.com"}}"#)),
             ])
                 .respond_with(Response::builder().status(StatusCode::OK).body(r#"{"responseURL":"https://response.com", "registerURL":"https://response.com","statusURL":"https://status.com","expiration":"1970-01-01T01:01:40+01:00"}"#).unwrap()),
         );
 
         let client = Client::new(server.url("/").to_string()).unwrap();
-
+        let ephemeral_key = PrivateKey::from_seed(&rand::random());
         let resp = client
-            .request_app_connection(&RegisterAppRequest {
-                app_id,
-                name: "name".to_string(),
-                description: "description".to_string(),
-                service_url: "https://service.com".parse().unwrap(),
-                logo_url: Some("https://logo.com".parse().unwrap()),
-                callback_url: Some("https://callback.com".parse().unwrap()),
-            })
+            .request_app_connection(
+                &ephemeral_key,
+                &AppMetadata {
+                    id: app_id,
+                    name: "name",
+                    description: "description",
+                    service_url: "https://service.com",
+                    logo_url: Some("https://logo.com"),
+                    callback_url: Some("https://callback.com"),
+                },
+            )
             .await
             .unwrap();
 
@@ -1660,7 +1747,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_object() {
+    async fn test_pin_object() {
         let object = SealedObject {
             encrypted_data_key: vec![1u8; 72],
             encrypted_metadata_key: vec![1u8; 72],
@@ -1697,17 +1784,139 @@ mod tests {
 
         let server = Server::run();
 
+        let pin_request = PinObjectRequest::from(&object);
+
         server.expect(
             Expectation::matching(all_of![
                 request::method_path("POST", "/objects"),
-                request::body(serde_json::to_string(&object).unwrap())
+                request::body(serde_json::to_string(&pin_request).unwrap())
             ])
             .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
         );
 
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string()).unwrap();
-        client.save_object(&app_key, &object).await.unwrap();
+        client.pin_object(&app_key, &object).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_register_flow() {
+        let ephemeral_key = PrivateKey::from_seed(&rand::random());
+        let ephemeral_pk = ephemeral_key.public_key();
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let app_pk = app_key.public_key();
+
+        let app_id = AppID::from(rand::random::<[u8; 32]>());
+        let metadata = AppMetadata {
+            id: app_id,
+            name: "test-app",
+            description: "A test application",
+            service_url: "https://test-app.com",
+            logo_url: Some("https://test-app.com/logo.png"),
+            callback_url: Some("https://test-app.com/callback"),
+        };
+
+        let server = Server::run();
+        let request_id = "abc123def456";
+
+        // step 1: request_app_connection — signed with ephemeral key, body has metadata
+        let expected_body = serde_json::to_string(&metadata).unwrap();
+        let step1_ephemeral_pk = ephemeral_pk;
+        server.expect(
+            Expectation::matching(move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                let pk = validate_url_signature_request(req);
+                pk == step1_ephemeral_pk
+                    && req.method() == "POST"
+                    && req.uri().path() == "/auth/connect"
+                    && req.body().as_ref() == expected_body.as_bytes()
+            })
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(format!(
+                        r#"{{"responseURL":"http://example.com/auth/connect/{request_id}","statusURL":"{}","registerURL":"{}","expiration":"2030-01-01T00:00:00Z"}}"#,
+                        &server.url(&format!("/auth/connect/{request_id}/status")).to_string(),
+                        &server.url(&format!("/auth/connect/{request_id}/register")).to_string()
+                    ))
+                    .unwrap(),
+            ),
+        );
+
+        // step 2: check_request_status — signed with ephemeral key
+        let step2_ephemeral_pk = ephemeral_pk;
+        let user_secret = Hash256::new(rand::random());
+        let status_response = serde_json::to_string(&AuthConnectStatusResponse {
+            approved: true,
+            user_secret: Some(user_secret),
+        })
+        .unwrap();
+        server.expect(
+            Expectation::matching(
+                move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                    let pk = validate_url_signature_request(req);
+                    pk == step2_ephemeral_pk
+                        && req.method() == "GET"
+                        && req.uri().path() == format!("/auth/connect/{request_id}/status")
+                },
+            )
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(status_response)
+                    .unwrap(),
+            ),
+        );
+
+        // step 3: register_app — signed with ephemeral key, body has app key + valid signature
+        let step3_ephemeral_pk = ephemeral_pk;
+        let step3_app_pk = app_pk;
+        server.expect(
+            Expectation::matching(
+                move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                    let pk = validate_url_signature_request(req);
+                    if pk != step3_ephemeral_pk || req.method() != "POST" {
+                        return false;
+                    }
+                    if req.uri().path() != format!("/auth/connect/{request_id}/register") {
+                        return false;
+                    }
+                    // verify the body contains a valid RegisterAppRequest
+                    let body: RegisterAppRequest =
+                        serde_json::from_slice(req.body().as_ref()).expect("invalid body");
+                    if body.app_key != step3_app_pk {
+                        return false;
+                    }
+                    // verify the app key ownership signature
+                    let sig_hash = register_app_sig_hash(request_id, &step3_ephemeral_pk);
+                    step3_app_pk.verify(sig_hash.as_ref(), &body.signature)
+                },
+            )
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        // run the flow
+        let client = Client::new(server.url("/").to_string()).unwrap();
+
+        // step 1
+        let resp = client
+            .request_app_connection(&ephemeral_key, &metadata)
+            .await
+            .unwrap();
+
+        // step 2
+        let status_url: Url = resp.status_url.parse().unwrap();
+        let secret = client
+            .check_request_status(&ephemeral_key, status_url)
+            .await
+            .unwrap();
+        assert_eq!(secret, Some(user_secret));
+
+        // step 3
+        let register_url: Url = resp.register_url.parse().unwrap();
+        client
+            .register_app(&ephemeral_key, &app_key, register_url)
+            .await
+            .unwrap();
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "indexd"
-version = "0.2.0"
+version = "0.4.0"
 edition = "2024"
 repository = "https://github.com/SiaFoundation/sia-sdk-rs"
 license = "MIT"
@@ -14,13 +14,14 @@ name = "indexd"
 path = "src/lib.rs"
 
 [dependencies]
+# do not update to reqwest v0.13 until https://github.com/seanmonstar/reqwest/issues/2968 is resolved
 reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
 rustls = { version = "0.23.37", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 serde = "1.0.228"
 serde_json = "1.0.149"
 thiserror = "2.0.18"
-sia_sdk = { path = "../sia_sdk", version = "0.2.0" }
-tokio = { version = "1.49.0", features = ["fs", "sync", "io-util", "macros", "rt"] }
+sia_sdk = { path = "../sia_sdk", version = "0.2.2" }
+tokio = { version = "1.50.0", features = ["fs", "sync", "io-util", "macros", "rt"] }
 rand = "0.10.0"
 blake2b_simd = "1.0.4"
 url = { version = "2.5.8", features = ["serde"] }
@@ -30,7 +31,7 @@ quinn = { version = "0.11.9", default-features = false, features = ["bloom", "lo
 bytes = "1.11.1"
 tokio-util = { version = "0.7.18", features = ["rt"] }
 priority-queue = "2.7.0"
-serde_with = {version = "3.17.0", features = ["base64"]}
+serde_with = {version = "3.18.0", features = ["base64"]}
 hex = "0.4.3"
 chacha20poly1305 = "0.10.1"
 chrono = { version = "0.4.44", features = ["serde"] }
@@ -38,14 +39,19 @@ blake2 = "0.10.6"
 hkdf = "0.12.4"
 base64 = "0.22.1"
 
+rustls-platform-verifier = { version = "0.6.2", optional = true }
+
 [dev-dependencies]
+rustls-platform-verifier = "0.6.2"
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 httptest = "0.16.4"
-rustls-platform-verifier = "0.6.2"
-tokio = { version = "1.49.0", features = ["macros"] }
+tokio = { version = "1.50.0", features = ["macros"] }
+env_logger = "0.11.9"
 
 [features]
+default = ["platform-verifier"]
 mock = []
+platform-verifier = ["rustls-platform-verifier"]
 
 [[bench]]
 name = "upload"

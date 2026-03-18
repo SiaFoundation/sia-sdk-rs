@@ -2,14 +2,13 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll, Waker};
 
 use bytes::BytesMut;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{Mutex as TokioMutex, Notify};
+use tokio::sync::Notify;
 use tokio::time;
 
 use crate::frame::{
@@ -20,6 +19,12 @@ use crate::handshake::{ConnSettings, HandshakeResult, SeqCipher};
 
 /// Grace period before removing a closed stream from tracking.
 const CLOSING_STREAM_CLEANUP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// After [`Mux::close`], how long to wait for the peer to send EOF before
+/// forcibly aborting the read loop. The read loop is detached (not immediately
+/// aborted) so the peer can finish reading any frames still buffered in the TCP
+/// stack. If the peer never closes, this bounds the resource lifetime.
+pub(crate) const READ_LOOP_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Maximum frames to accept for a closed stream before treating it as a flood.
 const MAX_CLOSED_FRAMES: u16 = 1000;
@@ -125,11 +130,18 @@ struct MuxState {
     /// Pending streams waiting for acceptance.
     accept_queue: VecDeque<Stream>,
 
+    /// Notifier for tasks blocked in accept_stream. Fired when a new stream is
+    /// queued or a fatal error is set.
+    accept_notify: Arc<Notify>,
+
     /// Sticky fatal error set by the read or write loop.
     err: Option<MuxError>,
 
     /// Set when the mux is shutting down; the write loop should flush and exit.
     shutdown: bool,
+
+    /// Next stream ID to assign. Incremented by 2 to preserve dialer/acceptor parity.
+    next_id: u32,
 }
 
 /// Join handles for the background read and write loop tasks.
@@ -146,19 +158,19 @@ struct TaskHandles {
 pub struct Mux {
     state: Arc<StdMutex<MuxState>>,
     write_notify: Arc<Notify>,
-    accept_notify: Arc<Notify>,
-    next_id: AtomicU32,
     settings: ConnSettings,
-    tasks: TokioMutex<Option<TaskHandles>>,
+    tasks: Option<TaskHandles>,
 }
 
 impl Mux {
     /// Wait for and return the next peer-initiated stream.
     pub async fn accept_stream(&self) -> Result<Stream, MuxError> {
+        // Clone the Arc once so we can call notified() without holding the lock.
+        let accept_notify = self.state.lock().unwrap().accept_notify.clone();
         loop {
             // Prepare the notification listener BEFORE checking state to avoid
             // a race where a stream arrives between the check and the await.
-            let notified = self.accept_notify.notified();
+            let notified = accept_notify.notified();
             {
                 let mut s = self.state.lock().unwrap();
                 if let Some(stream) = s.accept_queue.pop_front() {
@@ -184,12 +196,12 @@ impl Mux {
             return Err(MuxError::ClosedConn);
         }
 
-        let id = self.next_id.fetch_add(2, Ordering::Relaxed);
+        let id = s.next_id;
+        s.next_id += 2;
         // Wraparound when next_id grows too large
-        if id >= u32::MAX >> 2 {
+        if s.next_id >= u32::MAX >> 2 {
             let parity = id & 1;
-            self.next_id
-                .store(ID_LOWEST_STREAM + parity, Ordering::Relaxed);
+            s.next_id = ID_LOWEST_STREAM + parity;
         }
 
         let ss = Arc::new(StdMutex::new(StreamState {
@@ -218,7 +230,7 @@ impl Mux {
     /// Returns `Ok(())` if the mux was healthy or had already been closed by
     /// either side. Returns `Err` with the pre-existing error if the mux had
     /// failed for another reason (e.g. stream flood, I/O error).
-    pub async fn close(self) -> Result<(), MuxError> {
+    pub async fn close(mut self) -> Result<(), MuxError> {
         // Signal shutdown via shared state
         {
             let mut s = self.state.lock().unwrap();
@@ -227,7 +239,7 @@ impl Mux {
         self.write_notify.notify_one();
 
         // Take handles so we can await write and abort read.
-        let (write_handle, read_handle) = match self.tasks.lock().await.take() {
+        let (write_handle, read_handle) = match self.tasks.take() {
             Some(h) => (Some(h.write_handle), Some(h.read_handle)),
             None => (None, None),
         };
@@ -244,9 +256,26 @@ impl Mux {
         // Set fatal error on all streams
         set_fatal_error(&self.state, MuxError::ClosedConn);
 
-        // Abort read loop
-        if let Some(rh) = read_handle {
-            rh.abort();
+        // Detach the read loop with a grace period rather than aborting it
+        // immediately. Aborting would drop the ReadHalf immediately; combined
+        // with the already-dropped WriteHalf that zeros the Arc on the
+        // underlying connection, the OS sends a TCP RST that clears the peer's
+        // receive buffer — losing frames still in transit.
+        //
+        // Instead, spawn a task that waits READ_LOOP_GRACE_PERIOD for the peer
+        // to send EOF (their FIN in response to ours), then forcibly aborts the
+        // read loop. This bounds resource lifetime: a cooperative peer closes
+        // within milliseconds; a hanging peer is cleaned up within the grace
+        // period.
+        if let Some(mut rh) = read_handle {
+            tokio::spawn(async move {
+                if time::timeout(READ_LOOP_GRACE_PERIOD, &mut rh)
+                    .await
+                    .is_err()
+                {
+                    rh.abort();
+                }
+            });
         }
 
         match prior_err {
@@ -512,7 +541,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
     mut reader: PacketReader<R, SeqCipher>,
     mux_state: Arc<StdMutex<MuxState>>,
     write_notify: Arc<Notify>,
-    accept_notify: Arc<Notify>,
     settings: ConnSettings,
 ) {
     loop {
@@ -593,8 +621,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     };
 
                     s.accept_queue.push_back(stream);
-                    // Drop the mux lock before notifying (avoid holding it
-                    // while the accept task wakes and tries to lock).
+                    // Clone notify before dropping the lock so we can fire it
+                    // without holding the mux lock.
+                    let accept_notify = s.accept_notify.clone();
                     drop(s);
                     accept_notify.notify_one();
 
@@ -753,6 +782,10 @@ async fn write_loop<W: AsyncWrite + Unpin>(
         keepalive_timer.reset();
 
         if is_shutdown {
+            // Shut down the write half so the peer's read_loop receives EOF
+            // (TCP FIN). Without this, the WriteHalf drops without sending FIN
+            // because the ReadHalf still holds the shared Arc on the socket.
+            let _ = writer.shutdown().await;
             return;
         }
     }
@@ -780,6 +813,8 @@ fn set_fatal_error(mux_state: &Arc<StdMutex<MuxState>>, err: MuxError) {
     for w in s.buffer_wakers.drain(..) {
         w.wake();
     }
+    // Wake any task blocked in accept_stream
+    s.accept_notify.notify_one();
 }
 
 pub(crate) fn new_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
@@ -810,25 +845,18 @@ pub(crate) fn new_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         streams: HashMap::new(),
         closing: HashMap::new(),
         accept_queue: VecDeque::new(),
+        accept_notify: Arc::new(Notify::new()),
         err: None,
         shutdown: false,
+        next_id: ID_LOWEST_STREAM + id_offset,
     }));
 
     let write_notify = Arc::new(Notify::new());
-    let accept_notify = Arc::new(Notify::new());
 
     let read_state = mux_state.clone();
     let read_write_notify = write_notify.clone();
-    let read_accept_notify = accept_notify.clone();
     let read_handle = tokio::spawn(async move {
-        read_loop(
-            packet_reader,
-            read_state,
-            read_write_notify,
-            read_accept_notify,
-            settings,
-        )
-        .await;
+        read_loop(packet_reader, read_state, read_write_notify, settings).await;
     });
 
     let write_state = mux_state.clone();
@@ -840,13 +868,11 @@ pub(crate) fn new_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     Mux {
         state: mux_state,
         write_notify,
-        accept_notify,
-        next_id: AtomicU32::new(ID_LOWEST_STREAM + id_offset),
         settings,
-        tasks: TokioMutex::new(Some(TaskHandles {
+        tasks: Some(TaskHandles {
             read_handle,
             write_handle,
-        })),
+        }),
     }
 }
 
@@ -856,8 +882,11 @@ pub(crate) fn new_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
 
 #[cfg(test)]
 mod tests {
+    use crate::MuxError;
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, copy, sink};
     use tokio::net::TcpListener;
+    use tokio::time::timeout;
 
     /// Creates a pair of connected Mux instances using anonymous handshake
     /// over a local TCP connection.
@@ -1136,6 +1165,122 @@ mod tests {
         accept_handle.await.unwrap();
     }
 
+    /// Verifies that calling `close()` while the peer still has frames buffered
+    /// does not send a TCP RST that would discard those frames.
+    ///
+    /// Before the fix, `close()` aborted the read_loop task, which dropped the
+    /// ReadHalf. With both halves gone the TcpStream was dropped and the OS
+    /// sent a RST, clearing the peer's receive buffer. The fix detaches the
+    /// read_loop (`drop(handle)`) so the ReadHalf stays alive until the task
+    /// exits naturally via EOF, allowing the peer to finish reading.
+    #[tokio::test]
+    async fn close_preserves_in_flight_frames() {
+        let (dial_mux, accept_mux) = new_testing_pair().await;
+
+        let settings = crate::handshake::ConnSettings::default();
+        let frame_size = settings.max_payload_size();
+        let num_frames = 10usize;
+
+        // Accept side: receive all frames, verify content.
+        let accept_handle = tokio::spawn(async move {
+            let mut stream = accept_mux.accept_stream().await.unwrap();
+            let mut received = Vec::new();
+            let mut buf = vec![0u8; 8192];
+            loop {
+                let n = stream.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                received.extend_from_slice(&buf[..n]);
+            }
+            let expected_len = num_frames * frame_size;
+            assert_eq!(
+                received.len(),
+                expected_len,
+                "lost {} bytes — likely caused by TCP RST from premature ReadHalf drop",
+                expected_len - received.len()
+            );
+            let expected: Vec<u8> = (0..expected_len).map(|i| (i % 251) as u8).collect();
+            assert_eq!(received, expected, "data corrupted");
+            stream.close().unwrap();
+            accept_mux.close().await.unwrap();
+        });
+
+        // Dial side: write all frames, then immediately close() before the
+        // accept side has had a chance to read everything.
+        let mut stream = dial_mux.dial_stream().unwrap();
+        let total = num_frames * frame_size;
+        let data: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        stream.write_all(&data).await.unwrap();
+        stream.close().unwrap();
+
+        // Close the dial mux immediately — this is the critical moment.
+        // With `rh.abort()` this races against the accept side reading; with
+        // `drop(read_handle)` the ReadHalf stays alive until the task finishes.
+        dial_mux.close().await.unwrap();
+
+        accept_handle.await.unwrap();
+    }
+
+    /// Verifies that the read loop is forcibly aborted within READ_LOOP_GRACE_PERIOD
+    /// when the peer never closes its write side after we call close().
+    ///
+    /// Without the grace-period abort, a peer that hangs indefinitely keeps the
+    /// read_loop task and its ReadHalf alive forever, leaking the connection.
+    ///
+    /// Uses an in-memory duplex stream (not TCP) so that all I/O is driven
+    /// purely by the tokio scheduler — no OS-level I/O events that might not
+    /// fire reliably in paused-clock mode.
+    #[tokio::test(start_paused = true)]
+    async fn close_read_loop_aborted_after_grace_period() {
+        let (client_conn, server_conn) = tokio::io::duplex(64 * 1024);
+
+        let accept_fut =
+            tokio::spawn(async move { crate::accept_anonymous(server_conn).await.unwrap() });
+        let dial_mux = crate::dial_anonymous(client_conn).await.unwrap();
+        let accept_mux = accept_fut.await.unwrap();
+
+        // Weak pointer into dial_mux's state — the only remaining holder after
+        // close() consumes the Mux is the read_loop task itself. Once the task
+        // is aborted the Arc refcount hits zero and upgrade() returns None.
+        let state_weak = std::sync::Arc::downgrade(&dial_mux.state);
+
+        // close() must complete without needing time to advance (no timers
+        // block the shutdown path — only write_notify is needed).
+        dial_mux.close().await.unwrap();
+
+        // The peer (accept_mux) is still alive and has not called close(), so
+        // its write side is still open. The dial_mux's read_loop is blocked
+        // waiting for frames that will never arrive.
+        assert!(
+            state_weak.upgrade().is_some(),
+            "state freed too early — read_loop should still be running"
+        );
+
+        // Yield once so the cleanup task gets its first poll and registers its
+        // Sleep at t=0+GRACE_PERIOD. Without this yield, the Sleep is created
+        // after the advance and misses the window.
+        tokio::task::yield_now().await;
+
+        // Advance time past the grace period to fire the cleanup task's timer.
+        tokio::time::advance(super::READ_LOOP_GRACE_PERIOD + std::time::Duration::from_millis(100))
+            .await;
+        // Yield repeatedly:
+        //   - first passes let the cleanup task wake, call rh.abort(), and exit
+        //   - subsequent passes let the read_loop task receive the abort
+        //     signal, drop its future, and release the Arc<MuxState>
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            state_weak.upgrade().is_none(),
+            "read_loop task was not cleaned up after grace period"
+        );
+
+        let _ = accept_mux.close().await;
+    }
+
     /// Verifies that the mux tolerates straggler frames for a closed stream
     /// (below MAX_CLOSED_FRAMES) but kills the connection when the threshold
     /// is exceeded (stream flood).
@@ -1222,6 +1367,27 @@ mod tests {
             let accept_mux = accept_handle.await.unwrap();
             let _ = accept_mux.close().await;
             let _ = dial_mux.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_notify() {
+        let (dial_mux, accept_mux) = new_testing_pair().await;
+
+        let accept_handle = tokio::spawn(async move { accept_mux.accept_stream().await });
+
+        dial_mux.close().await.unwrap();
+
+        match timeout(Duration::from_millis(500), accept_handle)
+            .await
+            .expect("accept_stream hung after peer closed")
+            .expect("join error")
+        {
+            Ok(_) => panic!("expected accept_stream to fail after peer closed"),
+            Err(e) => assert!(
+                matches!(e, MuxError::PeerClosedConn),
+                "expected accept_stream to return PeerClosedConn after peer closed, got {e:?}"
+            ),
         }
     }
 }

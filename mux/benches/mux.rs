@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use mux::{ConnSettings, IPV6_MTU, Mux};
+use sia_mux::{ConnSettings, IPV6_MTU, Mux};
 use tokio::io::{AsyncWriteExt, copy, sink};
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
@@ -11,12 +11,12 @@ async fn new_testing_pair() -> (Mux, Mux) {
     let accept_fut = tokio::spawn(async move {
         let (conn, _) = listener.accept().await.unwrap();
         conn.set_nodelay(true).unwrap();
-        mux::accept_anonymous(conn).await.unwrap()
+        sia_mux::accept_anonymous(conn).await.unwrap()
     });
 
     let dial_conn = tokio::net::TcpStream::connect(addr).await.unwrap();
     dial_conn.set_nodelay(true).unwrap();
-    let dial_mux = mux::dial_anonymous(dial_conn).await.unwrap();
+    let dial_mux = sia_mux::dial_anonymous(dial_conn).await.unwrap();
     let accept_mux = accept_fut.await.unwrap();
 
     (dial_mux, accept_mux)
@@ -29,14 +29,14 @@ async fn new_testing_pair_with_settings(settings: ConnSettings) -> (Mux, Mux) {
     let accept_fut = tokio::spawn(async move {
         let (conn, _) = listener.accept().await.unwrap();
         conn.set_nodelay(true).unwrap();
-        mux::accept_anonymous_with_settings(conn, settings)
+        sia_mux::accept_anonymous_with_settings(conn, settings)
             .await
             .unwrap()
     });
 
     let dial_conn = tokio::net::TcpStream::connect(addr).await.unwrap();
     dial_conn.set_nodelay(true).unwrap();
-    let dial_mux = mux::dial_anonymous_with_settings(dial_conn, settings)
+    let dial_mux = sia_mux::dial_anonymous_with_settings(dial_conn, settings)
         .await
         .unwrap();
     let accept_mux = accept_fut.await.unwrap();
@@ -68,7 +68,7 @@ fn bench_mux(c: &mut Criterion) {
 
     for num_streams in [1, 2, 10, 100, 500, 1000] {
         let mut group = c.benchmark_group("mux");
-        group.throughput(Throughput::Bytes((buf_size * num_streams) as u64));
+        group.throughput(Throughput::BytesDecimal((buf_size * num_streams) as u64));
 
         group.bench_with_input(
             BenchmarkId::from_parameter(num_streams),
@@ -77,26 +77,25 @@ fn bench_mux(c: &mut Criterion) {
                 let (dial_mux, accept_mux) = runtime.block_on(new_testing_pair());
                 spawn_discard_server(&runtime, accept_mux);
 
-                // Pre-open streams and write sequentially (Go writes concurrently
-                // via goroutines).
-                let mut streams: Vec<_> = (0..num_streams)
-                    .map(|_| dial_mux.dial_stream().unwrap())
-                    .collect();
                 let buf = vec![0u8; buf_size];
 
                 b.iter(|| {
                     runtime.block_on(async {
-                        for stream in &mut streams {
-                            stream.write_all(&buf).await.unwrap();
+                        let mut handles = Vec::with_capacity(num_streams);
+                        for _ in 0..num_streams {
+                            let mut stream = dial_mux.dial_stream().unwrap();
+                            let buf = buf.clone();
+                            handles.push(tokio::spawn(async move {
+                                stream.write_all(&buf).await.unwrap();
+                            }));
+                        }
+                        for h in handles {
+                            h.await.unwrap();
                         }
                     });
                 });
 
                 runtime.block_on(async {
-                    for s in &mut streams {
-                        let _ = s.close();
-                    }
-                    drop(streams);
                     let _ = dial_mux.close().await;
                 });
             },
@@ -119,7 +118,7 @@ fn bench_packets(c: &mut Criterion) {
             ConnSettings::new(IPV6_MTU * multiplier, ConnSettings::default().max_timeout())
                 .unwrap();
         let buf_size = settings.max_payload_size();
-        group.throughput(Throughput::Bytes(buf_size as u64));
+        group.throughput(Throughput::BytesDecimal(buf_size as u64));
 
         group.bench_with_input(
             BenchmarkId::new(format!("{IPV6_MTU}x{multiplier}"), buf_size),

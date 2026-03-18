@@ -1,12 +1,11 @@
 use std::sync::{Arc, Mutex};
 
-use indexd::app_client::RegisterAppRequest;
-use indexd::{self, Url};
+use indexd::{self, Hash256};
 use sia::seed::{self, Seed};
 use sia::signing::{PrivateKey, Signature};
 use thiserror::Error;
 
-use crate::{AppMeta, SDK, spawn, tls};
+use crate::{AppMeta, SDK, spawn};
 
 #[derive(Debug, Error, uniffi::Error)]
 #[uniffi(flat_error)]
@@ -22,7 +21,7 @@ pub enum AppKeyError {
 ///
 /// AppKeys can be registered with an indexer during
 /// onboarding with a [Builder]. They are derived from
-/// a BIP-32 recovery phrase, which can be generated
+/// a BIP-39 recovery phrase, which can be generated
 /// using [generate_recovery_phrase].
 ///
 /// It must be stored securely by the application and
@@ -110,14 +109,14 @@ pub enum SeedError {
     InvalidMnemonic(#[from] seed::SeedError),
 }
 
-/// Generates a new BIP-32 12-word recovery phrase.
+/// Generates a new BIP-39 12-word recovery phrase.
 #[uniffi::export]
 pub fn generate_recovery_phrase() -> String {
     let seed: [u8; 16] = rand::random();
     Seed::from_seed(seed).to_string()
 }
 
-/// Validates a BIP-32 recovery phrase.
+/// Validates a BIP-39 recovery phrase.
 #[uniffi::export]
 pub fn validate_recovery_phrase(phrase: &str) -> Result<(), SeedError> {
     Seed::new(phrase)?;
@@ -204,14 +203,33 @@ impl Builder {
     /// to connect using an existing app key, or [Builder::request_connection]
     /// to request a new connection.
     #[uniffi::constructor]
-    pub fn new(indexer_url: String) -> Result<Self, BuilderError> {
-        let builder = indexd::Builder::new(indexer_url)?;
+    pub fn new(indexer_url: String, app_meta: AppMeta) -> Result<Self, BuilderError> {
+        if app_meta.id.len() != 32 {
+            return Err(BuilderError::Custom("app ID must be 32 bytes".to_string()));
+        }
+        let app_id = Hash256::from(<[u8; 32]>::try_from(app_meta.id).unwrap());
+        let app_meta = indexd::AppMetadata {
+            id: app_id,
+            // sad, but required in FFI-land to make app meta compile-time const
+            // friendly in native-land.
+            name: Box::leak(app_meta.name.into_boxed_str()),
+            description: Box::leak(app_meta.description.into_boxed_str()),
+            service_url: Box::leak(app_meta.service_url.into_boxed_str()),
+            logo_url: app_meta
+                .logo_url
+                .map(|s| Box::leak(s.into_boxed_str()) as &'static str),
+            callback_url: app_meta
+                .callback_url
+                .map(|s| Box::leak(s.into_boxed_str()) as &'static str),
+        };
+        let tls_config = crate::tls_config();
+        let builder = indexd::Builder::with_tls_config(indexer_url, app_meta, tls_config)?;
         Ok(Builder {
             state: Arc::new(Mutex::new(Some(BuilderState::Disconnected(builder)))),
         })
     }
 
-    /// Attempts to connect using the provided app key and TLS configuration.
+    /// Attempts to connect using the provided app key.
     /// If the app key is valid, returns Some([SDK]), otherwise returns None.
     ///
     /// If you receive None, call [Builder::request_connection] to request a new connection.
@@ -221,67 +239,27 @@ impl Builder {
     pub async fn connected(&self, app_key: Arc<AppKey>) -> Result<Option<Arc<SDK>>, BuilderError> {
         self.with_state_transition(|state| async move {
             match state {
-                BuilderState::Disconnected(builder) => {
-                    // install crypto provider
-                    if rustls::crypto::CryptoProvider::get_default().is_none() {
-                        rustls::crypto::ring::default_provider()
-                            .install_default()
-                            .map_err(|e| BuilderError::Crypto(format!("{:?}", e)))?;
-                    }
-                    let rustls_config = tls::tls_config();
-
-                    match builder.connected(&app_key.0, rustls_config).await? {
-                        Some(sdk) => {
-                            Ok((BuilderState::Finalized, Some(Arc::new(SDK { inner: sdk }))))
-                        }
-                        None => Ok((BuilderState::Disconnected(builder), None)),
-                    }
-                }
+                BuilderState::Disconnected(builder) => match builder.connected(&app_key.0).await? {
+                    Some(sdk) => Ok((BuilderState::Finalized, Some(Arc::new(SDK { inner: sdk })))),
+                    None => Ok((BuilderState::Disconnected(builder), None)),
+                },
                 _ => Err(BuilderError::InvalidState),
             }
         })
         .await
     }
 
-    /// Requests a new connection for the application.
+    /// Requests connection approval for the application. The
+    /// user must approve the connection request for the app to be registered and receive an SDK instance.
     ///
-    /// # Arguments
-    /// * `app` - Details of the application requesting connection.
-    pub async fn request_connection(&self, meta: AppMeta) -> Result<Self, BuilderError> {
+    /// After calling this method, call [Builder::response_url] to get the URL that the user should
+    /// visit to approve the connection request, and [Builder::wait_for_approval] to wait for the
+    /// user to approve the connection request.
+    pub async fn request_connection(&self) -> Result<Self, BuilderError> {
         self.with_state_transition(|state| async move {
-            if meta.id.len() != 32 {
-                return Err(BuilderError::Custom("app ID must be 32 bytes".to_string()));
-            }
-            let mut app_id = [0u8; 32];
-            app_id.copy_from_slice(&meta.id);
             match state {
                 BuilderState::Disconnected(builder) => {
-                    let builder = builder
-                        .request_connection(&RegisterAppRequest {
-                            app_id: app_id.into(),
-                            name: meta.name,
-                            description: meta.description,
-                            service_url: Url::parse(&meta.service_url).map_err(|e| {
-                                BuilderError::Custom(format!("invalid service url: {e}"))
-                            })?,
-                            logo_url: meta
-                                .logo_url
-                                .map(|s| {
-                                    Url::parse(&s).map_err(|e| {
-                                        BuilderError::Custom(format!("invalid logo url: {e}"))
-                                    })
-                                })
-                                .transpose()?,
-                            callback_url: meta
-                                .callback_url
-                                .map(|s| {
-                                    Url::parse(&s).map_err(|e| {
-                                        BuilderError::Custom(format!("invalid callback url: {e}"))
-                                    })
-                                })
-                                .transpose()?,
-                        })
-                        .await?;
+                    let builder = builder.request_connection().await?;
                     Ok((BuilderState::RequestingApproval(builder), ()))
                 }
                 _ => Err(BuilderError::InvalidState),
@@ -334,14 +312,7 @@ impl Builder {
         self.with_state_transition(|state| async move {
             match state {
                 BuilderState::Approved(builder) => {
-                    // install crypto provider
-                    if rustls::crypto::CryptoProvider::get_default().is_none() {
-                        rustls::crypto::ring::default_provider()
-                            .install_default()
-                            .map_err(|e| BuilderError::Crypto(format!("{:?}", e)))?;
-                    }
-                    let rustls_config = tls::tls_config();
-                    let sdk = builder.register(&mnemonic, rustls_config).await?;
+                    let sdk = builder.register(&mnemonic).await?;
                     Ok((BuilderState::Finalized, Arc::new(SDK { inner: sdk })))
                 }
                 _ => Err(BuilderError::InvalidState),

@@ -1,7 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use indexd::mock::{MockDownloader, MockRHP4Client, MockUploader};
-use indexd::{DownloadOptions, Hosts, Object, UploadOptions};
+use indexd::{DownloadOptions, Object, UploadOptions};
 use rand::Rng;
 use sia::rhp::{Host, SECTOR_SIZE};
 use sia::signing::PrivateKey;
@@ -61,8 +61,7 @@ async fn upload_object(uploader: Arc<MockUploader>, input: Bytes, opts: UploadOp
 fn upload_benchmark(c: &mut Criterion) {
     let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
     let transport = Arc::new(MockRHP4Client::new());
-    let hosts = Hosts::new();
-    hosts.update(
+    transport.update_hosts(
         (0..90)
             .map(|_| Host {
                 public_key: PrivateKey::from_seed(&rand::random()).public_key(),
@@ -78,16 +77,8 @@ fn upload_benchmark(c: &mut Criterion) {
             .collect(),
     );
 
-    let uploader = Arc::new(MockUploader::new(
-        hosts.clone(),
-        transport.clone(),
-        app_key.clone(),
-    ));
-    let downloader = Arc::new(MockDownloader::new(
-        hosts.clone(),
-        transport.clone(),
-        app_key.clone(),
-    ));
+    let uploader = Arc::new(MockUploader::new(transport.clone(), app_key.clone()));
+    let downloader = Arc::new(MockDownloader::new(transport.clone(), app_key.clone()));
     let mut input = BytesMut::zeroed(SECTOR_SIZE * 30); // 3 full slabs
     rand::rng().fill_bytes(&mut input);
     let input = input.freeze();

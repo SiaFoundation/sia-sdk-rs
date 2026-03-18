@@ -17,7 +17,24 @@ use tokio::runtime::{self, Runtime};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::AbortOnDropHandle;
 
-mod tls;
+/// Returns a rustls ClientConfig using webpki roots on Android,
+/// or the platform trust store on other OSes.
+///
+/// Avoids [rustls-platform-verifier] on Android until
+/// https://github.com/rustls/rustls-platform-verifier/issues/115 is resolved
+#[cfg(target_os = "android")]
+fn tls_config() -> rustls::ClientConfig {
+    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.to_vec());
+    rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+}
+
+#[cfg(not(target_os = "android"))]
+fn tls_config() -> rustls::ClientConfig {
+    use rustls_platform_verifier::ConfigVerifierExt;
+    rustls::ClientConfig::with_platform_verifier().expect("failed to create tls config")
+}
 
 mod logging;
 pub use logging::*;
@@ -73,7 +90,7 @@ pub enum Error {
 #[uniffi(flat_error)]
 pub enum ConnectError {
     #[error("app client error: {0}")]
-    AppClient(#[from] indexd::app_client::Error),
+    AppClient(#[from] indexd::AppApiError),
     #[error("task error: {0}")]
     JoinError(#[from] tokio::task::JoinError),
     #[error("error: {0}")]
@@ -527,8 +544,8 @@ pub struct ObjectsCursor {
     pub after: SystemTime,
 }
 
-impl From<indexd::app_client::ObjectsCursor> for ObjectsCursor {
-    fn from(c: indexd::app_client::ObjectsCursor) -> Self {
+impl From<indexd::ObjectsCursor> for ObjectsCursor {
+    fn from(c: indexd::ObjectsCursor) -> Self {
         Self {
             id: c.id.to_string(),
             after: c.after.into(),
@@ -539,6 +556,7 @@ impl From<indexd::app_client::ObjectsCursor> for ObjectsCursor {
 #[derive(uniffi::Record)]
 pub struct App {
     pub id: String,
+    pub name: String,
     pub description: String,
     pub service_url: Option<String>,
     pub logo_url: Option<String>,
@@ -548,20 +566,32 @@ pub struct App {
 #[derive(uniffi::Record)]
 pub struct Account {
     pub account_key: String,
+    /// The maximum amount of data that can be pinned to the indexer for this account.
     pub max_pinned_data: u64,
+    /// The amount of data currently pinned to the indexer for this account. This
+    /// counts towards max pinned data.
     pub pinned_data: u64,
+    /// The amount of data after erasure encoding. This is the actual amount of data on the network.
+    pub pinned_size: u64,
+    /// Whether the account is ready to be used. After registering an app, the account may not be
+    /// immediately ready as the indexer needs to process the registration and sync with the network.
+    /// The account will become ready once it has propagated on the network.
+    pub ready: bool,
     pub app: App,
     pub last_used: SystemTime,
 }
 
-impl From<indexd::app_client::Account> for Account {
-    fn from(a: indexd::app_client::Account) -> Self {
+impl From<indexd::Account> for Account {
+    fn from(a: indexd::Account) -> Self {
         Self {
             account_key: a.account_key.to_string(),
             max_pinned_data: a.max_pinned_data,
             pinned_data: a.pinned_data,
+            pinned_size: a.pinned_size,
+            ready: a.ready,
             app: App {
                 id: a.app.id.to_string(),
+                name: a.app.name,
                 description: a.app.description,
                 service_url: a.app.service_url,
                 logo_url: a.app.logo_url,
@@ -893,7 +923,7 @@ impl SDK {
         limit: u32,
     ) -> Result<Vec<ObjectEvent>, Error> {
         let cursor = match cursor {
-            Some(c) => Some(indexd::app_client::ObjectsCursor {
+            Some(c) => Some(indexd::ObjectsCursor {
                 after: c.after.into(),
                 id: Hash256::from_str(c.id.as_str())?,
             }),

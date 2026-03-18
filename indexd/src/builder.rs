@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use log::debug;
+use rand::random;
 use reqwest::IntoUrl;
 use sia::seed::{self, Seed};
 use sia::signing::PrivateKey;
@@ -10,16 +11,15 @@ use sia::types::Hash256;
 use thiserror::Error;
 use url::Url;
 
-use crate::app_client::{self, Client, RegisterAppRequest};
+use crate::app_client::{self, Client};
 use crate::object_encryption::derive;
-use crate::{SDK, quic};
+use crate::{AppID, AppMetadata, SDK, quic};
 
 /// The initial state of the SDK builder, before connecting to the indexd service.
 pub struct DisconnectedState;
 
 /// The state of the SDK builder after requesting approval for the application.
 pub struct RequestingApprovalState {
-    app_id: Hash256,
     response_url: Url,
     register_url: Url,
     status_url: Url,
@@ -28,15 +28,17 @@ pub struct RequestingApprovalState {
 
 /// The state of the SDK builder after the application has been approved.
 pub struct ApprovedState {
-    app_id: Hash256,
     register_url: Url,
     user_secret: Hash256,
 }
 
 /// A builder for creating an SDK instance.
 pub struct Builder<S> {
+    ephemeral_key: PrivateKey,
     state: S,
     client: Client,
+    app_meta: AppMetadata,
+    tls_config: rustls::ClientConfig,
 }
 
 /// Errors that can occur during the SDK building process.
@@ -54,46 +56,89 @@ pub enum BuilderError {
     #[error("mnemonic error: {0}")]
     Mnemonic(#[from] seed::SeedError),
 
+    #[error("tls error: {0}")]
+    Tls(#[from] rustls::Error),
+
     #[error("request expired")]
     RequestExpired,
 }
 
 impl Builder<DisconnectedState> {
-    /// Creates a new SDK builder with the provided indexer URL.
+    /// Creates a new SDK builder with the provided indexer URL using the
+    /// platform TLS verifier.
     ///
     /// After creating the builder, call [Builder::connected] to attempt
     /// to connect using an existing app key, or [Builder::request_connection]
     /// to request a new connection.
-    pub fn new<U: IntoUrl>(indexer_url: U) -> Result<Self, BuilderError> {
+    ///
+    /// # Example
+    /// ```rust
+    /// use indexd::{AppMetadata, Builder, app_id};
+    ///
+    /// const app_meta: AppMetadata = AppMetadata {
+    ///     id: app_id!("a9f0bda1b97b7d44ae6369ac830851a115311bb59aa2d848beda6ae95d10ad18"),
+    ///     name: "My App",
+    ///     description: "My App Description",
+    ///     service_url: "https://myapp.com",
+    ///     logo_url: Some("https://myapp.com/logo.png"),
+    ///     callback_url: Some("https://myapp.com/callback"),
+    /// };
+    ///
+    /// let builder = Builder::new("https://app.sia.storage", app_meta).expect("failed to create builder");
+    /// ```
+    #[cfg(feature = "platform-verifier")]
+    pub fn new<U: IntoUrl>(indexer_url: U, app_meta: AppMetadata) -> Result<Self, BuilderError> {
+        use rustls_platform_verifier::ConfigVerifierExt;
+        let tls_config = rustls::ClientConfig::with_platform_verifier()?;
+        Self::with_tls_config(indexer_url, app_meta, tls_config)
+    }
+
+    /// Creates a new SDK builder with the provided indexer URL and TLS
+    /// configuration.
+    ///
+    /// [Builder::new] should be preferred unless you need
+    /// a custom TLS configuration.
+    ///
+    /// After creating the builder, call [Builder::connected] to attempt
+    /// to connect using an existing app key, or [Builder::request_connection]
+    /// to request a new connection.
+    pub fn with_tls_config<U: IntoUrl>(
+        indexer_url: U,
+        app_meta: AppMetadata,
+        tls_config: rustls::ClientConfig,
+    ) -> Result<Self, BuilderError> {
         debug!(
             "Creating SDK builder for indexer at {}",
             indexer_url.as_str()
         );
         let client = Client::new(indexer_url)?;
         Ok(Self {
+            ephemeral_key: PrivateKey::from_seed(&random::<[u8; 32]>()),
             state: DisconnectedState,
             client,
+            app_meta,
+            tls_config,
         })
     }
 
-    /// Attempts to connect using the provided app key and TLS configuration.
+    /// Attempts to connect using the provided app key.
     /// If the app key is valid, returns Some([SDK]), otherwise returns None.
     ///
     /// If you receive None, call [Builder::request_connection] to request a new connection.
     ///
     /// # Arguments
     /// * `app_key` - The application key used for authentication.
-    /// * `tls_config` - The TLS configuration for secure communication.
-    pub async fn connected(
-        &self,
-        app_key: &PrivateKey,
-        tls_config: rustls::ClientConfig,
-    ) -> Result<Option<SDK>, BuilderError> {
+    pub async fn connected(&self, app_key: &PrivateKey) -> Result<Option<SDK>, BuilderError> {
         let connected = self.client.check_app_authenticated(app_key).await?;
         if !connected {
             return Ok(None);
         }
-        let sdk = SDK::new(self.client.clone(), Arc::new(app_key.clone()), tls_config).await?;
+        let sdk = SDK::new(
+            self.client.clone(),
+            Arc::new(app_key.clone()),
+            self.tls_config.clone(),
+        )
+        .await?;
         Ok(Some(sdk))
     }
 
@@ -103,18 +148,22 @@ impl Builder<DisconnectedState> {
     /// * `app` - Details of the application requesting connection.
     pub async fn request_connection(
         self,
-        app: &RegisterAppRequest,
     ) -> Result<Builder<RequestingApprovalState>, BuilderError> {
-        let resp = self.client.request_app_connection(app).await?;
+        let resp = self
+            .client
+            .request_app_connection(&self.ephemeral_key, &self.app_meta)
+            .await?;
         Ok(Builder {
+            ephemeral_key: self.ephemeral_key,
+            app_meta: self.app_meta,
             state: RequestingApprovalState {
-                app_id: app.app_id,
                 response_url: Url::parse(&resp.response_url)?,
                 register_url: Url::parse(&resp.register_url)?,
                 status_url: Url::parse(&resp.status_url)?,
                 expiration: resp.expiration,
             },
             client: self.client,
+            tls_config: self.tls_config,
         })
     }
 }
@@ -141,16 +190,18 @@ impl Builder<RequestingApprovalState> {
 
             if let Some(user_secret) = self
                 .client
-                .check_request_status(self.state.status_url.clone())
+                .check_request_status(&self.ephemeral_key, self.state.status_url.clone())
                 .await?
             {
                 return Ok(Builder {
+                    ephemeral_key: self.ephemeral_key,
                     state: ApprovedState {
-                        app_id: self.state.app_id,
                         register_url: self.state.register_url.clone(),
                         user_secret,
                     },
+                    app_meta: self.app_meta,
                     client: self.client,
+                    tls_config: self.tls_config,
                 });
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -163,20 +214,19 @@ impl Builder<ApprovedState> {
     ///
     /// # Arguments
     /// * `mnemonic` - The user's mnemonic phrase used to derive the application key.
-    /// * `tls_config` - The TLS configuration for secure communication.
     ///
     /// # Errors
     /// Returns [BuilderError] if the registration fails or the SDK cannot be created.
-    pub async fn register(
-        self,
-        mnemonic: &str,
-        tls_config: rustls::ClientConfig,
-    ) -> Result<SDK, BuilderError> {
-        let app_key = derive_app_key(mnemonic, &self.state.app_id, &self.state.user_secret)?;
+    pub async fn register(self, mnemonic: &str) -> Result<SDK, BuilderError> {
+        let app_key = derive_app_key(mnemonic, &self.app_meta.id, &self.state.user_secret)?;
         self.client
-            .register_app(&app_key, self.state.register_url.clone())
+            .register_app(
+                &self.ephemeral_key,
+                &app_key,
+                self.state.register_url.clone(),
+            )
             .await?;
-        SDK::new(self.client, Arc::new(app_key), tls_config).await
+        SDK::new(self.client, Arc::new(app_key), self.tls_config).await
     }
 }
 
@@ -186,7 +236,7 @@ impl Builder<ApprovedState> {
 /// It is exposed to be able to test the app key derivation logic.
 fn derive_app_key(
     mnemonic: &str,
-    app_id: &Hash256,
+    app_id: &AppID,
     shared_secret: &Hash256,
 ) -> Result<PrivateKey, BuilderError> {
     const KEY_DOMAIN: &[u8] = b"indexd app key derivation";
@@ -201,6 +251,8 @@ fn derive_app_key(
 
 #[cfg(test)]
 mod test {
+    use crate::app_id;
+
     use super::*;
     use sia::hash_256;
     use sia::types::Hash256;
@@ -209,8 +261,8 @@ mod test {
     fn test_app_key_derivation_golden() {
         const MNEMONIC: &str =
             "glare own entire dish exact open theme family harsh room scrap rose";
-        const APP_ID: Hash256 =
-            hash_256!("0e90d697f5045a6593f1c43ebf79a369e2bc72cc5c7b6282f3b5aeb0de6e4005");
+        const APP_ID: AppID =
+            app_id!("0e90d697f5045a6593f1c43ebf79a369e2bc72cc5c7b6282f3b5aeb0de6e4005");
         const SHARED_SECRET: Hash256 =
             hash_256!("cf02d945fe4bfe614d823dc13c19aa8501699e656d0f7915490c3056d5c97dc6");
         const EXPECTED_APP_KEY: &str =

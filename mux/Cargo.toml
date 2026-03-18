@@ -1,6 +1,6 @@
 [package]
-name = "mux"
-version = "0.1.0"
+name = "sia_mux"
+version = "0.0.1"
 edition = "2024"
 repository = "https://github.com/SiaFoundation/sia-sdk-rs"
 license = "MIT"
@@ -25,6 +25,7 @@ zeroize = { version = "1", features = ["derive"] }
 criterion = { version = "0.8", features = ["async_tokio"] }
 sia_sdk = { path = "../sia_sdk" }
 serde_json = "1"
+tokio = { version = "1", features = ["test-util"] }
 
 [[bench]]
 name = "mux"

@@ -1,3 +1,60 @@
+## 0.4.0 (2026-03-18)
+
+### Breaking Changes
+
+- Added ephemeral key to authorization flow
+- Reduced the size of the pin object request. Up to 4TB of data can now be pinned in a single object.
+
+### Features
+
+- Added `ready` field to account.
+
+## 0.3.0 (2026-03-16)
+
+### Breaking Changes
+
+- Re-export 3rd-party types to improve ergonomics.
+- Use rustls-platform-verifier by default to simplify SDK initialization.
+
+### Features
+
+- Added mnemonic helpers.
+- Introduce mux crate and frame module
+- Return `sia://` links from the indexd SDK.
+
+### Fixes
+
+- use AsyncRead/AsyncWrite traits instead of Ext variants in trait bounds
+- Added cancel function to cancel inflight packed uploads.
+
+#### Check if we have enough hosts prior to encoding in upload_slabs
+
+##261 by @Alrighttt
+
+Fixes https://github.com/SiaFoundation/sia-sdk-rs/issues/251
+
+- Added an `available_for_upload` method that returns the amount of known hosts marked `good_for_upload`.
+- Added a check in `upload_slabs` that verifies we have enough good hosts prior to encoding any data. 
+- Adds a variant to `QueueError` for `upload_slabs`'s new failure case. This enables testing for this new case specifically.
+
+#### Fix upload racing race conditon
+
+##258 by @Alrighttt
+
+This fixes a race condition in the upload logic that could happen when the amount of healthy hosts is nearly the same as the amount of shards. This could happen when the racing mechanism was triggered prior to all of the initial shards being assigned a host. The slow hosts would be consumed from the HostQueue without completing the upload. This would cause a latter shard to hit a QueueError::NoMoreHosts error.
+
+This changes the upload behavior so that each shard has a host assigned before any upload begins.
+
+A `set_slow_hosts` method was added to the `MockRHP4Client` to allow easily testing these conditions. This mimics a similar mechanism from the Go SDK.
+
+#### Go SDK test parity
+
+##266 by @Alrighttt
+
+This pull requests adds some missing test cases that exist within the Go SDK. Closes https://github.com/SiaFoundation/sia-sdk-rs/issues/220
+
+The remaining tests that have not been ported require changes to the `SDK` struct to allow mocking the `api_client`. I will work on a solution for this.
+
 ## 0.2.0 (2026-01-28)
 
 ### Breaking Changes

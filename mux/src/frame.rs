@@ -123,6 +123,11 @@ impl<W: AsyncWrite + Unpin, C: PacketCipher> PacketWriter<W, C> {
         }
     }
 
+    /// Shuts down the underlying writer, signalling EOF to the peer (TCP FIN).
+    pub async fn shutdown(&mut self) -> Result<(), io::Error> {
+        self.writer.shutdown().await
+    }
+
     /// Encrypts plaintext from `buf` into a separate output buffer and writes
     /// the resulting packets to the underlying writer. The caller must ensure
     /// `buf.len()` is a multiple of `max_frame_size` (`packet_size - AEAD_TAG_SIZE`).

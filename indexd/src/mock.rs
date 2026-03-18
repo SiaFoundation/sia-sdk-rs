@@ -10,13 +10,15 @@ use sia::types::{Currency, Hash256};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::sleep;
 
+use crate::hosts::Hosts;
 use crate::rhp4::{self, RHP4Client};
 use crate::{
-    DownloadError, DownloadOptions, Downloader, Hosts, Object, PackedUpload, UploadError,
-    UploadOptions, Uploader,
+    DownloadError, DownloadOptions, Downloader, Object, PackedUpload, UploadError, UploadOptions,
+    Uploader,
 };
 
 pub struct MockRHP4Client {
+    hosts: Hosts,
     sectors: RwLock<HashMap<PublicKey, HashMap<Hash256, Bytes>>>,
     slow_hosts: RwLock<HashSet<PublicKey>>,
     slow_delay: RwLock<Duration>,
@@ -25,10 +27,15 @@ pub struct MockRHP4Client {
 impl MockRHP4Client {
     pub fn new() -> Self {
         Self {
+            hosts: Hosts::new(),
             sectors: RwLock::new(HashMap::new()),
             slow_hosts: RwLock::new(HashSet::new()),
             slow_delay: RwLock::new(Duration::ZERO),
         }
+    }
+
+    pub fn update_hosts(&self, hosts: Vec<sia::rhp::Host>) {
+        self.hosts.update(hosts);
     }
 
     pub fn clear(&self) {
@@ -134,9 +141,9 @@ pub struct MockUploader {
 }
 
 impl MockUploader {
-    pub fn new(hosts: Hosts, client: Arc<MockRHP4Client>, app_key: Arc<PrivateKey>) -> Self {
+    pub fn new(client: Arc<MockRHP4Client>, app_key: Arc<PrivateKey>) -> Self {
         Self {
-            uploader: Uploader::new(hosts, client.clone(), app_key),
+            uploader: Uploader::new(client.hosts.clone(), client, app_key),
         }
     }
 
@@ -158,9 +165,9 @@ pub struct MockDownloader {
 }
 
 impl MockDownloader {
-    pub fn new(hosts: Hosts, client: Arc<MockRHP4Client>, app_key: Arc<PrivateKey>) -> Self {
+    pub fn new(client: Arc<MockRHP4Client>, app_key: Arc<PrivateKey>) -> Self {
         Self {
-            downloader: Downloader::new(hosts, client.clone(), app_key),
+            downloader: Downloader::new(client.hosts.clone(), client, app_key),
         }
     }
 
