@@ -1,3 +1,4 @@
+#![cfg(feature = "go-interop-tests")]
 //! Cross-language interoperability tests between the Rust mux implementation
 //! and the Go reference implementation.
 //!

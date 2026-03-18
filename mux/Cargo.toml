@@ -21,6 +21,9 @@ tokio-util = "0.7.18"
 x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 zeroize = { version = "1", features = ["derive"] }
 
+[features]
+go-interop-tests = []
+
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
 sia_sdk = { path = "../sia_sdk" }
