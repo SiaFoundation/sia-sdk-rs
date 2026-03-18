@@ -83,7 +83,7 @@ async fn main() {
     println!("Downloading object...");
     let start = Instant::now();
     let mut downloaded_data = Vec::new();
-    sdk.download( &mut downloaded_data,&obj, DownloadOptions::default())
+    sdk.download(&mut downloaded_data, &obj, DownloadOptions::default())
         .await
         .expect("failed to download object");
     let duration = start.elapsed();

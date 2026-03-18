@@ -290,10 +290,13 @@ impl Client {
         app_key: &PrivateKey,
         register_url: Url,
     ) -> Result<(), Error> {
-        let request_id = register_url
-            .path()
-            .strip_prefix("/auth/connect/")
-            .and_then(|s| s.strip_suffix("/register"))
+        let segments = register_url
+            .path_segments()
+            .ok_or(Error::Format("invalid register url format".into()))?;
+        // ../auth/connect/:request_id/register
+        let request_id = segments
+            .rev()
+            .nth(1)
             .ok_or(Error::Format("invalid register url format".into()))?;
 
         let sig_hash = register_app_sig_hash(request_id, &signing_key.public_key());
@@ -1731,6 +1734,126 @@ mod tests {
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string()).unwrap();
         client.save_object(&app_key, &object).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_register_flow() {
+        let ephemeral_key = PrivateKey::from_seed(&rand::random());
+        let ephemeral_pk = ephemeral_key.public_key();
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let app_pk = app_key.public_key();
+
+        let app_id = AppID::from(rand::random::<[u8; 32]>());
+        let metadata = AppMetadata {
+            id: app_id,
+            name: "test-app",
+            description: "A test application",
+            service_url: "https://test-app.com",
+            logo_url: Some("https://test-app.com/logo.png"),
+            callback_url: Some("https://test-app.com/callback"),
+        };
+
+        let server = Server::run();
+        let request_id = "abc123def456";
+
+        // step 1: request_app_connection — signed with ephemeral key, body has metadata
+        let expected_body = serde_json::to_string(&metadata).unwrap();
+        let step1_ephemeral_pk = ephemeral_pk;
+        server.expect(
+            Expectation::matching(move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                let pk = validate_url_signature_request(req);
+                pk == step1_ephemeral_pk
+                    && req.method() == "POST"
+                    && req.uri().path() == "/auth/connect"
+                    && req.body().as_ref() == expected_body.as_bytes()
+            })
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(format!(
+                        r#"{{"responseURL":"http://example.com/auth/connect/{request_id}","statusURL":"{}","registerURL":"{}","expiration":"2030-01-01T00:00:00Z"}}"#,
+                        &server.url(&format!("/auth/connect/{request_id}/status")).to_string(),
+                        &server.url(&format!("/auth/connect/{request_id}/register")).to_string()
+                    ))
+                    .unwrap(),
+            ),
+        );
+
+        // step 2: check_request_status — signed with ephemeral key
+        let step2_ephemeral_pk = ephemeral_pk;
+        let user_secret = Hash256::new(rand::random());
+        let status_response = serde_json::to_string(&AuthConnectStatusResponse {
+            approved: true,
+            user_secret: Some(user_secret),
+        })
+        .unwrap();
+        server.expect(
+            Expectation::matching(
+                move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                    let pk = validate_url_signature_request(req);
+                    pk == step2_ephemeral_pk
+                        && req.method() == "GET"
+                        && req.uri().path() == format!("/auth/connect/{request_id}/status")
+                },
+            )
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(status_response)
+                    .unwrap(),
+            ),
+        );
+
+        // step 3: register_app — signed with ephemeral key, body has app key + valid signature
+        let step3_ephemeral_pk = ephemeral_pk;
+        let step3_app_pk = app_pk;
+        server.expect(
+            Expectation::matching(
+                move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                    let pk = validate_url_signature_request(req);
+                    if pk != step3_ephemeral_pk || req.method() != "POST" {
+                        return false;
+                    }
+                    if req.uri().path() != format!("/auth/connect/{request_id}/register") {
+                        return false;
+                    }
+                    // verify the body contains a valid RegisterAppRequest
+                    let body: RegisterAppRequest =
+                        serde_json::from_slice(req.body().as_ref()).expect("invalid body");
+                    if body.app_key != step3_app_pk {
+                        return false;
+                    }
+                    // verify the app key ownership signature
+                    let sig_hash = register_app_sig_hash(request_id, &step3_ephemeral_pk);
+                    step3_app_pk.verify(sig_hash.as_ref(), &body.signature)
+                },
+            )
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        // run the flow
+        let client = Client::new(server.url("/").to_string()).unwrap();
+
+        // step 1
+        let resp = client
+            .request_app_connection(&ephemeral_key, &metadata)
+            .await
+            .unwrap();
+
+        // step 2
+        let status_url: Url = resp.status_url.parse().unwrap();
+        let secret = client
+            .check_request_status(&ephemeral_key, status_url)
+            .await
+            .unwrap();
+        assert_eq!(secret, Some(user_secret));
+
+        // step 3
+        let register_url: Url = resp.register_url.parse().unwrap();
+        client
+            .register_app(&ephemeral_key, &app_key, register_url)
+            .await
+            .unwrap();
     }
 
     #[test]
