@@ -39,4 +39,4 @@ jobs:
       - name: Build benches
         run: cargo build --benches --features=mock
       - name: Test
-        run: cargo test --features go-interop-tests
+        run: cargo test --all-features
