@@ -1,9 +1,8 @@
 //! Dial a Sia host over TCP, establish a mux connection, and call RPCSettings.
 //!
 //! Usage:
-//!   cargo run -p mux --example rpc_settings -- <host:port> <ed25519:pubkey>
-//!   cargo run -p mux --example rpc_settings -- --anonymous <host:port>
-
+//!   cargo run -p sia_mux --example rpc_settings -- <host:port> <ed25519:pubkey>
+//!   cargo run -p sia_mux --example rpc_settings -- --anonymous <host:port>
 use std::env;
 
 use bytes::Bytes;
