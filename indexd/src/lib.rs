@@ -15,9 +15,9 @@ mod builder;
 mod download;
 mod hosts;
 mod object_encryption;
-mod transport;
 mod rhp4;
 mod slabs;
+mod transport;
 mod upload;
 
 #[cfg(any(test, feature = "mock"))]
