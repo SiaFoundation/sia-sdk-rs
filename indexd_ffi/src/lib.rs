@@ -565,8 +565,14 @@ pub struct App {
 #[derive(uniffi::Record)]
 pub struct Account {
     pub account_key: String,
+    /// The maximum amount of data that can be pinned to the indexer for this account.
     pub max_pinned_data: u64,
+    /// The amount of data currently pinned to the indexer for this account.
     pub pinned_data: u64,
+    /// Whether the account is ready to be used. After registering an app, the account may not be
+    /// immediately ready as the indexer needs to process the registration and sync with the network.
+    /// The account will become ready once it has propogated on the network.
+    pub ready: bool,
     pub app: App,
     pub last_used: SystemTime,
 }
@@ -577,6 +583,7 @@ impl From<indexd::Account> for Account {
             account_key: a.account_key.to_string(),
             max_pinned_data: a.max_pinned_data,
             pinned_data: a.pinned_data,
+            ready: a.ready,
             app: App {
                 id: a.app.id.to_string(),
                 description: a.app.description,

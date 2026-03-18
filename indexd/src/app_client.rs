@@ -158,6 +158,7 @@ pub struct Account {
     pub account_key: PublicKey,
     pub max_pinned_data: u64,
     pub pinned_data: u64,
+    pub ready: bool,
     pub app: App,
     pub last_used: DateTime<Utc>,
 }
