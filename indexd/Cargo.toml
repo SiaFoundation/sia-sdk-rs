@@ -50,7 +50,9 @@ rustls-platform-verifier = "0.6.2"
 tokio = { version = "1.49.0", features = ["macros"] }
 
 [features]
+default = ["platform-verifier"]
 mock = []
+platform-verifier = ["rustls-platform-verifier"]
 
 [[bench]]
 name = "upload"
