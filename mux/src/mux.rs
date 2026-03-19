@@ -504,10 +504,11 @@ impl AsyncWrite for Stream {
         // Single copy: directly into shared write buffer
         append_frame(&mut s.write_buf, header, &buf[..n]);
 
-        // Chain-wake: if there's still buffer space, wake the next
-        // backpressured writer so it can append without waiting for
-        // the write loop to drain.
-        if s.write_buf.len() + frame_size <= max_buf_size
+        // Chain-wake: if there's room for the largest possible frame,
+        // wake the next backpressured writer so it can append without
+        // waiting for the write loop to drain.
+        let max_frame_size = FRAME_HEADER_SIZE + max_payload;
+        if s.write_buf.len() + max_frame_size <= max_buf_size
             && let Some(w) = s.buffer_wakers.pop_front()
         {
             w.wake();
