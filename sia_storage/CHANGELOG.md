@@ -1,3 +1,9 @@
+## 0.5.0 (2026-03-23)
+
+### Breaking Changes
+
+- Renamed crate to `sia_storage`
+
 ## 0.4.0 (2026-03-18)
 
 ### Breaking Changes
