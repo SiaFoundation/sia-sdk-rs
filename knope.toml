@@ -33,6 +33,7 @@ changelog = "sia_storage_ffi/CHANGELOG.md"
 [packages.sia_mux]
 versioned_files = [
     "sia_mux/Cargo.toml",
+    { path = "sia_storage/Cargo.toml", dependency = "sia_mux" },
     { path = "Cargo.lock", dependency = "sia_mux" }
 ]
 changelog = "sia_mux/CHANGELOG.md"

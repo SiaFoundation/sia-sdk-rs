@@ -26,7 +26,6 @@ go-interop-tests = []
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
-sia_core = { path = "../sia_core" }
 serde_json = "1"
 tokio = { version = "1", features = ["test-util"] }
 
