@@ -16,7 +16,7 @@ jobs:
         with:
           go-version: 'stable'
       - name: Build Go interop helper
-        run: cd mux/testutil/go-interop && go build -o interop .
+        run: cd sia_mux/testutil/go-interop && go build -o interop .
       - name: Setup Environment
         run: |
           rustup update stable
@@ -27,7 +27,7 @@ jobs:
         # Check if the library target compiles. This will still allow for using
         # non-wasm functionality in tests and benchmarks but guarantees that
         # consumers of the library can use it to generate wasm bindings.
-        run: cargo check --target wasm32-unknown-unknown --lib --package sia_sdk
+        run: cargo check --target wasm32-unknown-unknown --lib --package sia_core
       - name: Rustfmt
         run: cargo +nightly fmt --all -- --check
       - name: Clippy

@@ -1,0 +1,66 @@
+[package]
+name = "sia_storage"
+version = "0.4.0"
+edition = "2024"
+repository = "https://github.com/SiaFoundation/sia-sdk-rs"
+license = "MIT"
+description = "SDK for interacting with a Sia network indexer"
+authors = ["The Sia Foundation"]
+categories = ["cryptography::cryptocurrencies"]
+keywords = ["sia", "decentralized", "blockchain", "depin", "storage"]
+
+[lib]
+path = "src/lib.rs"
+bench = false
+
+[dependencies]
+# do not update to reqwest v0.13 until https://github.com/seanmonstar/reqwest/issues/2968 is resolved
+reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
+rustls = { version = "0.23.37", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+serde = "1.0.228"
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+sia_core = { path = "../sia_core", version = "0.2.2" }
+tokio = { version = "1.50.0", features = ["fs", "sync", "io-util", "macros", "rt"] }
+rand = "0.10.0"
+blake2b_simd = "1.0.4"
+url = { version = "2.5.8", features = ["serde"] }
+log = "0.4.29"
+# avoid rustls-platform-verifier until https://github.com/rustls/rustls-platform-verifier/issues/115 is resolved
+quinn = { version = "0.11.9", default-features = false, features = ["bloom", "log", "runtime-tokio", "rustls-ring"] }
+bytes = "1.11.1"
+tokio-util = { version = "0.7.18", features = ["rt"] }
+priority-queue = "2.7.0"
+serde_with = {version = "3.18.0", features = ["base64"]}
+hex = "0.4.3"
+chacha20poly1305 = "0.10.1"
+chacha20 = { version = "0.10.0", features = ["xchacha"] }
+chrono = { version = "0.4.44", features = ["serde"] }
+blake2 = "0.10.6"
+rayon = "1.11.0"
+reed-solomon-erasure = "6.0.0"
+zeroize = { version = "1.8.0", features = ["derive"] }
+hkdf = "0.12.4"
+base64 = "0.22.1"
+
+rustls-platform-verifier = { version = "0.6.2", optional = true }
+ed25519-dalek = "2.2.0"
+sia_mux = { version = "0.0.1", path = "../sia_mux" }
+
+[dev-dependencies]
+rustls-platform-verifier = "0.6.2"
+criterion = { version = "0.8.2", features = ["async_tokio"] }
+httptest = "0.16.4"
+tokio = { version = "1.50.0", features = ["macros"] }
+env_logger = "0.11.9"
+clap = { version = "4.6.0", features = ["derive"] }
+
+[features]
+default = ["platform-verifier"]
+mock = []
+platform-verifier = ["rustls-platform-verifier"]
+
+[[bench]]
+name = "upload"
+harness = false
+required-features = ["mock"]
