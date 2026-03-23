@@ -63,7 +63,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43d5b281e737544384e969a5ccad3f1cdd24b48086a0fc1b2a5262a26b8f4f4a"
 dependencies = [
  "anstyle",
- "anstyle-parse",
+ "anstyle-parse 0.2.7",
+ "anstyle-query",
+ "anstyle-wincon",
+ "colorchoice",
+ "is_terminal_polyfill",
+ "utf8parse",
+]
+
+[[package]]
+name = "anstream"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "824a212faf96e9acacdbd09febd34438f8f711fb84e09a8916013cd7815ca28d"
+dependencies = [
+ "anstyle",
+ "anstyle-parse 1.0.0",
  "anstyle-query",
  "anstyle-wincon",
  "colorchoice",
@@ -82,6 +97,15 @@ name = "anstyle-parse"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7644824f0aa2c7b9384579234ef10eb7efb6a0deb83f9630a49594dd9c15c2"
+dependencies = [
+ "utf8parse",
+]
+
+[[package]]
+name = "anstyle-parse"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52ce7f38b242319f7cabaa6813055467063ecdc9d355bbb4ce0c68908cd8130e"
 dependencies = [
  "utf8parse",
 ]
@@ -496,9 +520,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.5.51"
+version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c26d721170e0295f191a69bd9a1f93efcdb0aff38684b61ab5750468972e5f5"
+checksum = "b193af5b67834b676abd72466a96c1024e6a6ad978a1f484bd90b85c94041351"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -506,10 +530,11 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.51"
+version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75835f0c7bf681bfd05abe44e965760fea999a5286c6eb2d59883634fd02011a"
+checksum = "714a53001bf66416adb0e2ef5ac857140e7dc3a0c48fb28b2f10762fc4b5069f"
 dependencies = [
+ "anstream 1.0.0",
  "anstyle",
  "clap_lex",
  "strsim",
@@ -517,9 +542,9 @@ dependencies = [
 
 [[package]]
 name = "clap_derive"
-version = "4.5.49"
+version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a0b5487afeab2deb2ff4e03a807ad1a03ac532ff5a2cee5d86884440c7f7671"
+checksum = "1110bd8a634a1ab8cb04345d8d878267d57c3cf1b38d91b71af6686408bbca6a"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -529,9 +554,9 @@ dependencies = [
 
 [[package]]
 name = "clap_lex"
-version = "0.7.6"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
+checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "colorchoice"
@@ -869,7 +894,7 @@ version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2daee4ea451f429a58296525ddf28b45a3b64f1acf6587e2067437bb11e218d"
 dependencies = [
- "anstream",
+ "anstream 0.6.21",
  "anstyle",
  "env_filter",
  "jiff",
@@ -1478,62 +1503,6 @@ checksum = "3acae9609540aa318d1bc588455225fb2085b9ed0c4f6bd0d9d5bcd86f1a0344"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
-]
-
-[[package]]
-name = "indexd"
-version = "0.4.0"
-dependencies = [
- "base64",
- "blake2",
- "blake2b_simd",
- "bytes",
- "chacha20poly1305",
- "chrono",
- "criterion",
- "env_logger 0.11.9",
- "hex",
- "hkdf",
- "httptest",
- "log",
- "priority-queue",
- "quinn",
- "rand 0.10.0",
- "reqwest",
- "rustls",
- "rustls-platform-verifier",
- "serde",
- "serde_json",
- "serde_with",
- "sia_sdk",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "url",
-]
-
-[[package]]
-name = "indexd_ffi"
-version = "0.4.0"
-dependencies = [
- "async-trait",
- "base64",
- "bytes",
- "indexd",
- "log",
- "pretty_env_logger",
- "rand 0.10.0",
- "rustls",
- "rustls-platform-verifier",
- "sia_sdk",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "uniffi 0.29.4",
- "uniffi 0.30.0",
- "webpki-roots",
- "zeroize",
 ]
 
 [[package]]
@@ -2652,7 +2621,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
-name = "sia-sdk-derive"
+name = "sia_core"
+version = "0.2.2"
+dependencies = [
+ "base64",
+ "bip39",
+ "blake2",
+ "blake2b_simd",
+ "bytes",
+ "chacha20 0.10.0",
+ "chrono",
+ "criterion",
+ "ed25519-dalek",
+ "hex",
+ "log",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+ "rand 0.10.0",
+ "rayon",
+ "reed-solomon-erasure",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sia_core_derive",
+ "thiserror 2.0.18",
+ "tokio",
+ "uint",
+ "zeroize",
+]
+
+[[package]]
+name = "sia_core_derive"
 version = "0.0.7"
 dependencies = [
  "proc-macro2",
@@ -2671,7 +2671,7 @@ dependencies = [
  "rand_core 0.6.4",
  "ring",
  "serde_json",
- "sia_sdk",
+ "sia_core",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -2680,33 +2680,65 @@ dependencies = [
 ]
 
 [[package]]
-name = "sia_sdk"
-version = "0.2.2"
+name = "sia_storage"
+version = "0.4.0"
 dependencies = [
  "base64",
- "bip39",
  "blake2",
  "blake2b_simd",
  "bytes",
  "chacha20 0.10.0",
+ "chacha20poly1305",
  "chrono",
+ "clap",
  "criterion",
  "ed25519-dalek",
+ "env_logger 0.11.9",
  "hex",
- "num-bigint",
- "num-rational",
- "num-traits",
+ "hkdf",
+ "httptest",
+ "log",
+ "priority-queue",
+ "quinn",
  "rand 0.10.0",
  "rayon",
  "reed-solomon-erasure",
+ "reqwest",
+ "rustls",
  "rustls-platform-verifier",
  "serde",
  "serde_json",
- "sha2",
- "sia-sdk-derive",
+ "serde_with",
+ "sia_core",
+ "sia_mux",
  "thiserror 2.0.18",
  "tokio",
- "uint",
+ "tokio-util",
+ "url",
+ "zeroize",
+]
+
+[[package]]
+name = "sia_storage_ffi"
+version = "0.4.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "log",
+ "pretty_env_logger",
+ "rand 0.10.0",
+ "rustls",
+ "rustls-platform-verifier",
+ "sia_core",
+ "sia_storage",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "uniffi 0.29.4",
+ "uniffi 0.30.0",
+ "webpki-roots",
  "zeroize",
 ]
 

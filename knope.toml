@@ -1,34 +1,41 @@
-[packages.sia_sdk]
+[packages.sia_core]
 versioned_files = [
-    "sia_sdk/Cargo.toml",
-    { path = "indexd/Cargo.toml", dependency = "sia_sdk" },
-    { path = "indexd_ffi/Cargo.toml", dependency = "sia_sdk" },
-    { path = "Cargo.lock", dependency = "sia_sdk" }
+    "sia_core/Cargo.toml",
+    { path = "sia_storage/Cargo.toml", dependency = "sia_core" },
+    { path = "sia_storage_ffi/Cargo.toml", dependency = "sia_core" },
+    { path = "Cargo.lock", dependency = "sia_core" }
 ]
-changelog = "sia_sdk/CHANGELOG.md"
+changelog = "sia_core/CHANGELOG.md"
 
-[packages.sia_sdk_derive]
+[packages.sia_core_derive]
 versioned_files = [
-    "sia_derive/Cargo.toml",
-    { path = "sia_sdk/Cargo.toml", dependency = "sia-sdk-derive" },
-    { path = "Cargo.lock", dependency = "sia-sdk-derive" }
+    "sia_core_derive/Cargo.toml",
+    { path = "sia_core/Cargo.toml", dependency = "sia_core_derive" },
+    { path = "Cargo.lock", dependency = "sia_core_derive" }
 ]
-changelog = "sia_derive/CHANGELOG.md"
+changelog = "sia_core_derive/CHANGELOG.md"
 
-[packages.indexd]
+[packages.sia_storage]
 versioned_files = [
-    "indexd/Cargo.toml",
-    { path = "indexd_ffi/Cargo.toml", dependency = "indexd" },
-    { path = "Cargo.lock", dependency = "indexd" }
+    "sia_storage/Cargo.toml",
+    { path = "sia_storage_ffi/Cargo.toml", dependency = "sia_storage" },
+    { path = "Cargo.lock", dependency = "sia_storage" }
 ]
-changelog = "indexd/CHANGELOG.md"
+changelog = "sia_storage/CHANGELOG.md"
 
-[packages.indexd_ffi]
+[packages.sia_storage_ffi]
 versioned_files = [
-    "indexd_ffi/Cargo.toml",
-    { path = "Cargo.lock", dependency = "indexd_ffi" }
+    "sia_storage_ffi/Cargo.toml",
+    { path = "Cargo.lock", dependency = "sia_storage_ffi" }
 ]
-changelog = "indexd_ffi/CHANGELOG.md"
+changelog = "sia_storage_ffi/CHANGELOG.md"
+
+[packages.sia_mux]
+versioned_files = [
+    "sia_mux/Cargo.toml",
+    { path = "Cargo.lock", dependency = "sia_mux" }
+]
+changelog = "sia_mux/CHANGELOG.md"
 
 [[workflows]]
 name = "document-change"
@@ -51,4 +58,4 @@ type = "Release"
 
 [github]
 owner = "SiaFoundation"
-repo = "sia-sdk-rs"
+repo = "sia-rs"
