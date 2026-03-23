@@ -59,4 +59,4 @@ type = "Release"
 
 [github]
 owner = "SiaFoundation"
-repo = "sia-rs"
+repo = "sia-sdk-rs"
