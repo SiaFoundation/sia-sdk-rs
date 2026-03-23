@@ -19,7 +19,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Setup Knope
-        uses: knope-dev/action@1ba8f6acf146130c3f5b196465018aa9f553381a
+        uses: knope-dev/action@v8055388a38df33f0603050415ac3d8175d6b566f
       - name: Prepare Release
         run: knope prepare-release --verbose
       - name: Create Pull Request
