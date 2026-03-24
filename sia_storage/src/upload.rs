@@ -12,7 +12,7 @@ use sia_core::signing::{PrivateKey, PublicKey};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWriteExt, BufReader, SimplexStream, WriteHalf, copy, simplex};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio::task::{JoinSet, spawn_blocking};
+use tokio::task::JoinSet;
 use tokio::time::error::Elapsed;
 use tokio::time::{Instant, sleep};
 use tokio_util::task::AbortOnDropHandle;
@@ -43,7 +43,7 @@ impl<T: RHP4Client + Send + Sync + Clone + 'static> ShardUpload<T> {
         let data = self.data.clone();
         let slab_index = self.slab_index;
         let shard_index = self.shard_index;
-        tasks.spawn(async move {
+        join_set_spawn!(tasks, async move {
             let _permit = permit;
             let now = Instant::now();
             let root = client.write_sector(host_key, &account_key, data, write_timeout).await
@@ -363,7 +363,7 @@ where
             let rs = rs.clone();
             let shard_sema = shard_sema.clone();
 
-            slab_upload_tasks.spawn(async move {
+            join_set_spawn!(slab_upload_tasks, async move {
                 let _slab_guard = slab_permit;
 
                 // note: it may seem like a good idea to start uploading the data shards
@@ -373,11 +373,10 @@ where
                 //
                 // It could probably be resolved by using a pool, but leaving that as a
                 // future optimization for now.
-                let shards = spawn_blocking(move || -> erasure_coding::Result<_> {
+                let shards = maybe_spawn_blocking!({
                     rs.encode_shards(&mut shards)?;
-                    Ok(shards)
-                })
-                .await??;
+                    Ok::<_, erasure_coding::Error>(shards)
+                })?;
 
                 // generate a unique encryption key for the slab
                 let slab_key: EncryptionKey = rand::random::<[u8; 32]>().into();
@@ -397,12 +396,11 @@ where
                     let initial_host = reserved_hosts[shard_index];
                     let client = client.clone();
                     // spawn a task to encrypt and upload each shard for this slab.
-                    shard_upload_tasks.spawn(async move {
-                        let shard = spawn_blocking(move || {
+                    join_set_spawn!(shard_upload_tasks, async move {
+                        let shard = maybe_spawn_blocking!({
                             encrypt_shard(&owned_slab_key, shard_index as u8, 0, &mut shard);
                             shard
-                        })
-                        .await?;
+                        });
                         Self::upload_slab_shard(
                             ShardUpload {
                                 client,

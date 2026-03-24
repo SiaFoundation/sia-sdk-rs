@@ -1,3 +1,39 @@
+/// Run a blocking computation on `spawn_blocking` on native, or inline on WASM.
+/// Must be called from an async context. The expression must return a type that
+/// implements `Send + 'static` on native.
+///
+/// ```ignore
+/// let result = maybe_spawn_blocking!(expensive_computation())?;
+/// ```
+macro_rules! maybe_spawn_blocking {
+    ($body:expr) => {{
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            tokio::task::spawn_blocking(move || $body).await?
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            $body
+        }
+    }};
+}
+
+/// Spawn a future on a [`tokio::task::JoinSet`]. Uses `spawn` on native
+/// (requires `Send`) and `spawn_local` on WASM (no `Send` required).
+///
+/// ```ignore
+/// let mut set = tokio::task::JoinSet::new();
+/// join_set_spawn!(set, async move { do_work().await });
+/// ```
+macro_rules! join_set_spawn {
+    ($set:expr, $fut:expr) => {{
+        #[cfg(not(target_arch = "wasm32"))]
+        $set.spawn($fut);
+        #[cfg(target_arch = "wasm32")]
+        $set.spawn_local($fut);
+    }};
+}
+
 use std::sync::Arc;
 
 use log::debug;
