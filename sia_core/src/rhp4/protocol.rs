@@ -11,7 +11,6 @@ use std::fmt::Display;
 use std::marker::PhantomData;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::oneshot;
 
 use super::{
     AccountDeposit, AccountToken, HostPrices, HostSettings, RenterContractSigner, SEGMENT_SIZE,
@@ -668,7 +667,7 @@ pub struct RPCWriteSectorResult {
 /// If the sector is not appended to a contract within that time, it will be deleted.
 #[derive(Debug)]
 pub struct RPCWriteSector<State> {
-    root_rx: oneshot::Receiver<Hash256>,
+    data: Bytes,
     usage: Usage,
     state: PhantomData<State>,
 }
@@ -682,13 +681,6 @@ impl RPCWriteSector<RPCInit> {
         token: AccountToken,
         data: Bytes,
     ) -> Result<RPCWriteSector<RPCComplete>, Error> {
-        let root_data = data.clone();
-        let (tx, rx) = oneshot::channel();
-        rayon::spawn(move || {
-            let root = merkle::sector_root(root_data.as_ref());
-            let _ = tx.send(root);
-        });
-
         let usage = Usage::write_sector(&prices, data.len());
         let request = RPCWriteSectorRequest {
             prices,
@@ -699,10 +691,10 @@ impl RPCWriteSector<RPCInit> {
         Self::SPECIFIER.encode(&mut buf)?;
         request.encode(&mut buf)?;
         let header = Bytes::from(buf);
-        w.write_all_buf(&mut header.chain(data)).await?;
+        w.write_all_buf(&mut header.chain(data.clone())).await?;
 
         Ok(RPCWriteSector {
-            root_rx: rx,
+            data,
             usage,
             state: PhantomData,
         })
@@ -715,7 +707,7 @@ impl RPCWriteSector<RPCComplete> {
         r: &mut (impl AsyncRead + Unpin),
     ) -> Result<RPCWriteSectorResult, Error> {
         let response: RPCWriteSectorResponse = read_response(r).await?;
-        let root = self.root_rx.await.unwrap();
+        let root = maybe_rayon!(merkle::sector_root(self.data.as_ref()));
         if response.root != root {
             return Err(Error::SectorRootMismatch {
                 expected: root,
@@ -808,16 +800,11 @@ impl RPCReadSector<RPCComplete> {
         let root = self.root;
         let start = offset / SEGMENT_SIZE;
         let end = (offset + length).div_ceil(SEGMENT_SIZE);
-        let (tx, rx) = oneshot::channel();
-        rayon::spawn(move || {
-            let res = response
-                .data
-                .verify(&root, start, end)
-                .map_err(Error::ProofValidation);
-            tx.send(res).unwrap();
-        });
 
-        let data = rx.await.unwrap()?;
+        let data = maybe_rayon!(response
+            .data
+            .verify(&root, start, end)
+            .map_err(Error::ProofValidation))?;
         Ok(RPCReadSectorResult {
             usage: self.usage,
             data,

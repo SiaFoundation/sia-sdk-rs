@@ -26,22 +26,21 @@ log = "0.4.29"
 num-bigint = "0.4.6"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }
 num-traits = "0.2.19"
-rayon = "1.11.0"
 reed-solomon-erasure = "6.0.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.10.9"
 sia_core_derive = { version = "0.0.7", path = "../sia_core_derive" }
 thiserror = "2.0.18"
-tokio = { version = "1.50.0", features = [
-    "macros",
-    "rt",
-    "sync",
-    "io-util",
-    "time",
-] }
 uint = "0.10.0"
 zeroize = { version = "1.8.1", features = ["zeroize_derive"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1.11.0"
+tokio = { version = "1.50.0", features = ["macros", "rt", "sync", "io-util", "time"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1.50.0", features = ["macros", "rt", "sync", "io-util"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
