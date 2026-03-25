@@ -1,3 +1,4 @@
+use crate::time::Elapsed;
 use std::future::Future;
 
 use bytes::Bytes;
@@ -8,7 +9,6 @@ use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
 use thiserror::Error;
-use tokio::time::error::Elapsed;
 
 pub(crate) mod siamux;
 
