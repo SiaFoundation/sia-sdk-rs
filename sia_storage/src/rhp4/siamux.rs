@@ -1,3 +1,4 @@
+use crate::time::{Elapsed, timeout};
 use bytes::Bytes;
 use core::fmt::Debug;
 use ed25519_dalek::{SignatureError, VerifyingKey};
@@ -8,8 +9,6 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use thiserror::{self, Error};
 use tokio::net::{TcpStream, lookup_host};
-use tokio::time::error::Elapsed;
-use tokio::time::timeout;
 
 use crate::rhp4::HostEndpoint;
 
