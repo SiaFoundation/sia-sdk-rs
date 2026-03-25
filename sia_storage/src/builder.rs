@@ -2,7 +2,6 @@ use crate::time::sleep;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::rhp4::siamux;
 use chrono::{DateTime, Utc};
 use rand::random;
 use reqwest::IntoUrl;
@@ -51,7 +50,7 @@ pub enum BuilderError {
     Client(#[from] app_client::Error),
 
     #[error("transport error: {0}")]
-    Transport(#[from] siamux::ConnectError),
+    Transport(String),
 
     #[error("mnemonic error: {0}")]
     Mnemonic(#[from] seed::SeedError),
