@@ -13,34 +13,64 @@ keywords = ["sia", "decentralized", "blockchain", "depin", "storage"]
 path = "src/lib.rs"
 bench = false
 
+# --- Cross-platform dependencies ---
 [dependencies]
-# do not update to reqwest v0.13 until https://github.com/seanmonstar/reqwest/issues/2968 is resolved
-reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
 serde = "1.0.228"
 serde_json = "1.0.149"
 thiserror = "2.0.18"
 sia_core = { path = "../sia_core", version = "0.3.0" }
-tokio = { version = "1.50.0", features = ["fs", "sync", "io-util", "macros", "rt"] }
 rand = "0.10.0"
 blake2b_simd = "1.0.4"
 url = { version = "2.5.8", features = ["serde"] }
 log = "0.4.29"
 bytes = "1.11.1"
-tokio-util = { version = "0.7.18", features = ["rt"] }
 priority-queue = "2.7.0"
-serde_with = {version = "3.18.0", features = ["base64"]}
+serde_with = { version = "3.18.0", features = ["base64"] }
 hex = "0.4.3"
 chacha20poly1305 = "0.10.1"
 chacha20 = { version = "0.10.0", features = ["xchacha"] }
 chrono = { version = "0.4.44", features = ["serde"] }
 blake2 = "0.10.6"
-rayon = "1.11.0"
 reed-solomon-erasure = "6.0.0"
 zeroize = { version = "1.8.0", features = ["derive"] }
 hkdf = "0.12.4"
 base64 = "0.22.1"
 ed25519-dalek = "2.2.0"
+web-time = "1"
+
+# --- Native-only dependencies ---
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# do not update to reqwest v0.13 until https://github.com/seanmonstar/reqwest/issues/2968 is resolved
+reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
+rustls = { version = "0.23.37", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+tokio = { version = "1.50.0", features = ["fs", "sync", "io-util", "macros", "rt", "time"] }
+quinn = { version = "0.11.9", default-features = false, features = ["bloom", "log", "runtime-tokio", "rustls-ring"] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
+rayon = "1.11.0"
 sia_mux = { version = "0.1.0", path = "../sia_mux" }
+rustls-platform-verifier = { version = "0.6.2", optional = true }
+
+# --- WASM-only dependencies ---
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+reqwest = { version = "0.12.28", default-features = false, features = ["json"] }
+tokio = { version = "1.50.0", features = ["sync", "io-util", "macros", "rt"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "WebTransport",
+    "WebTransportOptions",
+    "WebTransportBidirectionalStream",
+    "WebTransportSendStream",
+    "WebTransportReceiveStream",
+    "WebTransportHash",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "WritableStream",
+    "WritableStreamDefaultWriter",
+] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["async_tokio"] }
@@ -50,7 +80,9 @@ env_logger = "0.11.9"
 clap = { version = "4.6.0", features = ["derive"] }
 
 [features]
+default = ["platform-verifier"]
 mock = []
+platform-verifier = ["rustls-platform-verifier"]
 
 [[bench]]
 name = "upload"
