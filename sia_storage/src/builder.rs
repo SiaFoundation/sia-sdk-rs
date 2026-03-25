@@ -1,3 +1,4 @@
+use crate::time::sleep;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -167,7 +168,7 @@ impl Builder<RequestingApprovalState> {
                     client: self.client,
                 });
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            sleep(Duration::from_secs(5)).await;
         }
     }
 }
