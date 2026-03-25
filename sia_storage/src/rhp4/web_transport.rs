@@ -6,10 +6,8 @@ use bytes::Bytes;
 use chrono::Utc;
 use js_sys::{Reflect, Uint8Array};
 use log::debug;
-use sia_core::encoding_async::{AsyncDecoder, AsyncEncoder};
-use sia_core::rhp4::{
-    self, AccountToken, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector, Transport,
-};
+use sia_core::rhp4::protocol::{RPCReadSector, RPCSettings, RPCWriteSector};
+use sia_core::rhp4::{AccountToken, HostPrices};
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::v2::Protocol;
 use sia_core::types::{Currency, Hash256};

@@ -1,6 +1,7 @@
 use crate::time::Elapsed;
 use std::future::Future;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use sia_core::encoding;
 use sia_core::rhp4::HostPrices;
@@ -52,8 +53,22 @@ pub(crate) struct HostEndpoint {
     pub addresses: Vec<NetAddress>,
 }
 
+/// Conditional Send + Sync bound: required on native (for spawning across
+/// threads), trivially satisfied on WASM (single-threaded).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) trait MaybeSendSync: Send + Sync {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + Sync> MaybeSendSync for T {}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) trait MaybeSendSync {}
+#[cfg(target_arch = "wasm32")]
+impl<T> MaybeSendSync for T {}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 /// Trait defining the operations that can be performed on a host
-pub(crate) trait Transport {
+pub(crate) trait Transport: MaybeSendSync {
     fn host_prices(
         &self,
         host: &HostEndpoint,
