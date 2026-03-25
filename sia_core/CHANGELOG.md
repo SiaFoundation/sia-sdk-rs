@@ -1,3 +1,9 @@
+## 0.3.0 (2026-03-23)
+
+### Breaking Changes
+
+- Renamed crate to `sia_core`
+
 ## 0.2.2 (2026-03-18)
 
 ### Features
