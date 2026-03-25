@@ -118,7 +118,11 @@ impl<T: Transport + Send + Sync + Clone + 'static> SlabDownload<T> {
                         start.elapsed()
                     )
                 })?;
-            debug!("download slab {slab_index} shard {shard_index} from host {} in {:?}",task.sector.host_key,start.elapsed());
+            debug!(
+                "download slab {slab_index} shard {shard_index} from host {} in {:?}",
+                task.sector.host_key,
+                start.elapsed()
+            );
             let mut data = data.try_into_mut().unwrap(); // no other references to the data exist, so this is safe
             let data = maybe_spawn_blocking!({
                 encrypt_shard(&encryption_key, shard_index as u8, offset, &mut data);
