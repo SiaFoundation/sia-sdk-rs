@@ -46,8 +46,10 @@ use crate::download::Downloader;
 use crate::hosts::Hosts;
 use crate::rhp4::HostEndpoint;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::rhp4::siamux;
+use crate::rhp4::siamux::Client as TransportClient;
 use crate::upload::Uploader;
+#[cfg(target_arch = "wasm32")]
+use crate::web_transport::Client as TransportClient;
 
 mod app_client;
 mod builder;
@@ -268,7 +270,7 @@ impl SDK {
         api_client: app_client::Client,
         app_key: Arc<PrivateKey>,
     ) -> Result<Self, BuilderError> {
-        let transport = siamux::Client::new();
+        let transport = Client::new();
         let hosts = Hosts::new(transport);
 
         let downloader = Downloader::new(hosts.clone(), app_key.clone());
