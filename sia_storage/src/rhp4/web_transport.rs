@@ -8,8 +8,7 @@ use js_sys::{Reflect, Uint8Array};
 use log::debug;
 use sia_core::encoding_async::{AsyncDecoder, AsyncEncoder};
 use sia_core::rhp4::{
-    self, AccountToken, HostPrices, RPCAccountBalance, RPCReadSector, RPCSettings, RPCWriteSector,
-    Transport,
+    self, AccountToken, HostPrices, RPCReadSector, RPCSettings, RPCWriteSector, Transport,
 };
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::v2::Protocol;
@@ -20,8 +19,8 @@ use web_sys::{ReadableStreamDefaultReader, WritableStreamDefaultWriter};
 
 use sia_core::rhp4::HostSettings;
 
-use crate::rhp4::{Error, Transport as RHP4Client};
 use crate::hosts::Hosts;
+use crate::rhp4::{Error, Transport as RHP4Client};
 
 /// A WebTransport connection to a host. Supports opening multiple
 /// bidirectional streams for sequential RPCs without reconnecting.
@@ -430,27 +429,6 @@ impl RHP4Client for Client {
         if result.is_err() {
             self.evict_connection(&host_key);
             self.evict_prices(&host_key);
-        }
-        result
-    }
-
-    async fn account_balance(
-        &self,
-        host_key: PublicKey,
-        account_key: &PrivateKey,
-    ) -> Result<Currency, Error> {
-        let conn = self.host_connection(host_key).await?;
-        let result: Result<Currency, Error> = async {
-            let stream = conn.open_stream().await?;
-            let resp = RPCAccountBalance::send_request(stream, account_key.public_key())
-                .await?
-                .complete()
-                .await?;
-            Ok(resp.balance)
-        }
-        .await;
-        if result.is_err() {
-            self.evict_connection(&host_key);
         }
         result
     }
