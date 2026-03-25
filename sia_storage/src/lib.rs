@@ -44,7 +44,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::app_client::SlabPinParams;
 use crate::download::Downloader;
 use crate::hosts::Hosts;
-use crate::rhp4::{HostEndpoint, siamux};
+use crate::rhp4::HostEndpoint;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::rhp4::siamux;
 use crate::upload::Uploader;
 
 mod app_client;
