@@ -78,6 +78,40 @@ pub(crate) mod time {
     pub use super::wasm_time::{Elapsed, sleep, timeout};
 }
 
+/// Unified task utilities for native and WASM targets.
+///
+/// Import from `crate::task` instead of `tokio::task` or `tokio_util::task`
+/// directly in other modules.
+pub(crate) mod task {
+    /// A wrapper around [`tokio::task::JoinHandle`] that aborts the task
+    /// when dropped. Replaces `tokio_util::task::AbortOnDropHandle` with
+    /// a cross-platform implementation that works on both native and WASM.
+    pub struct AbortOnDropHandle<T>(pub tokio::task::JoinHandle<T>);
+
+    impl<T> Drop for AbortOnDropHandle<T> {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    impl<T> AbortOnDropHandle<T> {
+        pub fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+            Self(handle)
+        }
+    }
+
+    impl<T> std::future::Future for AbortOnDropHandle<T> {
+        type Output = Result<T, tokio::task::JoinError>;
+
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::pin::Pin::new(&mut self.0).poll(cx)
+        }
+    }
+}
+
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 

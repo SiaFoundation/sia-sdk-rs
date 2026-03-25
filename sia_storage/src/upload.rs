@@ -1,3 +1,5 @@
+use crate::task::AbortOnDropHandle;
+use crate::time::{Elapsed, Instant, sleep};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,9 +15,6 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWriteExt, BufReader, SimplexStream, WriteHalf, copy, simplex};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinSet;
-use tokio::time::error::Elapsed;
-use tokio::time::{Instant, sleep};
-use tokio_util::task::AbortOnDropHandle;
 
 use crate::hosts::{HostQueue, QueueError, RPCError};
 use crate::{Hosts, Object, Sector, Slab};

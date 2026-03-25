@@ -10,6 +10,7 @@ use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
 use thiserror::Error;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod siamux;
 
 #[derive(Debug, Error)]
