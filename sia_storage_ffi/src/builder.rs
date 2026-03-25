@@ -222,8 +222,7 @@ impl Builder {
                 .callback_url
                 .map(|s| Box::leak(s.into_boxed_str()) as &'static str),
         };
-        let tls_config = crate::tls_config();
-        let builder = sia_storage::Builder::with_tls_config(indexer_url, app_meta, tls_config)?;
+        let builder = sia_storage::Builder::new(indexer_url, app_meta)?;
         Ok(Builder {
             state: Arc::new(Mutex::new(Some(BuilderState::Disconnected(builder)))),
         })
