@@ -72,10 +72,10 @@ pub(crate) mod time {
     pub use web_time::{Duration, Instant};
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub use tokio::time::sleep;
+    pub use tokio::time::{error::Elapsed, sleep, timeout};
 
     #[cfg(target_arch = "wasm32")]
-    pub use super::wasm_time::sleep;
+    pub use super::wasm_time::{Elapsed, sleep, timeout};
 }
 
 #[cfg(any(test, feature = "mock"))]
