@@ -1,4 +1,4 @@
-use crate::time::{Duration, Elapsed, sleep};
+use crate::time::{Duration, Elapsed, Instant, sleep};
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::sync::Arc;
