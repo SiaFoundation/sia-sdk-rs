@@ -63,12 +63,20 @@ mod upload;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod wasm_time;
 
-// Unified time imports.
-pub(crate) use web_time::Instant;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use tokio::time::sleep;
-#[cfg(target_arch = "wasm32")]
-pub(crate) use wasm_time::sleep;
+/// Unified time module for native and WASM targets.
+///
+/// All time-related imports throughout the codebase MUST come from
+/// `crate::time`. Do not import from `std::time`, `tokio::time`,
+/// `web_time`, or `wasm_time` directly in other modules.
+pub(crate) mod time {
+    pub use web_time::{Duration, Instant};
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use tokio::time::sleep;
+
+    #[cfg(target_arch = "wasm32")]
+    pub use super::wasm_time::sleep;
+}
 
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
