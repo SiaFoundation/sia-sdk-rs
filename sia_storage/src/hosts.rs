@@ -1,7 +1,7 @@
+use crate::time::{Duration, Elapsed, Instant, timeout};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Display};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use log::debug;
@@ -15,7 +15,6 @@ use std::sync::Mutex;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use tokio::time::timeout;
 
 use crate::rhp4::{HostEndpoint, Transport};
 
@@ -360,7 +359,7 @@ pub enum RPCError {
     Rhp(#[from] crate::rhp4::Error),
 
     #[error("RPC time out after {0:?}")]
-    Elapsed(#[from] tokio::time::error::Elapsed),
+    Elapsed(#[from] Elapsed),
 }
 
 /// Manages a list of known hosts and their performance metrics.
