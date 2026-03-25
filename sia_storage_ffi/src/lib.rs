@@ -17,25 +17,6 @@ use tokio::runtime::{self, Runtime};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::AbortOnDropHandle;
 
-/// Returns a rustls ClientConfig using webpki roots on Android,
-/// or the platform trust store on other OSes.
-///
-/// Avoids [rustls-platform-verifier] on Android until
-/// https://github.com/rustls/rustls-platform-verifier/issues/115 is resolved
-#[cfg(target_os = "android")]
-fn tls_config() -> rustls::ClientConfig {
-    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.to_vec());
-    rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth()
-}
-
-#[cfg(not(target_os = "android"))]
-fn tls_config() -> rustls::ClientConfig {
-    use rustls_platform_verifier::ConfigVerifierExt;
-    rustls::ClientConfig::with_platform_verifier().expect("failed to create tls config")
-}
-
 mod logging;
 pub use logging::*;
 

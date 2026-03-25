@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use crate::rhp4::siamux;
 use chrono::{DateTime, Utc};
-use log::debug;
 use rand::random;
 use reqwest::IntoUrl;
 use sia_core::seed::{self, Seed};
@@ -39,7 +38,6 @@ pub struct Builder<S> {
     state: S,
     client: Client,
     app_meta: AppMetadata,
-    tls_config: rustls::ClientConfig,
 }
 
 /// Errors that can occur during the SDK building process.
@@ -57,16 +55,12 @@ pub enum BuilderError {
     #[error("mnemonic error: {0}")]
     Mnemonic(#[from] seed::SeedError),
 
-    #[error("tls error: {0}")]
-    Tls(#[from] rustls::Error),
-
     #[error("request expired")]
     RequestExpired,
 }
 
 impl Builder<DisconnectedState> {
-    /// Creates a new SDK builder with the provided indexer URL using the
-    /// platform TLS verifier.
+    /// Creates a new SDK builder with the provided indexer URL.
     ///
     /// After creating the builder, call [Builder::connected] to attempt
     /// to connect using an existing app key, or [Builder::request_connection]
@@ -76,7 +70,7 @@ impl Builder<DisconnectedState> {
     /// ```rust
     /// use sia_storage::{AppMetadata, Builder, app_id};
     ///
-    /// const app_meta: AppMetadata = AppMetadata {
+    /// const APP_META: AppMetadata = AppMetadata {
     ///     id: app_id!("a9f0bda1b97b7d44ae6369ac830851a115311bb59aa2d848beda6ae95d10ad18"),
     ///     name: "My App",
     ///     description: "My App Description",
@@ -85,40 +79,15 @@ impl Builder<DisconnectedState> {
     ///     callback_url: Some("https://myapp.com/callback"),
     /// };
     ///
-    /// let builder = Builder::new("https://app.sia.storage", app_meta).expect("failed to create builder");
+    /// let builder = Builder::new("https://app.sia.storage", APP_META).expect("failed to create builder");
     /// ```
-    #[cfg(feature = "platform-verifier")]
     pub fn new<U: IntoUrl>(indexer_url: U, app_meta: AppMetadata) -> Result<Self, BuilderError> {
-        use rustls_platform_verifier::ConfigVerifierExt;
-        let tls_config = rustls::ClientConfig::with_platform_verifier()?;
-        Self::with_tls_config(indexer_url, app_meta, tls_config)
-    }
-
-    /// Creates a new SDK builder with the provided indexer URL and TLS
-    /// configuration.
-    ///
-    /// [Builder::new] should be preferred unless you need
-    /// a custom TLS configuration.
-    ///
-    /// After creating the builder, call [Builder::connected] to attempt
-    /// to connect using an existing app key, or [Builder::request_connection]
-    /// to request a new connection.
-    pub fn with_tls_config<U: IntoUrl>(
-        indexer_url: U,
-        app_meta: AppMetadata,
-        tls_config: rustls::ClientConfig,
-    ) -> Result<Self, BuilderError> {
-        debug!(
-            "Creating SDK builder for indexer at {}",
-            indexer_url.as_str()
-        );
         let client = Client::new(indexer_url)?;
         Ok(Self {
             ephemeral_key: PrivateKey::from_seed(&random::<[u8; 32]>()),
             state: DisconnectedState,
             client,
             app_meta,
-            tls_config,
         })
     }
 
@@ -159,7 +128,6 @@ impl Builder<DisconnectedState> {
                 expiration: resp.expiration,
             },
             client: self.client,
-            tls_config: self.tls_config,
         })
     }
 }
@@ -197,7 +165,6 @@ impl Builder<RequestingApprovalState> {
                     },
                     app_meta: self.app_meta,
                     client: self.client,
-                    tls_config: self.tls_config,
                 });
             }
             tokio::time::sleep(Duration::from_secs(5)).await;

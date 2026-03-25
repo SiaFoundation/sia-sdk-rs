@@ -139,7 +139,7 @@ fn format_bitrate(bytes: u64, duration: Duration) -> String {
     unreachable!()
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() {
     env_logger::init();
 
