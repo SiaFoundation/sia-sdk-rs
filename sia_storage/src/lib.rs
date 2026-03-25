@@ -45,11 +45,7 @@ use crate::app_client::SlabPinParams;
 use crate::download::Downloader;
 use crate::hosts::Hosts;
 use crate::rhp4::HostEndpoint;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::rhp4::siamux::Client as TransportClient;
 use crate::upload::Uploader;
-#[cfg(target_arch = "wasm32")]
-use crate::web_transport::Client as TransportClient;
 
 mod app_client;
 mod builder;

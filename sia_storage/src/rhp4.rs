@@ -11,7 +11,16 @@ use sia_core::types::v2::NetAddress;
 use thiserror::Error;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) mod siamux;
+mod siamux;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use siamux::Client;
+
+#[cfg(target_arch = "wasm32")]
+mod web_transport;
+
+#[cfg(target_arch = "wasm32")]
+pub use web_transport::Client;
 
 #[derive(Debug, Error)]
 pub enum Error {
