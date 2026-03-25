@@ -60,6 +60,16 @@ mod rhp4;
 mod slabs;
 mod upload;
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod wasm_time;
+
+// Unified time imports.
+pub(crate) use web_time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use tokio::time::sleep;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use wasm_time::sleep;
+
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 
