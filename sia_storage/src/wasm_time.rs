@@ -1,3 +1,5 @@
+use std::fmt;
+use std::future::Future;
 use std::time::Duration;
 
 /// WASM-compatible async sleep using `setTimeout`.
@@ -18,4 +20,25 @@ pub async fn sleep(duration: Duration) {
     }))
     .await
     .unwrap();
+}
+
+/// Error returned when a [`timeout`] expires.
+#[derive(Debug)]
+pub struct Elapsed;
+
+impl fmt::Display for Elapsed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "deadline has elapsed")
+    }
+}
+
+impl std::error::Error for Elapsed {}
+
+/// WASM-compatible timeout. Races the given future against a [`sleep`] timer.
+/// Returns `Err(Elapsed)` if the deadline expires first.
+pub async fn timeout<F: Future>(duration: Duration, future: F) -> Result<F::Output, Elapsed> {
+    tokio::select! {
+        result = future => Ok(result),
+        _ = sleep(duration) => Err(Elapsed),
+    }
 }
