@@ -1,4 +1,3 @@
-use crate::time::{Duration, Elapsed, Instant, sleep};
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -15,6 +14,7 @@ use tokio::task::JoinSet;
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::RPCError;
+use crate::time::{Duration, Elapsed, Instant, sleep};
 use crate::{Hosts, Object, Sector};
 
 #[derive(Debug, Error)]
