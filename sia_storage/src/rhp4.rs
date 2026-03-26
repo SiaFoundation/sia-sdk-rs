@@ -86,3 +86,11 @@ pub(crate) trait Transport: MaybeSendSync {
         length: usize,
     ) -> Result<Bytes, Error>;
 }
+
+/// Type alias for `dyn Transport` with conditional Send + Sync bounds.
+/// Use `Arc<DynTransport>` instead of `Arc<dyn Transport>` to avoid
+/// cfg-gates at every use site.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type DynTransport = dyn Transport + Send + Sync;
+#[cfg(target_arch = "wasm32")]
+pub(crate) type DynTransport = dyn Transport;

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder};
-use crate::rhp4::Transport;
+use crate::rhp4::{DynTransport, Transport};
 use bytes::BytesMut;
 use log::debug;
 use sia_core::rhp4::SEGMENT_SIZE;

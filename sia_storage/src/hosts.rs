@@ -16,7 +16,7 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::rhp4::{HostEndpoint, Transport};
+use crate::rhp4::{DynTransport, HostEndpoint, Transport};
 
 /// Represents a host in the Sia network. The
 /// addresses can be used to connect to the host.
@@ -372,13 +372,13 @@ pub enum RPCError {
 /// This is public for criterion benchmarks, but not intended for general use
 #[derive(Debug, Clone)]
 pub(crate) struct Hosts {
-    transport: Arc<dyn Transport>,
+    transport: Arc<DynTransport>,
     price_cache: Arc<HostCache<HostPrices>>,
     hosts: Arc<HostList>,
 }
 
 impl Hosts {
-    pub fn new(transport: Arc<dyn Transport>) -> Self {
+    pub fn new(transport: Arc<DynTransport>) -> Self {
         Self {
             transport,
             hosts: Arc::new(HostList::new()),
@@ -484,7 +484,7 @@ impl Hosts {
     }
 
     async fn fetch_prices(
-        transport: &T,
+        transport: Arc<DynTransport>,
         cache: &HostCache<HostPrices>,
         hosts: &HostList,
         host_endpoint: &HostEndpoint,
