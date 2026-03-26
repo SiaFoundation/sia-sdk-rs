@@ -28,10 +28,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::app_client::SlabPinParams;
 use crate::download::Downloader;
+pub use crate::hosts::Host;
 use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
 use crate::upload::Uploader;
-pub use crate::hosts::Host;
 pub use chrono::{DateTime, Utc};
 pub use reqwest::{IntoUrl, Url};
 #[doc(hidden)]
