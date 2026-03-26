@@ -238,8 +238,8 @@ pub struct SDK {
     app_key: Arc<PrivateKey>,
     api_client: app_client::Client,
     hosts: Hosts,
-    downloader: Downloader<siamux::Client>,
-    uploader: Uploader<siamux::Client>,
+    downloader: Downloader,
+    uploader: Uploader,
 }
 
 impl SDK {
