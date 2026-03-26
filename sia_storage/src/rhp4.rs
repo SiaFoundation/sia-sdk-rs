@@ -47,6 +47,7 @@ pub enum Error {
 }
 
 /// A host endpoint contains the information needed to connect to a host.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) struct HostEndpoint {
     pub public_key: PublicKey,
     pub addresses: Vec<NetAddress>,
