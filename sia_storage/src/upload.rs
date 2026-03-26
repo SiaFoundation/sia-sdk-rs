@@ -237,17 +237,19 @@ impl PackedUpload {
 }
 
 #[derive(Clone)]
-pub(crate) struct Uploader<T: RHP4Client> {
+pub(crate) struct Uploader {
     app_key: Arc<PrivateKey>,
-    hosts: Hosts<T>,
+    hosts: Hosts,
+    transport: Arc<dyn RHP4Client>,
 }
 
-impl<T> Uploader<T>
-where
-    T: RHP4Client + Send + Sync + Clone + 'static,
-{
-    pub fn new(hosts: Hosts<T>, app_key: Arc<PrivateKey>) -> Self {
-        Uploader { app_key, hosts }
+impl Uploader {
+    pub fn new(hosts: Hosts, transport: Arc<dyn RHP4Client>, app_key: Arc<PrivateKey>) -> Self {
+        Uploader {
+            app_key,
+            hosts,
+            transport,
+        }
     }
 
     fn upload_timeout(attempts: usize) -> Duration {
