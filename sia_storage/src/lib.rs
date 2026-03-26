@@ -98,6 +98,13 @@ pub(crate) mod task {
         }
     }
 
+    impl<T> std::ops::Deref for AbortOnDropHandle<T> {
+        type Target = tokio::task::JoinHandle<T>;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
     impl<T> std::future::Future for AbortOnDropHandle<T> {
         type Output = Result<T, tokio::task::JoinError>;
 
