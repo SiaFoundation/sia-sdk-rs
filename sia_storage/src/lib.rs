@@ -1,5 +1,3 @@
-// Platform compatibility layer — must be declared before modules that use its macros.
-// Import time types via `crate::time::` and task types via `crate::task::`.
 #[macro_use]
 mod compat;
 
