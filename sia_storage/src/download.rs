@@ -75,7 +75,7 @@ struct SectorDownloadTask {
     shard_index: usize,
 }
 
-struct SlabDownload<T: Transport> {
+struct SlabDownload {
     client: Hosts,
     account_key: Arc<PrivateKey>,
     encryption_key: Arc<EncryptionKey>,
@@ -85,7 +85,7 @@ struct SlabDownload<T: Transport> {
     offset: usize,
 }
 
-impl<T: Transport + Send + Sync + Clone + 'static> SlabDownload<T> {
+impl SlabDownload {
     fn spawn_read(
         &self,
         tasks: &mut JoinSet<Result<(usize, BytesMut), DownloadError>>,
@@ -215,17 +215,19 @@ impl<T: Transport + Send + Sync + Clone + 'static> SlabDownload<T> {
 }
 
 #[derive(Clone)]
-pub(crate) struct Downloader<T: Transport> {
+pub(crate) struct Downloader {
     account_key: Arc<PrivateKey>,
     hosts: Hosts,
+    transport: Arc<DynTransport>,
 }
 
-impl<T: Transport> Downloader<T>
-where
-    T: Send + Sync + Clone + 'static,
-{
-    pub fn new(hosts: Hosts, account_key: Arc<PrivateKey>) -> Self {
-        Self { account_key, hosts }
+impl Downloader {
+    pub fn new(hosts: Hosts, transport: Arc<DynTransport>, account_key: Arc<PrivateKey>) -> Self {
+        Self {
+            account_key,
+            hosts,
+            transport,
+        }
     }
 
     /// Downloads the provided slabs and writes the decrypted data to the
