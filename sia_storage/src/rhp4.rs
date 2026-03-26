@@ -1,5 +1,3 @@
-use crate::time::Elapsed;
-
 use async_trait::async_trait;
 use bytes::Bytes;
 use sia_core::encoding;
@@ -9,6 +7,8 @@ use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
 use thiserror::Error;
+
+use crate::time::Elapsed;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod siamux;
