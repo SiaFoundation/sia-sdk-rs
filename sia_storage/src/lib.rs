@@ -1,3 +1,30 @@
+use std::sync::Arc;
+
+use log::debug;
+use serde::Serialize;
+use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite};
+
+use crate::app_client::SlabPinParams;
+use crate::download::Downloader;
+use crate::hosts::Hosts;
+use crate::rhp4::{Client, HostEndpoint};
+use crate::upload::Uploader;
+
+mod app_client;
+mod builder;
+mod download;
+mod encryption;
+mod erasure_coding;
+mod hosts;
+mod object_encryption;
+mod rhp4;
+mod slabs;
+mod upload;
+
+#[cfg(target_arch = "wasm32")]
+mod wasm_time;
+
 /// Run a blocking computation on `spawn_blocking` on native, or inline on WASM.
 /// Must be called from an async context. The expression must return a type that
 /// implements `Send + 'static` on native.
@@ -52,33 +79,6 @@ macro_rules! maybe_spawn {
         }
     }};
 }
-
-use std::sync::Arc;
-
-use log::debug;
-use serde::Serialize;
-use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
-
-use crate::app_client::SlabPinParams;
-use crate::download::Downloader;
-use crate::hosts::Hosts;
-use crate::rhp4::{Client, HostEndpoint};
-use crate::upload::Uploader;
-
-mod app_client;
-mod builder;
-mod download;
-mod encryption;
-mod erasure_coding;
-mod hosts;
-mod object_encryption;
-mod rhp4;
-mod slabs;
-mod upload;
-
-#[cfg(target_arch = "wasm32")]
-mod wasm_time;
 
 /// Unified time module for native and WASM targets.
 ///
