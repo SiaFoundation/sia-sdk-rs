@@ -370,7 +370,7 @@ pub enum RPCError {
 /// It can be safely shared across threads and cloned.
 ///
 /// This is public for criterion benchmarks, but not intended for general use
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Hosts {
     transport: Arc<DynTransport>,
     price_cache: Arc<HostCache<HostPrices>>,
