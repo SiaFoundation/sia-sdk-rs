@@ -1,15 +1,9 @@
-use std::sync::Arc;
+// Platform compatibility layer — must be declared before modules that use its macros.
+// Import time types via `crate::time::` and task types via `crate::task::`.
+#[macro_use]
+mod compat;
 
-use log::debug;
-use serde::Serialize;
-use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
-
-use crate::app_client::SlabPinParams;
-use crate::download::Downloader;
-use crate::hosts::Hosts;
-use crate::rhp4::{Client, HostEndpoint};
-use crate::upload::Uploader;
+pub(crate) use compat::{task, time};
 
 mod app_client;
 mod builder;
@@ -22,13 +16,21 @@ mod rhp4;
 mod slabs;
 mod upload;
 
-#[cfg(target_arch = "wasm32")]
-mod wasm_time;
-
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 
-// re-export types for easier access
+use std::sync::Arc;
+
+use log::debug;
+use serde::Serialize;
+use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite};
+
+use crate::app_client::SlabPinParams;
+use crate::download::Downloader;
+use crate::hosts::Hosts;
+use crate::rhp4::{Client, HostEndpoint};
+use crate::upload::Uploader;
 pub use crate::hosts::Host;
 pub use chrono::{DateTime, Utc};
 pub use reqwest::{IntoUrl, Url};
@@ -51,117 +53,6 @@ pub use upload::{PackedUpload, UploadError, UploadOptions};
 
 /// A unique identifier for an indexer application. It should be constant for an application.
 pub type AppID = Hash256;
-
-/// Unified time module for native and WASM targets.
-///
-/// All time-related imports throughout the codebase MUST come from
-/// `crate::time`. Do not import from `std::time`, `tokio::time`,
-/// `web_time`, or `wasm_time` directly in other modules.
-pub(crate) mod time {
-    pub use web_time::{Duration, Instant};
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub use tokio::time::{error::Elapsed, sleep, timeout};
-
-    #[cfg(target_arch = "wasm32")]
-    pub use super::wasm_time::{Elapsed, sleep, timeout};
-}
-
-/// Unified task utilities for native and WASM targets.
-///
-/// Import from `crate::task` instead of `tokio::task` or `tokio_util::task`
-/// directly in other modules.
-pub(crate) mod task {
-    /// A wrapper around [`tokio::task::JoinHandle`] that aborts the task
-    /// when dropped. Replaces `tokio_util::task::AbortOnDropHandle` with
-    /// a cross-platform implementation that works on both native and WASM.
-    pub struct AbortOnDropHandle<T>(pub tokio::task::JoinHandle<T>);
-
-    impl<T> Drop for AbortOnDropHandle<T> {
-        fn drop(&mut self) {
-            self.0.abort();
-        }
-    }
-
-    impl<T> AbortOnDropHandle<T> {
-        pub fn new(handle: tokio::task::JoinHandle<T>) -> Self {
-            Self(handle)
-        }
-    }
-
-    impl<T> std::ops::Deref for AbortOnDropHandle<T> {
-        type Target = tokio::task::JoinHandle<T>;
-        fn deref(&self) -> &Self::Target {
-            &self.0
-        }
-    }
-
-    impl<T> std::future::Future for AbortOnDropHandle<T> {
-        type Output = Result<T, tokio::task::JoinError>;
-
-        fn poll(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Self::Output> {
-            std::pin::Pin::new(&mut self.0).poll(cx)
-        }
-    }
-}
-
-/// Run a blocking computation on `spawn_blocking` on native, or inline on WASM.
-/// Must be called from an async context. The expression must return a type that
-/// implements `Send + 'static` on native.
-///
-/// ```ignore
-/// let result = maybe_spawn_blocking!(expensive_computation())?;
-/// ```
-macro_rules! maybe_spawn_blocking {
-    ($body:expr) => {{
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            tokio::task::spawn_blocking(move || $body).await?
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            $body
-        }
-    }};
-}
-
-/// Spawn a future on a [`tokio::task::JoinSet`]. Uses `spawn` on native
-/// (requires `Send`) and `spawn_local` on WASM (no `Send` required).
-///
-/// ```ignore
-/// let mut set = tokio::task::JoinSet::new();
-/// join_set_spawn!(set, async move { do_work().await });
-/// ```
-macro_rules! join_set_spawn {
-    ($set:expr, $fut:expr) => {{
-        #[cfg(not(target_arch = "wasm32"))]
-        $set.spawn($fut);
-        #[cfg(target_arch = "wasm32")]
-        $set.spawn_local($fut);
-    }};
-}
-
-/// Spawn a future as a standalone task. Uses `tokio::spawn` on native
-/// (requires `Send`) and `tokio::task::spawn_local` on WASM.
-///
-/// ```ignore
-/// let handle = maybe_spawn!(async move { do_work().await });
-/// ```
-macro_rules! maybe_spawn {
-    ($fut:expr) => {{
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            tokio::spawn($fut)
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            tokio::task::spawn_local($fut)
-        }
-    }};
-}
 
 /// A macro to create an [AppID] from a literal hex string. The string must be 64 characters long.
 ///
