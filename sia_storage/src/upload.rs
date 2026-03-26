@@ -1,5 +1,3 @@
-use crate::task::AbortOnDropHandle;
-use crate::time::{Elapsed, Instant, sleep};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +14,8 @@ use tokio::task::JoinSet;
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::{HostQueue, QueueError, RPCError};
+use crate::task::AbortOnDropHandle;
+use crate::time::{Elapsed, Instant, sleep};
 use crate::{Hosts, Object, Sector, Slab};
 
 struct ShardUpload {
