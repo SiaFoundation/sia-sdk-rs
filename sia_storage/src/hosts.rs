@@ -433,10 +433,7 @@ impl Hosts {
     /// Warms connections to the given hosts by prefetching their prices. This can help seed
     /// the RPC performance metrics for new hosts before they're used for actual uploads
     /// or downloads.
-    pub async fn warm_connections(&self, hosts: Vec<HostEndpoint>)
-    where
-        T: 'static + Clone + Send + Sync,
-    {
+    pub async fn warm_connections(&self, hosts: Vec<HostEndpoint>) {
         let hosts_len = hosts.len();
         let mut warmed_conns: usize = 0;
         let mut inflight_scans = JoinSet::new();
