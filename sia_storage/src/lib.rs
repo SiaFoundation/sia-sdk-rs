@@ -59,7 +59,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::app_client::SlabPinParams;
 use crate::download::Downloader;
 use crate::hosts::Hosts;
-use crate::rhp4::HostEndpoint;
+use crate::rhp4::{Client, HostEndpoint};
 use crate::upload::Uploader;
 
 mod app_client;
