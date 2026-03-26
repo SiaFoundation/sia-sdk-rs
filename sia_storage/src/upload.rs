@@ -4,9 +4,6 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::encryption::{EncryptionKey, encrypt_shard};
-use crate::erasure_coding::{self, ErasureCoder};
-use crate::rhp4::Transport as RHP4Client;
 use bytes::{Bytes, BytesMut};
 use log::debug;
 use sia_core::rhp4::{self as rhp, SECTOR_SIZE};
@@ -16,6 +13,8 @@ use tokio::io::{AsyncRead, AsyncWriteExt, BufReader, SimplexStream, WriteHalf, c
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinSet;
 
+use crate::encryption::{EncryptionKey, encrypt_shard};
+use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::{HostQueue, QueueError, RPCError};
 use crate::{Hosts, Object, Sector, Slab};
 
@@ -240,16 +239,11 @@ impl PackedUpload {
 pub(crate) struct Uploader {
     app_key: Arc<PrivateKey>,
     hosts: Hosts,
-    transport: Arc<dyn RHP4Client>,
 }
 
 impl Uploader {
-    pub fn new(hosts: Hosts, transport: Arc<dyn RHP4Client>, app_key: Arc<PrivateKey>) -> Self {
-        Uploader {
-            app_key,
-            hosts,
-            transport,
-        }
+    pub fn new(hosts: Hosts, app_key: Arc<PrivateKey>) -> Self {
+        Uploader { app_key, hosts }
     }
 
     fn upload_timeout(attempts: usize) -> Duration {

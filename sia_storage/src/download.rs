@@ -3,9 +3,6 @@ use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use crate::encryption::{EncryptionKey, encrypt_shard};
-use crate::erasure_coding::{self, ErasureCoder};
-use crate::rhp4::{DynTransport, Transport};
 use bytes::BytesMut;
 use log::debug;
 use sia_core::rhp4::SEGMENT_SIZE;
@@ -15,6 +12,8 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
+use crate::encryption::{EncryptionKey, encrypt_shard};
+use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::RPCError;
 use crate::{Hosts, Object, Sector};
 
@@ -218,16 +217,11 @@ impl SlabDownload {
 pub(crate) struct Downloader {
     account_key: Arc<PrivateKey>,
     hosts: Hosts,
-    transport: Arc<DynTransport>,
 }
 
 impl Downloader {
-    pub fn new(hosts: Hosts, transport: Arc<DynTransport>, account_key: Arc<PrivateKey>) -> Self {
-        Self {
-            account_key,
-            hosts,
-            transport,
-        }
+    pub fn new(hosts: Hosts, account_key: Arc<PrivateKey>) -> Self {
+        Self { account_key, hosts }
     }
 
     /// Downloads the provided slabs and writes the decrypted data to the

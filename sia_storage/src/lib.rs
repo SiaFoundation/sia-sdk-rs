@@ -295,9 +295,8 @@ impl SDK {
         let transport = Client::new();
         let hosts = Hosts::new(Arc::new(transport.clone()));
 
-        let downloader =
-            Downloader::new(hosts.clone(), Arc::new(transport.clone()), app_key.clone());
-        let uploader = Uploader::new(hosts.clone(), Arc::new(transport), app_key.clone());
+        let downloader = Downloader::new(hosts.clone(), app_key.clone());
+        let uploader = Uploader::new(hosts.clone(), app_key.clone());
         let sdk = Self {
             app_key,
             api_client,
