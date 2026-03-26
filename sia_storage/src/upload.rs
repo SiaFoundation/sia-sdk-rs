@@ -19,7 +19,7 @@ use tokio::task::JoinSet;
 use crate::hosts::{HostQueue, QueueError, RPCError};
 use crate::{Hosts, Object, Sector, Slab};
 
-struct ShardUpload<T: RHP4Client> {
+struct ShardUpload {
     client: Hosts,
     hosts: HostQueue,
     account_key: Arc<PrivateKey>,
@@ -28,7 +28,7 @@ struct ShardUpload<T: RHP4Client> {
     shard_index: usize,
 }
 
-impl<T: RHP4Client + Send + Sync + Clone + 'static> ShardUpload<T> {
+impl ShardUpload {
     fn spawn_write(
         &self,
         tasks: &mut JoinSet<Result<Sector, UploadError>>,
@@ -257,7 +257,7 @@ impl Uploader {
     }
 
     async fn upload_slab_shard(
-        shard: ShardUpload<T>,
+        shard: ShardUpload,
         permit: OwnedSemaphorePermit,
         progress_tx: Option<mpsc::UnboundedSender<()>>,
         initial_host: (PublicKey, usize),
