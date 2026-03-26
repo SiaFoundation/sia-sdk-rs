@@ -449,7 +449,7 @@ impl Hosts {
                 let start = Instant::now();
 
                 match Self::fetch_prices(
-                    &transport,
+                    transport,
                     &price_cache,
                     &hosts,
                     &host,
@@ -470,6 +470,7 @@ impl Hosts {
                 }
             });
         }
+
         while let Some(res) = inflight_scans.join_next().await {
             if let Ok(warmed) = res
                 && warmed
@@ -516,7 +517,7 @@ impl Hosts {
     ) -> Result<Hash256, RPCError> {
         let host = self.host_endpoint(host_key)?;
         let (prices, _) = Self::fetch_prices(
-            &self.transport,
+            self.transport.clone(),
             &self.price_cache,
             &self.hosts,
             &host,
@@ -550,7 +551,7 @@ impl Hosts {
     ) -> Result<bytes::Bytes, RPCError> {
         let host = self.host_endpoint(host_key)?;
         let (prices, _) = Self::fetch_prices(
-            &self.transport,
+            self.transport.clone(),
             &self.price_cache,
             &self.hosts,
             &host,
