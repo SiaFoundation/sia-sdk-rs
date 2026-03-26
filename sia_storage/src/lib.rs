@@ -59,7 +59,7 @@ mod slabs;
 mod upload;
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) mod wasm_time;
+mod wasm_time;
 
 /// Unified time module for native and WASM targets.
 ///
