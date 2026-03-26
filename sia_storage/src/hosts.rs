@@ -1,4 +1,3 @@
-use crate::time::{Duration, Elapsed, Instant, timeout};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Display};
 use std::sync::{Arc, RwLock};
@@ -16,7 +15,8 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::rhp4::{DynTransport, HostEndpoint, Transport};
+use crate::rhp4::{DynTransport, HostEndpoint};
+use crate::time::{Duration, Elapsed, Instant, timeout};
 
 /// Represents a host in the Sia network. The
 /// addresses can be used to connect to the host.
