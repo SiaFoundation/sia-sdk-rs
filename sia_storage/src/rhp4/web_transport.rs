@@ -10,7 +10,7 @@ use sia_core::rhp4::HostPrices;
 use sia_core::signing::PrivateKey;
 use sia_core::types::Hash256;
 
-use super::{Error, HostEndpoint};
+use super::{Error, HostEndpoint, Transport};
 
 #[derive(Clone, Debug, Default)]
 pub struct Client;
@@ -22,7 +22,7 @@ impl Client {
 }
 
 #[async_trait(?Send)]
-impl super::Transport for Client {
+impl Transport for Client {
     async fn host_prices(&self, _host: &HostEndpoint) -> Result<HostPrices, Error> {
         todo!("WebTransport host_prices not yet implemented")
     }
