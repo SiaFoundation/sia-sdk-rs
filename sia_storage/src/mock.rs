@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use sia_core::rhp4::HostPrices;
@@ -51,6 +52,7 @@ impl MockRHP4Transport {
     }
 }
 
+#[async_trait]
 impl Transport for MockRHP4Transport {
     async fn host_prices(&self, _: &HostEndpoint) -> Result<HostPrices, RHP4Error> {
         Ok(HostPrices {
@@ -132,7 +134,7 @@ impl Transport for MockRHP4Transport {
 }
 
 pub struct MockUploader {
-    uploader: Uploader<Arc<MockRHP4Transport>>,
+    uploader: Uploader,
 }
 
 impl MockUploader {
@@ -156,7 +158,7 @@ impl MockUploader {
 }
 
 pub struct MockDownloader {
-    downloader: Downloader<Arc<MockRHP4Transport>>,
+    downloader: Downloader,
 }
 
 impl MockDownloader {
