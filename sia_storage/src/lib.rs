@@ -25,60 +25,32 @@ mod upload;
 #[cfg(target_arch = "wasm32")]
 mod wasm_time;
 
-/// Run a blocking computation on `spawn_blocking` on native, or inline on WASM.
-/// Must be called from an async context. The expression must return a type that
-/// implements `Send + 'static` on native.
-///
-/// ```ignore
-/// let result = maybe_spawn_blocking!(expensive_computation())?;
-/// ```
-macro_rules! maybe_spawn_blocking {
-    ($body:expr) => {{
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            tokio::task::spawn_blocking(move || $body).await?
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            $body
-        }
-    }};
-}
+#[cfg(any(test, feature = "mock"))]
+pub mod mock;
 
-/// Spawn a future on a [`tokio::task::JoinSet`]. Uses `spawn` on native
-/// (requires `Send`) and `spawn_local` on WASM (no `Send` required).
-///
-/// ```ignore
-/// let mut set = tokio::task::JoinSet::new();
-/// join_set_spawn!(set, async move { do_work().await });
-/// ```
-macro_rules! join_set_spawn {
-    ($set:expr, $fut:expr) => {{
-        #[cfg(not(target_arch = "wasm32"))]
-        $set.spawn($fut);
-        #[cfg(target_arch = "wasm32")]
-        $set.spawn_local($fut);
-    }};
-}
+// re-export types for easier access
+pub use crate::hosts::Host;
+pub use chrono::{DateTime, Utc};
+pub use reqwest::{IntoUrl, Url};
+#[doc(hidden)]
+pub use sia_core::macros::decode_hex_256;
+pub use sia_core::seed::SeedError;
+pub use sia_core::signing::{PrivateKey, PublicKey};
+pub use sia_core::types::Hash256;
+pub use sia_core::types::v2::Protocol;
 
-/// Spawn a future as a standalone task. Uses `tokio::spawn` on native
-/// (requires `Send`) and `tokio::task::spawn_local` on WASM.
-///
-/// ```ignore
-/// let handle = maybe_spawn!(async move { do_work().await });
-/// ```
-macro_rules! maybe_spawn {
-    ($fut:expr) => {{
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            tokio::spawn($fut)
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            tokio::task::spawn_local($fut)
-        }
-    }};
-}
+pub use app_client::{Account, App, Error as AppApiError, GeoLocation, HostQuery, ObjectsCursor};
+pub use builder::{
+    ApprovedState, Builder, BuilderError, DisconnectedState, RequestingApprovalState,
+};
+pub use download::{DownloadError, DownloadOptions};
+pub use encryption::EncryptionKey;
+pub use hosts::QueueError;
+pub use slabs::{Object, ObjectEvent, PinnedSlab, SealedObject, SealedObjectError, Sector, Slab};
+pub use upload::{PackedUpload, UploadError, UploadOptions};
+
+/// A unique identifier for an indexer application. It should be constant for an application.
+pub type AppID = Hash256;
 
 /// Unified time module for native and WASM targets.
 ///
@@ -136,32 +108,60 @@ pub(crate) mod task {
     }
 }
 
-#[cfg(any(test, feature = "mock"))]
-pub mod mock;
+/// Run a blocking computation on `spawn_blocking` on native, or inline on WASM.
+/// Must be called from an async context. The expression must return a type that
+/// implements `Send + 'static` on native.
+///
+/// ```ignore
+/// let result = maybe_spawn_blocking!(expensive_computation())?;
+/// ```
+macro_rules! maybe_spawn_blocking {
+    ($body:expr) => {{
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            tokio::task::spawn_blocking(move || $body).await?
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            $body
+        }
+    }};
+}
 
-// re-export types for easier access
-pub use crate::hosts::Host;
-pub use chrono::{DateTime, Utc};
-pub use reqwest::{IntoUrl, Url};
-#[doc(hidden)]
-pub use sia_core::macros::decode_hex_256;
-pub use sia_core::seed::SeedError;
-pub use sia_core::signing::{PrivateKey, PublicKey};
-pub use sia_core::types::Hash256;
-pub use sia_core::types::v2::Protocol;
+/// Spawn a future on a [`tokio::task::JoinSet`]. Uses `spawn` on native
+/// (requires `Send`) and `spawn_local` on WASM (no `Send` required).
+///
+/// ```ignore
+/// let mut set = tokio::task::JoinSet::new();
+/// join_set_spawn!(set, async move { do_work().await });
+/// ```
+macro_rules! join_set_spawn {
+    ($set:expr, $fut:expr) => {{
+        #[cfg(not(target_arch = "wasm32"))]
+        $set.spawn($fut);
+        #[cfg(target_arch = "wasm32")]
+        $set.spawn_local($fut);
+    }};
+}
 
-pub use app_client::{Account, App, Error as AppApiError, GeoLocation, HostQuery, ObjectsCursor};
-pub use builder::{
-    ApprovedState, Builder, BuilderError, DisconnectedState, RequestingApprovalState,
-};
-pub use download::{DownloadError, DownloadOptions};
-pub use encryption::EncryptionKey;
-pub use hosts::QueueError;
-pub use slabs::{Object, ObjectEvent, PinnedSlab, SealedObject, SealedObjectError, Sector, Slab};
-pub use upload::{PackedUpload, UploadError, UploadOptions};
-
-/// A unique identifier for an indexer application. It should be constant for an application.
-pub type AppID = Hash256;
+/// Spawn a future as a standalone task. Uses `tokio::spawn` on native
+/// (requires `Send`) and `tokio::task::spawn_local` on WASM.
+///
+/// ```ignore
+/// let handle = maybe_spawn!(async move { do_work().await });
+/// ```
+macro_rules! maybe_spawn {
+    ($fut:expr) => {{
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            tokio::spawn($fut)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            tokio::task::spawn_local($fut)
+        }
+    }};
+}
 
 /// A macro to create an [AppID] from a literal hex string. The string must be 64 characters long.
 ///
