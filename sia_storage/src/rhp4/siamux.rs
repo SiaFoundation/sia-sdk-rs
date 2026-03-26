@@ -39,9 +39,6 @@ pub enum ConnectError {
     #[error("timeout error: {0}")]
     Elapsed(#[from] Elapsed),
 
-    #[error("Host has no net address: {0}")]
-    UnknownHost(PublicKey),
-
     #[error("invalid port: {0}")]
     InvalidPort(#[from] ParseIntError),
 
