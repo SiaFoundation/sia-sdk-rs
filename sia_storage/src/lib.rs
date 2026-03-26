@@ -181,8 +181,7 @@ impl SDK {
         api_client: app_client::Client,
         app_key: Arc<PrivateKey>,
     ) -> Result<Self, BuilderError> {
-        let transport = Client::new();
-        let hosts = Hosts::new(Arc::new(transport.clone()));
+        let hosts = Hosts::new(Arc::new(Client::new()));
 
         let downloader = Downloader::new(hosts.clone(), app_key.clone());
         let uploader = Uploader::new(hosts.clone(), app_key.clone());
