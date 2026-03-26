@@ -34,6 +34,21 @@ macro_rules! join_set_spawn {
     }};
 }
 
+/// Spawn a future as a standalone task. Uses `tokio::spawn` on native
+/// (requires `Send`) and `tokio::task::spawn_local` on WASM.
+///
+/// ```ignore
+/// let handle = maybe_spawn!(async move { do_work().await });
+/// ```
+macro_rules! maybe_spawn {
+    ($fut:expr) => {{
+        #[cfg(not(target_arch = "wasm32"))]
+        { tokio::spawn($fut) }
+        #[cfg(target_arch = "wasm32")]
+        { tokio::task::spawn_local($fut) }
+    }};
+}
+
 use std::sync::Arc;
 
 use log::debug;

@@ -509,7 +509,7 @@ impl Uploader {
             length: 0,
             writer,
             objects: Vec::new(),
-            upload_handle: AbortOnDropHandle::new(tokio::spawn(async move {
+            upload_handle: AbortOnDropHandle::new(maybe_spawn!(async move {
                 let slabs = Self::upload_slabs(client, app_key, reader, options).await?;
                 Ok(slabs)
             })),
