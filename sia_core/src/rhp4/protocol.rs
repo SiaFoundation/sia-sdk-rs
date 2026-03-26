@@ -801,10 +801,12 @@ impl RPCReadSector<RPCComplete> {
         let start = offset / SEGMENT_SIZE;
         let end = (offset + length).div_ceil(SEGMENT_SIZE);
 
-        let data = maybe_rayon!(response
-            .data
-            .verify(&root, start, end)
-            .map_err(Error::ProofValidation))?;
+        let data = maybe_rayon!(
+            response
+                .data
+                .verify(&root, start, end)
+                .map_err(Error::ProofValidation)
+        )?;
         Ok(RPCReadSectorResult {
             usage: self.usage,
             data,

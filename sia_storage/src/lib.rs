@@ -43,9 +43,13 @@ macro_rules! join_set_spawn {
 macro_rules! maybe_spawn {
     ($fut:expr) => {{
         #[cfg(not(target_arch = "wasm32"))]
-        { tokio::spawn($fut) }
+        {
+            tokio::spawn($fut)
+        }
         #[cfg(target_arch = "wasm32")]
-        { tokio::task::spawn_local($fut) }
+        {
+            tokio::task::spawn_local($fut)
+        }
     }};
 }
 

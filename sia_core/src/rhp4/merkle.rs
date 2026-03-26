@@ -27,21 +27,33 @@ use tokio::io::{self, AsyncRead, AsyncReadExt};
 macro_rules! maybe_par {
     ($slice:expr, chunks_mut, $size:expr) => {{
         #[cfg(not(target_arch = "wasm32"))]
-        { $slice.par_chunks_mut($size) }
+        {
+            $slice.par_chunks_mut($size)
+        }
         #[cfg(target_arch = "wasm32")]
-        { $slice.chunks_mut($size) }
+        {
+            $slice.chunks_mut($size)
+        }
     }};
     ($slice:expr, chunks_exact_mut, $size:expr) => {{
         #[cfg(not(target_arch = "wasm32"))]
-        { $slice.par_chunks_exact_mut($size) }
+        {
+            $slice.par_chunks_exact_mut($size)
+        }
         #[cfg(target_arch = "wasm32")]
-        { $slice.chunks_exact_mut($size) }
+        {
+            $slice.chunks_exact_mut($size)
+        }
     }};
     ($slice:expr, chunks_exact, $size:expr) => {{
         #[cfg(not(target_arch = "wasm32"))]
-        { $slice.par_chunks_exact($size) }
+        {
+            $slice.par_chunks_exact($size)
+        }
         #[cfg(target_arch = "wasm32")]
-        { $slice.chunks_exact($size) }
+        {
+            $slice.chunks_exact($size)
+        }
     }};
 }
 
@@ -52,7 +64,9 @@ pub fn sector_root(sector: &[u8]) -> Hash256 {
     params.hash_length(32);
 
     let mut tree_hashes = vec![Hash256::default(); LEAVES_PER_SECTOR];
-    maybe_par!(tree_hashes, chunks_exact_mut, 4).enumerate().for_each(|(i, chunk)| {
+    maybe_par!(tree_hashes, chunks_exact_mut, 4)
+        .enumerate()
+        .for_each(|(i, chunk)| {
             // prepare inputs
             let mut inputs = [[0u8; SEGMENT_SIZE + 1]; 4];
             for (j, input) in inputs.iter_mut().enumerate() {
