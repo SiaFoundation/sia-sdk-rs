@@ -444,7 +444,7 @@ impl Hosts {
             let hosts = self.hosts.clone();
 
             let sema = sema.clone();
-            inflight_scans.spawn(async move {
+            join_set_spawn!(inflight_scans, async move {
                 let _permit = sema.acquire().await.unwrap();
                 let start = Instant::now();
 
