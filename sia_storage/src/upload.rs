@@ -20,7 +20,7 @@ use crate::hosts::{HostQueue, QueueError, RPCError};
 use crate::{Hosts, Object, Sector, Slab};
 
 struct ShardUpload<T: RHP4Client> {
-    client: Hosts<T>,
+    client: Hosts,
     hosts: HostQueue,
     account_key: Arc<PrivateKey>,
     data: Bytes,
@@ -304,7 +304,7 @@ where
     }
 
     async fn upload_slabs<R: AsyncRead + Unpin + Send + 'static>(
-        client: Hosts<T>,
+        client: Hosts,
         app_key: Arc<PrivateKey>,
         r: R,
         options: UploadOptions,

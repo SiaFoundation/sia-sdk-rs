@@ -179,7 +179,7 @@ impl MockDownloader {
 #[derive(Clone)]
 pub struct MockHosts {
     transport: Arc<MockRHP4Transport>,
-    inner: Hosts<Arc<MockRHP4Transport>>,
+    inner: Hosts,
 }
 
 impl MockHosts {

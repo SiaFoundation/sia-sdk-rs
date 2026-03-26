@@ -215,7 +215,7 @@ pub enum Error {
 pub struct SDK {
     app_key: Arc<PrivateKey>,
     api_client: app_client::Client,
-    hosts: Hosts<siamux::Client>,
+    hosts: Hosts,
     downloader: Downloader<siamux::Client>,
     uploader: Uploader<siamux::Client>,
 }

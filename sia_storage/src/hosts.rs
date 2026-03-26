@@ -371,14 +371,14 @@ pub enum RPCError {
 ///
 /// This is public for criterion benchmarks, but not intended for general use
 #[derive(Debug, Clone)]
-pub(crate) struct Hosts<T: Transport> {
-    transport: T,
+pub(crate) struct Hosts {
+    transport: Arc<dyn Transport>,
     price_cache: Arc<HostCache<HostPrices>>,
     hosts: Arc<HostList>,
 }
 
-impl<T: Transport + Clone> Hosts<T> {
-    pub fn new(transport: T) -> Self {
+impl Hosts {
+    pub fn new(transport: Arc<dyn Transport>) -> Self {
         Self {
             transport,
             hosts: Arc::new(HostList::new()),

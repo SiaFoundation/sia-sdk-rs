@@ -76,7 +76,7 @@ struct SectorDownloadTask {
 }
 
 struct SlabDownload<T: Transport> {
-    client: Hosts<T>,
+    client: Hosts,
     account_key: Arc<PrivateKey>,
     encryption_key: Arc<EncryptionKey>,
     semaphore: Arc<Semaphore>,
@@ -217,14 +217,14 @@ impl<T: Transport + Send + Sync + Clone + 'static> SlabDownload<T> {
 #[derive(Clone)]
 pub(crate) struct Downloader<T: Transport> {
     account_key: Arc<PrivateKey>,
-    hosts: Hosts<T>,
+    hosts: Hosts,
 }
 
 impl<T: Transport> Downloader<T>
 where
     T: Send + Sync + Clone + 'static,
 {
-    pub fn new(hosts: Hosts<T>, account_key: Arc<PrivateKey>) -> Self {
+    pub fn new(hosts: Hosts, account_key: Arc<PrivateKey>) -> Self {
         Self { account_key, hosts }
     }
 
