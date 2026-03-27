@@ -3,6 +3,7 @@ use std::fmt::{Debug, Display};
 use std::sync::{Arc, RwLock};
 
 use chrono::Utc;
+use futures::stream::{FuturesUnordered, StreamExt};
 use log::debug;
 use priority_queue::PriorityQueue;
 use serde::{Deserialize, Serialize};
@@ -13,9 +14,8 @@ use sia_core::types::v2::NetAddress;
 use std::sync::Mutex;
 use thiserror::Error;
 use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
 
-use crate::rhp4::{DynTransport, HostEndpoint};
+use crate::rhp4::{Client, HostEndpoint, Transport};
 use crate::time::{Duration, Elapsed, Instant, timeout};
 
 /// Represents a host in the Sia network. The
@@ -372,13 +372,13 @@ pub enum RPCError {
 /// This is public for criterion benchmarks, but not intended for general use
 #[derive(Clone)]
 pub(crate) struct Hosts {
-    transport: Arc<DynTransport>,
+    transport: Client,
     price_cache: Arc<HostCache<HostPrices>>,
     hosts: Arc<HostList>,
 }
 
 impl Hosts {
-    pub fn new(transport: Arc<DynTransport>) -> Self {
+    pub fn new(transport: Client) -> Self {
         Self {
             transport,
             hosts: Arc::new(HostList::new()),
@@ -436,7 +436,7 @@ impl Hosts {
     pub async fn warm_connections(&self, hosts: Vec<HostEndpoint>) {
         let hosts_len = hosts.len();
         let mut warmed_conns: usize = 0;
-        let mut inflight_scans = JoinSet::new();
+        let mut inflight_scans = FuturesUnordered::new();
         let sema = Arc::new(Semaphore::new(15));
         for host in hosts {
             let transport = self.transport.clone();
@@ -444,7 +444,7 @@ impl Hosts {
             let hosts = self.hosts.clone();
 
             let sema = sema.clone();
-            join_set_spawn!(inflight_scans, async move {
+            inflight_scans.push(async move {
                 let _permit = sema.acquire().await.unwrap();
                 let start = Instant::now();
 
@@ -470,11 +470,8 @@ impl Hosts {
                 }
             });
         }
-
-        while let Some(res) = inflight_scans.join_next().await {
-            if let Ok(warmed) = res
-                && warmed
-            {
+        while let Some(warmed) = inflight_scans.next().await {
+            if warmed {
                 warmed_conns += 1;
             }
         }
@@ -482,7 +479,7 @@ impl Hosts {
     }
 
     async fn fetch_prices(
-        transport: Arc<DynTransport>,
+        transport: Client,
         cache: &HostCache<HostPrices>,
         hosts: &HostList,
         host_endpoint: &HostEndpoint,
@@ -653,11 +650,8 @@ impl HostQueue {
 
 #[cfg(test)]
 mod test {
-    use sia_core::signing::PrivateKey;
-
-    use crate::mock::MockRHP4Transport;
-
     use super::*;
+    use sia_core::signing::PrivateKey;
 
     #[test]
     fn test_failure_rate() {
@@ -810,7 +804,7 @@ mod test {
 
     #[test]
     fn test_upload_queue() {
-        let hosts_manager = Hosts::new(Arc::new(MockRHP4Transport::new()));
+        let hosts_manager = Hosts::new(Client::new());
 
         let hk1 = PrivateKey::from_seed(&rand::random()).public_key();
         let hk2 = PrivateKey::from_seed(&rand::random()).public_key();

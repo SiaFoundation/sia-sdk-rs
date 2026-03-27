@@ -18,44 +18,6 @@ pub mod time {
     pub use super::wasm_time::{Elapsed, sleep, timeout};
 }
 
-/// Unified task utilities for native and WASM targets.
-pub mod task {
-    /// A wrapper around [`tokio::task::JoinHandle`] that aborts the task
-    /// when dropped. Replaces `tokio_util::task::AbortOnDropHandle` with
-    /// a cross-platform implementation that works on both native and WASM.
-    pub struct AbortOnDropHandle<T>(tokio::task::JoinHandle<T>);
-
-    impl<T> Drop for AbortOnDropHandle<T> {
-        fn drop(&mut self) {
-            self.0.abort();
-        }
-    }
-
-    impl<T> AbortOnDropHandle<T> {
-        pub fn new(handle: tokio::task::JoinHandle<T>) -> Self {
-            Self(handle)
-        }
-    }
-
-    impl<T> std::ops::Deref for AbortOnDropHandle<T> {
-        type Target = tokio::task::JoinHandle<T>;
-        fn deref(&self) -> &Self::Target {
-            &self.0
-        }
-    }
-
-    impl<T> std::future::Future for AbortOnDropHandle<T> {
-        type Output = Result<T, tokio::task::JoinError>;
-
-        fn poll(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Self::Output> {
-            std::pin::Pin::new(&mut self.0).poll(cx)
-        }
-    }
-}
-
 // --- Macros ---
 // These must be defined in a `#[macro_use]` module declared before the
 // modules that use them.
@@ -80,37 +42,17 @@ macro_rules! maybe_spawn_blocking {
     }};
 }
 
-/// Spawn a future on a [`tokio::task::JoinSet`]. Uses `spawn` on native
-/// (requires `Send`) and `spawn_local` on WASM (no `Send` required).
-///
-/// ```ignore
-/// let mut set = tokio::task::JoinSet::new();
-/// join_set_spawn!(set, async move { do_work().await });
-/// ```
-macro_rules! join_set_spawn {
-    ($set:expr, $fut:expr) => {{
-        #[cfg(not(target_arch = "wasm32"))]
-        $set.spawn($fut);
-        #[cfg(target_arch = "wasm32")]
-        $set.spawn_local($fut);
-    }};
-}
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSend: Send {}
 
-/// Spawn a future as a standalone task. Uses `tokio::spawn` on native
-/// (requires `Send`) and `tokio::task::spawn_local` on WASM.
-///
-/// ```ignore
-/// let handle = maybe_spawn!(async move { do_work().await });
-/// ```
-macro_rules! maybe_spawn {
-    ($fut:expr) => {{
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            tokio::spawn($fut)
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            tokio::task::spawn_local($fut)
-        }
-    }};
-}
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSend {}
+
+use std::future::Future;
+use std::pin::Pin;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
