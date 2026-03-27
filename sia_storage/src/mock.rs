@@ -13,7 +13,7 @@ use tokio::time::sleep;
 use crate::download::Downloader;
 use crate::hosts::Hosts;
 use crate::rhp4::{Error as RHP4Error, HostEndpoint, Transport};
-use crate::time::Duration;
+use crate::time::{Duration, sleep};
 use crate::upload::Uploader;
 use crate::{DownloadError, DownloadOptions, Object, PackedUpload, UploadError, UploadOptions};
 
