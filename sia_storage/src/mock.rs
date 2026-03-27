@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -14,6 +13,7 @@ use tokio::time::sleep;
 use crate::download::Downloader;
 use crate::hosts::Hosts;
 use crate::rhp4::{Error as RHP4Error, HostEndpoint, Transport};
+use crate::time::Duration;
 use crate::upload::Uploader;
 use crate::{DownloadError, DownloadOptions, Object, PackedUpload, UploadError, UploadOptions};
 
