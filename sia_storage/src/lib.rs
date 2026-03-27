@@ -1,15 +1,7 @@
-use std::sync::Arc;
+#[macro_use]
+mod compat;
 
-use log::debug;
-use serde::Serialize;
-use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
-
-use crate::app_client::SlabPinParams;
-use crate::download::Downloader;
-use crate::hosts::Hosts;
-use crate::rhp4::{HostEndpoint, siamux};
-use crate::upload::Uploader;
+pub(crate) use compat::{task, time};
 
 mod app_client;
 mod builder;
@@ -25,8 +17,19 @@ mod upload;
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 
-// re-export types for easier access
+use std::sync::Arc;
+
+use log::debug;
+use serde::Serialize;
+use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite};
+
+use crate::app_client::SlabPinParams;
+use crate::download::Downloader;
 pub use crate::hosts::Host;
+use crate::hosts::Hosts;
+use crate::rhp4::{Client, HostEndpoint};
+use crate::upload::Uploader;
 pub use chrono::{DateTime, Utc};
 pub use reqwest::{IntoUrl, Url};
 #[doc(hidden)]
@@ -127,9 +130,9 @@ pub enum Error {
 pub struct SDK {
     app_key: Arc<PrivateKey>,
     api_client: app_client::Client,
-    hosts: Hosts<siamux::Client>,
-    downloader: Downloader<siamux::Client>,
-    uploader: Uploader<siamux::Client>,
+    hosts: Hosts,
+    downloader: Downloader,
+    uploader: Uploader,
 }
 
 impl SDK {
@@ -178,8 +181,7 @@ impl SDK {
         api_client: app_client::Client,
         app_key: Arc<PrivateKey>,
     ) -> Result<Self, BuilderError> {
-        let transport = siamux::Client::new();
-        let hosts = Hosts::new(transport);
+        let hosts = Hosts::new(Arc::new(Client::new()));
 
         let downloader = Downloader::new(hosts.clone(), app_key.clone());
         let uploader = Uploader::new(hosts.clone(), app_key.clone());
@@ -431,9 +433,9 @@ mod test {
     use sia_core::rhp4::SECTOR_SIZE;
     use sia_core::types::v2::NetAddress;
     use std::io::Cursor;
-    use std::time::Duration;
 
     use crate::mock::MockRHP4Transport;
+    use crate::time::Duration;
 
     use super::*;
 

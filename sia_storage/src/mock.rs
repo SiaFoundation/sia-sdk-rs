@@ -1,18 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use sia_core::rhp4::HostPrices;
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::{Currency, Hash256};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::time::sleep;
 
 use crate::download::Downloader;
 use crate::hosts::Hosts;
 use crate::rhp4::{Error as RHP4Error, HostEndpoint, Transport};
+use crate::time::{Duration, sleep};
 use crate::upload::Uploader;
 use crate::{DownloadError, DownloadOptions, Object, PackedUpload, UploadError, UploadOptions};
 
@@ -51,6 +51,7 @@ impl MockRHP4Transport {
     }
 }
 
+#[async_trait]
 impl Transport for MockRHP4Transport {
     async fn host_prices(&self, _: &HostEndpoint) -> Result<HostPrices, RHP4Error> {
         Ok(HostPrices {
@@ -132,7 +133,7 @@ impl Transport for MockRHP4Transport {
 }
 
 pub struct MockUploader {
-    uploader: Uploader<Arc<MockRHP4Transport>>,
+    uploader: Uploader,
 }
 
 impl MockUploader {
@@ -156,7 +157,7 @@ impl MockUploader {
 }
 
 pub struct MockDownloader {
-    downloader: Downloader<Arc<MockRHP4Transport>>,
+    downloader: Downloader,
 }
 
 impl MockDownloader {
@@ -179,7 +180,7 @@ impl MockDownloader {
 #[derive(Clone)]
 pub struct MockHosts {
     transport: Arc<MockRHP4Transport>,
-    inner: Hosts<Arc<MockRHP4Transport>>,
+    inner: Hosts,
 }
 
 impl MockHosts {

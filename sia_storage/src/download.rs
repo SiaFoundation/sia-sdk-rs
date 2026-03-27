@@ -1,11 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-use crate::encryption::{EncryptionKey, encrypt_shard};
-use crate::erasure_coding::{self, ErasureCoder};
-use crate::rhp4::Transport;
 use bytes::BytesMut;
 use log::debug;
 use sia_core::rhp4::SEGMENT_SIZE;
@@ -13,11 +9,12 @@ use sia_core::signing::PrivateKey;
 use thiserror::Error;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio::task::{JoinSet, spawn_blocking};
-use tokio::time::error::Elapsed;
-use tokio::time::sleep;
+use tokio::task::JoinSet;
 
+use crate::encryption::{EncryptionKey, encrypt_shard};
+use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::RPCError;
+use crate::time::{Duration, Elapsed, Instant, sleep};
 use crate::{Hosts, Object, Sector};
 
 #[derive(Debug, Error)]
@@ -77,8 +74,8 @@ struct SectorDownloadTask {
     shard_index: usize,
 }
 
-struct SlabDownload<T: Transport> {
-    client: Hosts<T>,
+struct SlabDownload {
+    client: Hosts,
     account_key: Arc<PrivateKey>,
     encryption_key: Arc<EncryptionKey>,
     semaphore: Arc<Semaphore>,
@@ -87,7 +84,7 @@ struct SlabDownload<T: Transport> {
     offset: usize,
 }
 
-impl<T: Transport + Send + Sync + Clone + 'static> SlabDownload<T> {
+impl SlabDownload {
     fn spawn_read(
         &self,
         tasks: &mut JoinSet<Result<(usize, BytesMut), DownloadError>>,
@@ -99,7 +96,7 @@ impl<T: Transport + Send + Sync + Clone + 'static> SlabDownload<T> {
         let encryption_key = self.encryption_key.clone();
         let slab_index = self.slab_index;
         let offset = self.offset;
-        tasks.spawn(async move {
+        join_set_spawn!(tasks, async move {
             let _permit = permit;
             let shard_index = task.shard_index;
             let start = Instant::now();
@@ -120,13 +117,16 @@ impl<T: Transport + Send + Sync + Clone + 'static> SlabDownload<T> {
                         start.elapsed()
                     )
                 })?;
-            debug!("download slab {slab_index} shard {shard_index} from host {} in {:?}",task.sector.host_key,start.elapsed());
+            debug!(
+                "download slab {slab_index} shard {shard_index} from host {} in {:?}",
+                task.sector.host_key,
+                start.elapsed()
+            );
             let mut data = data.try_into_mut().unwrap(); // no other references to the data exist, so this is safe
-            let data = spawn_blocking(move || {
+            let data = maybe_spawn_blocking!({
                 encrypt_shard(&encryption_key, shard_index as u8, offset, &mut data);
                 data
-            })
-            .await?;
+            });
             Ok((shard_index, data))
         });
     }
@@ -214,16 +214,13 @@ impl<T: Transport + Send + Sync + Clone + 'static> SlabDownload<T> {
 }
 
 #[derive(Clone)]
-pub(crate) struct Downloader<T: Transport> {
+pub(crate) struct Downloader {
     account_key: Arc<PrivateKey>,
-    hosts: Hosts<T>,
+    hosts: Hosts,
 }
 
-impl<T: Transport> Downloader<T>
-where
-    T: Send + Sync + Clone + 'static,
-{
-    pub fn new(hosts: Hosts<T>, account_key: Arc<PrivateKey>) -> Self {
+impl Downloader {
+    pub fn new(hosts: Hosts, account_key: Arc<PrivateKey>) -> Self {
         Self { account_key, hosts }
     }
 
@@ -289,12 +286,11 @@ where
                 })?;
 
             let encoding_start = Instant::now();
-            let shards = spawn_blocking(move || -> Result<Vec<Option<BytesMut>>, DownloadError> {
+            let shards = maybe_spawn_blocking!({
                 let rs = ErasureCoder::new(data_shards, parity_shards)?;
                 rs.reconstruct_data_shards(&mut shards)?;
-                Ok(shards)
-            })
-            .await??;
+                Ok::<_, DownloadError>(shards)
+            })?;
             debug!(
                 "reconstructed slab {} in {:?}",
                 slab_index,

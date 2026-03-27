@@ -24,10 +24,12 @@ jobs:
           rustup target add wasm32-unknown-unknown
           rustup component add rustfmt --toolchain nightly
       - name: Build for wasm
-        # Check if the library target compiles. This will still allow for using
-        # non-wasm functionality in tests and benchmarks but guarantees that
-        # consumers of the library can use it to generate wasm bindings.
-        run: cargo check --target wasm32-unknown-unknown --lib --package sia_core
+        # Check if the library targets compile for wasm32. This will still allow
+        # for using non-wasm functionality in tests and benchmarks but guarantees
+        # that consumers of the library can use it to generate wasm bindings.
+        run: cargo check --target wasm32-unknown-unknown --lib --package sia_core --package sia_storage --no-default-features
+      - name: Clippy (wasm)
+        run: cargo clippy --target wasm32-unknown-unknown --lib --package sia_core --package sia_storage --no-default-features -- -D warnings
       - name: Rustfmt
         run: cargo +nightly fmt --all -- --check
       - name: Clippy

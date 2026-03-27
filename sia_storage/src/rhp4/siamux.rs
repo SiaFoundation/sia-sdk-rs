@@ -1,3 +1,6 @@
+use crate::time::{Elapsed, timeout};
+
+use async_trait::async_trait;
 use bytes::Bytes;
 use core::fmt::Debug;
 use ed25519_dalek::{SignatureError, VerifyingKey};
@@ -5,13 +8,11 @@ use log::debug;
 use std::collections::HashMap;
 use std::num::ParseIntError;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use thiserror::{self, Error};
 use tokio::net::{TcpStream, lookup_host};
-use tokio::time::error::Elapsed;
-use tokio::time::timeout;
 
 use crate::rhp4::HostEndpoint;
+use crate::time::Duration;
 
 use super::{Error as TransportError, Transport};
 use sia_core::rhp4::protocol::{RPCReadSector, RPCSettings, RPCWriteSector};
@@ -37,9 +38,6 @@ pub enum ConnectError {
 
     #[error("timeout error: {0}")]
     Elapsed(#[from] Elapsed),
-
-    #[error("Host has no net address: {0}")]
-    UnknownHost(PublicKey),
 
     #[error("invalid port: {0}")]
     InvalidPort(#[from] ParseIntError),
@@ -144,6 +142,7 @@ impl Client {
     }
 }
 
+#[async_trait]
 impl Transport for Client {
     async fn host_prices(&self, host: &HostEndpoint) -> Result<HostPrices, TransportError> {
         let mut stream = self

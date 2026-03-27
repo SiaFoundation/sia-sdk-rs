@@ -1,10 +1,6 @@
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
 
-use crate::encryption::{EncryptionKey, encrypt_shard};
-use crate::erasure_coding::{self, ErasureCoder};
-use crate::rhp4::Transport as RHP4Client;
 use bytes::{Bytes, BytesMut};
 use log::debug;
 use sia_core::rhp4::{self as rhp, SECTOR_SIZE};
@@ -12,16 +8,17 @@ use sia_core::signing::{PrivateKey, PublicKey};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWriteExt, BufReader, SimplexStream, WriteHalf, copy, simplex};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio::task::{JoinSet, spawn_blocking};
-use tokio::time::error::Elapsed;
-use tokio::time::{Instant, sleep};
-use tokio_util::task::AbortOnDropHandle;
+use tokio::task::JoinSet;
 
+use crate::encryption::{EncryptionKey, encrypt_shard};
+use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::{HostQueue, QueueError, RPCError};
+use crate::task::AbortOnDropHandle;
+use crate::time::{Duration, Elapsed, Instant, sleep};
 use crate::{Hosts, Object, Sector, Slab};
 
-struct ShardUpload<T: RHP4Client> {
-    client: Hosts<T>,
+struct ShardUpload {
+    client: Hosts,
     hosts: HostQueue,
     account_key: Arc<PrivateKey>,
     data: Bytes,
@@ -29,7 +26,7 @@ struct ShardUpload<T: RHP4Client> {
     shard_index: usize,
 }
 
-impl<T: RHP4Client + Send + Sync + Clone + 'static> ShardUpload<T> {
+impl ShardUpload {
     fn spawn_write(
         &self,
         tasks: &mut JoinSet<Result<Sector, UploadError>>,
@@ -43,7 +40,7 @@ impl<T: RHP4Client + Send + Sync + Clone + 'static> ShardUpload<T> {
         let data = self.data.clone();
         let slab_index = self.slab_index;
         let shard_index = self.shard_index;
-        tasks.spawn(async move {
+        join_set_spawn!(tasks, async move {
             let _permit = permit;
             let now = Instant::now();
             let root = client.write_sector(host_key, &account_key, data, write_timeout).await
@@ -238,16 +235,13 @@ impl PackedUpload {
 }
 
 #[derive(Clone)]
-pub(crate) struct Uploader<T: RHP4Client> {
+pub(crate) struct Uploader {
     app_key: Arc<PrivateKey>,
-    hosts: Hosts<T>,
+    hosts: Hosts,
 }
 
-impl<T> Uploader<T>
-where
-    T: RHP4Client + Send + Sync + Clone + 'static,
-{
-    pub fn new(hosts: Hosts<T>, app_key: Arc<PrivateKey>) -> Self {
+impl Uploader {
+    pub fn new(hosts: Hosts, app_key: Arc<PrivateKey>) -> Self {
         Uploader { app_key, hosts }
     }
 
@@ -256,7 +250,7 @@ where
     }
 
     async fn upload_slab_shard(
-        shard: ShardUpload<T>,
+        shard: ShardUpload,
         permit: OwnedSemaphorePermit,
         progress_tx: Option<mpsc::UnboundedSender<()>>,
         initial_host: (PublicKey, usize),
@@ -305,7 +299,7 @@ where
     }
 
     async fn upload_slabs<R: AsyncRead + Unpin + Send + 'static>(
-        client: Hosts<T>,
+        client: Hosts,
         app_key: Arc<PrivateKey>,
         r: R,
         options: UploadOptions,
@@ -363,7 +357,7 @@ where
             let rs = rs.clone();
             let shard_sema = shard_sema.clone();
 
-            slab_upload_tasks.spawn(async move {
+            join_set_spawn!(slab_upload_tasks, async move {
                 let _slab_guard = slab_permit;
 
                 // note: it may seem like a good idea to start uploading the data shards
@@ -373,11 +367,10 @@ where
                 //
                 // It could probably be resolved by using a pool, but leaving that as a
                 // future optimization for now.
-                let shards = spawn_blocking(move || -> erasure_coding::Result<_> {
+                let shards = maybe_spawn_blocking!({
                     rs.encode_shards(&mut shards)?;
-                    Ok(shards)
-                })
-                .await??;
+                    Ok::<_, erasure_coding::Error>(shards)
+                })?;
 
                 // generate a unique encryption key for the slab
                 let slab_key: EncryptionKey = rand::random::<[u8; 32]>().into();
@@ -397,12 +390,11 @@ where
                     let initial_host = reserved_hosts[shard_index];
                     let client = client.clone();
                     // spawn a task to encrypt and upload each shard for this slab.
-                    shard_upload_tasks.spawn(async move {
-                        let shard = spawn_blocking(move || {
+                    join_set_spawn!(shard_upload_tasks, async move {
+                        let shard = maybe_spawn_blocking!({
                             encrypt_shard(&owned_slab_key, shard_index as u8, 0, &mut shard);
                             shard
-                        })
-                        .await?;
+                        });
                         Self::upload_slab_shard(
                             ShardUpload {
                                 client,
@@ -510,7 +502,7 @@ where
             length: 0,
             writer,
             objects: Vec::new(),
-            upload_handle: AbortOnDropHandle::new(tokio::spawn(async move {
+            upload_handle: AbortOnDropHandle::new(maybe_spawn!(async move {
                 let slabs = Self::upload_slabs(client, app_key, reader, options).await?;
                 Ok(slabs)
             })),

@@ -1,7 +1,6 @@
+use crate::time::sleep;
 use std::sync::Arc;
-use std::time::Duration;
 
-use crate::rhp4::siamux;
 use chrono::{DateTime, Utc};
 use rand::random;
 use reqwest::IntoUrl;
@@ -13,6 +12,7 @@ use url::Url;
 
 use crate::app_client::{self, Client};
 use crate::object_encryption::derive;
+use crate::time::Duration;
 use crate::{AppID, AppMetadata, SDK};
 
 /// The initial state of the SDK builder, before connecting to the indexd service.
@@ -50,7 +50,7 @@ pub enum BuilderError {
     Client(#[from] app_client::Error),
 
     #[error("transport error: {0}")]
-    Transport(#[from] siamux::ConnectError),
+    Transport(String),
 
     #[error("mnemonic error: {0}")]
     Mnemonic(#[from] seed::SeedError),
@@ -167,7 +167,7 @@ impl Builder<RequestingApprovalState> {
                     client: self.client,
                 });
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            sleep(Duration::from_secs(5)).await;
         }
     }
 }

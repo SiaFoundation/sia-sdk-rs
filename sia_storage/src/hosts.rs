@@ -1,7 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Display};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use log::debug;
@@ -15,9 +14,9 @@ use std::sync::Mutex;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use tokio::time::timeout;
 
-use crate::rhp4::{HostEndpoint, Transport};
+use crate::rhp4::{DynTransport, HostEndpoint};
+use crate::time::{Duration, Elapsed, Instant, timeout};
 
 /// Represents a host in the Sia network. The
 /// addresses can be used to connect to the host.
@@ -360,7 +359,7 @@ pub enum RPCError {
     Rhp(#[from] crate::rhp4::Error),
 
     #[error("RPC time out after {0:?}")]
-    Elapsed(#[from] tokio::time::error::Elapsed),
+    Elapsed(#[from] Elapsed),
 }
 
 /// Manages a list of known hosts and their performance metrics.
@@ -371,15 +370,15 @@ pub enum RPCError {
 /// It can be safely shared across threads and cloned.
 ///
 /// This is public for criterion benchmarks, but not intended for general use
-#[derive(Debug, Clone)]
-pub(crate) struct Hosts<T: Transport> {
-    transport: T,
+#[derive(Clone)]
+pub(crate) struct Hosts {
+    transport: Arc<DynTransport>,
     price_cache: Arc<HostCache<HostPrices>>,
     hosts: Arc<HostList>,
 }
 
-impl<T: Transport + Clone> Hosts<T> {
-    pub fn new(transport: T) -> Self {
+impl Hosts {
+    pub fn new(transport: Arc<DynTransport>) -> Self {
         Self {
             transport,
             hosts: Arc::new(HostList::new()),
@@ -434,10 +433,7 @@ impl<T: Transport + Clone> Hosts<T> {
     /// Warms connections to the given hosts by prefetching their prices. This can help seed
     /// the RPC performance metrics for new hosts before they're used for actual uploads
     /// or downloads.
-    pub async fn warm_connections(&self, hosts: Vec<HostEndpoint>)
-    where
-        T: 'static + Clone + Send + Sync,
-    {
+    pub async fn warm_connections(&self, hosts: Vec<HostEndpoint>) {
         let hosts_len = hosts.len();
         let mut warmed_conns: usize = 0;
         let mut inflight_scans = JoinSet::new();
@@ -448,12 +444,12 @@ impl<T: Transport + Clone> Hosts<T> {
             let hosts = self.hosts.clone();
 
             let sema = sema.clone();
-            inflight_scans.spawn(async move {
+            join_set_spawn!(inflight_scans, async move {
                 let _permit = sema.acquire().await.unwrap();
                 let start = Instant::now();
 
                 match Self::fetch_prices(
-                    &transport,
+                    transport,
                     &price_cache,
                     &hosts,
                     &host,
@@ -474,6 +470,7 @@ impl<T: Transport + Clone> Hosts<T> {
                 }
             });
         }
+
         while let Some(res) = inflight_scans.join_next().await {
             if let Ok(warmed) = res
                 && warmed
@@ -485,7 +482,7 @@ impl<T: Transport + Clone> Hosts<T> {
     }
 
     async fn fetch_prices(
-        transport: &T,
+        transport: Arc<DynTransport>,
         cache: &HostCache<HostPrices>,
         hosts: &HostList,
         host_endpoint: &HostEndpoint,
@@ -520,7 +517,7 @@ impl<T: Transport + Clone> Hosts<T> {
     ) -> Result<Hash256, RPCError> {
         let host = self.host_endpoint(host_key)?;
         let (prices, _) = Self::fetch_prices(
-            &self.transport,
+            self.transport.clone(),
             &self.price_cache,
             &self.hosts,
             &host,
@@ -554,7 +551,7 @@ impl<T: Transport + Clone> Hosts<T> {
     ) -> Result<bytes::Bytes, RPCError> {
         let host = self.host_endpoint(host_key)?;
         let (prices, _) = Self::fetch_prices(
-            &self.transport,
+            self.transport.clone(),
             &self.price_cache,
             &self.hosts,
             &host,
