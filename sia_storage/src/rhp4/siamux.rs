@@ -8,11 +8,11 @@ use log::debug;
 use std::collections::HashMap;
 use std::num::ParseIntError;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use thiserror::{self, Error};
 use tokio::net::{TcpStream, lookup_host};
 
 use crate::rhp4::HostEndpoint;
+use crate::time::Duration;
 
 use super::{Error as TransportError, Transport};
 use sia_core::rhp4::protocol::{RPCReadSector, RPCSettings, RPCWriteSector};

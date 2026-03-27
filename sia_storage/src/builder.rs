@@ -1,6 +1,5 @@
 use crate::time::sleep;
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use rand::random;
@@ -13,6 +12,7 @@ use url::Url;
 
 use crate::app_client::{self, Client};
 use crate::object_encryption::derive;
+use crate::time::Duration;
 use crate::{AppID, AppMetadata, SDK};
 
 /// The initial state of the SDK builder, before connecting to the indexd service.

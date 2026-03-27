@@ -1,6 +1,5 @@
 use base64::engine::general_purpose::URL_SAFE;
 use base64::prelude::*;
-use std::time::Duration;
 
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
@@ -20,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::DecryptError;
 use crate::slabs::Sector;
+use crate::time::Duration;
 use crate::{AppMetadata, Object, PinnedSlab, SealedObject, Slab};
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;

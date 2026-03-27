@@ -433,9 +433,9 @@ mod test {
     use sia_core::rhp4::SECTOR_SIZE;
     use sia_core::types::v2::NetAddress;
     use std::io::Cursor;
-    use std::time::Duration;
 
     use crate::mock::MockRHP4Transport;
+    use crate::time::Duration;
 
     use super::*;
 
