@@ -54,22 +54,13 @@ pub(crate) struct HostEndpoint {
     pub addresses: Vec<NetAddress>,
 }
 
-/// Conditional Send + Sync bound: required on native (for spawning across
-/// threads), trivially satisfied on WASM (single-threaded).
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) trait MaybeSendSync: Send + Sync {}
-#[cfg(not(target_arch = "wasm32"))]
-impl<T: Send + Sync> MaybeSendSync for T {}
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) trait MaybeSendSync {}
-#[cfg(target_arch = "wasm32")]
-impl<T> MaybeSendSync for T {}
-
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-/// Trait defining the operations that can be performed on a host
-pub(crate) trait Transport: MaybeSendSync {
+/// Trait defining the operations that can be performed on a host.
+/// Send + Sync bounds are applied at the usage site via [`DynTransport`]
+/// rather than on the trait itself, so WASM types that are !Send can
+/// implement this trait without unsafe.
+pub(crate) trait Transport {
     async fn host_prices(&self, host: &HostEndpoint) -> Result<HostPrices, Error>;
     async fn write_sector(
         &self,
