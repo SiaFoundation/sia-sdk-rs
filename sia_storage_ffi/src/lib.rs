@@ -556,6 +556,8 @@ pub struct Account {
     pub account_key: String,
     /// The maximum amount of data that can be pinned to the indexer for this account.
     pub max_pinned_data: u64,
+    /// Remaining amount of data in bytes that can still be pinned, after applying both the account limit and current quota limit.
+    pub remaining_storage: u64,
     /// The amount of data currently pinned to the indexer for this account. This
     /// counts towards max pinned data.
     pub pinned_data: u64,
@@ -574,6 +576,7 @@ impl From<sia_storage::Account> for Account {
         Self {
             account_key: a.account_key.to_string(),
             max_pinned_data: a.max_pinned_data,
+            remaining_storage: a.remaining_storage,
             pinned_data: a.pinned_data,
             pinned_size: a.pinned_size,
             ready: a.ready,

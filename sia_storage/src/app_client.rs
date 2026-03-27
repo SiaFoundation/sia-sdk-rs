@@ -159,6 +159,8 @@ pub struct Account {
     pub account_key: PublicKey,
     /// The maximum amount of data that can be pinned to the indexer for this account.
     pub max_pinned_data: u64,
+    /// Remaining amount of data in bytes that can still be pinned, after applying both the account limit and current quota limit.
+    pub remaining_storage: u64,
     /// The amount of data currently pinned to the indexer for this account. This
     /// counts towards max pinned data.
     pub pinned_data: u64,
