@@ -8,7 +8,6 @@ use sia_core::rhp4::HostPrices;
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::{Currency, Hash256};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::time::sleep;
 
 use crate::download::Downloader;
 use crate::hosts::Hosts;
