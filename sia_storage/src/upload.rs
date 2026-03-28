@@ -75,7 +75,6 @@ impl ShardUpload {
         loop {
             let active = tasks.len();
             tokio::select! {
-                biased;
                 Some(res) = tasks.next() => {
                     match res {
                         Ok(result) => {
@@ -524,7 +523,6 @@ pub(crate) async fn upload_slabs<R: AsyncRead + Unpin> (mut r: R, client: Hosts,
     let mut current_slab_index: usize = 0;
     loop {
         tokio::select! {
-            biased;
             Some(res) = shard_tasks.next() => {
                 let result: SectorUploadResult = res?;
                 slabs.entry(result.slab_index).and_modify(|s: &mut UploadedSlab| s.shards[result.shard_index] = Some(result.sector));

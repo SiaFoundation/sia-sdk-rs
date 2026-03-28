@@ -115,7 +115,6 @@ impl Client {
     async fn host_stream(&self, host: &HostEndpoint) -> Result<Stream, ConnectError> {
         let conn = match self.existing_conn(&host.public_key) {
             Some(conn) => {
-                debug!("reusing existing siamux connection to {}", host.public_key);
                 conn
             }
             None => {
@@ -129,7 +128,6 @@ impl Client {
                     .write()
                     .unwrap()
                     .insert(host.public_key, new_conn.clone());
-                debug!("created new siamux connection to {}", host.public_key);
                 new_conn
             }
         };

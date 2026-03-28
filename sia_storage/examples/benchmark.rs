@@ -57,15 +57,25 @@ impl AsyncRead for SeededReader {
 
 struct SeededVerifier {
     rng: SmallRng,
+    size: usize,
     remaining: usize,
+    start: Instant,
+    ttfb: Option<Duration>,
 }
 
 impl SeededVerifier {
     fn new(seed: u64, size: usize) -> Self {
         Self {
             rng: SmallRng::seed_from_u64(seed),
+            size: size,
             remaining: size,
+            start: Instant::now(),
+            ttfb: None,
         }
+    }
+
+    fn ttfb(&self) -> Option<Duration> {
+        self.ttfb
     }
 }
 
@@ -75,6 +85,9 @@ impl AsyncWrite for SeededVerifier {
         _: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        if self.ttfb.is_none() {
+            self.ttfb = Some(self.start.elapsed());
+        }
         let mut expected = vec![0u8; buf.len()];
         self.rng.fill_bytes(&mut expected);
         if buf.len() > self.remaining {
@@ -86,7 +99,7 @@ impl AsyncWrite for SeededVerifier {
         if buf != expected.as_slice() {
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("data mismatch at byte {}", self.remaining - buf.len()),
+                format!("data mismatch at byte {}", self.size - self.remaining),
             )));
         }
         self.remaining -= buf.len();
@@ -213,11 +226,12 @@ async fn main() {
         format_bitrate(obj.encoded_size(), upload_duration),
     );
     println!(
-        "Object downloaded ID: {}\tSize: {}\tEncoded: {}\tElapsed: {:?}\tThroughput: {}",
+        "Object downloaded ID: {}\tSize: {}\tEncoded: {}\tElapsed: {:?}\tTTFB: {:?}\tThroughput: {}",
         obj.id(),
         format_bytes(obj.size()),
         format_bytes(obj.encoded_size()),
         download_duration,
+        verifier.ttfb(),
         format_bitrate(obj.size(), download_duration),
     );
 }

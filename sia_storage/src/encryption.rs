@@ -85,6 +85,19 @@ pub(crate) fn encrypt_shards(
     });
 }
 
+pub(crate) fn encrypt_recovered_shards(
+    key: &EncryptionKey,
+    shard_start: u8,
+    offset: usize,
+    shards: &mut Vec<Option<impl AsMut<[u8]> + Send>>,
+) {
+    shards.par_iter_mut().enumerate().for_each(|(i, shard)| {
+        if let Some(shard) = shard {
+            encrypt_shard(key, shard_start + i as u8, offset, shard.as_mut());
+        }
+    });
+}
+
 pub struct CipherReader<R: AsyncRead> {
     inner: R,
     cipher: Chacha20Cipher,
