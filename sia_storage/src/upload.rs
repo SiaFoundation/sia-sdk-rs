@@ -1,23 +1,24 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 
+use crate::encryption::{EncryptionKey, encrypt_shards};
+use crate::erasure_coding::{self, ErasureCoder, SlabReader, read_slabs};
+use crate::hosts::{HostQueue, Hosts, QueueError, RPCError};
+use crate::time::{Duration, Elapsed, Instant, sleep};
+use crate::{Object, Sector, Slab};
 use bytes::{Bytes, BytesMut};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use log::debug;
-use sia_core::rhp4::{self as rhp, SECTOR_SIZE};
+use sia_core::rhp4::{SECTOR_SIZE, SEGMENT_SIZE};
 use sia_core::signing::{PrivateKey, PublicKey};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWriteExt, BufReader, SimplexStream, WriteHalf, copy, simplex};
+use tokio::io::{AsyncRead, BufReader};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio::task::JoinSet;
-
-use crate::encryption::{EncryptionKey, encrypt_shard};
-use crate::erasure_coding::{self, ErasureCoder};
-use crate::hosts::{HostQueue, QueueError, RPCError};
-use crate::task::AbortOnDropHandle;
-use crate::time::{Duration, Elapsed, Instant, sleep};
-use crate::{Hosts, Object, Sector, Slab};
 
 struct ShardUpload {
+    semaphore: Arc<Semaphore>,
     client: Hosts,
     hosts: HostQueue,
     account_key: Arc<PrivateKey>,
@@ -27,20 +28,23 @@ struct ShardUpload {
 }
 
 impl ShardUpload {
+    fn upload_timeout(attempts: usize) -> Duration {
+        Duration::from_secs((10 + (5 * attempts as u64)).min(120))
+    }
+
     fn spawn_write(
         &self,
-        tasks: &mut JoinSet<Result<Sector, UploadError>>,
         host_key: PublicKey,
         write_timeout: Duration,
         permit: OwnedSemaphorePermit,
-    ) {
+    ) -> impl Future<Output = Result<SectorUploadResult, UploadError>> {
         let client = self.client.clone();
         let hosts = self.hosts.clone();
         let account_key = self.account_key.clone();
         let data = self.data.clone();
         let slab_index = self.slab_index;
         let shard_index = self.shard_index;
-        join_set_spawn!(tasks, async move {
+        async move {
             let _permit = permit;
             let now = Instant::now();
             let root = client.write_sector(host_key, &account_key, data, write_timeout).await
@@ -55,9 +59,61 @@ impl ShardUpload {
                 "slab {slab_index} shard {shard_index} uploaded to {host_key} in {:?}",
                 now.elapsed()
             );
-            Ok(Sector { root, host_key })
-        });
+            Ok(SectorUploadResult { sector: Sector { root, host_key }, shard_index, slab_index })
+        }
     }
+
+    async fn upload_shard(
+        self,
+        initial_host: (PublicKey, usize),
+    ) -> Result<SectorUploadResult, UploadError> {
+        let (host_key, attempts) = initial_host;
+        let write_timeout = Self::upload_timeout(attempts);
+        let permit = self.semaphore.clone().acquire_owned().await?;
+        let mut tasks = FuturesUnordered::new();
+        tasks.push(self.spawn_write(host_key, write_timeout, permit));
+        loop {
+            let active = tasks.len();
+            tokio::select! {
+                Some(res) = tasks.next() => {
+                    match res {
+                        Ok(result) => {
+                            if result.sector.host_key != host_key {
+                                debug!("slab {} shard {} penalizing original host {}", self.slab_index, self.shard_index, host_key);
+                                self.client.add_failure(host_key)
+                            }
+                            /*if let Some(progress_tx) = progress_tx {
+                                let _ = progress_tx.send(());
+                            }*/
+                            return Ok(result);
+                        }
+                        Err(_) => {
+                            if tasks.is_empty() {
+                                let (host_key, attempts) = self.hosts.pop_front()?;
+                                let write_timeout = Self::upload_timeout(attempts);
+                                let permit = self.semaphore.clone().acquire_owned().await?;
+                                tasks.push(self.spawn_write(host_key, write_timeout, permit));
+                            }
+                        }
+                    }
+                },
+                _ = sleep(Duration::from_secs(active as u64)) => {
+                    if let Ok(racer) = self.semaphore.clone().try_acquire_owned()
+                        && let Ok((host_key, attempts)) = self.hosts.pop_front() {
+                            debug!("slab {} shard {} racing slow host", self.slab_index, self.shard_index);
+                            let write_timeout = Self::upload_timeout(attempts);
+                            tasks.push(self.spawn_write(host_key, write_timeout, racer));
+                        }
+                }
+            }
+        }
+    }
+}
+
+struct SectorUploadResult {
+    sector: Sector,
+    shard_index: usize,
+    slab_index: usize,
 }
 
 #[derive(Debug, Error)]
@@ -133,8 +189,8 @@ impl Default for UploadOptions {
 }
 
 struct ObjectUpload {
-    start: u64,
-    end: u64,
+    start: usize,
+    end: usize,
     object: Object,
 }
 
@@ -144,368 +200,403 @@ struct ObjectUpload {
 ///
 /// The caller must call [finalize](Self::finalize) to complete the upload.
 pub struct PackedUpload {
-    slab_size: u64,
-    length: u64,
-    writer: WriteHalf<SimplexStream>,
+    slab_buffer: SlabReader,
+    total_length: usize,
+    upload_pipeline: UploadPipeline,
     objects: Vec<ObjectUpload>,
-    upload_handle: AbortOnDropHandle<Result<Vec<Slab>, UploadError>>,
 }
 
 impl PackedUpload {
+    pub(crate) fn new(
+        client: Hosts,
+        app_key: Arc<PrivateKey>,
+        options: UploadOptions,
+    ) -> Result<Self, UploadError> {
+        Ok(Self {
+            slab_buffer: SlabReader::new(
+                options.data_shards as usize,
+                options.parity_shards as usize,
+            ),
+            total_length: 0,
+            upload_pipeline: UploadPipeline::new(client, app_key, options)?,
+            objects: Vec::new(),
+        })
+    }
+
     /// Returns the number of bytes remaining until reaching the optimal
     /// packed size. Adding objects larger than this will start a new slab.
     /// To minimize padding, prioritize objects that fit within the
     /// remaining size.
-    pub fn remaining(&self) -> u64 {
-        if self.length == 0 {
-            return self.slab_size;
-        }
-        (self.slab_size - (self.length % self.slab_size)) % self.slab_size
+    pub fn remaining(&self) -> usize {
+        self.slab_buffer
+            .slab_size()
+            .saturating_sub(self.slab_buffer.length())
     }
 
     /// Returns the cumulative length of all objects currently in the upload.
-    pub fn length(&self) -> u64 {
-        self.length
+    pub fn length(&self) -> usize {
+        self.total_length
     }
 
     /// Returns the optimal size of each slab.
-    pub fn slab_size(&self) -> u64 {
-        self.slab_size
+    pub fn slab_size(&self) -> usize {
+        self.slab_buffer.slab_size()
     }
 
     /// Returns the number of slabs after the upload is finalized.
-    pub fn slabs(&self) -> u64 {
-        self.length.div_ceil(self.slab_size)
-    }
-
-    /// Cancels the upload.
-    pub fn cancel(self) {
-        self.upload_handle.abort();
-    }
-
-    /// Finalizes the upload and returns the resulting objects. This will wait for all readers
-    /// to finish and all slabs to be uploaded before returning. The resulting objects will contain the metadata needed to download the objects.
-    ///
-    /// The caller must pin the resulting objects to the indexer when ready.
-    pub async fn finalize(mut self) -> Result<Vec<Object>, UploadError> {
-        let _ = self.writer.shutdown().await; // ignore error
-        let uploaded_slabs = self.upload_handle.await??;
-        self.objects
-            .into_iter()
-            .map(|upload| {
-                let mut object = upload.object;
-                let slabs = object.slabs_mut();
-                let slabs_start = upload.start / self.slab_size;
-                let slabs_end = upload.end.div_ceil(self.slab_size);
-                let n = slabs_end - slabs_start;
-                slabs.extend_from_slice(&uploaded_slabs[slabs_start as usize..slabs_end as usize]);
-
-                slabs[0].offset = (upload.start % self.slab_size) as u32;
-                if slabs.len() > 1 {
-                    // if spanning multiple slabs, adjust first slab's length
-                    slabs[0].length = (self.slab_size - slabs[0].offset as u64) as u32;
-                }
-                let last_slab_index = (n - 1) as usize;
-                let last_slab_offset = slabs[last_slab_index].offset as u64;
-                slabs[last_slab_index].length =
-                    (upload.end - ((slabs_end - 1) * self.slab_size) - last_slab_offset) as u32;
-
-                Ok(object)
-            })
-            .collect()
+    pub fn slabs(&self) -> usize {
+        self.length().div_ceil(self.slab_size())
     }
 
     /// Adds a new object to the upload. The data will be read until EOF and packed into
     /// the upload. The resulting object will contain the metadata needed to download the object. The caller
     /// must call [finalize](Self::finalize) to get the resulting objects after all objects have been added.
-    pub async fn add<R: AsyncRead + Unpin>(&mut self, r: R) -> io::Result<u64> {
-        if self.upload_handle.is_finished() {
-            // should only happen if the upload errored; callers can get the error by calling finalize
-            return Err(io::Error::other("cannot add object to finalized upload"));
-        }
+    pub async fn add<R: AsyncRead + Unpin>(&mut self, r: R) -> Result<usize, UploadError> {
+        let data_shards = self.upload_pipeline.erasure_coder.data_shards();
+        let stripe_size = SEGMENT_SIZE * data_shards;
         let object = Object::default();
-        let mut r = object.reader(r, 0);
-        let object_length = copy(&mut r, &mut self.writer).await?;
-        let start = self.length;
-        let end = start + object_length;
-        self.objects.push(ObjectUpload { start, end, object });
-        self.length += object_length;
-        Ok(object_length)
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct Uploader {
-    app_key: Arc<PrivateKey>,
-    hosts: Hosts,
-}
-
-impl Uploader {
-    pub fn new(hosts: Hosts, app_key: Arc<PrivateKey>) -> Self {
-        Uploader { app_key, hosts }
-    }
-
-    fn upload_timeout(attempts: usize) -> Duration {
-        Duration::from_secs((10 + (5 * attempts as u64)).min(120))
-    }
-
-    async fn upload_slab_shard(
-        shard: ShardUpload,
-        permit: OwnedSemaphorePermit,
-        progress_tx: Option<mpsc::UnboundedSender<()>>,
-        initial_host: (PublicKey, usize),
-    ) -> Result<(usize, Sector), UploadError> {
-        let (host_key, attempts) = initial_host;
-        let write_timeout = Self::upload_timeout(attempts);
-        let semaphore = permit.semaphore().clone();
-        let mut tasks = JoinSet::new();
-        shard.spawn_write(&mut tasks, host_key, write_timeout, permit);
+        let mut r = BufReader::with_capacity(4 * stripe_size, object.reader(r, 0));
+        let start = self.total_length;
         loop {
-            let active = tasks.len();
             tokio::select! {
                 biased;
-                Some(res) = tasks.join_next() => {
-                    match res.unwrap() {
-                        Ok(sector) => {
-                            if sector.host_key != host_key {
-                                debug!("slab {} shard {} penalizing original host {}", shard.slab_index, shard.shard_index, host_key);
-                                shard.client.add_failure(host_key)
-                            }
-                            if let Some(progress_tx) = progress_tx {
-                                let _ = progress_tx.send(());
-                            }
-                            return Ok((shard.shard_index, sector));
-                        }
-                        Err(_) => {
-                            if tasks.is_empty() {
-                                let (host_key, attempts) = shard.hosts.pop_front()?;
-                                let write_timeout = Self::upload_timeout(attempts);
-                                let permit = semaphore.clone().acquire_owned().await?;
-                                shard.spawn_write(&mut tasks, host_key, write_timeout, permit);
-                            }
-                        }
-                    }
+                Some(res) = self.upload_pipeline.poll_next() => {
+                    res?;
                 },
-                _ = sleep(Duration::from_secs(active as u64)) => {
-                    if let Ok(racer) = semaphore.clone().try_acquire_owned()
-                        && let Ok((host_key, attempts)) = shard.hosts.pop_front() {
-                            debug!("slab {} shard {} racing slow host", shard.slab_index, shard.shard_index);
-                            let write_timeout = Self::upload_timeout(attempts);
-                            shard.spawn_write(&mut tasks, host_key, write_timeout, racer);
-                        }
+                res = self.slab_buffer.read_slab(&mut r) => {
+                    let read_bytes = res?;
+                    if read_bytes == 0 {
+                        break;
+                    }
+                    if let Some(slab) = self.slab_buffer.next_slab() {
+                        self.upload_pipeline.push(slab.shards, slab.length);
+                    }
+                    self.total_length += read_bytes;
                 }
             }
         }
+        let end = self.total_length;
+        self.objects.push(ObjectUpload { start, end, object });
+        Ok(end - start)
     }
 
-    async fn upload_slabs<R: AsyncRead + Unpin + Send + 'static>(
+    pub async fn finalize(mut self) -> Result<Vec<Object>, UploadError> {
+        let slab_size = self.slab_size();
+        if let Some(slab) = self.slab_buffer.finish() {
+            self.upload_pipeline.push(slab.shards, slab.length);
+        }
+        let uploaded_slabs = self.upload_pipeline.finish().await?;
+        self.objects
+            .into_iter()
+            .map(|upload| {
+                let mut object = upload.object;
+                let slabs = object.slabs_mut();
+                let slabs_start = upload.start / slab_size;
+                let slabs_end = upload.end.div_ceil(slab_size);
+                let n = slabs_end - slabs_start;
+                slabs.extend_from_slice(&uploaded_slabs[slabs_start..slabs_end]);
+
+                slabs[0].offset = (upload.start % slab_size) as u32;
+                if slabs.len() > 1 {
+                    // if spanning multiple slabs, adjust first slab's length
+                    slabs[0].length = (slab_size - slabs[0].offset as usize) as u32;
+                }
+                let last_slab_index = n - 1;
+                let last_slab_offset = slabs[last_slab_index].offset as usize;
+                slabs[last_slab_index].length =
+                    (upload.end - ((slabs_end - 1) * slab_size) - last_slab_offset) as u32;
+
+                Ok(object)
+            })
+            .collect()
+    }
+}
+
+struct UploadedSlab {
+    encryption_key: EncryptionKey,
+    length: u32,
+    shards: Vec<Option<Sector>>,
+}
+
+enum PipelineEvent {
+    SlabEncoded {
+        slab_index: usize,
+        shards: Vec<Bytes>,
+        slab_key: EncryptionKey,
+        length: usize,
+    },
+    ShardUploaded(SectorUploadResult),
+}
+
+type PipelineFuture = crate::compat::BoxFuture<'static, Result<PipelineEvent, UploadError>>;
+
+pub(crate) struct UploadPipeline {
+    client: Hosts,
+    app_key: Arc<PrivateKey>,
+    erasure_coder: Arc<ErasureCoder>,
+    shard_sema: Arc<Semaphore>,
+    tasks: FuturesUnordered<PipelineFuture>,
+    slabs: BTreeMap<usize, UploadedSlab>,
+    next_slab_index: usize,
+}
+
+impl UploadPipeline {
+    pub(crate) fn new(
         client: Hosts,
         app_key: Arc<PrivateKey>,
-        r: R,
         options: UploadOptions,
-    ) -> Result<Vec<Slab>, UploadError> {
-        if options.data_shards == 0 {
-            return Err(UploadError::InvalidOptions(
-                "data_shards must be greater than 0".to_string(),
-            ));
-        } else if options.parity_shards == 0 {
-            return Err(UploadError::InvalidOptions(
-                "parity_shards must be greater than 0".to_string(),
-            ));
-        } else if options.max_inflight == 0 {
-            return Err(UploadError::InvalidOptions(
-                "max_inflight must be greater than 0".to_string(),
-            ));
-        }
-        let data_shards = options.data_shards as usize;
-        let parity_shards = options.parity_shards as usize;
-        let total_shards = data_shards + parity_shards;
-
-        // fail fast if there aren't enough hosts before doing any encoding
+    ) -> Result<Self, UploadError> {
+        let total_shards = options.data_shards as usize + options.parity_shards as usize;
         if client.available_for_upload() < total_shards {
-            return Err(QueueError::InsufficientHosts.into());
+            return Err(UploadError::InvalidOptions(format!(
+                "not enough hosts for upload: need {}, have {}",
+                total_shards,
+                client.available_for_upload()
+            )));
+        }
+        Ok(Self {
+            client,
+            app_key,
+            erasure_coder: Arc::new(
+                ErasureCoder::new(options.data_shards as usize, options.parity_shards as usize)
+                    .map_err(|e| {
+                        UploadError::InvalidOptions(format!(
+                            "failed to create erasure coder: {}",
+                            e
+                        ))
+                    })?,
+            ),
+            shard_sema: Arc::new(Semaphore::new(options.max_inflight)),
+            tasks: FuturesUnordered::new(),
+            slabs: BTreeMap::new(),
+            next_slab_index: 0,
+        })
+    }
+
+    fn handle_event(&mut self, event: PipelineEvent) -> Result<Option<()>, UploadError> {
+        match event {
+            PipelineEvent::ShardUploaded(result) => {
+                self.slabs
+                    .entry(result.slab_index)
+                    .and_modify(|s| s.shards[result.shard_index] = Some(result.sector));
+                Ok(Some(()))
+            }
+            PipelineEvent::SlabEncoded {
+                slab_index,
+                shards,
+                slab_key,
+                length,
+            } => {
+                self.slabs.insert(
+                    slab_index,
+                    UploadedSlab {
+                        encryption_key: slab_key,
+                        length: length as u32,
+                        shards: vec![None; shards.len()],
+                    },
+                );
+                let total_shards = shards.len();
+                let hosts = self.client.upload_queue();
+                let initial_hosts = hosts.pop_n(total_shards)?;
+                for shard_index in 0..total_shards {
+                    let initial_host = initial_hosts[shard_index];
+                    let shard_upload = ShardUpload {
+                        semaphore: self.shard_sema.clone(),
+                        client: self.client.clone(),
+                        hosts: hosts.clone(),
+                        account_key: self.app_key.clone(),
+                        data: shards[shard_index].clone(),
+                        slab_index,
+                        shard_index,
+                    };
+                    self.tasks.push(Box::pin(async move {
+                        shard_upload
+                            .upload_shard(initial_host)
+                            .await
+                            .map(PipelineEvent::ShardUploaded)
+                    }));
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// Polls for the next completed shard upload. Encoding completions are
+    /// handled internally — shard futures are pushed and the poll continues.
+    pub(crate) async fn poll_next(&mut self) -> Option<Result<(), UploadError>> {
+        loop {
+            match self.tasks.next().await? {
+                Err(e) => return Some(Err(e)),
+                Ok(event) => match self.handle_event(event) {
+                    Ok(Some(())) => return Some(Ok(())),
+                    Ok(None) => continue,
+                    Err(e) => return Some(Err(e)),
+                },
+            }
+        }
+    }
+
+    /// Queues a new slab for encoding and upload. This is non-blocking — the
+    /// actual encoding and uploads are driven by [poll_next](Self::poll_next).
+    pub(crate) fn push(&mut self, shards: Vec<BytesMut>, length: usize) {
+        let total_shards = self.erasure_coder.total_shards();
+        if shards.len() != total_shards {
+            panic!("expected {} shards, got {}", total_shards, shards.len());
+        }
+        let slab_index = self.next_slab_index;
+        self.next_slab_index += 1;
+        let rs = self.erasure_coder.clone();
+        self.tasks.push(Box::pin(async move {
+            let (shards, slab_key) = maybe_spawn_blocking!({
+                let start = Instant::now();
+                let slab_key: EncryptionKey = rand::random::<[u8; 32]>().into();
+                let mut shards = shards;
+                rs.encode_shards(&mut shards)?;
+                encrypt_shards(&slab_key, 0, 0, &mut shards);
+                debug!(
+                    "slab {} encoded and encrypted slab in {:?}",
+                    slab_index,
+                    start.elapsed()
+                );
+                Ok::<_, UploadError>((
+                    shards
+                        .into_iter()
+                        .map(|shard| shard.freeze())
+                        .collect::<Vec<_>>(),
+                    slab_key,
+                ))
+            })?;
+            Ok(PipelineEvent::SlabEncoded {
+                slab_index,
+                shards,
+                slab_key,
+                length,
+            })
+        }));
+    }
+
+    /// Waits for all pending uploads to complete and returns the resulting slabs.
+    pub(crate) async fn finish(mut self) -> Result<Vec<Slab>, UploadError> {
+        while let Some(result) = self.tasks.next().await {
+            self.handle_event(result?)?;
         }
 
-        // hard cap all shard uploads including races
-        let shard_sema = Arc::new(Semaphore::new(options.max_inflight));
-        // cap number of "active" slabs to limit memory usage.
-        let slab_sema = Arc::new(Semaphore::new(
-            options
-                .max_inflight
-                .div_ceil(total_shards)
-                .saturating_add(1),
-        ));
+        Ok(self
+            .slabs
+            .into_values()
+            .map(|slab| Slab {
+                encryption_key: slab.encryption_key,
+                offset: 0,
+                min_shards: self.erasure_coder.data_shards() as u8,
+                length: slab.length,
+                sectors: slab.shards.into_iter().map(|s| s.unwrap()).collect(),
+            })
+            .collect::<Vec<_>>())
+    }
+}
 
-        // use a buffered reader since the erasure coder reads 64 bytes at a time.
-        let mut r = BufReader::new(r);
-        let mut slab_upload_tasks = JoinSet::new();
-        let rs = Arc::new(ErasureCoder::new(data_shards, parity_shards).unwrap());
-        let mut slab_index: usize = 0;
-        loop {
-            let slab_permit = slab_sema.clone().acquire_owned().await?;
-            let mut shards = vec![BytesMut::zeroed(SECTOR_SIZE); total_shards];
-            let length =
-                ErasureCoder::read_slab_shards(&mut r, options.data_shards as usize, &mut shards)
-                    .await?;
-            if length == 0 {
-                break; // EoF
+struct EncodedSlab {
+    slab_key: EncryptionKey,
+    slab_index: usize,
+    shards: Vec<Bytes>,
+    length: usize,
+}
+
+pub(crate) async fn upload_slabs<R: AsyncRead + Unpin> (mut r: R, client: Hosts, app_key: Arc<PrivateKey>, options: UploadOptions) -> Result<Vec<Slab>, UploadError> {
+    let total_shards = options.data_shards as usize + options.parity_shards as usize;
+    if client.available_for_upload() < total_shards {
+        return Err(UploadError::InvalidOptions(format!(
+            "not enough hosts for upload: need {}, have {}",
+            total_shards,
+            client.available_for_upload()
+        )));
+    }
+    let data_shards = options.data_shards as usize;
+    let parity_shards = options.parity_shards as usize;
+
+    let erasure_coder = Arc::new(ErasureCoder::new(options.data_shards as usize, options.parity_shards as usize)?);
+    let shard_sema = Arc::new(Semaphore::new(options.max_inflight));
+    let mut slab_tasks = FuturesUnordered::new();
+    let mut shard_tasks = FuturesUnordered::new();
+    let mut slab_reader = Box::pin(read_slabs(&mut r, data_shards, parity_shards));
+    let mut slabs = BTreeMap::new();
+    let mut current_slab_index: usize = 0;
+    loop {
+        tokio::select! {
+            Some(res) = shard_tasks.next() => {
+                let result: SectorUploadResult = res?;
+                slabs.entry(result.slab_index).and_modify(|s: &mut UploadedSlab| s.shards[result.shard_index] = Some(result.sector));
             }
-
-            let app_key = app_key.clone();
-            let client = client.clone();
-            let progress_tx = options.shard_uploaded.clone();
-            let rs = rs.clone();
-            let shard_sema = shard_sema.clone();
-
-            join_set_spawn!(slab_upload_tasks, async move {
-                let _slab_guard = slab_permit;
-
-                // note: it may seem like a good idea to start uploading the data shards
-                // while the parity shards are being calculated, but this also forces
-                // cloning the rather large shards and ends up being a net performance
-                // decrease (~8%).
-                //
-                // It could probably be resolved by using a pool, but leaving that as a
-                // future optimization for now.
-                let shards = maybe_spawn_blocking!({
-                    rs.encode_shards(&mut shards)?;
-                    Ok::<_, erasure_coding::Error>(shards)
-                })?;
-
-                // generate a unique encryption key for the slab
-                let slab_key: EncryptionKey = rand::random::<[u8; 32]>().into();
-
-                let host_queue = client.upload_queue();
-                // reserve one host per shard upfront to guarantee each shard has at least one host
-                let reserved_hosts = host_queue.pop_n(shards.len())?;
-                let owned_slab_key = Arc::new(slab_key.clone());
-                let start_time = Instant::now();
-                let mut shard_upload_tasks = JoinSet::new();
-                for (shard_index, mut shard) in shards.into_iter().enumerate() {
-                    let app_key = app_key.clone();
-                    let owned_slab_key = owned_slab_key.clone();
-                    let permit = shard_sema.clone().acquire_owned().await?;
-                    let host_queue = host_queue.clone();
-                    let progress_tx = progress_tx.clone();
-                    let initial_host = reserved_hosts[shard_index];
-                    let client = client.clone();
-                    // spawn a task to encrypt and upload each shard for this slab.
-                    join_set_spawn!(shard_upload_tasks, async move {
-                        let shard = maybe_spawn_blocking!({
-                            encrypt_shard(&owned_slab_key, shard_index as u8, 0, &mut shard);
-                            shard
-                        });
-                        Self::upload_slab_shard(
-                            ShardUpload {
-                                client,
-                                hosts: host_queue,
-                                account_key: app_key,
-                                data: shard.into(),
-                                slab_index,
-                                shard_index,
-                            },
-                            permit,
-                            progress_tx,
-                            initial_host,
-                        )
-                        .await
+            Some(res) = slab_tasks.next() => {
+                let encoded_slab: EncodedSlab = res?;
+                let total_shards = encoded_slab.shards.len();
+                let hosts = client.upload_queue();
+                let initial_hosts = hosts.pop_n(total_shards)?;
+                slabs.insert(encoded_slab.slab_index, UploadedSlab {
+                    encryption_key: encoded_slab.slab_key,
+                    length: encoded_slab.length as u32,
+                    shards: vec![None; total_shards],
+                });
+                for shard_index in 0..total_shards {
+                    let initial_host = initial_hosts[shard_index];
+                    let shard_upload = ShardUpload {
+                        semaphore: shard_sema.clone(),
+                        client: client.clone(),
+                        hosts: hosts.clone(),
+                        account_key: app_key.clone(),
+                        data: encoded_slab.shards[shard_index].clone(),
+                        slab_index: encoded_slab.slab_index,
+                        shard_index,
+                    };
+                    shard_tasks.push(async move {
+                        shard_upload
+                            .upload_shard(initial_host)
+                            .await
                     });
                 }
+            }
+            Some(res) = slab_reader.next(), if shard_tasks.len() < options.max_inflight => {
+                let (length, mut shards) = res?;
+                let slab_key: EncryptionKey = rand::random::<[u8; 32]>().into();
+                let slab_index = current_slab_index;
+                current_slab_index += 1;
 
-                let mut slab_sectors = vec![None; data_shards + parity_shards];
-                while let Some(res) = shard_upload_tasks.join_next().await {
-                    match res {
-                        Ok(Ok((shard_index, sector))) => {
-                            slab_sectors[shard_index] = Some(sector);
-                        }
-                        Ok(Err(e)) => {
-                            return Err(e);
-                        }
-                        Err(e) => {
-                            return Err(e.into());
-                        }
-                    };
-                }
-                debug!(
-                    "slab {slab_index} uploaded in {:?}",
-                    Instant::now().duration_since(start_time)
-                );
-                Ok((
-                    slab_index,
-                    Slab {
-                        sectors: slab_sectors.into_iter().map(|s| s.unwrap()).collect(),
-                        encryption_key: slab_key,
-                        offset: 0,
-                        length: length as u32,
-                        min_shards: options.data_shards,
-                    },
-                ))
-            });
-            slab_index += 1;
-        }
-
-        let num_slabs = slab_upload_tasks.len();
-        let mut slabs: Vec<Option<Slab>> = vec![None; num_slabs];
-        while let Some(res) = slab_upload_tasks.join_next().await {
-            match res {
-                Ok(Ok((slab_index, slab))) => {
-                    slabs[slab_index] = Some(slab);
-                }
-                Ok(Err(e)) => return Err(e),
-                Err(e) => return Err(e.into()),
-            };
-        }
-        let slabs = slabs.into_iter().map(|s| s.unwrap()).collect();
-        Ok(slabs)
-    }
-
-    /// Reads until EOF and uploads all slabs.
-    /// The data will be erasure coded, encrypted,
-    /// and uploaded using the uploader's parameters.
-    ///
-    /// # Arguments
-    /// * `r` - The reader to read the data from. It will be read until EOF.
-    /// * `options` - The [UploadOptions] to use for the upload.
-    ///
-    /// # Returns
-    /// A new object containing the metadata needed to download the object. The caller
-    /// must pin the object to an indexer after uploading.
-    pub async fn upload<R: AsyncRead + Unpin + Send + 'static>(
-        &self,
-        r: R,
-        options: UploadOptions,
-    ) -> Result<Object, UploadError> {
-        let mut object = Object::default();
-        // use a buffered reader since the erasure coder reads 64 bytes at a time.
-        let r = object.reader(BufReader::new(r), 0);
-        let new_slabs =
-            Self::upload_slabs(self.hosts.clone(), self.app_key.clone(), r, options).await?;
-        let slabs = object.slabs_mut();
-        slabs.extend(new_slabs.into_iter());
-        Ok(object)
-    }
-
-    /// Creates a new packed upload. This allows multiple objects to be packed together
-    /// for more efficient uploads. The returned `PackedUpload` can be used to add objects to the upload, and then finalized to get the resulting objects.
-    ///
-    /// # Arguments
-    /// * `options` - The [UploadOptions] to use for the upload.
-    ///
-    /// # Returns
-    /// A [PackedUpload] that can be used to add objects and finalize the upload.
-    pub fn upload_packed(&self, options: UploadOptions) -> PackedUpload {
-        let app_key = self.app_key.clone();
-        let (reader, writer) = simplex(1024 * 1024);
-        let client = self.hosts.clone();
-        PackedUpload {
-            slab_size: options.data_shards as u64 * rhp::SECTOR_SIZE as u64,
-            length: 0,
-            writer,
-            objects: Vec::new(),
-            upload_handle: AbortOnDropHandle::new(maybe_spawn!(async move {
-                let slabs = Self::upload_slabs(client, app_key, reader, options).await?;
-                Ok(slabs)
-            })),
+                let erasure_coder = erasure_coder.clone();
+                slab_tasks.push(async move {
+                    let start = Instant::now();
+                    let (shards, slab_key) = maybe_spawn_blocking!({
+                        erasure_coder.encode_shards(&mut shards)?;
+                        encrypt_shards(&slab_key, 0, 0, &mut shards);
+                        debug!(
+                            "slab {} encoded and encrypted slab in {:?}",
+                            slab_index,
+                            start.elapsed()
+                        );
+                        Ok::<_, UploadError>((
+                            shards
+                                .into_iter()
+                                .map(|shard| shard.freeze())
+                                .collect::<Vec<_>>(),
+                            slab_key,
+                        ))
+                    })?;
+                    Ok::<_, UploadError>(EncodedSlab{
+                        slab_key,
+                        slab_index,
+                        shards,
+                        length,
+                    })
+                });
+            },
+            else => break,
         }
     }
+
+    Ok(slabs.into_values().map(|slab| Slab {
+        encryption_key: slab.encryption_key,
+        offset: 0,
+        min_shards: data_shards as u8,
+        length: slab.length,
+        sectors: slab.shards.into_iter().map(|s| s.unwrap()).collect(),
+    }).collect())
 }

@@ -1,6 +1,5 @@
 use crate::time::{Elapsed, timeout};
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use core::fmt::Debug;
 use ed25519_dalek::{SignatureError, VerifyingKey};
@@ -116,7 +115,6 @@ impl Client {
     async fn host_stream(&self, host: &HostEndpoint) -> Result<Stream, ConnectError> {
         let conn = match self.existing_conn(&host.public_key) {
             Some(conn) => {
-                debug!("reusing existing siamux connection to {}", host.public_key);
                 conn
             }
             None => {
@@ -130,7 +128,6 @@ impl Client {
                     .write()
                     .unwrap()
                     .insert(host.public_key, new_conn.clone());
-                debug!("created new siamux connection to {}", host.public_key);
                 new_conn
             }
         };
@@ -142,7 +139,6 @@ impl Client {
     }
 }
 
-#[async_trait]
 impl Transport for Client {
     async fn host_prices(&self, host: &HostEndpoint) -> Result<HostPrices, TransportError> {
         let mut stream = self

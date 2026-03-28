@@ -38,6 +38,8 @@ base64 = "0.22.1"
 ed25519-dalek = "2.2.0"
 web-time = "1"
 async-trait = "0.1.89"
+futures = "0.3.32"
+async-stream = "0.3.6"
 
 # --- Native-only dependencies ---
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -49,7 +51,7 @@ quinn = { version = "0.11.9", default-features = false, features = ["bloom", "lo
 tokio-util = { version = "0.7.18", features = ["rt"] }
 rayon = "1.11.0"
 sia_mux = { version = "0.1.0", path = "../sia_mux" }
-rustls-platform-verifier = { version = "0.6.2", optional = true }
+futures = "0.3.32"
 
 # --- WASM-only dependencies ---
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -81,9 +83,7 @@ env_logger = "0.11.9"
 clap = { version = "4.6.0", features = ["derive"] }
 
 [features]
-default = ["platform-verifier"]
 mock = []
-platform-verifier = ["rustls-platform-verifier"]
 
 [[bench]]
 name = "upload"

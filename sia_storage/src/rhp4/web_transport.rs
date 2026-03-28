@@ -4,7 +4,6 @@
 //! using the browser's WebTransport API, mirroring the siamux client on native.
 //!
 //! TODO: implement WebTransport connection pooling and RPC methods.
-use async_trait::async_trait;
 use bytes::Bytes;
 use sia_core::rhp4::HostPrices;
 use sia_core::signing::PrivateKey;
@@ -12,7 +11,7 @@ use sia_core::types::Hash256;
 
 use super::{Error, HostEndpoint, Transport};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Client;
 
 impl Client {
@@ -21,7 +20,6 @@ impl Client {
     }
 }
 
-#[async_trait(?Send)]
 impl Transport for Client {
     async fn host_prices(&self, _host: &HostEndpoint) -> Result<HostPrices, Error> {
         todo!("WebTransport host_prices not yet implemented")

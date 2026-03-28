@@ -341,7 +341,7 @@ impl Object {
         CipherReader::new(r, self.data_key.clone(), offset)
     }
 
-    /// Returns a writer that encrypts data on-the-fly using the object's encryption key.
+    /// Returns a writer that decrypts data on-the-fly using the object's encryption key.
     pub(crate) fn writer<W: AsyncWrite + Unpin>(&self, w: W, offset: usize) -> CipherWriter<W> {
         CipherWriter::new(w, self.data_key.clone(), offset)
     }

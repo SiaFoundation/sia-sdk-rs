@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use sia_storage::{AppMetadata, Builder, DownloadOptions, UploadOptions};
+use sia_storage::{AppMetadata, Builder, DownloadOptions, Object, UploadOptions};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[derive(Parser)]
 struct Args {
-    /// Size of the data to upload and download in bytes (default: 512 MiB)
-    #[arg(short, long, default_value_t = 512 * 1024 * 1024)]
+    /// Size of the data to upload and download in bytes (default: 120 MiB)
+    #[arg(short, long, default_value_t = 120 * 1024 * 1024)]
     size: usize,
 }
 
@@ -57,15 +57,25 @@ impl AsyncRead for SeededReader {
 
 struct SeededVerifier {
     rng: SmallRng,
+    size: usize,
     remaining: usize,
+    start: Instant,
+    ttfb: Option<Duration>,
 }
 
 impl SeededVerifier {
     fn new(seed: u64, size: usize) -> Self {
         Self {
             rng: SmallRng::seed_from_u64(seed),
+            size: size,
             remaining: size,
+            start: Instant::now(),
+            ttfb: None,
         }
+    }
+
+    fn ttfb(&self) -> Option<Duration> {
+        self.ttfb
     }
 }
 
@@ -75,6 +85,9 @@ impl AsyncWrite for SeededVerifier {
         _: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        if self.ttfb.is_none() {
+            self.ttfb = Some(self.start.elapsed());
+        }
         let mut expected = vec![0u8; buf.len()];
         self.rng.fill_bytes(&mut expected);
         if buf.len() > self.remaining {
@@ -86,7 +99,7 @@ impl AsyncWrite for SeededVerifier {
         if buf != expected.as_slice() {
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("data mismatch at byte {}", self.remaining - buf.len()),
+                format!("data mismatch at byte {}", self.size - self.remaining),
             )));
         }
         self.remaining -= buf.len();
@@ -184,8 +197,9 @@ async fn main() {
     // upload the data to the network
     println!("Uploading random data...");
     let start = Instant::now();
+    let obj = Object::default();
     let obj = sdk
-        .upload(reader, UploadOptions::default())
+        .upload(reader, obj, UploadOptions::default())
         .await
         .expect("failed to upload object");
     let upload_duration = start.elapsed();
@@ -212,11 +226,12 @@ async fn main() {
         format_bitrate(obj.encoded_size(), upload_duration),
     );
     println!(
-        "Object downloaded ID: {}\tSize: {}\tEncoded: {}\tElapsed: {:?}\tThroughput: {}",
+        "Object downloaded ID: {}\tSize: {}\tEncoded: {}\tElapsed: {:?}\tTTFB: {:?}\tThroughput: {}",
         obj.id(),
         format_bytes(obj.size()),
         format_bytes(obj.encoded_size()),
         download_duration,
+        verifier.ttfb(),
         format_bitrate(obj.size(), download_duration),
     );
 }

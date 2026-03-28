@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use bytes::Bytes;
 use sia_core::encoding;
 use sia_core::rhp4::HostPrices;
@@ -10,17 +9,21 @@ use thiserror::Error;
 
 use crate::time::Elapsed;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(feature = "mock"), not(target_arch = "wasm32")))]
 mod siamux;
+#[cfg(all(not(feature = "mock"), not(target_arch = "wasm32")))]
+pub(crate) use siamux::Client;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub use siamux::Client;
-
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(not(feature = "mock"), target_arch = "wasm32"))]
 mod web_transport;
 
-#[cfg(target_arch = "wasm32")]
-pub use web_transport::Client;
+#[cfg(all(not(feature = "mock"), target_arch = "wasm32"))]
+pub(crate) use web_transport::Client;
+
+#[cfg(feature = "mock")]
+mod mock;
+#[cfg(feature = "mock")]
+pub(crate) use mock::Client;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -47,29 +50,22 @@ pub enum Error {
 }
 
 /// A host endpoint contains the information needed to connect to a host.
-// dead code until WebTransport client is implemented
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) struct HostEndpoint {
     pub public_key: PublicKey,
     pub addresses: Vec<NetAddress>,
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-/// Trait defining the operations that can be performed on a host.
-/// Send + Sync bounds are applied at the usage site via [`DynTransport`]
-/// rather than on the trait itself, so WASM types that are !Send can
-/// implement this trait without unsafe.
+/// Trait defining the operations that can be performed on a host
 pub(crate) trait Transport {
-    async fn host_prices(&self, host: &HostEndpoint) -> Result<HostPrices, Error>;
-    async fn write_sector(
+    fn host_prices(&self, host: &HostEndpoint) -> impl Future<Output = Result<HostPrices, Error>>;
+    fn write_sector(
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
         account_key: &PrivateKey,
         sector: Bytes,
-    ) -> Result<Hash256, Error>;
-    async fn read_sector(
+    ) -> impl Future<Output = Result<Hash256, Error>>;
+    fn read_sector(
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
@@ -77,13 +73,5 @@ pub(crate) trait Transport {
         root: Hash256,
         offset: usize,
         length: usize,
-    ) -> Result<Bytes, Error>;
+    ) -> impl Future<Output = Result<Bytes, Error>>;
 }
-
-/// Type alias for `dyn Transport` with conditional Send + Sync bounds.
-/// Use `Arc<DynTransport>` instead of `Arc<dyn Transport>` to avoid
-/// cfg-gates at every use site.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) type DynTransport = dyn Transport + Send + Sync;
-#[cfg(target_arch = "wasm32")]
-pub(crate) type DynTransport = dyn Transport;

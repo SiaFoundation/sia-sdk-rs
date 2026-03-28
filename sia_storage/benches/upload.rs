@@ -59,7 +59,6 @@ async fn upload_object(uploader: Arc<MockUploader>, input: Bytes, opts: UploadOp
 }
 
 fn upload_benchmark(c: &mut Criterion) {
-    let _ = env_logger::builder().is_test(true).try_init();
     let runtime = runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
