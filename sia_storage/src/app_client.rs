@@ -833,10 +833,9 @@ mod tests {
     use base64::prelude::*;
     use chrono::FixedOffset;
     use sia_core::signing::Signature;
-    use sia_core::{hash_256, public_key, signature};
+    use sia_core::{hash_256, public_key};
 
     use crate::AppID;
-    use crate::slabs::object_id;
 
     use super::*;
     use httptest::http::Response;
