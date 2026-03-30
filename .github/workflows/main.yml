@@ -49,7 +49,7 @@ jobs:
           WASM_BINDGEN_TEST_TIMEOUT: '300'
       - name: Test (wasm - sia_storage)
         # --lib skips compiling the native-only benchmark example
-        run: wasm-pack test --release --headless --chrome sia_storage -- --lib
+        run: wasm-pack test --release --headless --chrome --lib sia_storage 
         env:
           RUSTFLAGS: '--cfg=web_sys_unstable_apis'
           WASM_BINDGEN_TEST_TIMEOUT: '300'
