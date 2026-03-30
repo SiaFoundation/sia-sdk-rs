@@ -573,8 +573,8 @@ mod tests {
     use chrono::FixedOffset;
     use serde_json;
 
-    #[test]
-    fn test_serialize_network() {
+    cross_target_tests! {
+    async fn test_serialize_network() {
         let test_cases = vec![
             (
                 Network::anagami(),
@@ -598,8 +598,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_serialize_state() {
+    async fn test_serialize_state() {
         let s = State {
             index: ChainIndex {
                 height: 0,
@@ -799,5 +798,6 @@ mod tests {
         assert_eq!(BINARY_STR, hex::encode(serialized.clone()));
         let deserialized = State::decode(&mut &serialized[..]).unwrap();
         assert_eq!(s, deserialized);
+    }
     }
 }
