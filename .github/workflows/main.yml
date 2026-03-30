@@ -42,14 +42,29 @@ jobs:
         run: cargo build --benches --features=mock
       - name: Test (native)
         run: cargo test --all-features
-      - name: Test (wasm - sia_core)
-        run: wasm-pack -vv test --release --headless --chrome sia_core
+      - name: Test (wasm - sia_core - chrome)
+        run: wasm-pack test --release --headless --chrome sia_core
         env:
           RUSTFLAGS: '--cfg=web_sys_unstable_apis'
           WASM_BINDGEN_TEST_TIMEOUT: '300'
-      - name: Test (wasm - sia_storage)
+      - name: Test (wasm - sia_storage - chrome)
         # --lib skips compiling the native-only benchmark example
         run: cd sia_storage && wasm-pack test --release --headless --chrome -- --lib
+        env:
+          RUSTFLAGS: '--cfg=web_sys_unstable_apis'
+          WASM_BINDGEN_TEST_TIMEOUT: '300'
+      - name: Install geckodriver
+        run: |
+          GECKO_URL=$(curl -s https://api.github.com/repos/mozilla/geckodriver/releases/latest | grep -o 'https://.*linux64.tar.gz"' | head -1 | tr -d '"')
+          curl -sL "$GECKO_URL" | tar xz -C /usr/local/bin
+      - name: Test (wasm - sia_core - firefox)
+        run: wasm-pack test --release --headless --firefox sia_core
+        env:
+          RUSTFLAGS: '--cfg=web_sys_unstable_apis'
+          WASM_BINDGEN_TEST_TIMEOUT: '300'
+      - name: Test (wasm - sia_storage - firefox)
+        # --lib skips compiling the native-only benchmark example
+        run: cd sia_storage && wasm-pack test --release --headless --firefox -- --lib
         env:
           RUSTFLAGS: '--cfg=web_sys_unstable_apis'
           WASM_BINDGEN_TEST_TIMEOUT: '300'
