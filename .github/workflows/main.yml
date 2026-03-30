@@ -23,13 +23,12 @@ jobs:
           rustup toolchain install nightly
           rustup target add wasm32-unknown-unknown
           rustup component add rustfmt --toolchain nightly
-      - name: Build for wasm
-        # Check if the library targets compile for wasm32. This will still allow
-        # for using non-wasm functionality in tests and benchmarks but guarantees
-        # that consumers of the library can use it to generate wasm bindings.
-        run: cargo check --target wasm32-unknown-unknown --lib --package sia_core --package sia_storage --no-default-features
+      - name: Install wasm-pack
+        run: curl https://wasm-bindgen.github.io/wasm-pack/installer/init.sh -sSf | sh
       - name: Clippy (wasm)
         run: cargo clippy --target wasm32-unknown-unknown --lib --package sia_core --package sia_storage --no-default-features -- -D warnings
+        env:
+          RUSTFLAGS: '--cfg=web_sys_unstable_apis'
       - name: Rustfmt
         run: cargo +nightly fmt --all -- --check
       - name: Clippy
@@ -40,5 +39,16 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
       - name: Build benches
         run: cargo build --benches --features=mock
-      - name: Test
+      - name: Test (native)
         run: cargo test --all-features
+      - name: Test (wasm - sia_core)
+        run: wasm-pack test --release --headless --chrome sia_core
+        env:
+          RUSTFLAGS: '--cfg=web_sys_unstable_apis'
+          WASM_BINDGEN_TEST_TIMEOUT: '300'
+      - name: Test (wasm - sia_storage)
+        # --lib skips compiling the native-only benchmark example
+        run: wasm-pack test --release --headless --chrome sia_storage -- --lib
+        env:
+          RUSTFLAGS: '--cfg=web_sys_unstable_apis'
+          WASM_BINDGEN_TEST_TIMEOUT: '300'
