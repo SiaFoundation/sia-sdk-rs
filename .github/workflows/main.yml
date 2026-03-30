@@ -54,9 +54,7 @@ jobs:
           RUSTFLAGS: '--cfg=web_sys_unstable_apis'
           WASM_BINDGEN_TEST_TIMEOUT: '300'
       - name: Install geckodriver
-        run: |
-          GECKO_URL=$(curl -s https://api.github.com/repos/mozilla/geckodriver/releases/latest | grep -o 'https://.*linux64.tar.gz"' | head -1 | tr -d '"')
-          curl -sL "$GECKO_URL" | tar xz -C /usr/local/bin
+        run: curl -sL https://github.com/mozilla/geckodriver/releases/download/v0.36.0/geckodriver-v0.36.0-linux64.tar.gz | tar xz -C /usr/local/bin
       - name: Test (wasm - sia_core - firefox)
         run: wasm-pack test --release --headless --firefox sia_core
         env:
