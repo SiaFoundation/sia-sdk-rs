@@ -51,7 +51,7 @@ impl MockRHP4Transport {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl Transport for MockRHP4Transport {
     async fn host_prices(&self, _: &HostEndpoint) -> Result<HostPrices, RHP4Error> {
         Ok(HostPrices {
