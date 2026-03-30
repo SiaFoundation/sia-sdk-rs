@@ -43,7 +43,7 @@ jobs:
       - name: Test (native)
         run: cargo test --all-features
       - name: Test (wasm - sia_core)
-        run: wasm-pack test --release --headless --chrome sia_core
+        run: wasm-pack -vv test --release --headless --chrome sia_core
         env:
           RUSTFLAGS: '--cfg=web_sys_unstable_apis'
           WASM_BINDGEN_TEST_TIMEOUT: '300'
