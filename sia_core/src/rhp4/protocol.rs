@@ -1175,7 +1175,7 @@ mod test {
         buf
     }
 
-    #[tokio::test]
+    cross_target_tests! {
     async fn test_write_request() {
         const EXPECTED_HEX: &str = "52656164536563746f72000000000000000000a1edccce1bc2d300000000000000000042db999d3784a7010000000000000000e3c8666c53467b02000000000000000084b6333b6f084f03000000000000000025a4000a8bca22040000000000000000c691cdd8a68cf604000000000007000000000000000800000000000000090000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000b000000000000000000000000000000000000000000000000000000000000000c000000000000000d0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000f000000000000001000000000000000";
 
@@ -1214,7 +1214,6 @@ mod test {
         assert_eq!(buf, hex::decode(EXPECTED_HEX).unwrap());
     }
 
-    #[tokio::test]
     async fn test_read_response() {
         let expected = RPCFreeSectorsResponse {
             old_subtree_hashes: vec![
@@ -1264,7 +1263,6 @@ mod test {
         assert_eq!(resp, expected);
     }
 
-    #[tokio::test]
     async fn test_response_error() {
         let expected_err = RPCError {
             code: 1,
@@ -1285,10 +1283,9 @@ mod test {
         }
     }
 
-    #[tokio::test]
     async fn test_rpc_write_sector_complete() {
         let mut data = BytesMut::zeroed(SECTOR_SIZE);
-        rand::fill(&mut data[..]);
+        getrandom::fill(&mut data[..]).unwrap();
         let data = data.freeze();
         let root = merkle::sector_root(&data);
 
@@ -1315,6 +1312,7 @@ mod test {
         if let Error::SectorRootMismatch { expected, got } = err {
             assert_eq!(expected, root);
             assert_eq!(got, wrong_root);
+        }
         }
     }
 }

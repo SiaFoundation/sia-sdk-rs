@@ -473,30 +473,30 @@ impl Transaction {
         state.finalize().into()
     }
 
-    fn derive_child_id<T: From<blake2b_simd::Hash>>(&self, prefix: &Specifier, i: usize) -> T {
+    fn derive_child_id<T: From<blake2b_simd::Hash>>(&self, prefix: &Specifier, i: u64) -> T {
         let mut state = Params::new().hash_length(32).to_state();
         state.update(prefix.as_ref());
         self.encode_no_sigs(&mut state).unwrap();
-        state.update(&(i as u64).to_le_bytes());
+        state.update(&i.to_le_bytes());
         state.finalize().into()
     }
 
     /// siacoin_output_id returns the SiacoinOutputID for the i-th siacoin output of the transaction
-    pub fn siacoin_output_id(&self, i: usize) -> SiacoinOutputID {
+    pub fn siacoin_output_id(&self, i: u64) -> SiacoinOutputID {
         const SIACOIN_OUTPUT_ID_PREFIX: Specifier = specifier!("siacoin output");
 
         self.derive_child_id(&SIACOIN_OUTPUT_ID_PREFIX, i)
     }
 
     /// siafund_output_id returns the SiafundOutputID for the i-th siafund output of the transaction
-    pub fn siafund_output_id(&self, i: usize) -> SiafundOutputID {
+    pub fn siafund_output_id(&self, i: u64) -> SiafundOutputID {
         const SIAFUND_OUTPUT_ID_PREFIX: Specifier = specifier!("siafund output");
 
         self.derive_child_id(&SIAFUND_OUTPUT_ID_PREFIX, i)
     }
 
     /// file_contract_id returns the FileContractID for the i-th file contract of the transaction
-    pub fn file_contract_id(&self, i: usize) -> FileContractID {
+    pub fn file_contract_id(&self, i: u64) -> FileContractID {
         const FILE_CONTRACT_ID_PREFIX: Specifier = specifier!("file contract");
 
         self.derive_child_id(&FILE_CONTRACT_ID_PREFIX, i)
@@ -543,8 +543,8 @@ mod tests {
         assert_eq!(deserialized, *obj);
     }
 
-    #[test]
-    fn test_serialize_unlock_key() {
+    cross_target_tests! {
+    async fn test_serialize_unlock_key() {
         let unlock_key: UnlockKey = PublicKey::new([
             0x9a, 0xac, 0x1f, 0xfb, 0x1c, 0xfd, 0x10, 0x79, 0xa8, 0xc6, 0xc8, 0x7b, 0x47, 0xda,
             0x1d, 0x56, 0x7e, 0x35, 0xb9, 0x72, 0x34, 0x99, 0x3c, 0x28, 0x8c, 0x1a, 0xd0, 0xdb,
@@ -577,8 +577,7 @@ mod tests {
         assert_eq!(unlock_key_deserialized, unlock_key);
     }
 
-    #[test]
-    fn test_serialize_unlock_conditions() {
+    async fn test_serialize_unlock_conditions() {
         let unlock_conditions = UnlockConditions::new(
             123,
             vec![
@@ -620,8 +619,7 @@ mod tests {
         assert_eq!(unlock_conditions_deserialized, unlock_conditions);
     }
 
-    #[test]
-    fn test_serialize_covered_fields() {
+    async fn test_serialize_covered_fields() {
         let mut cf = CoveredFields::default();
         cf.siacoin_inputs.push(1);
         cf.siacoin_outputs.push(2);
@@ -635,8 +633,7 @@ mod tests {
         test_serialize_json(&cf, json_str);
     }
 
-    #[test]
-    fn test_serialize_siacoin_input() {
+    async fn test_serialize_siacoin_input() {
         let siacoin_input = SiacoinInput {
             parent_id: siacoin_id!(
                 "b3633a1370a72002ae2a956d21e8d481c3a69e146633470cf625ecd83fdeaa24"
@@ -669,8 +666,7 @@ mod tests {
         test_serialize_json(&siacoin_input, json_str);
     }
 
-    #[test]
-    fn test_serialize_siafund_input() {
+    async fn test_serialize_siafund_input() {
         let siafund_input = SiafundInput {
             parent_id: siafund_id!(
                 "b3633a1370a72002ae2a956d21e8d481c3a69e146633470cf625ecd83fdeaa24"
@@ -711,8 +707,7 @@ mod tests {
         test_serialize_json(&siafund_input, json_str);
     }
 
-    #[test]
-    fn test_serialize_transaction_signature() {
+    async fn test_serialize_transaction_signature() {
         let signature = TransactionSignature {
             parent_id: hash_256!(
                 "b3633a1370a72002ae2a956d21e8d481c3a69e146633470cf625ecd83fdeaa24"
@@ -742,8 +737,7 @@ mod tests {
         test_serialize_json(&signature, json_str);
     }
 
-    #[test]
-    fn test_serialize_filecontract() {
+    async fn test_serialize_filecontract() {
         let contract = FileContract {
             file_size: 1,
             file_merkle_root: Hash256::from([
@@ -790,8 +784,7 @@ mod tests {
         test_serialize_json(&contract, json_str);
     }
 
-    #[test]
-    fn test_serialize_filecontract_revision() {
+    async fn test_serialize_filecontract_revision() {
         let revision = FileContractRevision {
             parent_id: FileContractID::from([
                 9, 8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -857,8 +850,7 @@ mod tests {
         test_serialize_json(&revision, json_str);
     }
 
-    #[test]
-    fn test_serialize_storage_proof() {
+    async fn test_serialize_storage_proof() {
         let storage_proof = StorageProof {
             parent_id: contract_id!(
                 "b3633a1370a72002ae2a956d21e8d481c3a69e146633470cf625ecd83fdeaa24"
@@ -889,8 +881,7 @@ mod tests {
         test_serialize_json(&storage_proof, json_str);
     }
 
-    #[test]
-    fn test_serialize_transaction() {
+    async fn test_serialize_transaction() {
         let transaction = Transaction {
             siacoin_inputs: vec![SiacoinInput {
                 parent_id: siacoin_id!(
@@ -989,8 +980,7 @@ mod tests {
         test_serialize_json(&transaction, json_str);
     }
 
-    #[test]
-    fn test_transaction_id() {
+    async fn test_transaction_id() {
         let txn = Transaction::default();
         let id = txn.id();
         assert_eq!(
@@ -999,8 +989,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_transaction_whole_sig_hash() {
+    async fn test_transaction_whole_sig_hash() {
         let cs = ChainState {
             state: State {
                 index: ChainIndex {
@@ -1122,8 +1111,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_transaction_partial_sig_hash() {
+    async fn test_transaction_partial_sig_hash() {
         let cs = ChainState {
             state: State {
                 index: ChainIndex {
@@ -1271,8 +1259,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_standard_unlockhash() {
+    async fn test_standard_unlockhash() {
         let test_cases = vec![
             (
                 "80f637df83a93a6916d1b5c8bdbb061f967fb9fe8fe51ef4d97eeec73c6bfc394771e4a04f42",
@@ -1417,8 +1404,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_seed_standard_unlock_hash() {
+    async fn test_seed_standard_unlock_hash() {
         const PHRASE: &str =
             "song renew capable taxi follow sword more hybrid laptop dance unfair poem";
         let test_addresses = vec![
@@ -1511,8 +1497,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_file_contract_tax() {
+    async fn test_file_contract_tax() {
         struct TestCase {
             payout: Currency,
             prefork: Currency,
@@ -1724,5 +1709,6 @@ mod tests {
                 tc.payout
             );
         }
+    }
     }
 }

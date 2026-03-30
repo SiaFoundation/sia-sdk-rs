@@ -285,8 +285,8 @@ mod tests {
         assert_eq!(bytes.len(), 0, "leftover bytes for {value:?}");
     }
 
-    #[test]
-    fn test_numerics() {
+    cross_target_tests! {
+    async fn test_numerics() {
         test_roundtrip(1u8, vec![1]);
         test_roundtrip(2u16, vec![2, 0, 0, 0, 0, 0, 0, 0]);
         test_roundtrip(3u32, vec![3, 0, 0, 0, 0, 0, 0, 0]);
@@ -297,8 +297,7 @@ mod tests {
         test_roundtrip(-3i64, vec![253, 255, 255, 255, 255, 255, 255, 255]);
     }
 
-    #[test]
-    fn test_strings() {
+    async fn test_strings() {
         test_roundtrip(
             "hello".to_string(),
             vec![
@@ -312,14 +311,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_fixed_arrays() {
+    async fn test_fixed_arrays() {
         test_roundtrip([1u8, 2u8, 3u8], vec![1, 2, 3]);
         test_roundtrip([0u8; 4], vec![0, 0, 0, 0]);
     }
 
-    #[test]
-    fn test_vectors() {
+    async fn test_vectors() {
         test_roundtrip(
             vec![1u8, 2u8, 3u8],
             vec![
@@ -347,8 +344,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_nested() {
+    async fn test_nested() {
         test_roundtrip(
             vec![vec![1u8, 2u8], vec![3u8, 4u8]],
             vec![
@@ -359,5 +355,6 @@ mod tests {
                 3, 4, // second inner vec contents
             ],
         );
+    }
     }
 }

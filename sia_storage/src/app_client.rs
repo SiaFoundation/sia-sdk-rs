@@ -697,7 +697,9 @@ fn register_app_sig_hash(request_id: &str, ephemeral_key: &PublicKey) -> Hash256
         .into()
 }
 
-#[cfg(test)]
+// FIXME Alright - we need to abtract out a "HttpClient" trait that we can then mock to port these
+// tests to WASM. The httptest crate does not work in WASM.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use base64::engine::general_purpose::URL_SAFE;
     use base64::prelude::*;

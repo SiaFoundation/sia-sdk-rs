@@ -81,30 +81,30 @@ pub use specifier;
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_specifier() {
-        let spec = specifier!["hello"];
-        let expected = Specifier([
-            b'h', b'e', b'l', b'l', b'o', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ]);
-        assert_eq!(spec, expected);
-    }
+    cross_target_tests! {
+        async fn test_specifier() {
+            let spec = specifier!["hello"];
+            let expected = Specifier([
+                b'h', b'e', b'l', b'l', b'o', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ]);
+            assert_eq!(spec, expected);
+        }
 
-    #[test]
-    fn test_specifier_string() {
-        let test_cases = vec![
-            (specifier!["hello world"], "hello world"),
-            (specifier!["hello"], "hello"),
-            (
-                Specifier::new([
-                    b'h', b'e', b'l', b'l', b'o', 0, b'w', b'o', b'r', b'l', b'd', 0, 0, 0, 0, 0,
-                ]),
-                "hello\0world",
-            ),
-            (Specifier::new([0; 16]), ""),
-        ];
-        for (specifier, expected) in test_cases {
-            assert_eq!(specifier.to_string(), expected);
+        async fn test_specifier_string() {
+            let test_cases = vec![
+                (specifier!["hello world"], "hello world"),
+                (specifier!["hello"], "hello"),
+                (
+                    Specifier::new([
+                        b'h', b'e', b'l', b'l', b'o', 0, b'w', b'o', b'r', b'l', b'd', 0, 0, 0, 0, 0,
+                    ]),
+                    "hello\0world",
+                ),
+                (Specifier::new([0; 16]), ""),
+            ];
+            for (specifier, expected) in test_cases {
+                assert_eq!(specifier.to_string(), expected);
+            }
         }
     }
 }

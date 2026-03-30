@@ -850,8 +850,66 @@ mod tests {
         assert_eq!(deserialized, *obj);
     }
 
-    #[test]
-    fn test_serialize_siacoin_element() {
+    fn test_chain_state() -> ChainState {
+        ChainState {
+            state: State {
+                index: ChainIndex {
+                    height: 1,
+                    id: BlockID::default(),
+                },
+                prev_timestamps: [DateTime::UNIX_EPOCH; 11],
+                depth: BlockID::default(),
+                child_target: BlockID::default(),
+                siafund_pool: Currency::new(0),
+                oak_time: Duration::zero(),
+                oak_target: BlockID::default(),
+                foundation_primary_address: Address::new([0u8; 32]),
+                foundation_failsafe_address: Address::new([0u8; 32]),
+                total_work: Work::zero(),
+                difficulty: Work::zero(),
+                oak_work: Work::zero(),
+                elements: ElementAccumulator::default(),
+                attestations: 0,
+            },
+            network: Network {
+                name: "test".to_string(),
+                initial_coinbase: Currency::new(0),
+                minimum_coinbase: Currency::new(0),
+                initial_target: BlockID::default(),
+                block_interval: Duration::seconds(1),
+                maturity_delay: 0,
+                hardfork_dev_addr: HardforkDevAddr {
+                    height: 0,
+                    old_address: Address::new([0u8; 32]),
+                    new_address: Address::new([0u8; 32]),
+                },
+                hardfork_tax: HardforkTax { height: 10 },
+                hardfork_storage_proof: HardforkStorageProof { height: 0 },
+                hardfork_asic: HardforkASIC {
+                    height: 0,
+                    oak_time: Duration::zero(),
+                    oak_target: BlockID::default(),
+                },
+                hardfork_oak: HardforkOak {
+                    height: 0,
+                    fix_height: 0,
+                    genesis_timestamp: DateTime::UNIX_EPOCH,
+                },
+                hardfork_foundation: HardforkFoundation {
+                    height: 0,
+                    primary_address: Address::new([0u8; 32]),
+                    failsafe_address: Address::new([0u8; 32]),
+                },
+                hardfork_v2: HardforkV2 {
+                    allow_height: 0,
+                    require_height: 0,
+                },
+            },
+        }
+    }
+
+    cross_target_tests! {
+    async fn test_serialize_siacoin_element() {
         let se = SiacoinElement {
             id: SiacoinOutputID::default(),
             siacoin_output: SiacoinOutput {
@@ -872,8 +930,7 @@ mod tests {
         test_serialize_json(&se, json_str);
     }
 
-    #[test]
-    fn test_serialize_siafund_element() {
+    async fn test_serialize_siafund_element() {
         let se = SiafundElement {
             id: SiafundOutputID::default(),
             state_element: StateElement {
@@ -894,8 +951,7 @@ mod tests {
         test_serialize_json(&se, json_str);
     }
 
-    #[test]
-    fn test_serialize_file_contract_element() {
+    async fn test_serialize_file_contract_element() {
         let fce = FileContractElement {
             id: FileContractID::default(),
             state_element: StateElement {
@@ -936,8 +992,7 @@ mod tests {
         test_serialize_json(&fce, json_str);
     }
 
-    #[test]
-    fn test_serialize_file_contract() {
+    async fn test_serialize_file_contract() {
         let fc = FileContract {
             capacity: 0,
             filesize: 0,
@@ -969,8 +1024,7 @@ mod tests {
         test_serialize_json(&fc, json_str);
     }
 
-    #[test]
-    fn test_serialize_file_contract_revision() {
+    async fn test_serialize_file_contract_revision() {
         let fcr = FileContractRevision {
             parent: FileContractElement {
                 id: FileContractID::default(),
@@ -1034,8 +1088,7 @@ mod tests {
         test_serialize_json(&fcr, json_str);
     }
 
-    #[test]
-    fn test_serialize_file_contract_renewal() {
+    async fn test_serialize_file_contract_renewal() {
         let fcr = FileContractRenewal {
             new_contract: FileContract {
                 capacity: 0,
@@ -1096,8 +1149,7 @@ mod tests {
         test_serialize_json(&fcr, json_str);
     }
 
-    #[test]
-    fn test_serialize_storage_proof() {
+    async fn test_serialize_storage_proof() {
         let sp = StorageProof {
             proof_index: ChainIndexElement {
                 id: BlockID::default(),
@@ -1121,66 +1173,7 @@ mod tests {
         test_serialize_json(&sp, json_str);
     }
 
-    fn test_chain_state() -> ChainState {
-        ChainState {
-            state: State {
-                index: ChainIndex {
-                    height: 1,
-                    id: BlockID::default(),
-                },
-                prev_timestamps: [DateTime::UNIX_EPOCH; 11],
-                depth: BlockID::default(),
-                child_target: BlockID::default(),
-                siafund_pool: Currency::new(0),
-                oak_time: Duration::zero(),
-                oak_target: BlockID::default(),
-                foundation_primary_address: Address::new([0u8; 32]),
-                foundation_failsafe_address: Address::new([0u8; 32]),
-                total_work: Work::zero(),
-                difficulty: Work::zero(),
-                oak_work: Work::zero(),
-                elements: ElementAccumulator::default(),
-                attestations: 0,
-            },
-            network: Network {
-                name: "test".to_string(),
-                initial_coinbase: Currency::new(0),
-                minimum_coinbase: Currency::new(0),
-                initial_target: BlockID::default(),
-                block_interval: Duration::seconds(1),
-                maturity_delay: 0,
-                hardfork_dev_addr: HardforkDevAddr {
-                    height: 0,
-                    old_address: Address::new([0u8; 32]),
-                    new_address: Address::new([0u8; 32]),
-                },
-                hardfork_tax: HardforkTax { height: 10 },
-                hardfork_storage_proof: HardforkStorageProof { height: 0 },
-                hardfork_asic: HardforkASIC {
-                    height: 0,
-                    oak_time: Duration::zero(),
-                    oak_target: BlockID::default(),
-                },
-                hardfork_oak: HardforkOak {
-                    height: 0,
-                    fix_height: 0,
-                    genesis_timestamp: DateTime::UNIX_EPOCH,
-                },
-                hardfork_foundation: HardforkFoundation {
-                    height: 0,
-                    primary_address: Address::new([0u8; 32]),
-                    failsafe_address: Address::new([0u8; 32]),
-                },
-                hardfork_v2: HardforkV2 {
-                    allow_height: 0,
-                    require_height: 0,
-                },
-            },
-        }
-    }
-
-    #[test]
-    fn test_serialize_v2_file_contract_resolution() {
+    async fn test_serialize_v2_file_contract_resolution() {
         struct TestCase {
             resolution: ContractResolution,
             binary_str: String,
@@ -1308,8 +1301,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_file_contract_tax() {
+    async fn test_file_contract_tax() {
         struct TestCase {
             output_value: Currency,
             tax: Currency,
@@ -1447,8 +1439,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_attestation_sig_hash() {
+    async fn test_attestation_sig_hash() {
         let cs = test_chain_state();
         let a = Attestation {
             public_key: PublicKey::new([
@@ -1466,8 +1457,7 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_file_contract_sig_hash() {
+    async fn test_file_contract_sig_hash() {
         let cs = test_chain_state();
         let s = "{\"capacity\":15437388468662742744,\"filesize\":16009828729725979578,\"fileMerkleRoot\":\"2d3b2c7b78f04eb1b66ac467ae7831081f7b495a2964b943c2c750e70180785a\",\"proofHeight\":0,\"expirationHeight\":0,\"renterOutput\":{\"value\":\"2825068531000000000000000000000000\",\"address\":\"cf620149bcbde171fcd9611a32ba29e2e97687f3b1562c1fe14c504f642690c9d8f5ec3cbeaf\"},\"hostOutput\":{\"value\":\"0\",\"address\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"missedHostValue\":\"0\",\"totalCollateral\":\"0\",\"renterPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"hostPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"revisionNumber\":0,\"renterSignature\":\"bee650e82a5534269bef42be0dd9a0b0f6c465b31437567075275d2188c685b2b65ef0fc7f369c780a758786f480da4d55459a1d85215f64aa47db1e79b1b8de\",\"hostSignature\":\"c32cf921ee00344d76e96e6f2dd306bd9c21226c83bb2ac55ce69b8d991a2f2212f645341c720f2fd8a7c57edef9b32f26a2c29c55958a45fd5c0d56a2addae3\"}";
 
@@ -1479,8 +1469,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_contract_renewal_sig_hash() {
+    async fn test_contract_renewal_sig_hash() {
         let cs = test_chain_state();
         let s = "{\"finalRevision\":{\"capacity\":11959377077631068749,\"filesize\":10613077956865333006,\"fileMerkleRoot\":\"9482be576a5d68b6ad311b359b12070fae3df71fc0d2ec480a5ba8c3f4c9ad40\",\"proofHeight\":0,\"expirationHeight\":0,\"renterOutput\":{\"value\":\"107325855000000000000000000000000\",\"address\":\"cc590b0901f908ee76ea2c8497b9c29d7f2250db4427b7b1dfd8d5c0a368845c4a70d66c8998\"},\"hostOutput\":{\"value\":\"0\",\"address\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"missedHostValue\":\"0\",\"totalCollateral\":\"0\",\"renterPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"hostPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"revisionNumber\":18446744073709551615,\"renterSignature\":\"a71062c50866e8e834143340117efc49adbe7c8e50775c2ef6c2d8fd84470231928115e377288d588d93342946adbcbc83c5e3be01d4d22accf59c86f44ad523\",\"hostSignature\":\"a277c4b62d6ab7eead9d02c9e6243810baa0af9a8fef8b70b2f33df83fc8e67b94b2247b53c5e6d3a93a6197d41dd07652b75896757cf1dfeb059edca458de40\"},\"newContract\":{\"capacity\":2615073250361876210,\"filesize\":14611382285114970285,\"fileMerkleRoot\":\"5942d80cb6816da220a9576d62f3979b5e4f96b769cf785bcddf31698afb1432\",\"proofHeight\":0,\"expirationHeight\":0,\"renterOutput\":{\"value\":\"4046664893000000000000000000000000\",\"address\":\"41b74682d50aed617224d17162150c3854cc290b522c20d62260466ef13a95e212b7d9c6778b\"},\"hostOutput\":{\"value\":\"0\",\"address\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"missedHostValue\":\"0\",\"totalCollateral\":\"0\",\"renterPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"hostPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"revisionNumber\":0,\"renterSignature\":\"2614ae9d0b8300c98eadc1ffcab414298e30c678c0072359b1794623a04a68ef2474fbb1492071313b6f768946a52978b520c219a23649bfef9b9d0baabc7331\",\"hostSignature\":\"9c14a4f1428ad5bd72075c626fdf7dcf24143eda3a9cbecbc16ca751f0c88ee09e04a7f4f79718fb87df6debdd1d94d97bd00bcfa4fa77b3de582ad26eb45139\"},\"renterRollover\":\"3597839704000000000000000000000000\",\"hostRollover\":\"3099140907000000000000000000000000\",\"renterSignature\":\"4906067918dc6e7951c4e42b5b5bc1c3a3e3f02bddd10bf981275ccd0e8a5a067d35d4b5c2115256454490fed011e5c11ea35cb378eb6ada168b65d614515a44\",\"hostSignature\":\"5414a4c1e32f17b275148f3935a53b30cc30d1a0ff43e88f71e8308209282528a2942779638a6e2329314101e5ea79627d98b0f1b19830bf0ea89f670f7798bf\"}";
 
@@ -1492,8 +1481,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_input_sig_hash() {
+    async fn test_input_sig_hash() {
         let cs = test_chain_state();
         let s = "{\"siacoinInputs\":[{\"parent\":{\"id\":\"af88fb86ace93d500549ad5d3ccae9d75184c932d8b9f6b39b22dc1beb19cb2b\",\"stateElement\":{\"leafIndex\":17247661272366213787,\"merkleProof\":[\"419c0046c59819e4541a3810134dac5c975eb61cb12382c0fbad713257a9efd3\"]},\"siacoinOutput\":{\"value\":\"3088711336000000000000000000000000\",\"address\":\"c6b4adae9284845d1075bc33a68d281bf02ed406206f58a50d13191af7b6f617933bf733cd42\"},\"maturityHeight\":0},\"satisfiedPolicy\":{\"policy\":{\"type\":\"pk\",\"policy\":\"ed25519:e655ec65952c4953c904c9ee16961dfb02e8689f1f82fcfd9e387c8ea1104a2b\"},\"signatures\":[\"7ba834e5e33ca4ac7ad7dbd2b3bd42c7ae62db25263feb2a51777f5c8d5569b1eb28e349544689d3f96242a66d33dcdebeab4e5fa30c906fd2caaf83c16f3bfe\"]}}],\"siacoinOutputs\":[{\"value\":\"1597553234000000000000000000000000\",\"address\":\"bc99db1f50a653604797de23d535c9fbf73b493ab70089c7716c1e5c5fc2d0a578575d367eb0\"}],\"fileContracts\":[{\"capacity\":10874342648285931495,\"filesize\":13810078500867640614,\"fileMerkleRoot\":\"424b9304a9fccf94945ef14c6377060be59fb7d58ac8c952d67be05c67d863a2\",\"proofHeight\":0,\"expirationHeight\":0,\"renterOutput\":{\"value\":\"1556050983000000000000000000000000\",\"address\":\"4505c61036d22e5075c676ea5906a645eb1cfa9a6a53d933ecfa198654b7d3f0fe74bdfbdaef\"},\"hostOutput\":{\"value\":\"0\",\"address\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"missedHostValue\":\"0\",\"totalCollateral\":\"0\",\"renterPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"hostPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"revisionNumber\":18446744073709551615,\"renterSignature\":\"84d8091517ff09f11df171b21a1414200ea7074664c7e27d9de13c44bbb6cbc0de6de5783c6955065a77035bb2d92974fb5f11aa0dae9ac50dbddbb17d63d7fc\",\"hostSignature\":\"2fad832ddb5d6b11893851df4ecbd9a4b512a7a425dda67ac0da1604a0e8781d04e29cef928f31be706e6fc81089048ea87366449450e3da941a0b04487582f2\"}],\"fileContractRevisions\":[{\"parent\":{\"id\":\"22e9e60d81478b36fc44ee67b8d8ba874d196fc6e9c56bfacd5fcecdde39b736\",\"stateElement\":{\"leafIndex\":12023426945600912207,\"merkleProof\":[\"a0efcbdbe1f8e1b4fb6615eccac5948303d5a2c5afedda0baf658e5bbe41896e\"]},\"v2FileContract\":{\"capacity\":10776473623907646048,\"filesize\":7973631990249562263,\"fileMerkleRoot\":\"acd56f68224de7828076cb53f3476413819c8c78dde2461422c5a96644fba623\",\"proofHeight\":0,\"expirationHeight\":0,\"renterOutput\":{\"value\":\"842083234000000000000000000000000\",\"address\":\"150084c56cd2bc38e80220eb69a485b5c298ee3c9f7fcc046c6b975ea8fb70f9098afe1ad85b\"},\"hostOutput\":{\"value\":\"0\",\"address\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"missedHostValue\":\"0\",\"totalCollateral\":\"0\",\"renterPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"hostPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"revisionNumber\":18446744073709551615,\"renterSignature\":\"94dd2555507b81cfd927b36891a9b37465c00cb46a61d96ede5f760f1c5a5cadabb8c7719adb5cb088eec92d9a9c52497973fc2b5d0c54a2dfa04e35490e25b5\",\"hostSignature\":\"d66133988a412e5542535e9a6c3815396c46020a4ad693074d6681049b39c438af9dd395478566e193263e8acfa915848ec23ff47a95eca51bac4ede2a92f634\"}},\"revision\":{\"capacity\":6034084714889303577,\"filesize\":12020548219123782123,\"fileMerkleRoot\":\"2ce9c19107be51ab776221d61300c6c1aa32c2195246473eb15d7db12ec0943f\",\"proofHeight\":0,\"expirationHeight\":0,\"renterOutput\":{\"value\":\"2247488091000000000000000000000000\",\"address\":\"6f7add99e7eba38429b101ff31190aa3a148c0087a3ad775790a8e01a90f71a94ca9ba2ffc71\"},\"hostOutput\":{\"value\":\"0\",\"address\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"missedHostValue\":\"0\",\"totalCollateral\":\"0\",\"renterPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"hostPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"revisionNumber\":18446744073709551615,\"renterSignature\":\"7fb556fef4bfea24f7b9472b1b9874be600795da4535107d3910085a3e34c5818a60bd77d0bcbd92e6dbec604f1b67d827ba02072e83abfac217a2294157c53f\",\"hostSignature\":\"77664782e2c1dd42a3669f11f0519630561a4c0b48552c89bb74f79367f21fd73b6bc5ea112502f81bbc9e3df3b916158486c2e17145b95e5307ca56fb37fc6c\"}}],\"fileContractResolutions\":[{\"parent\":{\"id\":\"6b8527472e1143e07099e3f516f56ac2b46860f13652582b2abb6fffeac1f5d9\",\"stateElement\":{\"leafIndex\":14811616376775388856,\"merkleProof\":[\"bf4325ff8d463ba3bf62e9f697911a4bf8038971298440f4a2c5e010730ac594\"]},\"v2FileContract\":{\"capacity\":6642268570724229223,\"filesize\":15896577861535581162,\"fileMerkleRoot\":\"6e19255c03515dbbee1280f8e13e7378810243042a01a439849c0ddbc0fd7eac\",\"proofHeight\":0,\"expirationHeight\":0,\"renterOutput\":{\"value\":\"2825432965000000000000000000000000\",\"address\":\"2ca7f5d7cbd79fbf4b5f2f5a4ead652342dd0413e39e9406b2935c53162d9347359d0477b320\"},\"hostOutput\":{\"value\":\"0\",\"address\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"missedHostValue\":\"0\",\"totalCollateral\":\"0\",\"renterPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"hostPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"revisionNumber\":18446744073709551615,\"renterSignature\":\"169330702f83d499de6bff18cc7c2474785e02b8101baf8427407e9f6cc3ee6e7768b7e6ef929a6510c1b0ac1c24eab8090af84c27c772c80201fe93da535e17\",\"hostSignature\":\"29bf20483727c327e36c3085a87d91ad3072ca82f5d62da1d9895980320ab7a65d133bb147d55bd97c9f5a36a85afbfb8d9209ac82afaca18df64054394f0f08\"}},\"type\":\"expiration\",\"resolution\":{}},{\"parent\":{\"id\":\"2dd1bedefe81f2914ddf9f61c9d714d134d0af7a75d1c1322474d5e8eea342f2\",\"stateElement\":{\"leafIndex\":11863728860462350395,\"merkleProof\":[\"91a391d6104f76e439580a90f56fec3c07d01ad5535315416243ae6d8e17289d\"]},\"v2FileContract\":{\"capacity\":3158332065060007910,\"filesize\":11561455863259225844,\"fileMerkleRoot\":\"b4db7aa14dc851a348e0981c3ed1161dc286bca85424da42609b3c12f5f31ee6\",\"proofHeight\":0,\"expirationHeight\":0,\"renterOutput\":{\"value\":\"2522086295000000000000000000000000\",\"address\":\"36e4ed130d7a9f0cbcdd0ed6fa78738dcd9eb6e779fc7501dd06f7cf968ce215e33778f0c79e\"},\"hostOutput\":{\"value\":\"0\",\"address\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"missedHostValue\":\"0\",\"totalCollateral\":\"0\",\"renterPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"hostPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"revisionNumber\":18446744073709551615,\"renterSignature\":\"ff79f46439dd108ebe2c42434a11b916f7dee6f018798435b3c34a92ca121d3e21c0282d4efba4982a36e2cfe146e3c8ee31ba545911857a93d947faef543e2f\",\"hostSignature\":\"7f45f2f977e574ea980a0842f48d216b6680d129a98056cafa7f108487457bde8e0cd1cc5d74ba3187170f214115827bc961f0163203c479c3d4ab7e19f3d31f\"}},\"type\":\"storageProof\",\"resolution\":{\"proofIndex\":{\"id\":\"90da2d2ed68b716be7617b8c35c713ad66584a1dbf564cc44c09b6f3815e1d79\",\"stateElement\":{\"leafIndex\":1814794313179331469,\"merkleProof\":[\"8a3990c651140b9486c09559c54623a4e8ca5c2705a7de2b0b54de6d97e6d01d\"]},\"chainIndex\":{\"height\":17891680254001945312,\"id\":\"e5b6bf4a036b93d8a178ffe86ee209502a0ff3d45d2b3216052267b7a5561d21\"}},\"leaf\":\"c5e078423107b4d2c0ab10509404c525343e96eff45ea6353039194470aec04e3994d52cd2d9a6cbbd3709387207f59f063bec4e7266f6fa0c6dfcf7d7634a1c\",\"proof\":[\"f900e345a663fb6ec9eca5721a81e25fae111e50f38aeb76fd6258f2d4cecd86\"]}},{\"parent\":{\"id\":\"49d9f6a8cfae42cd9cc4d792b1799ab2752be164cd86ce5e474fe3731c31b492\",\"stateElement\":{\"leafIndex\":376572300431080610,\"merkleProof\":[\"b2945edc55afbc2344d201baaed373fc0a737c00216186c5e724c3e7d681a705\"]},\"v2FileContract\":{\"capacity\":14165001982102687892,\"filesize\":5514344128076756235,\"fileMerkleRoot\":\"3bcf704f911a925eea72629d71352e1f402fc7d3b632f0df6e203089a6fd9092\",\"proofHeight\":0,\"expirationHeight\":0,\"renterOutput\":{\"value\":\"1548819653000000000000000000000000\",\"address\":\"c1f4c5d401041e4eb68455283ce6705f2dcdc5ac4d700f7dc233b13f91bbfa986aec255c62bb\"},\"hostOutput\":{\"value\":\"0\",\"address\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"missedHostValue\":\"0\",\"totalCollateral\":\"0\",\"renterPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"hostPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"revisionNumber\":18446744073709551615,\"renterSignature\":\"ac99ce31b11341a8835e2666eed317b0042d45ce6ccb52a11a3d2d6c7ec050f432ea8e1fef95b3481da64c5b2b3a772459db094a68d4a3cf52f2e928f3dd7b55\",\"hostSignature\":\"c8a097593157a24390c5fc77bed87c54355e03572ff2b49137801c51ac55ff092141dfb46505808fa97ee22e839d682f9de7f595896338ebf1c4e1885067747c\"}},\"type\":\"renewal\",\"resolution\":{\"finalRevision\":{\"capacity\":6539007356562521256,\"filesize\":17290867016333557028,\"fileMerkleRoot\":\"ebaa3f96d6572cc3caf3036468ddf52ef6fbfcc3eacef4cffd6eabcd43d1b91a\",\"proofHeight\":0,\"expirationHeight\":0,\"renterOutput\":{\"value\":\"2415984205000000000000000000000000\",\"address\":\"1300755d91ac9d739e168f5e54eb2aba9aa0c29cc29142ab4babf0e92be83f17cde6a5ff4ed5\"},\"hostOutput\":{\"value\":\"0\",\"address\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"missedHostValue\":\"0\",\"totalCollateral\":\"0\",\"renterPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"hostPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"revisionNumber\":18446744073709551615,\"renterSignature\":\"a1489731bddba377854020ae706127938ce95c617d22db29b9f9aa331ee27dbfb625b67b3418647b40d4ab4f0075a69a10d66840a3cec4b3c86112ce7e648761\",\"hostSignature\":\"4181fc7c46f09d0124c365a1aeba76f906d99afb3f49d6637f54fc4e2746776a8f3aa343bc823c705c11a581a87ddb918d9bccec0cb2deb46aa4627cf5cf3e80\"},\"newContract\":{\"capacity\":2724141139581307456,\"filesize\":2682841277844293416,\"fileMerkleRoot\":\"62ea0682d909fb36df6557ea2d8174b20db44c0ad1ed692b7b11b40893147e36\",\"proofHeight\":0,\"expirationHeight\":0,\"renterOutput\":{\"value\":\"4004958805000000000000000000000000\",\"address\":\"cc6a403530f6da43fb262723a9536a96666bd74075d64dd7d0eb65df5c494c24b115cdee00c5\"},\"hostOutput\":{\"value\":\"0\",\"address\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"missedHostValue\":\"0\",\"totalCollateral\":\"0\",\"renterPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"hostPublicKey\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"revisionNumber\":0,\"renterSignature\":\"ed98b9027f795d3eeafac4928963a55189066fa8a447fd70041d498d6d1072ad5247d36cd657e1f5163889f14591e89159daca5c8c3e645af9b26ac782990cfc\",\"hostSignature\":\"841fff506bfbdc5c9f6dcda6de472dd6bc7e73e5f0974e0bc979fdcc24059246590ef2f6af2b75a786c27f78f43a27e5da91b320736a5cbb7bb15be8375e372e\"},\"renterRollover\":\"3037399761000000000000000000000000\",\"hostRollover\":\"2211277679000000000000000000000000\",\"renterSignature\":\"745f21dae4f1fba04c2d9b09ae69a9e5f096cf26707447fb3b1c17e486b71589b7dc5fda40ef08eac2122b51606b2fbe84211c5f6507631456ac0dd0ee164ef3\",\"hostSignature\":\"0510b572606c3144a4472538b722c2420165efda406b92b74457459d5c5b90a622490d7a70bd7e5e40b031fadd9d3edd90c13226869d8d358512aab5b0145a11\"}}],\"attestations\":[{\"publicKey\":\"ed25519:269ba257f490941f5fcfde5313e326fa205a1a8d91715d91f892581d7282bf21\",\"key\":\"629109f07df18f46\",\"value\":\"Adg+GFWhwVo=\",\"signature\":\"d44eb9a001803f52814adae65da4dc195d760e7afb00b9593716e54a116db7b98ad8e774e101098d31abca3b389a01a08438d7a33508f1f665d2d48f4524509d\"}],\"minerFee\":\"2208027072000000000000000000000000\"}";
         let txn: Transaction = serde_json::from_str(s).unwrap();
@@ -1504,8 +1492,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_transaction_serialization() {
+    async fn test_transaction_serialization() {
         let txn = Transaction {
             siacoin_inputs: vec![],
             siacoin_outputs: vec![],
@@ -1567,5 +1554,6 @@ mod tests {
             &txn,
             "{\"siacoinInputs\":[{\"parent\":{\"stateElement\":{\"leafIndex\":12312413,\"merkleProof\":[\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"]},\"id\":\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\",\"siacoinOutput\":{\"value\":\"100\",\"address\":\"8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8cdf32abee86f0\"},\"maturityHeight\":0},\"satisfiedPolicy\":{\"policy\":{\"type\":\"pk\",\"policy\":\"ed25519:aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"},\"signatures\":[\"aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422aefb1120a3f69fc8293caeb0bd36b4637d6fdf12f2f60494a2875358552f1422\"]}}],\"siacoinOutputs\":[{\"value\":\"100\",\"address\":\"8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8cdf32abee86f0\"}],\"minerFee\":\"123581\"}",
         );
+    }
     }
 }

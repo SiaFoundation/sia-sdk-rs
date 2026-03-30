@@ -344,8 +344,8 @@ impl From<ParseIntError> for CurrencyParseError {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_from_str() {
+    cross_target_tests! {
+    async fn test_from_str() {
         let test_cases = vec![
             ("1 H", Currency::new(1)),
             ("100 H", Currency::new(100)),
@@ -396,8 +396,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_encode_v1() {
+    async fn test_encode_v1() {
         let test_cases = vec![
             (Currency::new(0), vec![0, 0, 0, 0, 0, 0, 0, 0]),
             (Currency::new(10000), vec![2, 0, 0, 0, 0, 0, 0, 0, 39, 16]),
@@ -434,8 +433,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_json_serialize_currency() {
+    async fn test_json_serialize_currency() {
         let currency_num = 120282366920938463463374607431768211455;
         let currency = Currency::new(currency_num);
 
@@ -444,5 +442,6 @@ mod tests {
         let currency_deserialized: Currency = serde_json::from_str(&currency_serialized).unwrap();
         assert_eq!(currency_serialized, format!("\"{currency_num}\""));
         assert_eq!(currency_deserialized, currency);
+    }
     }
 }

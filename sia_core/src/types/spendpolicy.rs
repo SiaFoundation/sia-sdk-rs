@@ -475,8 +475,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_address() {
+    cross_target_tests! {
+    async fn test_address() {
         let test_cases = vec![
             (
                 SpendPolicy::PublicKey(PublicKey::new([
@@ -529,8 +529,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_opaque_policy() {
+    async fn test_opaque_policy() {
         let test_cases = vec![
             SpendPolicy::above(100),
             SpendPolicy::after(DateTime::from_timestamp_secs(100).unwrap()),
@@ -589,8 +588,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_policy_encoding() {
+    async fn test_policy_encoding() {
         let test_cases = vec![
             (
                 SpendPolicy::above(100),
@@ -681,8 +679,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_satisfied_policy_encoding() {
+    async fn test_satisfied_policy_encoding() {
         struct TestCase {
             policy: SatisfiedPolicy,
             json: &'static str,
@@ -756,5 +753,6 @@ mod tests {
             let deserialized: SatisfiedPolicy = serde_json::from_str(tc.json).unwrap();
             assert_eq!(deserialized, tc.policy, "json deserialization failed");
         }
+    }
     }
 }

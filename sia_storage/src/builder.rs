@@ -217,11 +217,12 @@ mod test {
     use crate::app_id;
 
     use super::*;
+    use sia_core::cross_target_tests;
     use sia_core::hash_256;
     use sia_core::types::Hash256;
 
-    #[test]
-    fn test_app_key_derivation_golden() {
+    cross_target_tests! {
+    async fn test_app_key_derivation_golden() {
         const MNEMONIC: &str =
             "glare own entire dish exact open theme family harsh room scrap rose";
         const APP_ID: AppID =
@@ -238,5 +239,6 @@ mod test {
         let derived_app_key =
             derive_app_key(MNEMONIC, &APP_ID, &SHARED_SECRET).expect("derivation failed");
         assert_eq!(derived_app_key, expected_app_key);
+    }
     }
 }

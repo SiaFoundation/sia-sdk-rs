@@ -24,7 +24,6 @@ hex = "0.4.3"
 num-bigint = "0.4.6"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }
 num-traits = "0.2.19"
-rayon = "1.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.10.9"
@@ -40,7 +39,7 @@ tokio = { version = "1.50.0", features = ["macros", "rt", "sync", "io-util", "ti
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1.50.0", features = ["macros", "rt", "sync", "io-util"] }
 
-[dev-dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
 tokio = { version = "1.50.0", features = [
     "macros",
@@ -49,6 +48,11 @@ tokio = { version = "1.50.0", features = [
     "io-util",
 ] }
 rand = "0.10.0"
+getrandom = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [[bench]]
 name = "merkle_root"

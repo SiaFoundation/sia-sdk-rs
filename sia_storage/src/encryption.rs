@@ -79,10 +79,10 @@ pub struct CipherReader<R: AsyncRead> {
 }
 
 impl<R: AsyncRead> CipherReader<R> {
-    pub fn new(inner: R, key: EncryptionKey, offset: usize) -> Self {
+    pub fn new(inner: R, key: EncryptionKey, offset: u64) -> Self {
         Self {
             inner,
-            cipher: Chacha20Cipher::new(key, offset as u64),
+            cipher: Chacha20Cipher::new(key, offset),
         }
     }
 }
@@ -112,10 +112,10 @@ pub struct CipherWriter<W: AsyncWrite> {
 }
 
 impl<W: AsyncWrite + Unpin> CipherWriter<W> {
-    pub fn new(inner: W, key: EncryptionKey, offset: usize) -> Self {
+    pub fn new(inner: W, key: EncryptionKey, offset: u64) -> Self {
         Self {
             inner,
-            cipher: Chacha20Cipher::new(key, offset as u64),
+            cipher: Chacha20Cipher::new(key, offset),
             buf: Vec::new(),
             buf_pos: 0,
         }
@@ -260,13 +260,22 @@ impl StreamCipher for Chacha20Cipher {
 
 #[cfg(test)]
 mod test {
-    use rand::Rng;
-    use rayon::prelude::*;
+    use sia_core::cross_target_tests;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use sia_core::rhp4::SECTOR_SIZE;
 
     use super::*;
+
+    fn random_bytes(buf: &mut [u8]) {
+        getrandom::fill(buf).unwrap();
+    }
+
+    fn random_key() -> EncryptionKey {
+        let mut key = [0u8; 32];
+        getrandom::fill(&mut key).unwrap();
+        EncryptionKey::from(key)
+    }
 
     fn encrypt_shards(
         key: &EncryptionKey,
@@ -274,106 +283,9 @@ mod test {
         offset: usize,
         shards: &mut Vec<Vec<u8>>,
     ) {
-        shards.par_iter_mut().enumerate().for_each(|(i, shard)| {
+        shards.iter_mut().enumerate().for_each(|(i, shard)| {
             encrypt_shard(key, shard_start + i as u8, offset, shard);
         });
-    }
-
-    #[test]
-    fn test_encrypt_sector_roundtrip() {
-        let key = EncryptionKey::from([1u8; 32]);
-
-        let mut sector = vec![0u8; SECTOR_SIZE];
-        rand::rng().fill_bytes(&mut sector);
-
-        let original = sector.clone();
-        encrypt_shard(&key, 0, 0, &mut sector);
-        assert_ne!(sector, original);
-        encrypt_shard(&key, 0, 0, &mut sector);
-        assert_eq!(sector, original);
-    }
-
-    #[test]
-    fn test_encrypt_shards() {
-        let key = EncryptionKey::from([1u8; 32]);
-        let mut shards = vec![vec![1, 2, 3], vec![4, 5, 6]];
-
-        // encrypt
-        encrypt_shards(&key, 0, 0, &mut shards);
-        assert_eq!(shards[0], vec![136, 154, 188]);
-        assert_eq!(shards[1], vec![70, 216, 180]);
-
-        // decrypt
-        encrypt_shards(&key, 0, 0, &mut shards);
-        assert_eq!(shards[0], vec![1, 2, 3]);
-        assert_eq!(shards[1], vec![4, 5, 6]);
-
-        // encrypt with offset
-        encrypt_shards(&key, 0, 100, &mut shards);
-        assert_eq!(shards[0], vec![6, 194, 192]);
-        assert_eq!(shards[1], vec![236, 188, 165]);
-
-        // decrypt with offset
-        encrypt_shards(&key, 0, 100, &mut shards);
-        assert_eq!(shards[0], vec![1, 2, 3]);
-        assert_eq!(shards[1], vec![4, 5, 6]);
-    }
-
-    #[tokio::test]
-    async fn test_cipher_reader_writer() {
-        let key = EncryptionKey::from([1u8; 32]);
-        let data = b"lorem ipsum dolor sit amet, consectetur adipiscing elit";
-
-        for offset in [0, 10, u32::MAX as usize * 64 - 10, u32::MAX as usize * 64] {
-            let mut reader = CipherReader::new(data.as_ref(), key.clone(), offset);
-            let mut cipher_text = vec![0u8; data.len()];
-            reader.read_exact(&mut cipher_text).await.unwrap();
-            assert_ne!(cipher_text, data);
-
-            let mut writer = CipherWriter::new(Vec::new(), key.clone(), offset);
-            writer.write_all(&cipher_text).await.unwrap();
-            let plaintext = writer.inner;
-            assert_eq!(plaintext, data);
-        }
-    }
-
-    // Direct port of Go SDK's sdk/encrypt_test.go:TestEncryptRoundtrip
-    #[tokio::test]
-    async fn test_encrypt_roundtrip() {
-        const MAX_BYTES_PER_NONCE: usize = u32::MAX as usize * 64;
-
-        let mut data = [0u8; 4096];
-        rand::rng().fill_bytes(&mut data);
-
-        let key = EncryptionKey::from(rand::random::<[u8; 32]>());
-
-        for offset in [
-            0,
-            16,
-            31,
-            63,
-            64,
-            96,
-            128,
-            2048,
-            4096,
-            MAX_BYTES_PER_NONCE - 127,
-            MAX_BYTES_PER_NONCE - 128,
-            MAX_BYTES_PER_NONCE - 63,
-            MAX_BYTES_PER_NONCE - 64,
-            MAX_BYTES_PER_NONCE,
-            2 * MAX_BYTES_PER_NONCE,
-        ] {
-            let mut reader = CipherReader::new(data.as_ref(), key.clone(), offset);
-            let mut ciphertext = vec![0u8; data.len()];
-            reader.read_exact(&mut ciphertext).await.unwrap();
-
-            let mut writer = CipherWriter::new(Vec::new(), key.clone(), offset);
-            writer.write_all(&ciphertext).await.unwrap();
-            let plaintext = writer.inner;
-
-            assert_eq!(plaintext, data, "roundtrip failed at offset {offset}");
-        }
     }
 
     /// A writer that accepts at most `max_bytes_per_write` bytes per poll_write
@@ -419,11 +331,9 @@ mod test {
         ) -> Poll<std::io::Result<usize>> {
             self.call_count += 1;
             if self.call_count % 2 == 1 {
-                // Odd calls return Pending
                 cx.waker().wake_by_ref();
                 Poll::Pending
             } else {
-                // Even calls succeed
                 self.inner.extend_from_slice(buf);
                 Poll::Ready(Ok(buf.len()))
             }
@@ -438,87 +348,178 @@ mod test {
         }
     }
 
-    /// Tests that CipherWriter produces correct output when the inner writer
-    /// only accepts a few bytes at a time (short writes).
-    #[tokio::test]
-    async fn test_cipher_writer_short_writes() {
-        let key = EncryptionKey::from(rand::random::<[u8; 32]>());
-        let mut data = vec![0u8; 4096];
-        rand::rng().fill_bytes(&mut data);
+    cross_target_tests! {
+        async fn test_encrypt_sector_roundtrip() {
+            let key = EncryptionKey::from([1u8; 32]);
 
-        // Encrypt with CipherReader
-        let mut reader = CipherReader::new(data.as_slice(), key.clone(), 0);
-        let mut ciphertext = vec![0u8; data.len()];
-        reader.read_exact(&mut ciphertext).await.unwrap();
+            let mut sector = vec![0u8; SECTOR_SIZE];
+            random_bytes(&mut sector);
 
-        // Decrypt with CipherWriter wrapping a ShortWriter that only accepts
-        // small chunks, forcing write_all to retry with remaining bytes.
-        for max_bytes in [1, 7, 13, 31, 64, 100, 512] {
-            let short = ShortWriter {
-                inner: Vec::new(),
-                max_bytes_per_write: max_bytes,
-            };
-            let mut writer = CipherWriter::new(short, key.clone(), 0);
-            writer.write_all(&ciphertext).await.unwrap();
-            writer.flush().await.unwrap();
-            assert_eq!(
-                writer.inner.inner, data,
-                "short write failed with max_bytes={max_bytes}"
-            );
+            let original = sector.clone();
+            encrypt_shard(&key, 0, 0, &mut sector);
+            assert_ne!(sector, original);
+            encrypt_shard(&key, 0, 0, &mut sector);
+            assert_eq!(sector, original);
         }
-    }
 
-    /// Tests that CipherWriter produces correct output when the inner writer
-    /// returns Poll::Pending on alternating calls, simulating tokio::fs::File
-    /// behavior that caused the original decryption bug.
-    #[tokio::test]
-    async fn test_cipher_writer_pending_writes() {
-        let key = EncryptionKey::from(rand::random::<[u8; 32]>());
-        let mut data = vec![0u8; 4096];
-        rand::rng().fill_bytes(&mut data);
+        async fn test_encrypt_shards() {
+            let key = EncryptionKey::from([1u8; 32]);
+            let mut shards = vec![vec![1, 2, 3], vec![4, 5, 6]];
 
-        // Encrypt
-        let mut reader = CipherReader::new(data.as_slice(), key.clone(), 0);
-        let mut ciphertext = vec![0u8; data.len()];
-        reader.read_exact(&mut ciphertext).await.unwrap();
+            // encrypt
+            encrypt_shards(&key, 0, 0, &mut shards);
+            assert_eq!(shards[0], vec![136, 154, 188]);
+            assert_eq!(shards[1], vec![70, 216, 180]);
 
-        // Decrypt through a writer that returns Pending every other call
-        let pending = PendingWriter {
-            inner: Vec::new(),
-            call_count: 0,
-        };
-        let mut writer = CipherWriter::new(pending, key.clone(), 0);
-        writer.write_all(&ciphertext).await.unwrap();
-        writer.flush().await.unwrap();
-        assert_eq!(writer.inner.inner, data);
-    }
+            // decrypt
+            encrypt_shards(&key, 0, 0, &mut shards);
+            assert_eq!(shards[0], vec![1, 2, 3]);
+            assert_eq!(shards[1], vec![4, 5, 6]);
 
-    /// Tests that CipherWriter handles combined short writes + Pending at
-    /// various offsets (exercises nonce rotation under adversarial I/O).
-    #[tokio::test]
-    async fn test_cipher_writer_short_writes_with_offset() {
-        const MAX_BYTES_PER_NONCE: usize = u32::MAX as usize * 64;
+            // encrypt with offset
+            encrypt_shards(&key, 0, 100, &mut shards);
+            assert_eq!(shards[0], vec![6, 194, 192]);
+            assert_eq!(shards[1], vec![236, 188, 165]);
 
-        let key = EncryptionKey::from(rand::random::<[u8; 32]>());
-        let mut data = vec![0u8; 4096];
-        rand::rng().fill_bytes(&mut data);
+            // decrypt with offset
+            encrypt_shards(&key, 0, 100, &mut shards);
+            assert_eq!(shards[0], vec![1, 2, 3]);
+            assert_eq!(shards[1], vec![4, 5, 6]);
+        }
 
-        for offset in [0, 64, 2048, MAX_BYTES_PER_NONCE - 64, MAX_BYTES_PER_NONCE] {
-            let mut reader = CipherReader::new(data.as_slice(), key.clone(), offset);
+        async fn test_cipher_reader_writer() {
+            let key = EncryptionKey::from([1u8; 32]);
+            let data = b"lorem ipsum dolor sit amet, consectetur adipiscing elit";
+
+            for offset in [0, 10, u32::MAX as u64 * 64 - 10, u32::MAX as u64 * 64] {
+                let mut reader = CipherReader::new(data.as_ref(), key.clone(), offset);
+                let mut cipher_text = vec![0u8; data.len()];
+                reader.read_exact(&mut cipher_text).await.unwrap();
+                assert_ne!(cipher_text, data);
+
+                let mut writer = CipherWriter::new(Vec::new(), key.clone(), offset);
+                writer.write_all(&cipher_text).await.unwrap();
+                let plaintext = writer.inner;
+                assert_eq!(plaintext, data);
+            }
+        }
+
+        // Direct port of Go SDK's sdk/encrypt_test.go:TestEncryptRoundtrip
+        async fn test_encrypt_roundtrip() {
+            const MAX_BYTES_PER_NONCE: u64 = u32::MAX as u64 * 64;
+
+            let mut data = [0u8; 4096];
+            random_bytes(&mut data);
+
+            let key = random_key();
+
+            for offset in [
+                0,
+                16,
+                31,
+                63,
+                64,
+                96,
+                128,
+                2048,
+                4096,
+                MAX_BYTES_PER_NONCE - 127,
+                MAX_BYTES_PER_NONCE - 128,
+                MAX_BYTES_PER_NONCE - 63,
+                MAX_BYTES_PER_NONCE - 64,
+                MAX_BYTES_PER_NONCE,
+                2 * MAX_BYTES_PER_NONCE,
+            ] {
+                let mut reader = CipherReader::new(data.as_ref(), key.clone(), offset);
+                let mut ciphertext = vec![0u8; data.len()];
+                reader.read_exact(&mut ciphertext).await.unwrap();
+
+                let mut writer = CipherWriter::new(Vec::new(), key.clone(), offset);
+                writer.write_all(&ciphertext).await.unwrap();
+                let plaintext = writer.inner;
+
+                assert_eq!(plaintext, data, "roundtrip failed at offset {offset}");
+            }
+        }
+        /// Tests that CipherWriter produces correct output when the inner writer
+        /// only accepts a few bytes at a time (short writes).
+        async fn test_cipher_writer_short_writes() {
+            let key = random_key();
+            let mut data = vec![0u8; 4096];
+            random_bytes(&mut data);
+
+            // Encrypt with CipherReader
+            let mut reader = CipherReader::new(data.as_slice(), key.clone(), 0);
             let mut ciphertext = vec![0u8; data.len()];
             reader.read_exact(&mut ciphertext).await.unwrap();
 
-            let short = ShortWriter {
+            // Decrypt with CipherWriter wrapping a ShortWriter that only accepts
+            // small chunks, forcing write_all to retry with remaining bytes.
+            for max_bytes in [1, 7, 13, 31, 64, 100, 512] {
+                let short = ShortWriter {
+                    inner: Vec::new(),
+                    max_bytes_per_write: max_bytes,
+                };
+                let mut writer = CipherWriter::new(short, key.clone(), 0);
+                writer.write_all(&ciphertext).await.unwrap();
+                writer.flush().await.unwrap();
+                assert_eq!(
+                    writer.inner.inner, data,
+                    "short write failed with max_bytes={max_bytes}"
+                );
+            }
+        }
+
+        /// Tests that CipherWriter produces correct output when the inner writer
+        /// returns Poll::Pending on alternating calls, simulating tokio::fs::File
+        /// behavior that caused the original decryption bug.
+        async fn test_cipher_writer_pending_writes() {
+            let key = random_key();
+            let mut data = vec![0u8; 4096];
+            random_bytes(&mut data);
+
+            // Encrypt
+            let mut reader = CipherReader::new(data.as_slice(), key.clone(), 0);
+            let mut ciphertext = vec![0u8; data.len()];
+            reader.read_exact(&mut ciphertext).await.unwrap();
+
+            // Decrypt through a writer that returns Pending every other call
+            let pending = PendingWriter {
                 inner: Vec::new(),
-                max_bytes_per_write: 37, // prime-sized to misalign with blocks
+                call_count: 0,
             };
-            let mut writer = CipherWriter::new(short, key.clone(), offset);
+            let mut writer = CipherWriter::new(pending, key.clone(), 0);
             writer.write_all(&ciphertext).await.unwrap();
             writer.flush().await.unwrap();
-            assert_eq!(
-                writer.inner.inner, data,
-                "short write + offset failed at offset={offset}"
-            );
+            assert_eq!(writer.inner.inner, data);
+        }
+
+        /// Tests that CipherWriter handles combined short writes + Pending at
+        /// various offsets (exercises nonce rotation under adversarial I/O).
+        async fn test_cipher_writer_short_writes_with_offset() {
+            const MAX_BYTES_PER_NONCE: u64 = u32::MAX as u64 * 64;
+
+            let key = random_key();
+            let mut data = vec![0u8; 4096];
+            random_bytes(&mut data);
+
+            for offset in [0, 64, 2048, MAX_BYTES_PER_NONCE - 64, MAX_BYTES_PER_NONCE] {
+                let mut reader = CipherReader::new(data.as_slice(), key.clone(), offset);
+                let mut ciphertext = vec![0u8; data.len()];
+                reader.read_exact(&mut ciphertext).await.unwrap();
+
+                let short = ShortWriter {
+                    inner: Vec::new(),
+                    max_bytes_per_write: 37, // prime-sized to misalign with blocks
+                };
+                let mut writer = CipherWriter::new(short, key.clone(), offset);
+                writer.write_all(&ciphertext).await.unwrap();
+                writer.flush().await.unwrap();
+                assert_eq!(
+                    writer.inner.inner, data,
+                    "short write + offset failed at offset={offset}"
+                );
+            }
         }
     }
 }

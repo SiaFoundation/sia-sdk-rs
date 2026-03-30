@@ -653,14 +653,21 @@ impl HostQueue {
 
 #[cfg(test)]
 mod test {
+    use sia_core::cross_target_tests;
     use sia_core::signing::PrivateKey;
 
     use crate::mock::MockRHP4Transport;
 
     use super::*;
 
-    #[test]
-    fn test_failure_rate() {
+    fn random_pubkey() -> sia_core::signing::PublicKey {
+        let mut seed = [0u8; 32];
+        getrandom::fill(&mut seed).unwrap();
+        PrivateKey::from_seed(&seed).public_key()
+    }
+
+    cross_target_tests! {
+    async fn test_failure_rate() {
         let mut fr = FailureRate::default();
         assert_eq!(fr.rate(), 0, "initial failure rate should be 0%");
         fr.add_sample(false);
@@ -690,8 +697,7 @@ mod test {
         );
     }
 
-    #[test]
-    fn test_rpc_average() {
+    async fn test_rpc_average() {
         let mut avg = RPCAverage::default();
         avg.add_sample(Duration::from_millis(100));
         assert_eq!(
@@ -721,8 +727,7 @@ mod test {
         );
     }
 
-    #[test]
-    fn test_host_metric_ordering() {
+    async fn test_host_metric_ordering() {
         let mut hosts = vec![
             HostMetric::default(),
             HostMetric::default(),
@@ -776,12 +781,11 @@ mod test {
         );
     }
 
-    #[test]
-    fn test_host_priority_queue() {
+    async fn test_host_priority_queue() {
         let mut pq = PriorityQueue::<PublicKey, HostMetric>::new();
         let mut hosts = vec![];
         for _ in 0..5 {
-            let pk = PrivateKey::from_seed(&rand::random()).public_key();
+            let pk = random_pubkey();
             pq.push(pk, HostMetric::default());
             hosts.push(pk);
         }
@@ -808,13 +812,12 @@ mod test {
         assert_eq!(pq.peek().unwrap().0, &hosts[3]);
     }
 
-    #[test]
-    fn test_upload_queue() {
+    async fn test_upload_queue() {
         let hosts_manager = Hosts::new(Arc::new(MockRHP4Transport::new()));
 
-        let hk1 = PrivateKey::from_seed(&rand::random()).public_key();
-        let hk2 = PrivateKey::from_seed(&rand::random()).public_key();
-        let hk3 = PrivateKey::from_seed(&rand::random()).public_key();
+        let hk1 = random_pubkey();
+        let hk2 = random_pubkey();
+        let hk3 = random_pubkey();
 
         hosts_manager.update(
             vec![
@@ -855,10 +858,9 @@ mod test {
         );
     }
 
-    #[test]
-    fn test_host_queue_pop_n() {
+    async fn test_host_queue_pop_n() {
         let hosts: Vec<_> = (0..5)
-            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
+            .map(|_| random_pubkey())
             .collect();
         let queue = HostQueue::new(hosts.clone());
 
@@ -882,10 +884,9 @@ mod test {
         assert!(matches!(queue.pop_front(), Err(QueueError::NoMoreHosts)));
     }
 
-    #[test]
-    fn test_host_queue_pop_n_not_enough_hosts() {
+    async fn test_host_queue_pop_n_not_enough_hosts() {
         let hosts: Vec<_> = (0..3)
-            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
+            .map(|_| random_pubkey())
             .collect();
         let queue = HostQueue::new(hosts.clone());
 
@@ -898,10 +899,9 @@ mod test {
         assert_eq!(popped.len(), 3);
     }
 
-    #[test]
-    fn test_host_queue_pop_n_zero() {
+    async fn test_host_queue_pop_n_zero() {
         let hosts: Vec<_> = (0..3)
-            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
+            .map(|_| random_pubkey())
             .collect();
         let queue = HostQueue::new(hosts);
 
@@ -912,5 +912,6 @@ mod test {
         // queue should be unchanged - can still pop 3
         let popped = queue.pop_n(3).expect("should pop 3");
         assert_eq!(popped.len(), 3);
+    }
     }
 }

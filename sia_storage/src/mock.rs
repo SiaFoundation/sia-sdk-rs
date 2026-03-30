@@ -51,7 +51,8 @@ impl MockRHP4Transport {
     }
 }
 
-#[async_trait(?Send)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl Transport for MockRHP4Transport {
     async fn host_prices(&self, _: &HostEndpoint) -> Result<HostPrices, RHP4Error> {
         Ok(HostPrices {
