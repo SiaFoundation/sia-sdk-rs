@@ -697,8 +697,136 @@ fn register_app_sig_hash(request_id: &str, ephemeral_key: &PublicKey) -> Hash256
         .into()
 }
 
-// FIXME Alright - we need to abtract out a "HttpClient" trait that we can then mock to port these
-// tests to WASM. The httptest crate does not work in WASM.
+/// Pure computation tests (signing, hashing, encoding) — run on both native and WASM.
+#[cfg(test)]
+mod cross_target_test {
+    use base64::engine::general_purpose::URL_SAFE;
+    use base64::prelude::*;
+    use sia_core::{cross_target_tests, hash_256, public_key, signature};
+
+    use crate::slabs::object_id;
+
+    use super::*;
+
+    cross_target_tests! {
+    async fn test_register_app_sig_hash_golden() {
+        const REQUEST_ID: &str = "ebddc9385dace70f9a97cebce34134ac";
+        const EPHEMERAL_KEY: PublicKey =
+            public_key!("ed25519:9f5fb0b962f29497b3993e12c7a7880fbaf0cf52bad3620af0280895fdea8ece");
+        const EXPECTED_SIG_HASH: Hash256 =
+            hash_256!("3017354ace367561d4c568263463c17d3c16030c637734e12e9418be1f2f8e65");
+
+        assert_eq!(
+            register_app_sig_hash(REQUEST_ID, &EPHEMERAL_KEY),
+            EXPECTED_SIG_HASH,
+            "expected sig hash did not match"
+        );
+    }
+
+    /// Ensures that our base64 url encoding is compatible with our Go implementation.
+    async fn test_base64_url() {
+        const DATA: &[u8] = b"hello, world!";
+        const ENCODED_DATA: &str = "aGVsbG8sIHdvcmxkIQ==";
+
+        let encoded = URL_SAFE.encode(DATA);
+        assert_eq!(encoded, ENCODED_DATA);
+    }
+
+    async fn test_request_hash() {
+        let method = Method::POST;
+        let url = Url::parse("https://foo.bar/foo").unwrap();
+        let valid_until = DateTime::from_timestamp_secs(123).unwrap();
+        let body = b"hello world!";
+        let hash = request_hash(&url, method, Some(body), valid_until);
+        assert_eq!(
+            hash,
+            hash_256!("a9f0bda1b97b7d44ae6369ac830851a115311bb59aa2d848beda6ae95d10ad18")
+        )
+    }
+
+    async fn test_sign() {
+        let app_key = PrivateKey::from_seed(&[0u8; 32]);
+
+        // with body
+        let params = sign(
+            &app_key,
+            &"https://foo.bar/baz.jpg".parse().unwrap(),
+            Method::POST,
+            Some("{}".as_bytes()),
+            DateTime::from_timestamp_secs(123).unwrap() + Duration::from_secs(60),
+        );
+        assert_eq!(params[0], (QUERY_PARAM_VALID_UNTIL, "183".to_string()));
+        assert_eq!(
+            params[1],
+            (
+                QUERY_PARAM_CREDENTIAL,
+                URL_SAFE.encode(public_key!(
+                    "ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
+                )),
+            )
+        );
+        assert_eq!(
+            params[2],
+            (
+                QUERY_PARAM_SIGNATURE,
+                URL_SAFE.encode(signature!("458283fd707c9d170d5e1814944f35893c53c9445fd46c74a6b285bf3029bf404c9af509ea271d811726bd20d8c7d8fe4b9efdc4bebb445f18059eca886ece03").as_ref()),
+            )
+        );
+
+        // without body
+        let params = sign(
+            &app_key,
+            &"https://foo.bar/baz.jpg".parse().unwrap(),
+            Method::GET,
+            None,
+            DateTime::from_timestamp_secs(123).unwrap() + Duration::from_secs(60),
+        );
+        assert_eq!(params[0], (QUERY_PARAM_VALID_UNTIL, "183".to_string()));
+        assert_eq!(
+            params[1],
+            (
+                QUERY_PARAM_CREDENTIAL,
+                URL_SAFE.encode(
+                    public_key!(
+                        "ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
+                    )
+                    .as_ref()
+                )
+            )
+        );
+        assert_eq!(
+            params[2],
+            (
+                QUERY_PARAM_SIGNATURE,
+                URL_SAFE.encode(signature!("7411fc80f920cb098690498133be075cd43bf6385fc8348fe1946e29d909891680d45651dfb0a6fd9f7196a971816c21441852362680f2fe4cb935de8f90380b").as_ref()),
+            )
+        );
+    }
+
+    async fn test_shared_object_id() {
+        let obj = SharedObjectResponse {
+            slabs: vec![Slab {
+                encryption_key: [0u8; 32].into(),
+                min_shards: 1,
+                sectors: vec![Sector {
+                    root: Hash256::new([1u8; 32]),
+                    host_key: PublicKey::new([2u8; 32]),
+                }],
+                offset: 10,
+                length: 100,
+            }],
+            encrypted_metadata: None,
+        };
+
+        assert_eq!(
+            object_id(&obj.slabs).to_string(),
+            "1b13d5dd22605af0573cae7fe9242c1ee83727c29798308b2b170864677b46d0"
+        );
+    }
+    }
+}
+
+/// Integration tests requiring httptest (native TCP mock server) — native only.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use base64::engine::general_purpose::URL_SAFE;
@@ -795,104 +923,6 @@ mod tests {
         let hash = request_hash(&verify_url, method, body, valid_until);
         assert!(pk.verify(hash.as_ref(), &sig), "invalid signature");
         pk
-    }
-
-    #[test]
-    fn test_register_app_sig_hash_golden() {
-        const REQUEST_ID: &str = "ebddc9385dace70f9a97cebce34134ac";
-        const EPHEMERAL_KEY: PublicKey =
-            public_key!("ed25519:9f5fb0b962f29497b3993e12c7a7880fbaf0cf52bad3620af0280895fdea8ece");
-        const EXPECTED_SIG_HASH: Hash256 =
-            hash_256!("3017354ace367561d4c568263463c17d3c16030c637734e12e9418be1f2f8e65");
-
-        assert_eq!(
-            register_app_sig_hash(REQUEST_ID, &EPHEMERAL_KEY),
-            EXPECTED_SIG_HASH,
-            "expected sig hash did not match"
-        );
-    }
-
-    /// Ensures that our base64 url encoding is compatible with our Go implementation.
-    #[test]
-    fn test_base64_url() {
-        const DATA: &[u8] = b"hello, world!";
-        const ENCODED_DATA: &str = "aGVsbG8sIHdvcmxkIQ==";
-
-        let encoded = URL_SAFE.encode(DATA);
-        assert_eq!(encoded, ENCODED_DATA);
-    }
-
-    #[test]
-    fn test_request_hash() {
-        let method = Method::POST;
-        let url = Url::parse("https://foo.bar/foo").unwrap();
-        let valid_until = DateTime::from_timestamp_secs(123).unwrap();
-        let body = b"hello world!";
-        let hash = request_hash(&url, method, Some(body), valid_until);
-        assert_eq!(
-            hash,
-            hash_256!("a9f0bda1b97b7d44ae6369ac830851a115311bb59aa2d848beda6ae95d10ad18")
-        )
-    }
-
-    #[test]
-    fn test_sign() {
-        let app_key = PrivateKey::from_seed(&[0u8; 32]);
-
-        // with body
-        let params = sign(
-            &app_key,
-            &"https://foo.bar/baz.jpg".parse().unwrap(),
-            Method::POST,
-            Some("{}".as_bytes()),
-            DateTime::from_timestamp_secs(123).unwrap() + Duration::from_secs(60),
-        );
-        assert_eq!(params[0], (QUERY_PARAM_VALID_UNTIL, "183".to_string()));
-        assert_eq!(
-            params[1],
-            (
-                QUERY_PARAM_CREDENTIAL,
-                URL_SAFE.encode(public_key!(
-                    "ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
-                )),
-            )
-        );
-        assert_eq!(
-            params[2],
-            (
-                QUERY_PARAM_SIGNATURE,
-                URL_SAFE.encode(signature!("458283fd707c9d170d5e1814944f35893c53c9445fd46c74a6b285bf3029bf404c9af509ea271d811726bd20d8c7d8fe4b9efdc4bebb445f18059eca886ece03").as_ref()),
-            )
-        );
-
-        // without body
-        let params = sign(
-            &app_key,
-            &"https://foo.bar/baz.jpg".parse().unwrap(),
-            Method::GET,
-            None,
-            DateTime::from_timestamp_secs(123).unwrap() + Duration::from_secs(60),
-        );
-        assert_eq!(params[0], (QUERY_PARAM_VALID_UNTIL, "183".to_string()));
-        assert_eq!(
-            params[1],
-            (
-                QUERY_PARAM_CREDENTIAL,
-                URL_SAFE.encode(
-                    public_key!(
-                        "ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
-                    )
-                    .as_ref()
-                )
-            )
-        );
-        assert_eq!(
-            params[2],
-            (
-                QUERY_PARAM_SIGNATURE,
-                URL_SAFE.encode(signature!("7411fc80f920cb098690498133be075cd43bf6385fc8348fe1946e29d909891680d45651dfb0a6fd9f7196a971816c21441852362680f2fe4cb935de8f90380b").as_ref()),
-            )
-        );
     }
 
     #[tokio::test]
@@ -1924,25 +1954,4 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
-    fn test_shared_object_id() {
-        let obj = SharedObjectResponse {
-            slabs: vec![Slab {
-                encryption_key: [0u8; 32].into(),
-                min_shards: 1,
-                sectors: vec![Sector {
-                    root: Hash256::new([1u8; 32]),
-                    host_key: PublicKey::new([2u8; 32]),
-                }],
-                offset: 10,
-                length: 100,
-            }],
-            encrypted_metadata: None,
-        };
-
-        assert_eq!(
-            object_id(&obj.slabs).to_string(),
-            "1b13d5dd22605af0573cae7fe9242c1ee83727c29798308b2b170864677b46d0"
-        );
-    }
 }
