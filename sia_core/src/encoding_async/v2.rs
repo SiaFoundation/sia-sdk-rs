@@ -140,49 +140,49 @@ mod tests {
     }
 
     cross_target_tests! {
-        async fn test_numerics() {
-            test_decode(1u8, vec![1]).await;
-            test_decode(2u16, vec![2, 0, 0, 0, 0, 0, 0, 0]).await;
-            test_decode(3u32, vec![3, 0, 0, 0, 0, 0, 0, 0]).await;
-            test_decode(4u64, vec![4, 0, 0, 0, 0, 0, 0, 0]).await;
-            test_decode(5usize, vec![5, 0, 0, 0, 0, 0, 0, 0]).await;
-            test_decode(-1i16, vec![255, 255, 255, 255, 255, 255, 255, 255]).await;
-            test_decode(-2i32, vec![254, 255, 255, 255, 255, 255, 255, 255]).await;
-            test_decode(-3i64, vec![253, 255, 255, 255, 255, 255, 255, 255]).await;
-        }
+    async fn test_numerics() {
+        test_decode(1u8, vec![1]).await;
+        test_decode(2u16, vec![2, 0, 0, 0, 0, 0, 0, 0]).await;
+        test_decode(3u32, vec![3, 0, 0, 0, 0, 0, 0, 0]).await;
+        test_decode(4u64, vec![4, 0, 0, 0, 0, 0, 0, 0]).await;
+        test_decode(5usize, vec![5, 0, 0, 0, 0, 0, 0, 0]).await;
+        test_decode(-1i16, vec![255, 255, 255, 255, 255, 255, 255, 255]).await;
+        test_decode(-2i32, vec![254, 255, 255, 255, 255, 255, 255, 255]).await;
+        test_decode(-3i64, vec![253, 255, 255, 255, 255, 255, 255, 255]).await;
+    }
 
-        async fn test_strings() {
-            test_decode(
-                "hello".to_string(),
-                vec![5, 0, 0, 0, 0, 0, 0, 0, 104, 101, 108, 108, 111],
-            )
-            .await;
-            test_decode("".to_string(), vec![0, 0, 0, 0, 0, 0, 0, 0]).await;
-        }
+    async fn test_strings() {
+        test_decode(
+            "hello".to_string(),
+            vec![5, 0, 0, 0, 0, 0, 0, 0, 104, 101, 108, 108, 111],
+        )
+        .await;
+        test_decode("".to_string(), vec![0, 0, 0, 0, 0, 0, 0, 0]).await;
+    }
 
-        async fn test_fixed_arrays() {
-            test_decode([1u8, 2u8, 3u8], vec![1, 2, 3]).await;
-            test_decode([0u8; 4], vec![0, 0, 0, 0]).await;
-        }
+    async fn test_fixed_arrays() {
+        test_decode([1u8, 2u8, 3u8], vec![1, 2, 3]).await;
+        test_decode([0u8; 4], vec![0, 0, 0, 0]).await;
+    }
 
-        async fn test_vectors() {
-            test_decode(vec![1u8, 2u8, 3u8], vec![3, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3]).await;
-            test_decode(
-                vec![100u64, 200u64],
-                vec![
-                    2, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, 200, 0, 0, 0, 0, 0, 0, 0,
-                ],
-            )
-            .await;
-        }
+    async fn test_vectors() {
+        test_decode(vec![1u8, 2u8, 3u8], vec![3, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3]).await;
+        test_decode(
+            vec![100u64, 200u64],
+            vec![
+                2, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, 200, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        )
+        .await;
+    }
 
-        async fn test_bytes() {
-            test_decode(
-                Bytes::from("hello"),
-                vec![5, 0, 0, 0, 0, 0, 0, 0, 104, 101, 108, 108, 111],
-            )
-            .await;
-            test_decode(Bytes::from(""), vec![0, 0, 0, 0, 0, 0, 0, 0]).await;
-        }
+    async fn test_bytes() {
+        test_decode(
+            Bytes::from("hello"),
+            vec![5, 0, 0, 0, 0, 0, 0, 0, 104, 101, 108, 108, 111],
+        )
+        .await;
+        test_decode(Bytes::from(""), vec![0, 0, 0, 0, 0, 0, 0, 0]).await;
+    }
     }
 }

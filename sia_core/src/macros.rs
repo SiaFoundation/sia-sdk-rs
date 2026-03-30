@@ -377,57 +377,57 @@ mod tests {
     ];
 
     cross_target_tests! {
-        async fn test_bad_address() {
-            use std::str::FromStr;
-            assert!(Address::from_str(
-                "5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9e758b4"
-            ).is_err(), "truncated address should fail");
-            assert!(Address::from_str(
-                "5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9000000000000"
-            ).is_err(), "bad checksum should fail");
-        }
+    async fn test_bad_address() {
+        use std::str::FromStr;
+        assert!(Address::from_str(
+            "5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9e758b4"
+        ).is_err(), "truncated address should fail");
+        assert!(Address::from_str(
+            "5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9000000000000"
+        ).is_err(), "bad checksum should fail");
+    }
 
-        async fn test_address_macro() {
-            const ADDRESS: Address = address!(
-                "5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9e758b4f79b34"
-            );
-            assert_eq!(ADDRESS.as_ref(), EXPECTED_BYTES);
-        }
+    async fn test_address_macro() {
+        const ADDRESS: Address = address!(
+            "5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9e758b4f79b34"
+        );
+        assert_eq!(ADDRESS.as_ref(), EXPECTED_BYTES);
+    }
 
-        async fn test_public_key_macro() {
-            const PUBLIC_KEY: PublicKey =
-                public_key!("ed25519:5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9");
-            assert_eq!(PUBLIC_KEY.as_ref(), EXPECTED_BYTES);
-        }
+    async fn test_public_key_macro() {
+        const PUBLIC_KEY: PublicKey =
+            public_key!("ed25519:5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9");
+        assert_eq!(PUBLIC_KEY.as_ref(), EXPECTED_BYTES);
+    }
 
-        async fn test_block_id_macro() {
-            const BLOCK_ID: BlockID =
-                block_id!("5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9");
-            assert_eq!(BLOCK_ID.as_ref(), EXPECTED_BYTES);
-        }
+    async fn test_block_id_macro() {
+        const BLOCK_ID: BlockID =
+            block_id!("5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9");
+        assert_eq!(BLOCK_ID.as_ref(), EXPECTED_BYTES);
+    }
 
-        async fn test_transaction_id_macro() {
-            const TRANSACTION_ID: TransactionID =
-                transaction_id!("5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9");
-            assert_eq!(TRANSACTION_ID.as_ref(), EXPECTED_BYTES);
-        }
+    async fn test_transaction_id_macro() {
+        const TRANSACTION_ID: TransactionID =
+            transaction_id!("5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9");
+        assert_eq!(TRANSACTION_ID.as_ref(), EXPECTED_BYTES);
+    }
 
-        async fn test_contract_id_macro() {
-            const CONTRACT_ID: FileContractID =
-                contract_id!("5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9");
-            assert_eq!(CONTRACT_ID.as_ref(), EXPECTED_BYTES);
-        }
+    async fn test_contract_id_macro() {
+        const CONTRACT_ID: FileContractID =
+            contract_id!("5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9");
+        assert_eq!(CONTRACT_ID.as_ref(), EXPECTED_BYTES);
+    }
 
-        async fn test_siacoin_id_macro() {
-            const SIACOIN_ID: SiacoinOutputID =
-                siacoin_id!("5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9");
-            assert_eq!(SIACOIN_ID.as_ref(), EXPECTED_BYTES);
-        }
+    async fn test_siacoin_id_macro() {
+        const SIACOIN_ID: SiacoinOutputID =
+            siacoin_id!("5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9");
+        assert_eq!(SIACOIN_ID.as_ref(), EXPECTED_BYTES);
+    }
 
-        async fn test_siafund_id_macro() {
-            const SIAFUND_ID: SiafundOutputID =
-                siafund_id!("5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9");
-            assert_eq!(SIAFUND_ID.as_ref(), EXPECTED_BYTES);
-        }
+    async fn test_siafund_id_macro() {
+        const SIAFUND_ID: SiafundOutputID =
+            siafund_id!("5eb70f141387df1e2ecd434b22be50bff57a6e08484f3890fe4415a6d323b5e9");
+        assert_eq!(SIAFUND_ID.as_ref(), EXPECTED_BYTES);
+    }
     }
 }

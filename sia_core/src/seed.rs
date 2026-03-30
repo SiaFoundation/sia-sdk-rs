@@ -68,8 +68,8 @@ mod tests {
     use super::*;
 
     cross_target_tests! {
-        async fn test_seed_from_entropy() {
-            let test_cases = vec![
+    async fn test_seed_from_entropy() {
+        let test_cases = vec![
             (
                 [
                     23, 154, 249, 239, 129, 81, 216, 147, 144, 163, 207, 136, 238, 88, 11, 253,
