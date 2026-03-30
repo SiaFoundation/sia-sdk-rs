@@ -25,7 +25,7 @@ jobs:
           rustup component add rustfmt --toolchain nightly
       - name: Install wasm-pack
         shell: bash
-        run: curl https://wasm-bindgen.github.io/wasm-pack/installer/init.sh -sSf | sh
+        run: curl https://wasm-bindgen.github.io/wasm-pack/installer/init.sh -sSf | bash
       - name: Clippy (wasm)
         run: cargo clippy --target wasm32-unknown-unknown --lib --package sia_core --package sia_storage --no-default-features -- -D warnings
         env:
