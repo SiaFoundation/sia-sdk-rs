@@ -217,8 +217,8 @@ mod test {
     use crate::app_id;
 
     use super::*;
-    use sia_core::types::Hash256;
     use sia_core::hash_256;
+    use sia_core::types::Hash256;
 
     cross_target_tests! {
     async fn test_app_key_derivation_golden() {
