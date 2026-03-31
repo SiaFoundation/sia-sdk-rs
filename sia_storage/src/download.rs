@@ -232,7 +232,7 @@ impl Downloader {
         object: &Object,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
-        let mut w = object.writer(w, options.offset as usize);
+        let mut w = object.writer(w, options.offset);
         let mut offset = options.offset;
         let max_length = object.size();
         let mut length = options.length.unwrap_or(max_length);

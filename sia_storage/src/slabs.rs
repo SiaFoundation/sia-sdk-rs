@@ -337,12 +337,12 @@ impl Object {
     }
 
     /// Returns a reader that encrypts data on-the-fly using the object's encryption key.
-    pub(crate) fn reader<R: AsyncRead + Unpin>(&self, r: R, offset: usize) -> CipherReader<R> {
+    pub(crate) fn reader<R: AsyncRead + Unpin>(&self, r: R, offset: u64) -> CipherReader<R> {
         CipherReader::new(r, self.data_key.clone(), offset)
     }
 
     /// Returns a writer that encrypts data on-the-fly using the object's encryption key.
-    pub(crate) fn writer<W: AsyncWrite + Unpin>(&self, w: W, offset: usize) -> CipherWriter<W> {
+    pub(crate) fn writer<W: AsyncWrite + Unpin>(&self, w: W, offset: u64) -> CipherWriter<W> {
         CipherWriter::new(w, self.data_key.clone(), offset)
     }
 
@@ -385,8 +385,14 @@ mod test {
     use super::*;
     use sia_core::hash_256;
 
-    #[test]
-    fn test_object_id() {
+    fn random_bytes_32() -> [u8; 32] {
+        let mut buf = [0u8; 32];
+        getrandom::fill(&mut buf).unwrap();
+        buf
+    }
+
+    cross_target_tests! {
+    async fn test_object_id() {
         let slabs = vec![Slab {
             encryption_key: [0u8; 32].into(),
             min_shards: 1,
@@ -407,8 +413,7 @@ mod test {
 
     /// Tests ObjectID of a SealedObject
     /// Port of objects_test.go:TestObjectID
-    #[test]
-    fn test_sealed_object_id_golden() {
+    async fn test_sealed_object_id_golden() {
         let mut encryption_key = [0u8; 32];
         encryption_key[..3].copy_from_slice(&[4, 5, 6]);
         let mut sector_root = [0u8; 32];
@@ -447,8 +452,7 @@ mod test {
     }
 
     /// tests Slab.digest against a reference digest
-    #[test]
-    fn test_slab_digest() {
+    async fn test_slab_digest() {
         let s = Slab {
             min_shards: 1,
             encryption_key: [
@@ -461,19 +465,19 @@ mod test {
                     root: hash_256!(
                         "fb0a42cce246d6bb9716eb0e97579a1d0d5c2bb34d7234e9ae271d4fd8201b24"
                     ),
-                    host_key: PublicKey::new(rand::random()), // host key is not included in the digest
+                    host_key: PublicKey::new(random_bytes_32()), // host key is not included in the digest
                 },
                 Sector {
                     root: hash_256!(
                         "8125994daee38e1fbaf7a26c7935420ce055202f7175eae98d291ebe80f2b00e"
                     ),
-                    host_key: PublicKey::new(rand::random()), // host key is not included in the digest
+                    host_key: PublicKey::new(random_bytes_32()), // host key is not included in the digest
                 },
                 Sector {
                     root: hash_256!(
                         "54ee41b57b9439868b119b8fe1c6c602bd6b35e27d31400c5bb85912b60c9f0a"
                     ),
-                    host_key: PublicKey::new(rand::random()), // host key is not included in the digest
+                    host_key: PublicKey::new(random_bytes_32()), // host key is not included in the digest
                 },
             ],
             // length and offset are not included in the digest
@@ -487,18 +491,17 @@ mod test {
         )
     }
 
-    #[test]
-    fn test_object_roundtrip() {
+    async fn test_object_roundtrip() {
         let slabs = vec![
             Slab {
-                encryption_key: rand::random::<[u8; 32]>().into(),
+                encryption_key: random_bytes_32().into(),
                 min_shards: 2,
                 sectors: vec![],
                 offset: 0,
                 length: 100,
             },
             Slab {
-                encryption_key: rand::random::<[u8; 32]>().into(),
+                encryption_key: random_bytes_32().into(),
                 min_shards: 2,
                 sectors: vec![],
                 offset: 0,
@@ -511,7 +514,7 @@ mod test {
         obj.slabs = slabs.clone();
         obj.metadata = meta.clone();
 
-        let seed: [u8; 32] = rand::random();
+        let seed: [u8; 32] = random_bytes_32();
         let private_key = PrivateKey::from_seed(&seed);
 
         let sealed = obj.seal(&private_key);
@@ -523,8 +526,7 @@ mod test {
 
     /// tests that the SealedObject struct is compatible with the Go implementation
     /// by deserializing a reference object
-    #[test]
-    fn test_sealed_object_golden() {
+    async fn test_sealed_object_golden() {
         let mut seed = [0u8; 32];
         hex::decode_to_slice(
             "9593edfd90ef2da9973af3bca88afdf54b6e7ff66ff6c749505734b9cf6b8aec",
@@ -550,5 +552,6 @@ mod test {
         assert_eq!(opened.data_key, expected_object_key);
         assert_eq!(opened.slabs.len(), 2);
         assert_eq!(opened.metadata, expected_metadata);
+    }
     }
 }

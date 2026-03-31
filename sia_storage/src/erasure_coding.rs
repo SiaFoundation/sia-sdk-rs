@@ -113,8 +113,6 @@ impl ErasureCoder {
 mod tests {
     use std::io::Cursor;
 
-    use rand::Rng;
-
     use super::*;
 
     fn init_shard(i: u8) -> BytesMut {
@@ -123,7 +121,7 @@ mod tests {
         buf
     }
 
-    #[tokio::test]
+    cross_target_tests! {
     async fn test_encode_shards() {
         let data_shards = 2;
         let parity_shards = 3;
@@ -159,7 +157,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
     async fn test_striped_read() {
         const DATA_SHARDS: usize = 3;
         const PARITY_SHARDS: usize = 2;
@@ -173,7 +170,7 @@ mod tests {
 
         for (data_size, expected_size) in test_cases {
             let mut data = vec![0u8; data_size];
-            rand::rng().fill_bytes(&mut data);
+            getrandom::fill(&mut data).unwrap();
 
             let mut shards = vec![BytesMut::zeroed(SECTOR_SIZE); DATA_SHARDS + PARITY_SHARDS];
             let size = ErasureCoder::read_slab_shards(
@@ -209,7 +206,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
     async fn test_striped_read_write() {
         const DATA_SHARDS: usize = 4;
         const PARITY_SHARDS: usize = 1;
@@ -302,5 +298,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(joined_data, data[data.len() / 2..]);
+    }
     }
 }

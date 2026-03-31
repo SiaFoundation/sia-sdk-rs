@@ -428,8 +428,8 @@ pub fn validate_recovery_phrase(phrase: &str) -> Result<(), SeedError> {
 
 #[cfg(test)]
 mod test {
+    use crate::compat::run_local;
     use bytes::{Bytes, BytesMut};
-    use rand::Rng;
     use sia_core::rhp4::SECTOR_SIZE;
     use sia_core::types::v2::NetAddress;
     use std::io::Cursor;
@@ -441,592 +441,600 @@ mod test {
 
     const SLAB_SIZE: u64 = SECTOR_SIZE as u64 * 10; // 10 sectors per slab
 
-    #[tokio::test]
-    async fn test_upload_download_packed() {
-        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
-        let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
-        hosts.update(
-            (0..60)
-                .map(|_| Host {
-                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
-                    addresses: vec![NetAddress {
-                        protocol: sia_core::types::v2::Protocol::QUIC,
-                        address: "localhost:1234".to_string(),
-                    }],
-                    country_code: "US".to_string(),
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    good_for_upload: true,
-                })
-                .collect(),
-            true,
-        );
-
-        let uploader = Uploader::new(hosts.clone(), app_key.clone());
-        let downloader = Downloader::new(hosts.clone(), app_key.clone());
-
-        let input: Bytes = Bytes::from("Hello, world!");
-
-        let mut packed_upload = uploader.upload_packed(UploadOptions::default());
-        assert_eq!(packed_upload.remaining(), SLAB_SIZE);
-
-        packed_upload
-            .add(Cursor::new(input.clone()))
-            .await
-            .expect("add 1 to complete");
-        packed_upload
-            .add(Cursor::new(input.clone()))
-            .await
-            .expect("add 2 to complete");
-
-        assert_eq!(
-            packed_upload.remaining(),
-            SLAB_SIZE - (input.len() * 2) as u64
-        );
-
-        let objects = packed_upload.finalize().await.expect("upload to finish");
-        assert_eq!(objects.len(), 2);
-        assert_ne!(objects[0].id(), objects[1].id()); // encryption keys should be different
-
-        // Both objects should have 1 slab each, since the input is small enough to fit in a single slab.
-        assert_eq!(objects[0].slabs().len(), 1);
-        assert_eq!(objects[1].slabs().len(), 1);
-
-        // obj 0 should be the first 13 bytes
-        assert_eq!(objects[0].slabs()[0].offset, 0);
-        assert_eq!(objects[0].size(), 13);
-
-        // obj 1 should be the next 13 bytes
-        assert_eq!(objects[1].slabs()[0].offset, 13);
-        assert_eq!(objects[1].size(), 13);
-
-        let mut output = BytesMut::zeroed(13);
-        downloader
-            .download(
-                &mut Cursor::new(&mut output[..]),
-                &objects[0],
-                DownloadOptions::default(),
-            )
-            .await
-            .expect("download to complete");
-
-        assert_eq!(output.freeze(), input.clone());
-
-        let mut output = BytesMut::zeroed(13);
-        downloader
-            .download(
-                &mut Cursor::new(&mut output[..]),
-                &objects[1],
-                DownloadOptions::default(),
-            )
-            .await
-            .expect("download to complete");
-
-        assert_eq!(output.freeze(), input.clone());
+    fn random_seed() -> [u8; 32] {
+        let mut seed = [0u8; 32];
+        getrandom::fill(&mut seed).unwrap();
+        seed
     }
 
-    #[tokio::test]
-    async fn test_upload_download_packed_spanning() {
-        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
-        let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
-        hosts.update(
-            (0..60)
-                .map(|_| Host {
-                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
-                    addresses: vec![NetAddress {
-                        protocol: sia_core::types::v2::Protocol::QUIC,
-                        address: "localhost:1234".to_string(),
-                    }],
-                    country_code: "US".to_string(),
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    good_for_upload: true,
-                })
-                .collect(),
-            true,
-        );
-
-        let uploader = Uploader::new(hosts.clone(), app_key.clone());
-        let downloader = Downloader::new(hosts.clone(), app_key.clone());
-
-        let small_input = Bytes::from("Hello, world!");
-
-        let mut large_input = BytesMut::zeroed(SLAB_SIZE as usize + 18); // 1 full slab + 18 bytes
-        rand::rng().fill_bytes(&mut large_input);
-        let large_input = large_input.freeze();
-
-        let mut packed_upload = uploader.upload_packed(UploadOptions::default());
-        packed_upload
-            .add(Cursor::new(small_input.clone()))
-            .await
-            .expect("add 1 to complete");
-        packed_upload
-            .add(Cursor::new(large_input.clone()))
-            .await
-            .expect("add 2 to complete");
-
-        let objects = packed_upload.finalize().await.expect("upload to finish");
-        assert_eq!(objects.len(), 2);
-
-        // The first object should have 1 slab
-        assert_eq!(objects[0].slabs().len(), 1);
-        assert_eq!(objects[1].slabs().len(), 2);
-
-        // obj 0 should be the small input
-        assert_eq!(objects[0].size(), 13);
-        assert_eq!(objects[0].slabs()[0].offset, 0);
-        assert_eq!(objects[0].slabs()[0].length, 13);
-
-        // obj 1 should be the large input. The first slab starts at offset 13 so
-        // its length must be SLAB_SIZE - 13. The second slab has the remaining bytes.
-        assert_eq!(objects[1].size(), SLAB_SIZE + 18);
-        assert_eq!(objects[1].slabs()[0].offset, 13);
-        assert_eq!(objects[1].slabs()[0].length, (SLAB_SIZE - 13) as u32);
-        assert_eq!(objects[1].slabs()[1].offset, 0);
-        assert_eq!(objects[1].slabs()[1].length, 18 + 13);
-
-        let mut output = BytesMut::zeroed(objects[0].size() as usize);
-        downloader
-            .download(
-                &mut Cursor::new(&mut output[..]),
-                &objects[0],
-                DownloadOptions::default(),
-            )
-            .await
-            .expect("download to complete");
-
-        assert_eq!(output.freeze(), small_input);
-
-        let mut output = BytesMut::zeroed(objects[1].size() as usize);
-        downloader
-            .download(
-                &mut Cursor::new(&mut output[..]),
-                &objects[1],
-                DownloadOptions::default(),
-            )
-            .await
-            .expect("download to complete");
-
-        assert_eq!(output.freeze(), large_input);
+    fn random_bytes(buf: &mut [u8]) {
+        getrandom::fill(buf).unwrap();
     }
 
-    #[tokio::test]
-    async fn test_upload_download_packed_exact() {
-        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
-        let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
-        hosts.update(
-            (0..60)
-                .map(|_| Host {
-                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
-                    addresses: vec![NetAddress {
-                        protocol: sia_core::types::v2::Protocol::QUIC,
-                        address: "localhost:1234".to_string(),
-                    }],
-                    country_code: "US".to_string(),
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    good_for_upload: true,
-                })
-                .collect(),
-            true,
-        );
-
-        let uploader = Uploader::new(hosts.clone(), app_key.clone());
-        let downloader = Downloader::new(hosts.clone(), app_key.clone());
-
-        let mut exact_input = BytesMut::zeroed(SLAB_SIZE as usize); // 1 full slab
-        rand::rng().fill_bytes(&mut exact_input);
-        let exact_input = exact_input.freeze();
-
-        let mut packed_upload = uploader.upload_packed(UploadOptions::default());
-        packed_upload
-            .add(Cursor::new(exact_input.clone()))
-            .await
-            .expect("add 1 to complete");
-
-        let objects = packed_upload.finalize().await.expect("upload to finish");
-        assert_eq!(objects.len(), 1);
-
-        // The first object should have 1 slab, since it fits exactly
-        assert_eq!(objects[0].slabs().len(), 1);
-        // the first slab of obj[0] should be the full length. the second slab should be the remaining 18 bytes.
-        assert_eq!(objects[0].size(), SLAB_SIZE);
-        assert_eq!(objects[0].slabs()[0].offset, 0);
-        assert_eq!(objects[0].slabs()[0].length, SLAB_SIZE as u32);
-
-        let mut output = BytesMut::zeroed(objects[0].size() as usize);
-        downloader
-            .download(
-                &mut Cursor::new(&mut output[..]),
-                &objects[0],
-                DownloadOptions::default(),
-            )
-            .await
-            .expect("download to complete");
-
-        assert_eq!(output.freeze(), exact_input);
+    fn random_u64() -> u64 {
+        let mut bytes = [0u8; 8];
+        getrandom::fill(&mut bytes).unwrap();
+        u64::from_le_bytes(bytes)
     }
 
-    #[tokio::test]
-    async fn test_upload_download() {
-        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
-        let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
-        hosts.update(
-            (0..60)
-                .map(|_| Host {
-                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
-                    addresses: vec![NetAddress {
-                        protocol: sia_core::types::v2::Protocol::QUIC,
-                        address: "localhost:1234".to_string(),
-                    }],
-                    country_code: "US".to_string(),
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    good_for_upload: true,
-                })
-                .collect(),
-            true,
-        );
+    cross_target_tests! {
+    async fn test_upload_download_packed() { run_local(async {
+            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
+            hosts.update(
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
 
-        let uploader = Uploader::new(hosts.clone(), app_key.clone());
-        let downloader = Downloader::new(hosts.clone(), app_key.clone());
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+            let downloader = Downloader::new(hosts.clone(), app_key.clone());
 
-        let input: Bytes = Bytes::from("Hello, world!");
+            let input: Bytes = Bytes::from("Hello, world!");
 
-        let object = uploader
-            .upload(Cursor::new(input.clone()), UploadOptions::default())
-            .await
-            .expect("upload to complete");
+            let mut packed_upload = uploader.upload_packed(UploadOptions::default());
+            assert_eq!(packed_upload.remaining(), SLAB_SIZE);
 
-        assert_eq!(object.slabs().len(), 1);
-        assert_eq!(object.size(), 13);
+            packed_upload
+                .add(Cursor::new(input.clone()))
+                .await
+                .expect("add 1 to complete");
+            packed_upload
+                .add(Cursor::new(input.clone()))
+                .await
+                .expect("add 2 to complete");
 
-        let mut output = BytesMut::zeroed(object.size() as usize);
-        downloader
-            .download(
-                &mut Cursor::new(&mut output[..]),
-                &object,
-                DownloadOptions::default(),
-            )
-            .await
-            .expect("download to complete");
+            assert_eq!(
+                packed_upload.remaining(),
+                SLAB_SIZE - (input.len() * 2) as u64
+            );
 
-        assert_eq!(output.freeze(), input.clone());
+            let objects = packed_upload.finalize().await.expect("upload to finish");
+            assert_eq!(objects.len(), 2);
+            assert_ne!(objects[0].id(), objects[1].id()); // encryption keys should be different
 
-        let range = 7..13;
-        let mut output = BytesMut::zeroed(range.end - range.start);
-        downloader
-            .download(
-                &mut Cursor::new(&mut output[..]),
-                &object,
-                DownloadOptions {
-                    offset: range.start as u64,
-                    length: Some((range.end - range.start) as u64),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("download to complete");
+            // Both objects should have 1 slab each, since the input is small enough to fit in a single slab.
+            assert_eq!(objects[0].slabs().len(), 1);
+            assert_eq!(objects[1].slabs().len(), 1);
 
-        assert_eq!(output.freeze(), input.slice(range));
-    }
+            // obj 0 should be the first 13 bytes
+            assert_eq!(objects[0].slabs()[0].offset, 0);
+            assert_eq!(objects[0].size(), 13);
 
-    /// Port of Go SDK's client_test.go:TestDownload "ranges" subtest
-    #[tokio::test]
-    async fn test_download_ranges() {
-        use sia_core::rhp4::SECTOR_SIZE;
-        const SEGMENT_SIZE: u64 = 64; // leaf size
+            // obj 1 should be the next 13 bytes
+            assert_eq!(objects[1].slabs()[0].offset, 13);
+            assert_eq!(objects[1].size(), 13);
 
-        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
-        let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
-        hosts.update(
-            (0..60)
-                .map(|_| Host {
-                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
-                    addresses: vec![NetAddress {
-                        protocol: sia_core::types::v2::Protocol::QUIC,
-                        address: "localhost:1234".to_string(),
-                    }],
-                    country_code: "US".to_string(),
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    good_for_upload: true,
-                })
-                .collect(),
-            true,
-        );
+            let mut output = BytesMut::zeroed(13);
+            downloader
+                .download(
+                    &mut Cursor::new(&mut output[..]),
+                    &objects[0],
+                    DownloadOptions::default(),
+                )
+                .await
+                .expect("download to complete");
 
-        let uploader = Uploader::new(hosts.clone(), app_key.clone());
-        let downloader = Downloader::new(hosts.clone(), app_key.clone());
+            assert_eq!(output.freeze(), input.clone());
 
-        // Use default 10 data shards, so slab_size = 10 * SECTOR_SIZE
-        let slab_size = 10 * SECTOR_SIZE as u64;
-        let data_size = slab_size * 3; // 3 slabs
+            let mut output = BytesMut::zeroed(13);
+            downloader
+                .download(
+                    &mut Cursor::new(&mut output[..]),
+                    &objects[1],
+                    DownloadOptions::default(),
+                )
+                .await
+                .expect("download to complete");
 
-        let mut data = BytesMut::zeroed(data_size as usize);
-        rand::rng().fill_bytes(&mut data);
-        let data = data.freeze();
+            assert_eq!(output.freeze(), input.clone());
+        }).await }
 
-        let object = uploader
-            .upload(Cursor::new(data.clone()), UploadOptions::default())
-            .await
-            .expect("upload to complete");
+    async fn test_upload_download_packed_spanning() { run_local(async {
+            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
+            hosts.update(
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
 
-        assert_eq!(object.slabs().len(), 3);
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+            let downloader = Downloader::new(hosts.clone(), app_key.clone());
 
-        // Test cases matching Go's TestDownload ranges
-        let mut cases: Vec<(u64, u64)> = vec![
-            (0, SECTOR_SIZE as u64),                              // first sector
-            (SECTOR_SIZE as u64, SECTOR_SIZE as u64),             // second sector
-            (SEGMENT_SIZE, SEGMENT_SIZE),                         // one leaf
-            (SEGMENT_SIZE + 1, SEGMENT_SIZE / 2),                 // within a leaf
-            (SEGMENT_SIZE + SEGMENT_SIZE / 2, SEGMENT_SIZE),      // across leaves
-            (slab_size / 2, 2 * slab_size),                       // across slabs
-            (data_size - SECTOR_SIZE as u64, SECTOR_SIZE as u64), // last sector
-            (data_size - SEGMENT_SIZE, SEGMENT_SIZE),             // last leaf
-            (data_size, 0),                                       // empty at end
-        ];
+            let small_input = Bytes::from("Hello, world!");
 
-        // Add 10 random ranges
-        for _ in 0..10 {
-            let offset = rand::random::<u64>() % (data_size - 1);
-            let length = rand::random::<u64>() % (data_size - offset + 1);
-            cases.push((offset, length));
-        }
+            let mut large_input = BytesMut::zeroed(SLAB_SIZE as usize + 18); // 1 full slab + 18 bytes
+            random_bytes(&mut large_input);
+            let large_input = large_input.freeze();
 
-        for (offset, length) in cases {
-            let mut output = BytesMut::zeroed(length as usize);
+            let mut packed_upload = uploader.upload_packed(UploadOptions::default());
+            packed_upload
+                .add(Cursor::new(small_input.clone()))
+                .await
+                .expect("add 1 to complete");
+            packed_upload
+                .add(Cursor::new(large_input.clone()))
+                .await
+                .expect("add 2 to complete");
+
+            let objects = packed_upload.finalize().await.expect("upload to finish");
+            assert_eq!(objects.len(), 2);
+
+            // The first object should have 1 slab
+            assert_eq!(objects[0].slabs().len(), 1);
+            assert_eq!(objects[1].slabs().len(), 2);
+
+            // obj 0 should be the small input
+            assert_eq!(objects[0].size(), 13);
+            assert_eq!(objects[0].slabs()[0].offset, 0);
+            assert_eq!(objects[0].slabs()[0].length, 13);
+
+            // obj 1 should be the large input. The first slab starts at offset 13 so
+            // its length must be SLAB_SIZE - 13. The second slab has the remaining bytes.
+            assert_eq!(objects[1].size(), SLAB_SIZE + 18);
+            assert_eq!(objects[1].slabs()[0].offset, 13);
+            assert_eq!(objects[1].slabs()[0].length, (SLAB_SIZE - 13) as u32);
+            assert_eq!(objects[1].slabs()[1].offset, 0);
+            assert_eq!(objects[1].slabs()[1].length, 18 + 13);
+
+            let mut output = BytesMut::zeroed(objects[0].size() as usize);
+            downloader
+                .download(
+                    &mut Cursor::new(&mut output[..]),
+                    &objects[0],
+                    DownloadOptions::default(),
+                )
+                .await
+                .expect("download to complete");
+
+            assert_eq!(output.freeze(), small_input);
+
+            let mut output = BytesMut::zeroed(objects[1].size() as usize);
+            downloader
+                .download(
+                    &mut Cursor::new(&mut output[..]),
+                    &objects[1],
+                    DownloadOptions::default(),
+                )
+                .await
+                .expect("download to complete");
+
+            assert_eq!(output.freeze(), large_input);
+        }).await }
+
+    async fn test_upload_download_packed_exact() { run_local(async {
+            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
+            hosts.update(
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
+
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+            let downloader = Downloader::new(hosts.clone(), app_key.clone());
+
+            let mut exact_input = BytesMut::zeroed(SLAB_SIZE as usize); // 1 full slab
+            random_bytes(&mut exact_input);
+            let exact_input = exact_input.freeze();
+
+            let mut packed_upload = uploader.upload_packed(UploadOptions::default());
+            packed_upload
+                .add(Cursor::new(exact_input.clone()))
+                .await
+                .expect("add 1 to complete");
+
+            let objects = packed_upload.finalize().await.expect("upload to finish");
+            assert_eq!(objects.len(), 1);
+
+            // The first object should have 1 slab, since it fits exactly
+            assert_eq!(objects[0].slabs().len(), 1);
+            // the first slab of obj[0] should be the full length. the second slab should be the remaining 18 bytes.
+            assert_eq!(objects[0].size(), SLAB_SIZE);
+            assert_eq!(objects[0].slabs()[0].offset, 0);
+            assert_eq!(objects[0].slabs()[0].length, SLAB_SIZE as u32);
+
+            let mut output = BytesMut::zeroed(objects[0].size() as usize);
+            downloader
+                .download(
+                    &mut Cursor::new(&mut output[..]),
+                    &objects[0],
+                    DownloadOptions::default(),
+                )
+                .await
+                .expect("download to complete");
+
+            assert_eq!(output.freeze(), exact_input);
+        }).await }
+
+    async fn test_upload_download() { run_local(async {
+            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
+            hosts.update(
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
+
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+            let downloader = Downloader::new(hosts.clone(), app_key.clone());
+
+            let input: Bytes = Bytes::from("Hello, world!");
+
+            let object = uploader
+                .upload(Cursor::new(input.clone()), UploadOptions::default())
+                .await
+                .expect("upload to complete");
+
+            assert_eq!(object.slabs().len(), 1);
+            assert_eq!(object.size(), 13);
+
+            let mut output = BytesMut::zeroed(object.size() as usize);
+            downloader
+                .download(
+                    &mut Cursor::new(&mut output[..]),
+                    &object,
+                    DownloadOptions::default(),
+                )
+                .await
+                .expect("download to complete");
+
+            assert_eq!(output.freeze(), input.clone());
+
+            let range = 7..13;
+            let mut output = BytesMut::zeroed(range.end - range.start);
             downloader
                 .download(
                     &mut Cursor::new(&mut output[..]),
                     &object,
                     DownloadOptions {
-                        offset,
-                        length: Some(length),
+                        offset: range.start as u64,
+                        length: Some((range.end - range.start) as u64),
                         ..Default::default()
                     },
                 )
                 .await
-                .unwrap();
+                .expect("download to complete");
 
-            assert_eq!(
-                output.freeze(),
-                data.slice(offset as usize..(offset + length) as usize),
-                "data mismatch at offset={offset}, length={length}"
+            assert_eq!(output.freeze(), input.slice(range));
+        }).await }
+
+        /// Port of Go SDK's client_test.go:TestDownload "ranges" subtest
+    async fn test_download_ranges() { run_local(async {
+            use sia_core::rhp4::SECTOR_SIZE;
+            const SEGMENT_SIZE: u64 = 64; // leaf size
+
+            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
+            hosts.update(
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
             );
+
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+            let downloader = Downloader::new(hosts.clone(), app_key.clone());
+
+            // Use default 10 data shards, so slab_size = 10 * SECTOR_SIZE
+            let slab_size = 10 * SECTOR_SIZE as u64;
+            let data_size = slab_size * 3; // 3 slabs
+
+            let mut data = BytesMut::zeroed(data_size as usize);
+            random_bytes(&mut data);
+            let data = data.freeze();
+
+            let object = uploader
+                .upload(Cursor::new(data.clone()), UploadOptions::default())
+                .await
+                .expect("upload to complete");
+
+            assert_eq!(object.slabs().len(), 3);
+
+            // Test cases matching Go's TestDownload ranges
+            let mut cases: Vec<(u64, u64)> = vec![
+                (0, SECTOR_SIZE as u64),                              // first sector
+                (SECTOR_SIZE as u64, SECTOR_SIZE as u64),             // second sector
+                (SEGMENT_SIZE, SEGMENT_SIZE),                         // one leaf
+                (SEGMENT_SIZE + 1, SEGMENT_SIZE / 2),                 // within a leaf
+                (SEGMENT_SIZE + SEGMENT_SIZE / 2, SEGMENT_SIZE),      // across leaves
+                (slab_size / 2, 2 * slab_size),                       // across slabs
+                (data_size - SECTOR_SIZE as u64, SECTOR_SIZE as u64), // last sector
+                (data_size - SEGMENT_SIZE, SEGMENT_SIZE),             // last leaf
+                (data_size, 0),                                       // empty at end
+            ];
+
+            // Add 10 random ranges
+            for _ in 0..10 {
+                let offset = random_u64() % (data_size - 1);
+                let length = random_u64() % (data_size - offset + 1);
+                cases.push((offset, length));
+            }
+
+            for (offset, length) in cases {
+                let mut output = BytesMut::zeroed(length as usize);
+                downloader
+                    .download(
+                        &mut Cursor::new(&mut output[..]),
+                        &object,
+                        DownloadOptions {
+                            offset,
+                            length: Some(length),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    output.freeze(),
+                    data.slice(offset as usize..(offset + length) as usize),
+                    "data mismatch at offset={offset}, length={length}"
+                );
+            }
+        }).await }
+
+    async fn test_download_slow_hosts() { run_local(async {
+            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let mock_transport = Arc::new(MockRHP4Transport::new());
+            let hosts = Hosts::new(mock_transport.clone());
+
+            // Create 30 hosts and track their public keys
+            let host_keys: Vec<_> = (0..30)
+                .map(|_| PrivateKey::from_seed(&random_seed()).public_key())
+                .collect();
+
+            hosts.update(
+                host_keys
+                    .iter()
+                    .map(|pk| Host {
+                        public_key: *pk,
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
+
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+            let downloader = Downloader::new(hosts.clone(), app_key.clone());
+
+            let input: Bytes = Bytes::from("Hello, world!");
+
+            let object = uploader
+                .upload(Cursor::new(input.clone()), UploadOptions::default())
+                .await
+                .expect("upload to complete");
+
+            // make all hosts slow
+            mock_transport.set_slow_hosts(
+                host_keys.iter().take(30).copied(),
+                Duration::from_secs(1),
+            );
+
+            let mut output = BytesMut::zeroed(object.size() as usize);
+            downloader
+                .download(
+                    &mut Cursor::new(&mut output[..]),
+                    &object,
+                    DownloadOptions::default(),
+                )
+                .await
+                .expect("download to complete");
+
+            assert_eq!(output.freeze(), input.clone());
+        }).await }
+
+    async fn test_upload_no_hosts() { run_local(async {
+            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+
+            let input: Bytes = Bytes::from("Hello, world!");
+
+            let err = uploader
+                .upload(Cursor::new(input.clone()), UploadOptions::default())
+                .await
+                .expect_err("upload to fail");
+
+            match err {
+                UploadError::QueueError(QueueError::InsufficientHosts) => (),
+                _ => panic!(),
+            }
+        }).await }
+
+        /// Tests that upload succeeds even when some hosts are slow, as long as
+        /// there are enough fast hosts to complete the upload.
+        /// This mirrors Go's TestUpload "slow" subtest.
+    async fn test_upload_slow_host() { run_local(async {
+            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let mock_transport = Arc::new(MockRHP4Transport::new());
+            let hosts = Hosts::new(mock_transport.clone());
+
+            // Create 30 hosts and track their public keys
+            let host_keys: Vec<_> = (0..30)
+                .map(|_| PrivateKey::from_seed(&random_seed()).public_key())
+                .collect();
+
+            hosts.update(
+                host_keys
+                    .iter()
+                    .map(|pk| Host {
+                        public_key: *pk,
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
+
+            // make the 1st host slow
+            mock_transport.set_slow_hosts(
+                host_keys.iter().take(1).copied(),
+                Duration::from_secs(2),
+            );
+
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+
+            let input: Bytes = Bytes::from("Hello, world!");
+
+            let object = uploader
+                .upload(Cursor::new(input.clone()), UploadOptions::default())
+                .await
+                .expect("upload should succeed with 1 slow host");
+
+            assert_eq!(object.slabs().len(), 1);
+        }).await }
+
+        // Upload should succeed even if all initial hosts are slow
+    async fn test_upload_all_hosts_slow() { run_local(async {
+            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let mock_transport = Arc::new(MockRHP4Transport::new());
+            let hosts = Hosts::new(mock_transport.clone());
+
+            // Create 30 hosts and track their public keys
+            let host_keys: Vec<_> = (0..30)
+                .map(|_| PrivateKey::from_seed(&random_seed()).public_key())
+                .collect();
+
+            hosts.update(
+                host_keys
+                    .iter()
+                    .map(|pk| Host {
+                        public_key: *pk,
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
+
+            // Make all hosts slow
+            mock_transport.set_slow_hosts(host_keys.iter().take(30).copied(), Duration::from_secs(2));
+
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+
+            let input: Bytes = Bytes::from("Hello, world!");
+
+            let _ = uploader
+                .upload(Cursor::new(input.clone()), UploadOptions::default())
+                .await
+                .expect("upload to succeed");
+        }).await }
+
+    async fn test_upload_not_enough_hosts_good_for_upload() { run_local(async {
+            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
+            // Create 30 hosts: 10 good for upload, 20 not good for upload
+            let host_keys: Vec<_> = (0..30)
+                .map(|_| PrivateKey::from_seed(&random_seed()).public_key())
+                .collect();
+
+            hosts.update(
+                host_keys
+                    .iter()
+                    .enumerate()
+                    .map(|(i, pk)| Host {
+                        public_key: *pk,
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: i < 10,
+                    })
+                    .collect(),
+                true,
+            );
+
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+
+            let input: Bytes = Bytes::from("Hello, world!");
+
+            let err = uploader
+                .upload(Cursor::new(input.clone()), UploadOptions::default())
+                .await
+                .expect_err("upload to fail");
+
+            match err {
+                UploadError::QueueError(QueueError::InsufficientHosts) => (),
+                _ => panic!(),
+            }
+        }).await }
         }
-    }
-
-    #[tokio::test]
-    async fn test_download_slow_hosts() {
-        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
-        let mock_transport = Arc::new(MockRHP4Transport::new());
-        let hosts = Hosts::new(mock_transport.clone());
-
-        // Create 30 hosts and track their public keys
-        let host_keys: Vec<_> = (0..30)
-            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
-            .collect();
-
-        hosts.update(
-            host_keys
-                .iter()
-                .map(|pk| Host {
-                    public_key: *pk,
-                    addresses: vec![NetAddress {
-                        protocol: sia_core::types::v2::Protocol::QUIC,
-                        address: "localhost:1234".to_string(),
-                    }],
-                    country_code: "US".to_string(),
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    good_for_upload: true,
-                })
-                .collect(),
-            true,
-        );
-
-        let uploader = Uploader::new(hosts.clone(), app_key.clone());
-        let downloader = Downloader::new(hosts.clone(), app_key.clone());
-
-        let input: Bytes = Bytes::from("Hello, world!");
-
-        let object = uploader
-            .upload(Cursor::new(input.clone()), UploadOptions::default())
-            .await
-            .expect("upload to complete");
-
-        // make all hosts slow
-        mock_transport.set_slow_hosts(
-            host_keys.iter().take(30).copied(),
-            tokio::time::Duration::from_secs(1),
-        );
-
-        let mut output = BytesMut::zeroed(object.size() as usize);
-        downloader
-            .download(
-                &mut Cursor::new(&mut output[..]),
-                &object,
-                DownloadOptions::default(),
-            )
-            .await
-            .expect("download to complete");
-
-        assert_eq!(output.freeze(), input.clone());
-    }
-
-    #[tokio::test]
-    async fn test_upload_no_hosts() {
-        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
-        let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
-        let uploader = Uploader::new(hosts.clone(), app_key.clone());
-
-        let input: Bytes = Bytes::from("Hello, world!");
-
-        let err = uploader
-            .upload(Cursor::new(input.clone()), UploadOptions::default())
-            .await
-            .expect_err("upload to fail");
-
-        match err {
-            UploadError::QueueError(QueueError::InsufficientHosts) => (),
-            _ => panic!(),
-        }
-    }
-
-    /// Tests that upload succeeds even when some hosts are slow, as long as
-    /// there are enough fast hosts to complete the upload.
-    /// This mirrors Go's TestUpload "slow" subtest.
-    #[tokio::test]
-    async fn test_upload_slow_host() {
-        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
-        let mock_transport = Arc::new(MockRHP4Transport::new());
-        let hosts = Hosts::new(mock_transport.clone());
-
-        // Create 30 hosts and track their public keys
-        let host_keys: Vec<_> = (0..30)
-            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
-            .collect();
-
-        hosts.update(
-            host_keys
-                .iter()
-                .map(|pk| Host {
-                    public_key: *pk,
-                    addresses: vec![NetAddress {
-                        protocol: sia_core::types::v2::Protocol::QUIC,
-                        address: "localhost:1234".to_string(),
-                    }],
-                    country_code: "US".to_string(),
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    good_for_upload: true,
-                })
-                .collect(),
-            true,
-        );
-
-        // make the 1st host slow
-        mock_transport.set_slow_hosts(
-            host_keys.iter().take(1).copied(),
-            tokio::time::Duration::from_secs(2),
-        );
-
-        let uploader = Uploader::new(hosts.clone(), app_key.clone());
-
-        let input: Bytes = Bytes::from("Hello, world!");
-
-        let object = uploader
-            .upload(Cursor::new(input.clone()), UploadOptions::default())
-            .await
-            .expect("upload should succeed with 1 slow host");
-
-        assert_eq!(object.slabs().len(), 1);
-    }
-
-    // Upload should succeed even if all initial hosts are slow
-    #[tokio::test]
-    async fn test_upload_all_hosts_slow() {
-        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
-        let mock_transport = Arc::new(MockRHP4Transport::new());
-        let hosts = Hosts::new(mock_transport.clone());
-
-        // Create 30 hosts and track their public keys
-        let host_keys: Vec<_> = (0..30)
-            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
-            .collect();
-
-        hosts.update(
-            host_keys
-                .iter()
-                .map(|pk| Host {
-                    public_key: *pk,
-                    addresses: vec![NetAddress {
-                        protocol: sia_core::types::v2::Protocol::QUIC,
-                        address: "localhost:1234".to_string(),
-                    }],
-                    country_code: "US".to_string(),
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    good_for_upload: true,
-                })
-                .collect(),
-            true,
-        );
-
-        // Make all hosts slow
-        mock_transport.set_slow_hosts(host_keys.iter().take(30).copied(), Duration::from_secs(2));
-
-        let uploader = Uploader::new(hosts.clone(), app_key.clone());
-
-        let input: Bytes = Bytes::from("Hello, world!");
-
-        let _ = uploader
-            .upload(Cursor::new(input.clone()), UploadOptions::default())
-            .await
-            .expect("upload to succeed");
-    }
-
-    #[tokio::test]
-    async fn test_upload_not_enough_hosts_good_for_upload() {
-        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
-        let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
-        // Create 30 hosts: 10 good for upload, 20 not good for upload
-        let host_keys: Vec<_> = (0..30)
-            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
-            .collect();
-
-        hosts.update(
-            host_keys
-                .iter()
-                .enumerate()
-                .map(|(i, pk)| Host {
-                    public_key: *pk,
-                    addresses: vec![NetAddress {
-                        protocol: sia_core::types::v2::Protocol::QUIC,
-                        address: "localhost:1234".to_string(),
-                    }],
-                    country_code: "US".to_string(),
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    good_for_upload: i < 10,
-                })
-                .collect(),
-            true,
-        );
-
-        let uploader = Uploader::new(hosts.clone(), app_key.clone());
-
-        let input: Bytes = Bytes::from("Hello, world!");
-
-        let err = uploader
-            .upload(Cursor::new(input.clone()), UploadOptions::default())
-            .await
-            .expect_err("upload to fail");
-
-        match err {
-            UploadError::QueueError(QueueError::InsufficientHosts) => (),
-            _ => panic!(),
-        }
-    }
 }
