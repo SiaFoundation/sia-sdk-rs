@@ -702,7 +702,7 @@ fn register_app_sig_hash(request_id: &str, ephemeral_key: &PublicKey) -> Hash256
 mod cross_target_test {
     use base64::engine::general_purpose::URL_SAFE;
     use base64::prelude::*;
-    use sia_core::{cross_target_tests, hash_256, public_key, signature};
+    use sia_core::{hash_256, public_key, signature};
 
     use crate::slabs::object_id;
 

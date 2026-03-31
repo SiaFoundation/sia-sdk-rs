@@ -653,7 +653,6 @@ impl HostQueue {
 
 #[cfg(test)]
 mod test {
-    use sia_core::cross_target_tests;
     use sia_core::signing::PrivateKey;
 
     use crate::mock::MockRHP4Transport;

@@ -113,7 +113,6 @@ impl ErasureCoder {
 mod tests {
     use std::io::Cursor;
 
-    use sia_core::cross_target_tests;
 
     use super::*;
 

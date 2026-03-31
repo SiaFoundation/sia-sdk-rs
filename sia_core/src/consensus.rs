@@ -248,7 +248,7 @@ impl Network {
 }
 
 fn has_tree_at_height(num_leaves: &u64, height: usize) -> bool {
-    num_leaves & (1u64 << height) != 0
+    num_leaves & (1 << height) != 0
 }
 
 #[derive(PartialEq, Debug)]
@@ -573,8 +573,8 @@ mod tests {
     use chrono::FixedOffset;
     use serde_json;
 
-    cross_target_tests! {
-    async fn test_serialize_network() {
+    #[test]
+    fn test_serialize_network() {
         let test_cases = vec![
             (
                 Network::anagami(),
@@ -598,7 +598,8 @@ mod tests {
         }
     }
 
-    async fn test_serialize_state() {
+    #[test]
+    fn test_serialize_state() {
         let s = State {
             index: ChainIndex {
                 height: 0,
@@ -798,6 +799,5 @@ mod tests {
         assert_eq!(BINARY_STR, hex::encode(serialized.clone()));
         let deserialized = State::decode(&mut &serialized[..]).unwrap();
         assert_eq!(s, deserialized);
-    }
     }
 }

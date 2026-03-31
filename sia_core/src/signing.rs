@@ -208,8 +208,8 @@ impl fmt::Display for Signature {
 mod tests {
     use super::*;
 
-    cross_target_tests! {
-    async fn test_serialize_publickey() {
+    #[test]
+    fn test_serialize_publickey() {
         let public_key_str = "9aac1ffb1cfd1079a8c6c87b47da1d567e35b97234993c288c1ad0db1d1ce1b6";
         let public_key = PublicKey::new(hex::decode(public_key_str).unwrap().try_into().unwrap());
 
@@ -230,6 +230,5 @@ mod tests {
             format!("\"ed25519:{public_key_str}\"")
         );
         assert_eq!(public_key_deserialized, public_key);
-    }
     }
 }

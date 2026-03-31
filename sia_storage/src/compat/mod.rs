@@ -114,3 +114,41 @@ macro_rules! maybe_spawn {
         }
     }};
 }
+
+/// Dual-target test macro. All test functions must be `async fn`.
+/// Uses `#[tokio::test]` on native and `#[wasm_bindgen_test]` on WASM.
+///
+/// Can only be invoked once per scope (module) because it emits a
+/// `use wasm_bindgen_test::*;` import.
+#[cfg(test)]
+macro_rules! cross_target_tests {
+    ($($test_fn:item)*) => {
+        #[cfg(target_arch = "wasm32")]
+        use wasm_bindgen_test::*;
+
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_test_configure!(run_in_browser);
+
+        $(
+            #[cfg(target_arch = "wasm32")]
+            #[wasm_bindgen_test]
+            $test_fn
+
+            #[cfg(not(target_arch = "wasm32"))]
+            #[tokio::test]
+            $test_fn
+        )*
+    };
+}
+
+/// Run an async block inside a `tokio::task::LocalSet` on WASM, or directly
+/// on native. Required for tests that use `join_set_spawn!` / `spawn_local`.
+#[cfg(all(test, target_arch = "wasm32"))]
+pub(crate) async fn run_local<F: std::future::Future>(f: F) -> F::Output {
+    tokio::task::LocalSet::new().run_until(f).await
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) async fn run_local<F: std::future::Future>(f: F) -> F::Output {
+    f.await
+}

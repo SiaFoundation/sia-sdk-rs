@@ -2669,7 +2669,6 @@ dependencies = [
  "chrono",
  "criterion",
  "ed25519-dalek",
- "getrandom 0.4.1",
  "hex",
  "num-bigint",
  "num-rational",
@@ -2683,7 +2682,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "uint",
- "wasm-bindgen-test",
  "zeroize",
 ]
 

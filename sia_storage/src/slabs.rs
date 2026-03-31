@@ -383,7 +383,7 @@ pub(crate) fn object_id(slabs: &[Slab]) -> Hash256 {
 #[cfg(test)]
 mod test {
     use super::*;
-    use sia_core::{cross_target_tests, hash_256};
+    use sia_core::hash_256;
 
     fn random_bytes_32() -> [u8; 32] {
         let mut buf = [0u8; 32];

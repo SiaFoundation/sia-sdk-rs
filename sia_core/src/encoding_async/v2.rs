@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(bytes.len(), 0, "leftover bytes for {value:?}");
     }
 
-    cross_target_tests! {
+    #[tokio::test]
     async fn test_numerics() {
         test_decode(1u8, vec![1]).await;
         test_decode(2u16, vec![2, 0, 0, 0, 0, 0, 0, 0]).await;
@@ -151,6 +151,7 @@ mod tests {
         test_decode(-3i64, vec![253, 255, 255, 255, 255, 255, 255, 255]).await;
     }
 
+    #[tokio::test]
     async fn test_strings() {
         test_decode(
             "hello".to_string(),
@@ -160,11 +161,13 @@ mod tests {
         test_decode("".to_string(), vec![0, 0, 0, 0, 0, 0, 0, 0]).await;
     }
 
+    #[tokio::test]
     async fn test_fixed_arrays() {
         test_decode([1u8, 2u8, 3u8], vec![1, 2, 3]).await;
         test_decode([0u8; 4], vec![0, 0, 0, 0]).await;
     }
 
+    #[tokio::test]
     async fn test_vectors() {
         test_decode(vec![1u8, 2u8, 3u8], vec![3, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3]).await;
         test_decode(
@@ -176,6 +179,7 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
     async fn test_bytes() {
         test_decode(
             Bytes::from("hello"),
@@ -183,6 +187,5 @@ mod tests {
         )
         .await;
         test_decode(Bytes::from(""), vec![0, 0, 0, 0, 0, 0, 0, 0]).await;
-    }
     }
 }

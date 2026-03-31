@@ -260,7 +260,6 @@ impl StreamCipher for Chacha20Cipher {
 
 #[cfg(test)]
 mod test {
-    use sia_core::cross_target_tests;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use sia_core::rhp4::SECTOR_SIZE;

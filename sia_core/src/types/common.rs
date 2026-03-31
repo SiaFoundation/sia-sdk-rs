@@ -50,10 +50,10 @@ impl BlockID {
         state.finalize().into()
     }
 
-    pub fn miner_output_id(&self, i: u64) -> SiacoinOutputID {
+    pub fn miner_output_id(&self, i: usize) -> SiacoinOutputID {
         let mut state = Params::new().hash_length(32).to_state();
         state.update(self.as_ref());
-        state.update(&i.to_le_bytes());
+        state.update(&(i as u64).to_le_bytes());
         state.finalize().into()
     }
 }
@@ -66,31 +66,31 @@ impl TransactionID {
     const V2_FILE_CONTRACT_PREFIX: &[u8] = b"sia/id/filecontract|";
     const V2_ATTESTATION_PREFIX: &[u8] = b"sia/id/attestation|";
 
-    fn derive_v2_child_id<T: From<blake2b_simd::Hash>>(&self, prefix: &[u8], i: u64) -> T {
+    fn derive_v2_child_id<T: From<blake2b_simd::Hash>>(&self, prefix: &[u8], i: usize) -> T {
         let mut state = Params::new().hash_length(32).to_state();
         state.update(prefix.as_ref());
         state.update(self.as_ref());
-        state.update(&i.to_le_bytes());
+        state.update(&(i as u64).to_le_bytes());
         state.finalize().into()
     }
 
     /// v2_siacoin_output_id returns the SiacoinOutputID for the i-th siacoin output of the V2 transaction
-    pub fn v2_siacoin_output_id(&self, i: u64) -> SiacoinOutputID {
+    pub fn v2_siacoin_output_id(&self, i: usize) -> SiacoinOutputID {
         self.derive_v2_child_id(Self::V2_SIACOIN_OUTPUT_PREFIX, i)
     }
 
     /// v2_siafund_output_id returns the SiafundOutputID for the i-th siafund output of the V2 transaction
-    pub fn v2_siafund_output_id(&self, i: u64) -> SiafundOutputID {
+    pub fn v2_siafund_output_id(&self, i: usize) -> SiafundOutputID {
         self.derive_v2_child_id(Self::V2_SIAFUND_OUTPUT_PREFIX, i)
     }
 
     /// v2_file_contract_id returns the FileContractID for the i-th file contract of the V2 transaction
-    pub fn v2_file_contract_id(&self, i: u64) -> FileContractID {
+    pub fn v2_file_contract_id(&self, i: usize) -> FileContractID {
         self.derive_v2_child_id(Self::V2_FILE_CONTRACT_PREFIX, i)
     }
 
     /// v2_attestation_id returns the AttestationID for the i-th attestation of the V2 transaction
-    pub fn v2_attestation_id(&self, i: u64) -> AttestationID {
+    pub fn v2_attestation_id(&self, i: usize) -> AttestationID {
         self.derive_v2_child_id(Self::V2_ATTESTATION_PREFIX, i)
     }
 }
@@ -102,30 +102,30 @@ impl FileContractID {
     const V2_PROOF_OUTPUT_ID_PREFIX: &'static str = "id/v2filecontractoutput";
     const V2_FILE_CONTRACT_RENEWAL_PREFIX: &'static str = "id/v2filecontractrenewal";
 
-    fn derive_proof_output_id<T: From<blake2b_simd::Hash>>(&self, valid: bool, i: u64) -> T {
+    fn derive_proof_output_id<T: From<blake2b_simd::Hash>>(&self, valid: bool, i: usize) -> T {
         let mut state = Params::new().hash_length(32).to_state();
         state.update(Self::PROOF_OUTPUT_ID_PREFIX.as_ref());
         state.update(self.as_ref());
         state.update(&(valid as u8).to_le_bytes());
-        state.update(&i.to_le_bytes());
+        state.update(&(i as u64).to_le_bytes());
         state.finalize().into()
     }
 
-    fn derive_v2_proof_output_id<T: From<blake2b_simd::Hash>>(&self, i: u64) -> T {
+    fn derive_v2_proof_output_id<T: From<blake2b_simd::Hash>>(&self, i: usize) -> T {
         let mut state = Params::new().hash_length(32).to_state();
         state.update(Self::V2_PROOF_OUTPUT_ID_PREFIX.as_ref());
         state.update(self.as_ref());
-        state.update(&i.to_le_bytes());
+        state.update(&(i as u64).to_le_bytes());
         state.finalize().into()
     }
 
     /// valid_output_id returns the SiacoinOutputID for the i-th valid output of the contract
-    pub fn valid_output_id(&self, i: u64) -> SiacoinOutputID {
+    pub fn valid_output_id(&self, i: usize) -> SiacoinOutputID {
         self.derive_proof_output_id(true, i)
     }
 
     /// missed_output_id returns the SiacoinOutputID for the i-th missed output of the contract
-    pub fn missed_output_id(&self, i: u64) -> SiacoinOutputID {
+    pub fn missed_output_id(&self, i: usize) -> SiacoinOutputID {
         self.derive_proof_output_id(false, i)
     }
 
@@ -432,8 +432,8 @@ mod tests {
 
     use super::*;
 
-    cross_target_tests! {
-    async fn test_serialize_hash256() {
+    #[test]
+    fn test_serialize_hash256() {
         let hash_str = "9aac1ffb1cfd1079a8c6c87b47da1d567e35b97234993c288c1ad0db1d1ce1b6";
         let hash = Hash256(hex::decode(hash_str).unwrap().try_into().unwrap());
 
@@ -451,7 +451,8 @@ mod tests {
         assert_eq!(hash_deserialized, hash); // deserialize
     }
 
-    async fn test_serialize_address() {
+    #[test]
+    fn test_serialize_address() {
         let addr_str = "8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c";
         let checksum = "df32abee86f0";
         let address = address!(
@@ -472,7 +473,8 @@ mod tests {
         assert_eq!(addr_deserialized, address); // deserialize
     }
 
-    async fn test_serialize_block() {
+    #[test]
+    fn test_serialize_block() {
         let b = Block {
             parent_id: block_id!(
                 "8fb49ccf17dfdcc9526dec6ee8a5cca20ff8247302053d3777410b9b0494ba8c"
@@ -527,7 +529,8 @@ mod tests {
         assert_eq!(deserialized, b);
     }
 
-    async fn test_transaction_derive() {
+    #[test]
+    fn test_transaction_derive() {
         const TXN_JSON: &str = r#"{"siacoinInputs":[{"parentID":"750d22eff727689d1d8d1c83e513a30bb68ee7f9125a4dafc882459e34c2069d","unlockConditions":{"timelock":0,"publicKeys":["ed25519:800ed6c2760e3e4ba1ff00128585c8cf8fed2e3dc1e3da1eb92d49f405bd6360"],"signaturesRequired":6312611591377486220}}],"siacoinOutputs":[{"value":"890415399000000000000000000000000","address":"480a064b5fca13002a7fe575845154bbf0b3af4cc4f147cbed387d43cce3568ae2497366eaa7"}],"fileContracts":[{"filesize":0,"fileMerkleRoot":"0000000000000000000000000000000000000000000000000000000000000000","windowStart":10536451586783908586,"windowEnd":9324702155635244357,"payout":"0","validProofOutputs":[{"value":"1933513214000000000000000000000000","address":"944524fff2c49c401e748db37cfda7569fa6df35b704fe716394f2ac3f40ce87b4506e9906f0"}],"missedProofOutputs":[{"value":"2469287901000000000000000000000000","address":"1df67838262d7109ffcd9018f183b1eb33f05659a274b89ea6b52ff3617d34a770e9dd071d2e"}],"unlockHash":"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69","revisionNumber":9657412421282982780}],"fileContractRevisions":[{"parentID":"e4e26d93771d3bbb3d9dd306105d77cfb3a6254d1cc3495903af6e013442c63c","unlockConditions":{"timelock":0,"publicKeys":["ed25519:e6b9cde4eb058f8ecbb083d99779cb0f6d518d5386f019af6ead09fa52de8567"],"signaturesRequired":206644730660526450},"revisionNumber":10595710523108536025,"filesize":0,"fileMerkleRoot":"0000000000000000000000000000000000000000000000000000000000000000","windowStart":4348934140507359445,"windowEnd":14012366839994454386,"validProofOutputs":[{"value":"2435858510000000000000000000000000","address":"543bc0eda69f728d0a0fbce08e5bfc5ed7b961300e0af226949e135f7d12e32f0544e5262d6f"}],"missedProofOutputs":[{"value":"880343701000000000000000000000000","address":"7b7f9aee981fe0d93bb3f49c6233cf847ebdd39d7dc5253f7fc330df2167073b35f035703237"}],"unlockHash":"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69"}],"storageProofs":[{"parentID":"c0b9e98c9e03a2740c75d673871c1ee91f36d1bb329ff3ddbf1dfa8c6e1a64eb","leaf":"b78fa521dc62d9ced82bc3b61e0aa5a5c221d6cca5db63d94c9879543fb98c0a971094a89cd4408487ae32902248d321b545f9a051729aa0bb1725b848e3d453","proof":["fe08c0a061475e7e5dec19e717cf98792fa7b555d0b5d3540a05db09f59ab8de"]}],"minerFees":["241119475000000000000000000000000"],"arbitraryData":["2shzIHEUJYwuNHz6c/gPz+aTEWZRTpDTmemX9yYAKlY="],"signatures":[{"parentID":"06d1fca03c5ddd9b09116db1b97c5451f7dc792b05362969f83e3e8dc1007f46","publicKeyIndex":6088345341283457116,"timelock":2014247885072555224,"coveredFields":{"wholeTransaction":true},"signature":"2XNEKGZrl9RhMa2JmGsvcmqQWAIX/uxtMwLnPI6VJPcXqub6qYIuoAThYp9NAwadk+1GG6CXC66g4rOjFYuNSA=="}]}"#;
 
         const EXPECTED_TRANSACTION_ID: TransactionID =
@@ -563,7 +566,8 @@ mod tests {
         );
     }
 
-    async fn test_transaction_id_v2_derive() {
+    #[test]
+    fn test_transaction_id_v2_derive() {
         const EXPECTED_V2_SIACOIN_OUTPUT_ID: SiacoinOutputID =
             siacoin_id!("f74e0d8eae89ec820184c9bacfcad0181c781c02020f8a3fcbc82fd4ebf2fcf0");
         const EXPECTED_V2_SIAFUND_OUTPUT_ID: SiafundOutputID =
@@ -593,7 +597,8 @@ mod tests {
         );
     }
 
-    async fn test_block_id_derive() {
+    #[test]
+    fn test_block_id_derive() {
         const EXPECTED_FOUNDATION_OUTPUT_ID: SiacoinOutputID =
             siacoin_id!("159e2c4159a112ea9a70242d541a26f49fce41b6126f9105eab9b68dba4cfafb");
         const EXPECTED_MINER_OUTPUT_ID: SiacoinOutputID =
@@ -615,7 +620,8 @@ mod tests {
         );
     }
 
-    async fn test_siafund_output_id_derive() {
+    #[test]
+    fn test_siafund_output_id_derive() {
         const EXPECTED_CLAIM_ID: SiacoinOutputID =
             siacoin_id!("8eec57722c2ac040e34322ba77cb6b488ac8081f856d93bea1bf1bef42aeaabb");
         const EXPECTED_V2_CLAIM_ID: SiacoinOutputID =
@@ -635,6 +641,5 @@ mod tests {
             EXPECTED_V2_CLAIM_ID,
             "v2 claim output id"
         );
-    }
     }
 }

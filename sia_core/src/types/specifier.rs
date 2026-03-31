@@ -81,8 +81,8 @@ pub use specifier;
 mod tests {
     use super::*;
 
-    cross_target_tests! {
-    async fn test_specifier() {
+    #[test]
+    fn test_specifier() {
         let spec = specifier!["hello"];
         let expected = Specifier([
             b'h', b'e', b'l', b'l', b'o', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -90,7 +90,8 @@ mod tests {
         assert_eq!(spec, expected);
     }
 
-    async fn test_specifier_string() {
+    #[test]
+    fn test_specifier_string() {
         let test_cases = vec![
             (specifier!["hello world"], "hello world"),
             (specifier!["hello"], "hello"),
@@ -105,6 +106,5 @@ mod tests {
         for (specifier, expected) in test_cases {
             assert_eq!(specifier.to_string(), expected);
         }
-    }
     }
 }

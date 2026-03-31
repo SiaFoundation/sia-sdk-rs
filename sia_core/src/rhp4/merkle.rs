@@ -285,8 +285,8 @@ mod tests {
     use super::*;
     use crate::hash_256;
 
-    cross_target_tests! {
-    async fn test_sector_root() {
+    #[test]
+    fn test_sector_root() {
         let mut sector = vec![0u8; SECTOR_SIZE];
         let root = sector_root(&sector);
         assert_eq!(
@@ -320,7 +320,8 @@ mod tests {
         );
     }
 
-    async fn test_range_proof_size() {
+    #[test]
+    fn test_range_proof_size() {
         assert_eq!(range_proof_size(LEAVES_PER_SECTOR, 0, LEAVES_PER_SECTOR), 0);
         assert_eq!(range_proof_size(LEAVES_PER_SECTOR, 1, LEAVES_PER_SECTOR), 1);
         assert_eq!(
@@ -343,7 +344,8 @@ mod tests {
         );
     }
 
-    async fn test_next_subtree_size() {
+    #[test]
+    fn test_next_subtree_size() {
         assert_eq!(next_subtree_size(0, 1), 1);
         assert_eq!(
             next_subtree_size(LEAVES_PER_SECTOR, LEAVES_PER_SECTOR + 1),
@@ -358,6 +360,7 @@ mod tests {
         assert_eq!(next_subtree_size(24, 42), 8);
     }
 
+    #[tokio::test]
     async fn test_sector_root_from_reader() {
         // prepare slightly more than a sector worth of data to make sure we
         // only compute the hash over the first SECTOR_SIZE bytes
@@ -369,7 +372,8 @@ mod tests {
         assert_eq!(root, expected_root);
     }
 
-    async fn test_verify_range_proof() {
+    #[test]
+    fn test_verify_range_proof() {
         let data = Bytes::from(vec![0u8; SECTOR_SIZE]);
         let sector_root = sector_root(&data);
         let proof: Vec<Hash256> = vec![
@@ -394,6 +398,5 @@ mod tests {
             .verify(&sector_root, 24, 42)
             .expect("proof validation failed");
         assert_eq!(&data, &verified_data);
-    }
     }
 }
