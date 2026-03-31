@@ -298,7 +298,7 @@ impl Uploader {
         }
     }
 
-    async fn upload_slabs<R: AsyncRead + Unpin + Send + 'static>(
+    pub(crate) async fn upload_slabs<R: AsyncRead + Unpin + Send + 'static>(
         client: Hosts,
         app_key: Arc<PrivateKey>,
         r: R,

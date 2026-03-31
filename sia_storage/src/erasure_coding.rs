@@ -1,4 +1,4 @@
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use sia_core::rhp4::{SECTOR_SIZE, SEGMENT_SIZE};
 use thiserror::Error;
@@ -43,7 +43,7 @@ impl ErasureCoder {
     /// to the provided writer, skipping the first `skip` bytes.
     pub async fn write_data_shards<W: AsyncWrite + Unpin>(
         w: &mut W,
-        shards: &[Option<BytesMut>],
+        shards: &[Bytes],
         mut skip: usize,
         mut n: usize,
     ) -> Result<()> {
@@ -60,14 +60,10 @@ impl ErasureCoder {
                     continue;
                 }
 
-                let segment = shard.as_ref().ok_or(Error::ReedSolomon(
-                    reed_solomon_erasure::Error::TooFewDataShards,
-                ))?;
-
                 let start = offset + skip;
                 let length = n.min(SEGMENT_SIZE - skip);
 
-                w.write_all(&segment[start..start + length]).await?;
+                w.write_all(&shard[start..start + length]).await?;
                 n -= length;
                 skip = 0;
             }
@@ -268,7 +264,7 @@ mod tests {
         assert_ne!(shards[4], BytesMut::zeroed(SECTOR_SIZE));
 
         // joining the shards back together should result in the original data
-        let shards: Vec<Option<BytesMut>> = shards.iter().cloned().map(Some).collect();
+        let shards: Vec<Bytes> = shards.iter().cloned().map(|s| s.freeze()).collect();
         let mut joined_data = Vec::new();
         ErasureCoder::write_data_shards(&mut joined_data, &shards[..DATA_SHARDS], 0, data.len())
             .await

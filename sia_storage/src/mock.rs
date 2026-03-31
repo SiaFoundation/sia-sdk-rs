@@ -9,7 +9,7 @@ use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::{Currency, Hash256};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::download::Downloader;
+use crate::download::download_object;
 use crate::hosts::Hosts;
 use crate::rhp4::{Error as RHP4Error, HostEndpoint, Transport};
 use crate::time::{Duration, sleep};
@@ -158,14 +158,13 @@ impl MockUploader {
 }
 
 pub struct MockDownloader {
-    downloader: Downloader,
+    hosts: MockHosts,
+    app_key: Arc<PrivateKey>,
 }
 
 impl MockDownloader {
     pub fn new(hosts: MockHosts, app_key: Arc<PrivateKey>) -> Self {
-        Self {
-            downloader: Downloader::new(hosts.inner, app_key),
-        }
+        Self { hosts, app_key }
     }
 
     pub async fn download<W: AsyncWrite + Send + Sync + Unpin>(
@@ -174,7 +173,14 @@ impl MockDownloader {
         object: &Object,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
-        self.downloader.download(w, object, options).await
+        download_object(
+            self.hosts.inner.clone(),
+            self.app_key.clone(),
+            w,
+            object,
+            options,
+        )
+        .await
     }
 }
 
