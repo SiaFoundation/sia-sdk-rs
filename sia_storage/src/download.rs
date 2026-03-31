@@ -102,7 +102,18 @@ struct SlabRecovery<T> {
 }
 
 impl SlabRecovery<AwaitingRecovery> {
-    fn new(client: Hosts, account_key: Arc<PrivateKey>, slab: Slab) -> Self {
+    fn new(client: Hosts, account_key: Arc<PrivateKey>, slab: Slab) -> Result<Self, DownloadError> {
+        if slab.min_shards == 0 {
+            return Err(DownloadError::InvalidSlab(format!(
+                "min_shards cannot be 0"
+            )));
+        } else if slab.min_shards as usize > slab.sectors.len() {
+            return Err(DownloadError::InvalidSlab(format!(
+                "min_shards {} cannot be greater than number of sectors {}",
+                slab.min_shards, slab.sectors.len()
+            )));
+        }
+
         let mut sectors = slab
             .sectors
             .iter()
@@ -113,7 +124,7 @@ impl SlabRecovery<AwaitingRecovery> {
             })
             .collect::<Vec<_>>();
         client.prioritize(&mut sectors, |task| &task.sector.host_key);
-        Self {
+        Ok(Self {
             client,
             account_key,
             min_shards: slab.min_shards,
@@ -121,7 +132,7 @@ impl SlabRecovery<AwaitingRecovery> {
             offset: slab.offset as usize,
             length: slab.length as usize,
             state: AwaitingRecovery { sectors },
-        }
+        })
     }
 
     async fn recover_shard(
@@ -324,10 +335,16 @@ pub(crate) async fn download_object<W: AsyncWrite + Unpin>(
     object: &Object,
     options: DownloadOptions,
 ) -> Result<(), DownloadError> {
+    if options.max_inflight == 0 {
+        return Err(DownloadError::Custom(
+            "max_inflight must be greater than 0".to_string(),
+        ));
+    }
+
     const CHUNK_SIZE: usize = 1 << 18; // 256 KiB
 
     let object_size = object.size();
-    if options.offset >= object_size {
+    if options.offset >= object_size || options.length == Some(0) {
         return Ok(());
     }
 
@@ -341,7 +358,7 @@ pub(crate) async fn download_object<W: AsyncWrite + Unpin>(
     // recover the first chunk synchronously for fast TTFB
     if let Some((chunk_index, slab)) = chunks.next() {
         let start = Instant::now();
-        SlabRecovery::new(hosts.clone(), account_key.clone(), slab)
+        SlabRecovery::new(hosts.clone(), account_key.clone(), slab)?
             .recover_shards()
             .await?
             .decode()?
@@ -383,6 +400,7 @@ pub(crate) async fn download_object<W: AsyncWrite + Unpin>(
                     let start = Instant::now();
                     let result = async {
                         SlabRecovery::new(hosts, account_key, slab)
+                            .unwrap()
                             .recover_shards()
                             .await?
                             .decode()
@@ -421,6 +439,7 @@ mod test {
     use sia_core::types::v2::NetAddress;
     use sia_core::types::{Currency, Hash256};
 
+    use crate::compat::run_local;
     use crate::hosts::Hosts;
     use crate::mock::MockRHP4Transport;
     use crate::rhp4::{self, HostEndpoint, Transport};
@@ -434,7 +453,8 @@ mod test {
         sector_delays: Mutex<HashMap<Hash256, Duration>>,
     }
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl Transport for OOORHPClient {
         async fn host_prices(&self, _: &HostEndpoint) -> Result<HostPrices, rhp4::Error> {
             Ok(HostPrices {
@@ -491,134 +511,133 @@ mod test {
         }
     }
 
-    #[tokio::test]
-    async fn test_out_of_order_download() {
-        let _ = env_logger::builder().is_test(true).try_init();
+    cross_target_tests! {
+        async fn test_out_of_order_download() { run_local(async {
+            let upload_options = UploadOptions::default();
+            let slab_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
-        let upload_options = UploadOptions::default();
-        let slab_size = upload_options.data_shards as usize * SECTOR_SIZE;
+            let transport = Arc::new(OOORHPClient {
+                sector_data: Mutex::new(HashMap::new()),
+                sector_delays: Mutex::new(HashMap::new()),
+            });
+            let hosts = Hosts::new(transport.clone());
+            hosts.update(
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&rand::random()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
+            let mut data = BytesMut::zeroed(slab_size);
+            rand::rng().fill_bytes(&mut data);
+            let data = data.freeze();
+            let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
 
-        let transport = Arc::new(OOORHPClient {
-            sector_data: Mutex::new(HashMap::new()),
-            sector_delays: Mutex::new(HashMap::new()),
-        });
-        let hosts = Hosts::new(transport.clone());
-        hosts.update(
-            (0..60)
-                .map(|_| Host {
-                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
-                    addresses: vec![NetAddress {
-                        protocol: sia_core::types::v2::Protocol::QUIC,
-                        address: "localhost:1234".to_string(),
-                    }],
-                    country_code: "US".to_string(),
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    good_for_upload: true,
-                })
-                .collect(),
-            true,
-        );
-        let mut data = BytesMut::zeroed(slab_size);
-        rand::rng().fill_bytes(&mut data);
-        let data = data.freeze();
-        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+            let obj = uploader
+                .upload(Cursor::new(data.clone()), UploadOptions::default())
+                .await
+                .unwrap();
 
-        let uploader = Uploader::new(hosts.clone(), app_key.clone());
-        let obj = uploader
-            .upload(Cursor::new(data.clone()), UploadOptions::default())
+            let mut recovered_data = Vec::with_capacity(slab_size);
+            let mut w = Cursor::new(&mut recovered_data);
+            download_object(
+                hosts.clone(),
+                app_key.clone(),
+                &mut w,
+                &obj,
+                DownloadOptions::default(),
+            )
             .await
             .unwrap();
 
-        let mut recovered_data = Vec::with_capacity(slab_size);
-        let mut w = Cursor::new(&mut recovered_data);
-        download_object(
-            hosts.clone(),
-            app_key.clone(),
-            &mut w,
-            &obj,
-            DownloadOptions::default(),
-        )
-        .await
-        .unwrap();
+            assert_eq!(data, recovered_data);
+        }).await }
 
-        assert_eq!(data, recovered_data);
-    }
+        async fn test_slab_recovery() { run_local(async {
+            const DATA_SHARDS: usize = 10;
+            const PARITY_SHARDS: usize = 4;
+            const SLAB_SIZE: usize = SECTOR_SIZE * DATA_SHARDS;
 
-    #[tokio::test]
-    async fn test_slab_recovery() {
-        const DATA_SHARDS: usize = 10;
-        const PARITY_SHARDS: usize = 4;
-        const SLAB_SIZE: usize = SECTOR_SIZE * DATA_SHARDS;
-
-        let transport = Arc::new(MockRHP4Transport::new());
-        let hosts = Hosts::new(transport.clone());
-        hosts.update(
-            (0..60)
-                .map(|_| Host {
-                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
-                    addresses: vec![NetAddress {
-                        protocol: sia_core::types::v2::Protocol::QUIC,
-                        address: "localhost:1234".to_string(),
-                    }],
-                    country_code: "US".to_string(),
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    good_for_upload: true,
-                })
-                .collect(),
-            true,
-        );
-        let mut data = BytesMut::zeroed(SLAB_SIZE);
-        rand::rng().fill_bytes(&mut data);
-        let data = data.freeze();
-        let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
-
-        let slabs = Uploader::upload_slabs(
-            hosts.clone(),
-            app_key.clone(),
-            Cursor::new(data.clone()),
-            UploadOptions {
-                data_shards: DATA_SHARDS as u8,
-                parity_shards: PARITY_SHARDS as u8,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        let test_cases: Vec<(&str, usize, usize)> = vec![
-            ("full slab", 0, SLAB_SIZE),
-            ("first half", 0, SLAB_SIZE / 2),
-            ("second half", SLAB_SIZE / 2, SLAB_SIZE / 2),
-            ("first 30 bytes", 0, 30),
-            ("middle 30 bytes", SLAB_SIZE / 2 - 15, 30),
-            ("last 30 bytes", SLAB_SIZE - 30, 30),
-            ("first 4KiB", 0, 4096),
-            ("middle 4KiB", SLAB_SIZE / 2 - 2048, 4096),
-            ("last 4KiB", SLAB_SIZE - 4096, 4096),
-        ];
-
-        for (name, offset, length) in test_cases {
-            let mut slab = slabs[0].clone();
-            slab.offset = offset as u32;
-            slab.length = length as u32;
-
-            let mut recovered_data = Vec::with_capacity(length);
-            SlabRecovery::new(hosts.clone(), app_key.clone(), slab)
-                .recover_shards()
-                .await
-                .unwrap()
-                .decode()
-                .unwrap()
-                .write(&mut recovered_data)
-                .await
-                .unwrap();
-            assert_eq!(
-                &data[offset..offset + length],
-                &recovered_data[..],
-                "mismatch for case: {name}"
+            let transport = Arc::new(MockRHP4Transport::new());
+            let hosts = Hosts::new(transport.clone());
+            hosts.update(
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&rand::random()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
             );
-        }
+            let mut data = BytesMut::zeroed(SLAB_SIZE);
+            rand::rng().fill_bytes(&mut data);
+            let data = data.freeze();
+            let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
+
+            let slabs = Uploader::upload_slabs(
+                hosts.clone(),
+                app_key.clone(),
+                Cursor::new(data.clone()),
+                UploadOptions {
+                    data_shards: DATA_SHARDS as u8,
+                    parity_shards: PARITY_SHARDS as u8,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+            let test_cases: Vec<(&str, usize, usize)> = vec![
+                ("full slab", 0, SLAB_SIZE),
+                ("first half", 0, SLAB_SIZE / 2),
+                ("second half", SLAB_SIZE / 2, SLAB_SIZE / 2),
+                ("first 30 bytes", 0, 30),
+                ("middle 30 bytes", SLAB_SIZE / 2 - 15, 30),
+                ("last 30 bytes", SLAB_SIZE - 30, 30),
+                ("first 4KiB", 0, 4096),
+                ("middle 4KiB", SLAB_SIZE / 2 - 2048, 4096),
+                ("last 4KiB", SLAB_SIZE - 4096, 4096),
+            ];
+
+            for (name, offset, length) in test_cases {
+                let mut slab = slabs[0].clone();
+                slab.offset = offset as u32;
+                slab.length = length as u32;
+
+                let mut recovered_data = Vec::with_capacity(length);
+                SlabRecovery::new(hosts.clone(), app_key.clone(), slab)
+                    .unwrap()
+                    .recover_shards()
+                    .await
+                    .unwrap()
+                    .decode()
+                    .unwrap()
+                    .write(&mut recovered_data)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    &data[offset..offset + length],
+                    &recovered_data[..],
+                    "mismatch for case: {name}"
+                );
+            }
+        }).await }
     }
 }

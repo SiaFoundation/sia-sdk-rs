@@ -81,12 +81,10 @@ impl SeededVerifier {
         self.ttfb
     }
 
-    fn gap_p99(&self) -> Option<Duration> {
+    fn gap_max(&self) -> Option<Duration> {
         if self.elapsed.is_empty() {
             return None;
         }
-        // note: 1ms seems arbitrary, but write can be called multiple times per chunk
-        // filters out small gaps from buffered writes and focuses on larger stalls
         self.elapsed.windows(2).map(|w| w[1] - w[0]).max()
     }
 }
@@ -240,13 +238,13 @@ async fn main() {
         format_bitrate(obj.encoded_size(), upload_duration),
     );
     println!(
-        "Object downloaded ID: {}\tSize: {}\tEncoded: {}\tElapsed: {:?}\tTTFB: {:?}\tThroughput: {}\tWrite P99: {:?}",
+        "Object downloaded ID: {}\tSize: {}\tEncoded: {}\tElapsed: {:?}\tTTFB: {:?}\tThroughput: {}\tMax Write Latency: {:?}",
         obj.id(),
         format_bytes(obj.size()),
         format_bytes(obj.encoded_size()),
         download_duration,
         verifier.ttfb().unwrap_or_default(),
         format_bitrate(obj.size(), download_duration),
-        verifier.gap_p99().unwrap_or_default(),
+        verifier.gap_max().unwrap_or_default(),
     );
 }
