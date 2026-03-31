@@ -113,7 +113,6 @@ impl ErasureCoder {
 mod tests {
     use std::io::Cursor;
 
-
     use super::*;
 
     fn init_shard(i: u8) -> BytesMut {

@@ -1,5 +1,4 @@
 ---
-sia_core: minor
 sia_storage: minor
 ---
 

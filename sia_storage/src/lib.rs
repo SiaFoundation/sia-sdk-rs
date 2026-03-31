@@ -428,10 +428,10 @@ pub fn validate_recovery_phrase(phrase: &str) -> Result<(), SeedError> {
 
 #[cfg(test)]
 mod test {
+    use crate::compat::run_local;
     use bytes::{Bytes, BytesMut};
     use sia_core::rhp4::SECTOR_SIZE;
     use sia_core::types::v2::NetAddress;
-    use crate::compat::run_local;
     use std::io::Cursor;
 
     use crate::mock::MockRHP4Transport;
