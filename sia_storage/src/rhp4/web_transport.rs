@@ -68,13 +68,7 @@ impl Connection {
             .writable()
             .get_writer()
             .map_err(|e| Error::Transport(format!("get_writer: {e:?}")))?;
-        Ok(Stream {
-            reader,
-            pending_read: None,
-            buf: Vec::new(),
-            writer,
-            pending_write: None,
-        })
+        Ok(Stream::new(reader, writer))
     }
 }
 
@@ -109,6 +103,21 @@ struct Stream {
     buf: Vec<u8>,
     writer: web_sys::WritableStreamDefaultWriter,
     pending_write: Option<(JsFuture, usize)>,
+}
+
+impl Stream {
+    fn new(
+        reader: web_sys::ReadableStreamDefaultReader,
+        writer: web_sys::WritableStreamDefaultWriter,
+    ) -> Self {
+        Self {
+            reader,
+            pending_read: None,
+            buf: Vec::new(),
+            writer,
+            pending_write: None,
+        }
+    }
 }
 
 impl AsyncRead for Stream {
@@ -352,5 +361,131 @@ impl Transport for Client {
             self.evict(&host.public_key);
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use js_sys::Uint8Array;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    /// Creates a Stream backed by in-memory TransformStreams.
+    /// Returns the Stream and a writer that feeds data into it.
+    fn test_stream() -> (Stream, web_sys::WritableStreamDefaultWriter, web_sys::ReadableStreamDefaultReader) {
+        let ts = web_sys::TransformStream::new().unwrap();
+        let reader = ts
+            .readable()
+            .get_reader()
+            .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
+        let feeder = ts.writable().get_writer().unwrap();
+
+        // For the write side, create a separate TransformStream
+        let write_ts = web_sys::TransformStream::new().unwrap();
+        let writer = write_ts.writable().get_writer().unwrap();
+        let write_reader = write_ts
+            .readable()
+            .get_reader()
+            .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
+
+        let stream = Stream::new(reader, writer);
+        (stream, feeder, write_reader)
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_stream_read_exact() {
+        let (mut stream, feeder, _) = test_stream();
+
+        // Push data into the readable side
+        let data = b"hello, world!";
+        let array = Uint8Array::new_with_length(data.len() as u32);
+        array.copy_from(data);
+        JsFuture::from(feeder.write_with_chunk(&array)).await.unwrap();
+
+        // Read it back via AsyncRead
+        let mut buf = vec![0u8; 5];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello");
+
+        // Read the rest
+        let mut buf = vec![0u8; 8];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b", world!");
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_stream_read_buffering() {
+        let (mut stream, feeder, _) = test_stream();
+
+        // Push a large chunk
+        let data = vec![42u8; 1024];
+        let array = Uint8Array::new_with_length(data.len() as u32);
+        array.copy_from(&data);
+        JsFuture::from(feeder.write_with_chunk(&array)).await.unwrap();
+
+        // Read in small pieces — tests internal buffering
+        let mut total = Vec::new();
+        for _ in 0..4 {
+            let mut buf = vec![0u8; 256];
+            stream.read_exact(&mut buf).await.unwrap();
+            total.extend_from_slice(&buf);
+        }
+        assert_eq!(total, data);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_stream_write() {
+        // Create a TransformStream so we can verify written data
+        let write_ts = web_sys::TransformStream::new().unwrap();
+        let writer = write_ts.writable().get_writer().unwrap();
+        let out_reader = write_ts
+            .readable()
+            .get_reader()
+            .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
+
+        // Dummy reader (unused — we only test writes here)
+        let dummy_ts = web_sys::TransformStream::new().unwrap();
+        let dummy_reader = dummy_ts
+            .readable()
+            .get_reader()
+            .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
+        let mut stream = Stream::new(dummy_reader, writer);
+
+        // Write data via AsyncWrite
+        let data = b"hello from rust";
+        stream.write_all(data).await.unwrap();
+        stream.flush().await.unwrap();
+
+        // Read it back from the JS side
+        let result = JsFuture::from(out_reader.read()).await.unwrap();
+        let chunk: ReadableStreamReadResult = result.unchecked_into();
+        assert!(!chunk.is_done());
+        let received = Uint8Array::new(&chunk.value()).to_vec();
+        assert_eq!(received, data);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_stream_roundtrip() {
+        // Create a loopback: write → transform → read
+        let ts = web_sys::TransformStream::new().unwrap();
+        let reader = ts
+            .readable()
+            .get_reader()
+            .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
+        let writer = ts.writable().get_writer().unwrap();
+
+        let mut stream = Stream::new(reader, writer);
+
+        // Write and read back through the same transform
+        let data = b"roundtrip test data!";
+        stream.write_all(data).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut buf = vec![0u8; data.len()];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, data);
     }
 }
