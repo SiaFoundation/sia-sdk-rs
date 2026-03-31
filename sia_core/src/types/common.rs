@@ -99,8 +99,8 @@ impl_hash_id!(FileContractID);
 
 impl FileContractID {
     const PROOF_OUTPUT_ID_PREFIX: Specifier = specifier!("storage proof");
-    const V2_PROOF_OUTPUT_ID_PREFIX: &'static str = "id/v2filecontractoutput";
-    const V2_FILE_CONTRACT_RENEWAL_PREFIX: &'static str = "id/v2filecontractrenewal";
+    const V2_PROOF_OUTPUT_ID_PREFIX: &[u8] = b"sia/id/v2filecontractoutput|";
+    const V2_FILE_CONTRACT_RENEWAL_PREFIX: &[u8] = b"sia/id/v2filecontractrenewal|";
 
     fn derive_proof_output_id<T: From<blake2b_simd::Hash>>(&self, valid: bool, i: usize) -> T {
         let mut state = Params::new().hash_length(32).to_state();
@@ -113,7 +113,7 @@ impl FileContractID {
 
     fn derive_v2_proof_output_id<T: From<blake2b_simd::Hash>>(&self, i: usize) -> T {
         let mut state = Params::new().hash_length(32).to_state();
-        state.update(Self::V2_PROOF_OUTPUT_ID_PREFIX.as_ref());
+        state.update(Self::V2_PROOF_OUTPUT_ID_PREFIX);
         state.update(self.as_ref());
         state.update(&(i as u64).to_le_bytes());
         state.finalize().into()
@@ -142,7 +142,7 @@ impl FileContractID {
     /// v2_renewal_id returns the ID of the new contract created by renewing a V2 contract
     pub fn v2_renewal_id(&self) -> FileContractID {
         let mut state = Params::new().hash_length(32).to_state();
-        state.update(Self::V2_FILE_CONTRACT_RENEWAL_PREFIX.as_ref());
+        state.update(Self::V2_FILE_CONTRACT_RENEWAL_PREFIX);
         state.update(self.as_ref());
         state.finalize().into()
     }
