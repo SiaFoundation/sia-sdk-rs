@@ -104,7 +104,9 @@ struct SlabRecovery<T> {
 impl SlabRecovery<AwaitingRecovery> {
     fn new(client: Hosts, account_key: Arc<PrivateKey>, slab: Slab) -> Result<Self, DownloadError> {
         if slab.min_shards == 0 {
-            return Err(DownloadError::InvalidSlab("min_shards cannot be 0".to_string()));
+            return Err(DownloadError::InvalidSlab(
+                "min_shards cannot be 0".to_string(),
+            ));
         } else if slab.min_shards as usize > slab.sectors.len() {
             return Err(DownloadError::InvalidSlab(format!(
                 "min_shards {} cannot be greater than number of sectors {}",
