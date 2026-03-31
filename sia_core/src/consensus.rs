@@ -248,7 +248,7 @@ impl Network {
 }
 
 fn has_tree_at_height(num_leaves: &u64, height: usize) -> bool {
-    num_leaves & (1 << height) != 0
+    num_leaves & (1u64 << height) != 0
 }
 
 #[derive(PartialEq, Debug)]
