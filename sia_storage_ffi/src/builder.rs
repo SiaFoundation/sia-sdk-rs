@@ -32,13 +32,7 @@ pub enum AppKeyError {
 /// and inability to access stored objects.
 
 #[derive(uniffi::Object)]
-pub struct AppKey(PrivateKey);
-
-impl AppKey {
-    pub(crate) fn private_key(&self) -> &PrivateKey {
-        &self.0
-    }
-}
+pub struct AppKey(pub(crate) PrivateKey);
 
 #[uniffi::export]
 impl AppKey {

@@ -232,7 +232,7 @@ impl PinnedObject {
             created_at: sealed.created_at.into(),
             updated_at: sealed.updated_at.into(),
         };
-        let obj = sealed.open(app_key.private_key())?;
+        let obj = sealed.open(&app_key.0)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(obj)),
         })
@@ -246,7 +246,7 @@ impl PinnedObject {
     /// The sealed object.
     pub fn seal(&self, app_key: Arc<AppKey>) -> SealedObject {
         let inner = self.inner.lock().unwrap();
-        SealedObject::from(inner.seal(app_key.private_key()))
+        SealedObject::from(inner.seal(&app_key.0))
     }
 
     /// Returns the object's ID, which is the Blake2b hash of its slabs.
@@ -778,7 +778,7 @@ impl SDK {
                 match action {
                     PackedUploadAction::Add(reader, add_tx) => {
                         let res = packed_upload
-                            .add(adapt_ffi_reader(reader))
+                            .add(FFIReader::new(reader))
                             .await
                             .map_err(UploadError::from);
                         if let Ok(size) = res {
@@ -818,7 +818,7 @@ impl SDK {
     ) -> Result<PinnedObject, UploadError> {
         let sdk = self.inner.clone();
         spawn(async move {
-            let r = adapt_ffi_reader(r);
+            let r = FFIReader::new(r);
             let progress_tx = if let Some(callback) = options.progress_callback {
                 let total_shards = options.data_shards as u64 + options.parity_shards as u64;
                 let slab_size = total_shards * SECTOR_SIZE as u64;
@@ -868,7 +868,7 @@ impl SDK {
         let max_length = options.length.unwrap_or(object_size);
         let max_inflight = options.max_inflight;
         let sdk = self.inner.clone();
-        let w = adapt_ffi_writer(w);
+        let w = FFIWriter::new(w);
         let mut w = BufWriter::with_capacity(CHUNK_SIZE, w);
         spawn(async move {
             for offset in (offset..max_length).step_by(CHUNK_SIZE) {
