@@ -309,9 +309,7 @@ impl Client {
             match connect(&addr.address).await {
                 Ok(conn) => {
                     let conn = Rc::new(conn);
-                    self.pool
-                        .borrow_mut()
-                        .insert(host.public_key, conn.clone());
+                    self.pool.borrow_mut().insert(host.public_key, conn.clone());
                     return Ok(conn);
                 }
                 Err(e) => {
