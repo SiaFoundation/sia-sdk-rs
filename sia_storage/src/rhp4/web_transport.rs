@@ -5,9 +5,10 @@
 //! Connections are pooled per host — one WebTransport session per host,
 //! with multiple bidirectional streams for concurrent RPCs.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
@@ -275,7 +276,7 @@ impl AsyncWrite for Stream {
 
 #[derive(Clone)]
 pub struct Client {
-    pool: Arc<RwLock<HashMap<PublicKey, Arc<Connection>>>>,
+    pool: Rc<RefCell<HashMap<PublicKey, Rc<Connection>>>>,
 }
 
 impl Default for Client {
@@ -287,22 +288,15 @@ impl Default for Client {
 impl Client {
     pub fn new() -> Self {
         Client {
-            pool: Arc::new(RwLock::new(HashMap::new())),
+            pool: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
     /// Get a pooled connection or create a new one. If a pooled connection
     /// turns out to be stale, the RPC method will call [`evict`] and the
     /// next call will establish a fresh connection.
-    async fn connection(&self, host: &HostEndpoint) -> Result<Arc<Connection>, Error> {
-        // Check pool first
-        if let Some(conn) = self
-            .pool
-            .read()
-            .expect("WASM is single-threaded, lock cannot be poisoned")
-            .get(&host.public_key)
-            .cloned()
-        {
+    async fn connection(&self, host: &HostEndpoint) -> Result<Rc<Connection>, Error> {
+        if let Some(conn) = self.pool.borrow().get(&host.public_key).cloned() {
             return Ok(conn);
         }
 
@@ -314,10 +308,9 @@ impl Client {
             }
             match connect(&addr.address).await {
                 Ok(conn) => {
-                    let conn = Arc::new(conn);
+                    let conn = Rc::new(conn);
                     self.pool
-                        .write()
-                        .expect("WASM is single-threaded, lock cannot be poisoned")
+                        .borrow_mut()
                         .insert(host.public_key, conn.clone());
                     return Ok(conn);
                 }
@@ -337,10 +330,7 @@ impl Client {
     }
 
     fn evict(&self, host_key: &PublicKey) {
-        self.pool
-            .write()
-            .expect("WASM is single-threaded, lock cannot be poisoned")
-            .remove(host_key);
+        self.pool.borrow_mut().remove(host_key);
     }
 
     /// Returns true if the error indicates the connection is broken and
