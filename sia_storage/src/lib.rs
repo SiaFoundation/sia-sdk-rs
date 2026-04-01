@@ -180,6 +180,9 @@ impl SDK {
         api_client: app_client::Client,
         app_key: Arc<PrivateKey>,
     ) -> Result<Self, BuilderError> {
+        // TODO: introduce a cfg-gated DynTransportRef type alias (Arc on
+        // native, Rc on WASM) so we don't wrap a !Send type in Arc.
+        #[allow(clippy::arc_with_non_send_sync)]
         let hosts = Hosts::new(Arc::new(Client::new()));
 
         let uploader = Uploader::new(hosts.clone(), app_key.clone());

@@ -137,7 +137,7 @@ impl Stream {
             }
             let result = JsFuture::from(self.reader.read())
                 .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e:?}")))?;
+                .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
             let chunk: ReadableStreamReadResult = result.unchecked_into();
             if chunk.is_done() {
                 return Err(std::io::Error::new(
@@ -158,7 +158,7 @@ impl Stream {
         array.copy_from(data);
         JsFuture::from(self.writer.write_with_chunk(&array))
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e:?}")))?;
+            .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
         Ok(())
     }
 }
@@ -184,7 +184,7 @@ impl AsyncRead for Stream {
 
         let future = this.pending_read.as_mut().unwrap();
         let result = std::task::ready!(Pin::new(future).poll(cx))
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e:?}")))?;
+            .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
         this.pending_read = None;
 
         let chunk: ReadableStreamReadResult = result.unchecked_into();
@@ -216,7 +216,7 @@ impl AsyncWrite for Stream {
         // so the caller re-submits its data on the next call.
         if let Some((future, _)) = this.pending_write.as_mut() {
             std::task::ready!(Pin::new(future).poll(cx))
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e:?}")))?;
+                .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
             this.pending_write = None;
             return Poll::Ready(Ok(0));
         }
@@ -237,10 +237,7 @@ impl AsyncWrite for Stream {
             }
             Poll::Ready(Err(e)) => {
                 this.pending_write = None;
-                Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("{e:?}"),
-                )))
+                Poll::Ready(Err(std::io::Error::other(format!("{e:?}"))))
             }
             // Data is in-flight but not confirmed. The caller will re-call
             // poll_write; we'll complete the pending write and report its
@@ -253,7 +250,7 @@ impl AsyncWrite for Stream {
         let this = self.get_mut();
         if let Some((future, _)) = this.pending_write.as_mut() {
             std::task::ready!(Pin::new(future).poll(cx))
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e:?}")))?;
+                .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
             this.pending_write = None;
         }
         Poll::Ready(Ok(()))
@@ -266,7 +263,7 @@ impl AsyncWrite for Stream {
         }
         let future = this.pending_close.as_mut().unwrap();
         std::task::ready!(Pin::new(future).poll(cx))
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e:?}")))?;
+            .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
         this.pending_close = None;
         Poll::Ready(Ok(()))
     }
@@ -353,10 +350,10 @@ impl Transport for Client {
             Ok(resp.settings.prices)
         }
         .await;
-        if let Err(e) = &result {
-            if Self::should_evict(e) {
-                self.evict(&host.public_key);
-            }
+        if let Err(e) = &result
+            && Self::should_evict(e)
+        {
+            self.evict(&host.public_key);
         }
         result
     }
@@ -379,10 +376,10 @@ impl Transport for Client {
             Ok(resp.root)
         }
         .await;
-        if let Err(e) = &result {
-            if Self::should_evict(e) {
-                self.evict(&host.public_key);
-            }
+        if let Err(e) = &result
+            && Self::should_evict(e)
+        {
+            self.evict(&host.public_key);
         }
         result
     }
@@ -408,10 +405,10 @@ impl Transport for Client {
             Ok(resp.data)
         }
         .await;
-        if let Err(e) = &result {
-            if Self::should_evict(e) {
-                self.evict(&host.public_key);
-            }
+        if let Err(e) = &result
+            && Self::should_evict(e)
+        {
+            self.evict(&host.public_key);
         }
         result
     }
