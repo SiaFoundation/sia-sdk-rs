@@ -246,4 +246,7 @@ async fn main() {
         format_bitrate(obj.size(), download_duration),
         verifier.gap_max().unwrap_or_default(),
     );
+    sdk.delete_object(&obj.id())
+        .await
+        .expect("failed to delete object");
 }

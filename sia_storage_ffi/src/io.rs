@@ -52,6 +52,7 @@ pub(crate) struct FFIReader {
     pending: Option<BoxFuture<Result<Vec<u8>, IOError>>>,
     buf: Vec<u8>,
     pos: usize,
+    done: bool,
 }
 
 impl FFIReader {
@@ -61,6 +62,7 @@ impl FFIReader {
             pending: None,
             buf: Vec::new(),
             pos: 0,
+            done: false,
         }
     }
 }
@@ -72,6 +74,10 @@ impl AsyncRead for FFIReader {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+
+        if this.done {
+            return Poll::Ready(Ok(()));
+        }
 
         // drain buffered data first
         if this.pos < this.buf.len() {
@@ -96,7 +102,10 @@ impl AsyncRead for FFIReader {
         this.pending = None;
 
         match result {
-            Ok(data) if data.is_empty() => Poll::Ready(Ok(())), // EOF
+            Ok(data) if data.is_empty() => {
+                this.done = true;
+                Poll::Ready(Ok(()))
+            }
             Ok(data) => {
                 let n = data.len().min(buf.remaining());
                 buf.put_slice(&data[..n]);
@@ -106,7 +115,10 @@ impl AsyncRead for FFIReader {
                 }
                 Poll::Ready(Ok(()))
             }
-            Err(e) => Poll::Ready(Err(e.into())),
+            Err(e) => {
+                this.done = true;
+                Poll::Ready(Err(e.into()))
+            }
         }
     }
 }

@@ -33,7 +33,9 @@ jobs:
       - name: Rustfmt
         run: cargo +nightly fmt --all -- --check
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: |
+          cargo clippy -- -D warnings
+          cargo check --all-features --workspace
       - name: Build docs
         run: cargo doc --all-features --no-deps
         env:
