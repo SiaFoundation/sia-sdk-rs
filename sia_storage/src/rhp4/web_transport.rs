@@ -404,18 +404,14 @@ impl Transport for Client {
     }
 }
 
-// TODO: WebTransport stream tests are disabled — they hang in the WASM test
-// runner due to TransformStream + wasm_bindgen_test interaction issues.
-// The Stream's AsyncRead/AsyncWrite impls are exercised indirectly by the
-// upload/download integration tests via MockRHP4Transport.
-#[cfg(ignore)]
-mod _tests {
+#[cfg(test)]
+mod tests {
     use super::*;
     use js_sys::Uint8Array;
+    use wasm_bindgen_futures::spawn_local;
     use wasm_bindgen_test::*;
-    wasm_bindgen_test_configure!(run_in_browser);
 
-    /// Creates a Stream with separate read and write TransformStreams.
+    /// Creates a Stream backed by separate read/write TransformStreams.
     /// Returns (stream, feeder_for_reads, reader_for_writes).
     fn test_stream() -> (
         Stream,
@@ -438,20 +434,71 @@ mod _tests {
             .get_reader()
             .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
 
-        (Stream::new(stream_reader, stream_writer), feeder, out_reader)
+        (
+            Stream::new(stream_reader, stream_writer),
+            feeder,
+            out_reader,
+        )
     }
 
-    // #[wasm_bindgen_test]
-    async fn _test_stream_read_exact() {
+    /// Feed data into a WritableStreamDefaultWriter from a spawned microtask.
+    /// The write and read proceed as separate tasks on the JS event loop,
+    /// avoiding deadlock in single-threaded WASM.
+    fn feed_async(feeder: web_sys::WritableStreamDefaultWriter, data: Vec<u8>) {
+        spawn_local(async move {
+            let array = Uint8Array::new_with_length(data.len() as u32);
+            array.copy_from(&data);
+            JsFuture::from(feeder.write_with_chunk(&array))
+                .await
+                .unwrap();
+        });
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_stream_write_basic() {
+        let (mut stream, _, out_reader) = test_stream();
+
+        // Write from a spawned task — even with separate TransformStreams,
+        // the write-side transform won't pull unless the readable side is
+        // being consumed. Spawning lets the read and write interleave.
+        let data = b"hello from rust";
+        let data_clone = data.to_vec();
+        spawn_local(async move {
+            stream.write_all_async(&data_clone).await.unwrap();
+        });
+
+        let result = JsFuture::from(out_reader.read()).await.unwrap();
+        let chunk: ReadableStreamReadResult = result.unchecked_into();
+        assert!(!chunk.is_done());
+        let received = Uint8Array::new(&chunk.value()).to_vec();
+        assert_eq!(received, data);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_stream_write_large() {
+        let (mut stream, _, out_reader) = test_stream();
+
+        let data = vec![0xABu8; 4096];
+        let data_clone = data.clone();
+        spawn_local(async move {
+            stream.write_all_async(&data_clone).await.unwrap();
+        });
+
+        let mut received = Vec::new();
+        while received.len() < data.len() {
+            let result = JsFuture::from(out_reader.read()).await.unwrap();
+            let chunk: ReadableStreamReadResult = result.unchecked_into();
+            assert!(!chunk.is_done());
+            received.extend_from_slice(&Uint8Array::new(&chunk.value()).to_vec());
+        }
+        assert_eq!(received, data);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_stream_read_exact() {
         let (mut stream, feeder, _) = test_stream();
+        feed_async(feeder, b"hello, world!".to_vec());
 
-        // Feed data into the read side via JS
-        let data = b"hello, world!";
-        let array = Uint8Array::new_with_length(data.len() as u32);
-        array.copy_from(data);
-        JsFuture::from(feeder.write_with_chunk(&array)).await.unwrap();
-
-        // Read it back in two chunks
         let mut buf = vec![0u8; 5];
         stream.read_exact_async(&mut buf).await.unwrap();
         assert_eq!(&buf, b"hello");
@@ -461,35 +508,40 @@ mod _tests {
         assert_eq!(&buf, b", world!");
     }
 
-    // #[wasm_bindgen_test]
-    async fn _test_stream_read_buffering() {
+    #[wasm_bindgen_test]
+    async fn test_stream_read_buffering() {
         let (mut stream, feeder, _) = test_stream();
+        feed_async(feeder, vec![42u8; 1024]);
 
-        // Feed a large chunk
-        let data = vec![42u8; 1024];
-        let array = Uint8Array::new_with_length(data.len() as u32);
-        array.copy_from(&data);
-        JsFuture::from(feeder.write_with_chunk(&array)).await.unwrap();
-
-        // Read in small pieces — tests internal buffering
         let mut total = Vec::new();
         for _ in 0..4 {
             let mut buf = vec![0u8; 256];
             stream.read_exact_async(&mut buf).await.unwrap();
             total.extend_from_slice(&buf);
         }
-        assert_eq!(total, data);
+        assert_eq!(total, vec![42u8; 1024]);
     }
 
     #[wasm_bindgen_test]
-    async fn test_stream_write() {
-        let (mut stream, _, out_reader) = test_stream();
+    async fn test_stream_roundtrip() {
+        // Use two separate TransformStreams: one for write, one for read.
+        // Write side: our Stream writes → write_ts → out_reader verifies
+        // Read side: feeder feeds → read_ts → our Stream reads
+        let (mut stream, feeder, out_reader) = test_stream();
 
-        // Write via our async helper
-        let data = b"hello from rust";
-        stream.write_all_async(data).await.unwrap();
+        let data = b"roundtrip test data!";
 
-        // Read it back from the JS side
+        // 1. Feed data into the read side and read it through our Stream
+        feed_async(feeder, data.to_vec());
+        let mut buf = vec![0u8; data.len()];
+        stream.read_exact_async(&mut buf).await.unwrap();
+        assert_eq!(&buf, data);
+
+        // 2. Write data through our Stream and verify it on the write side
+        let data_vec = data.to_vec();
+        spawn_local(async move {
+            stream.write_all_async(&data_vec).await.unwrap();
+        });
         let result = JsFuture::from(out_reader.read()).await.unwrap();
         let chunk: ReadableStreamReadResult = result.unchecked_into();
         assert!(!chunk.is_done());
@@ -497,29 +549,26 @@ mod _tests {
         assert_eq!(received, data);
     }
 
-    // #[wasm_bindgen_test]
-    async fn _test_stream_roundtrip() {
-        let (mut stream, feeder, out_reader) = test_stream();
+    #[wasm_bindgen_test]
+    async fn test_stream_read_multiple_feeds() {
+        let (mut stream, feeder, _) = test_stream();
 
-        // Write data
-        let data = b"roundtrip test data!";
-        stream.write_all_async(data).await.unwrap();
+        spawn_local(async move {
+            let array = Uint8Array::new_with_length(5);
+            array.copy_from(b"hello");
+            JsFuture::from(feeder.write_with_chunk(&array))
+                .await
+                .unwrap();
 
-        // Verify it came out the write side
-        let result = JsFuture::from(out_reader.read()).await.unwrap();
-        let chunk: ReadableStreamReadResult = result.unchecked_into();
-        assert!(!chunk.is_done());
-        let written = Uint8Array::new(&chunk.value()).to_vec();
-        assert_eq!(written, data);
+            let array = Uint8Array::new_with_length(5);
+            array.copy_from(b"world");
+            JsFuture::from(feeder.write_with_chunk(&array))
+                .await
+                .unwrap();
+        });
 
-        // Feed the same data back into the read side
-        let array = Uint8Array::new_with_length(data.len() as u32);
-        array.copy_from(data);
-        JsFuture::from(feeder.write_with_chunk(&array)).await.unwrap();
-
-        // Read it back
-        let mut buf = vec![0u8; data.len()];
+        let mut buf = vec![0u8; 10];
         stream.read_exact_async(&mut buf).await.unwrap();
-        assert_eq!(&buf, data);
+        assert_eq!(&buf, b"helloworld");
     }
 }
