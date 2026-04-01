@@ -222,7 +222,7 @@ impl SlabRecovery<AwaitingRecovery> {
                     }
                 },
                 _ = sleep(Duration::from_millis(500)), if !sectors.is_empty() => {
-                    let task = sectors.pop_front().expect("not enough sectors to satisfy min_shards");
+                    let task = sectors.pop_front().expect("sectors should not be empty");
                     join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, shard_offset, shard_length));
                 },
             }
@@ -246,7 +246,7 @@ impl SlabRecovery<ShardsRecovered> {
         let data_shards = shards
             .into_iter()
             .take(self.min_shards as usize)
-            .map(|s| s.unwrap().freeze())
+            .map(|s| s.unwrap().freeze()) // safe because the data shards were just reconstructed
             .collect();
         Ok(SlabRecovery {
             client: self.client,
