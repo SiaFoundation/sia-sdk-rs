@@ -25,7 +25,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::app_client::SlabPinParams;
-use crate::download::Downloader;
+use crate::download::download_object;
 pub use crate::hosts::Host;
 use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
@@ -131,7 +131,6 @@ pub struct SDK {
     app_key: Arc<PrivateKey>,
     api_client: app_client::Client,
     hosts: Hosts,
-    downloader: Downloader,
     uploader: Uploader,
 }
 
@@ -183,13 +182,11 @@ impl SDK {
     ) -> Result<Self, BuilderError> {
         let hosts = Hosts::new(Arc::new(Client::new()));
 
-        let downloader = Downloader::new(hosts.clone(), app_key.clone());
         let uploader = Uploader::new(hosts.clone(), app_key.clone());
         let sdk = Self {
             app_key,
             api_client,
             hosts,
-            downloader,
             uploader,
         };
         sdk.refresh_hosts().await?;
@@ -243,8 +240,7 @@ impl SDK {
         object: &Object,
         options: DownloadOptions,
     ) -> Result<(), DownloadError> {
-        self.downloader.download(w, object, options).await?;
-        Ok(())
+        download_object(self.hosts.clone(), self.app_key.clone(), w, object, options).await
     }
 
     /// Retrieves a list of hosts from the indexer matching the provided query
@@ -458,7 +454,7 @@ mod test {
     }
 
     cross_target_tests! {
-    async fn test_upload_download_packed() { run_local(async {
+        async fn test_upload_download_packed() { run_local(async {
             let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
             let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
             hosts.update(
@@ -479,7 +475,7 @@ mod test {
             );
 
             let uploader = Uploader::new(hosts.clone(), app_key.clone());
-            let downloader = Downloader::new(hosts.clone(), app_key.clone());
+
 
             let input: Bytes = Bytes::from("Hello, world!");
 
@@ -517,9 +513,10 @@ mod test {
             assert_eq!(objects[1].size(), 13);
 
             let mut output = BytesMut::zeroed(13);
-            downloader
-                .download(
-                    &mut Cursor::new(&mut output[..]),
+            download_object(
+                hosts.clone(),
+                app_key.clone(),
+                &mut Cursor::new(&mut output[..]),
                     &objects[0],
                     DownloadOptions::default(),
                 )
@@ -529,9 +526,10 @@ mod test {
             assert_eq!(output.freeze(), input.clone());
 
             let mut output = BytesMut::zeroed(13);
-            downloader
-                .download(
-                    &mut Cursor::new(&mut output[..]),
+            download_object(
+                hosts.clone(),
+                app_key.clone(),
+                &mut Cursor::new(&mut output[..]),
                     &objects[1],
                     DownloadOptions::default(),
                 )
@@ -541,7 +539,7 @@ mod test {
             assert_eq!(output.freeze(), input.clone());
         }).await }
 
-    async fn test_upload_download_packed_spanning() { run_local(async {
+        async fn test_upload_download_packed_spanning() { run_local(async {
             let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
             let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
             hosts.update(
@@ -562,7 +560,7 @@ mod test {
             );
 
             let uploader = Uploader::new(hosts.clone(), app_key.clone());
-            let downloader = Downloader::new(hosts.clone(), app_key.clone());
+
 
             let small_input = Bytes::from("Hello, world!");
 
@@ -601,9 +599,10 @@ mod test {
             assert_eq!(objects[1].slabs()[1].length, 18 + 13);
 
             let mut output = BytesMut::zeroed(objects[0].size() as usize);
-            downloader
-                .download(
-                    &mut Cursor::new(&mut output[..]),
+            download_object(
+                hosts.clone(),
+                app_key.clone(),
+                &mut Cursor::new(&mut output[..]),
                     &objects[0],
                     DownloadOptions::default(),
                 )
@@ -613,9 +612,10 @@ mod test {
             assert_eq!(output.freeze(), small_input);
 
             let mut output = BytesMut::zeroed(objects[1].size() as usize);
-            downloader
-                .download(
-                    &mut Cursor::new(&mut output[..]),
+            download_object(
+                hosts.clone(),
+                app_key.clone(),
+                &mut Cursor::new(&mut output[..]),
                     &objects[1],
                     DownloadOptions::default(),
                 )
@@ -646,7 +646,7 @@ mod test {
             );
 
             let uploader = Uploader::new(hosts.clone(), app_key.clone());
-            let downloader = Downloader::new(hosts.clone(), app_key.clone());
+
 
             let mut exact_input = BytesMut::zeroed(SLAB_SIZE as usize); // 1 full slab
             random_bytes(&mut exact_input);
@@ -669,9 +669,10 @@ mod test {
             assert_eq!(objects[0].slabs()[0].length, SLAB_SIZE as u32);
 
             let mut output = BytesMut::zeroed(objects[0].size() as usize);
-            downloader
-                .download(
-                    &mut Cursor::new(&mut output[..]),
+            download_object(
+                hosts.clone(),
+                app_key.clone(),
+                &mut Cursor::new(&mut output[..]),
                     &objects[0],
                     DownloadOptions::default(),
                 )
@@ -702,7 +703,7 @@ mod test {
             );
 
             let uploader = Uploader::new(hosts.clone(), app_key.clone());
-            let downloader = Downloader::new(hosts.clone(), app_key.clone());
+
 
             let input: Bytes = Bytes::from("Hello, world!");
 
@@ -715,9 +716,10 @@ mod test {
             assert_eq!(object.size(), 13);
 
             let mut output = BytesMut::zeroed(object.size() as usize);
-            downloader
-                .download(
-                    &mut Cursor::new(&mut output[..]),
+            download_object(
+                hosts.clone(),
+                app_key.clone(),
+                &mut Cursor::new(&mut output[..]),
                     &object,
                     DownloadOptions::default(),
                 )
@@ -728,9 +730,10 @@ mod test {
 
             let range = 7..13;
             let mut output = BytesMut::zeroed(range.end - range.start);
-            downloader
-                .download(
-                    &mut Cursor::new(&mut output[..]),
+            download_object(
+                hosts.clone(),
+                app_key.clone(),
+                &mut Cursor::new(&mut output[..]),
                     &object,
                     DownloadOptions {
                         offset: range.start as u64,
@@ -769,7 +772,7 @@ mod test {
             );
 
             let uploader = Uploader::new(hosts.clone(), app_key.clone());
-            let downloader = Downloader::new(hosts.clone(), app_key.clone());
+
 
             // Use default 10 data shards, so slab_size = 10 * SECTOR_SIZE
             let slab_size = 10 * SECTOR_SIZE as u64;
@@ -796,7 +799,9 @@ mod test {
                 (slab_size / 2, 2 * slab_size),                       // across slabs
                 (data_size - SECTOR_SIZE as u64, SECTOR_SIZE as u64), // last sector
                 (data_size - SEGMENT_SIZE, SEGMENT_SIZE),             // last leaf
+                (data_size - 100, 200),                               // past end
                 (data_size, 0),                                       // empty at end
+                (data_size + 100, 0),                                 // empty past end
             ];
 
             // Add 10 random ranges
@@ -807,23 +812,32 @@ mod test {
             }
 
             for (offset, length) in cases {
-                let mut output = BytesMut::zeroed(length as usize);
-                downloader
-                    .download(
-                        &mut Cursor::new(&mut output[..]),
-                        &object,
-                        DownloadOptions {
-                            offset,
-                            length: Some(length),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap();
+                let mut output = Vec::with_capacity(length as usize);
+                download_object(
+                    hosts.clone(),
+                    app_key.clone(),
+                    &mut output,
+                    &object,
+                    DownloadOptions {
+                        offset,
+                        length: Some(length),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+
+                let clamped_length = if offset >= data_size {
+                    0
+                } else {
+                    length.min(data_size - offset) as usize
+                };
+                let clamped_offset = offset.min(data_size) as usize;
+                let clamped_range = clamped_offset..(clamped_offset + clamped_length);
 
                 assert_eq!(
-                    output.freeze(),
-                    data.slice(offset as usize..(offset + length) as usize),
+                    Bytes::from(output),
+                    data.slice(clamped_range),
                     "data mismatch at offset={offset}, length={length}"
                 );
             }
@@ -858,7 +872,7 @@ mod test {
             );
 
             let uploader = Uploader::new(hosts.clone(), app_key.clone());
-            let downloader = Downloader::new(hosts.clone(), app_key.clone());
+
 
             let input: Bytes = Bytes::from("Hello, world!");
 
@@ -874,9 +888,10 @@ mod test {
             );
 
             let mut output = BytesMut::zeroed(object.size() as usize);
-            downloader
-                .download(
-                    &mut Cursor::new(&mut output[..]),
+            download_object(
+                hosts.clone(),
+                app_key.clone(),
+                &mut Cursor::new(&mut output[..]),
                     &object,
                     DownloadOptions::default(),
                 )

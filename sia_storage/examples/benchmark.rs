@@ -11,8 +11,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[derive(Parser)]
 struct Args {
-    /// Size of the data to upload and download in bytes (default: 512 MiB)
-    #[arg(short, long, default_value_t = 512 * 1024 * 1024)]
+    /// Size of the data to upload and download in bytes (default: 120 MiB)
+    #[arg(short, long, default_value_t = 120 * 1024 * 1024)]
     size: usize,
 }
 
@@ -57,15 +57,35 @@ impl AsyncRead for SeededReader {
 
 struct SeededVerifier {
     rng: SmallRng,
+    size: usize,
     remaining: usize,
+    start: Instant,
+    ttfb: Option<Duration>,
+    elapsed: Vec<Duration>,
 }
 
 impl SeededVerifier {
     fn new(seed: u64, size: usize) -> Self {
+        let now = Instant::now();
         Self {
             rng: SmallRng::seed_from_u64(seed),
+            size: size,
             remaining: size,
+            start: now,
+            ttfb: None,
+            elapsed: Vec::new(),
         }
+    }
+
+    fn ttfb(&self) -> Option<Duration> {
+        self.ttfb
+    }
+
+    fn gap_max(&self) -> Option<Duration> {
+        if self.elapsed.is_empty() {
+            return None;
+        }
+        self.elapsed.windows(2).map(|w| w[1] - w[0]).max()
     }
 }
 
@@ -75,6 +95,11 @@ impl AsyncWrite for SeededVerifier {
         _: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        let now = Instant::now();
+        if self.ttfb.is_none() {
+            self.ttfb = Some(now - self.start);
+        }
+        let elapsed = now - self.start;
         let mut expected = vec![0u8; buf.len()];
         self.rng.fill_bytes(&mut expected);
         if buf.len() > self.remaining {
@@ -86,10 +111,11 @@ impl AsyncWrite for SeededVerifier {
         if buf != expected.as_slice() {
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("data mismatch at byte {}", self.remaining - buf.len()),
+                format!("data mismatch at byte {}", self.size - self.remaining),
             )));
         }
         self.remaining -= buf.len();
+        self.elapsed.push(elapsed);
         Poll::Ready(Ok(buf.len()))
     }
 
@@ -212,11 +238,13 @@ async fn main() {
         format_bitrate(obj.encoded_size(), upload_duration),
     );
     println!(
-        "Object downloaded ID: {}\tSize: {}\tEncoded: {}\tElapsed: {:?}\tThroughput: {}",
+        "Object downloaded ID: {}\tSize: {}\tEncoded: {}\tElapsed: {:?}\tTTFB: {:?}\tThroughput: {}\tMax Write Latency: {:?}",
         obj.id(),
         format_bytes(obj.size()),
         format_bytes(obj.encoded_size()),
         download_duration,
+        verifier.ttfb().unwrap_or_default(),
         format_bitrate(obj.size(), download_duration),
+        verifier.gap_max().unwrap_or_default(),
     );
 }

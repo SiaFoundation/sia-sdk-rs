@@ -3,6 +3,8 @@ use base64::prelude::BASE64_STANDARD;
 use chacha20::XChaCha20;
 use chacha20::cipher::inout::InOutBuf;
 use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherError, StreamCipherSeek};
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use sia_core::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use std::pin::Pin;
@@ -65,12 +67,42 @@ impl<'de> Deserialize<'de> for EncryptionKey {
 /// function again with the same key.
 /// NOTE: don't reuse the same key for the same shard as it will compromise the
 /// security of the encryption. Always use a freshly generated key.
-pub fn encrypt_shard(key: &EncryptionKey, index: u8, offset: usize, shard: &mut [u8]) {
+pub(crate) fn encrypt_shard(key: &EncryptionKey, index: u8, offset: usize, shard: &mut [u8]) {
     let mut nonce: [u8; 24] = [0u8; 24]; // XChaCha20 nonce size
     nonce[0] = index;
     let mut cipher = XChaCha20::new(key.as_ref().into(), &nonce.into());
     cipher.seek(offset);
     cipher.apply_keystream(shard);
+}
+
+/// Encrypts or decrypts the recovered shards.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn encrypt_recovered_shards(
+    key: &EncryptionKey,
+    shard_start: u8,
+    offset: usize,
+    shards: &mut [Option<impl AsMut<[u8]> + Send>],
+) {
+    shards.par_iter_mut().enumerate().for_each(|(i, shard)| {
+        if let Some(shard) = shard {
+            encrypt_shard(key, shard_start + i as u8, offset, shard.as_mut());
+        }
+    });
+}
+
+/// Encrypts or decrypts the recovered shards.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn encrypt_recovered_shards(
+    key: &EncryptionKey,
+    shard_start: u8,
+    offset: usize,
+    shards: &mut [Option<impl AsMut<[u8]>>],
+) {
+    shards.iter_mut().enumerate().for_each(|(i, shard)| {
+        if let Some(shard) = shard {
+            encrypt_shard(key, shard_start + i as u8, offset, shard.as_mut());
+        }
+    });
 }
 
 pub struct CipherReader<R: AsyncRead> {
