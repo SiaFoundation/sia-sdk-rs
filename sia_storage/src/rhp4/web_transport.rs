@@ -103,6 +103,7 @@ struct Stream {
     buf: Vec<u8>,
     writer: web_sys::WritableStreamDefaultWriter,
     pending_write: Option<(JsFuture, usize)>,
+    pending_close: Option<JsFuture>,
 }
 
 impl Stream {
@@ -116,6 +117,7 @@ impl Stream {
             buf: Vec::new(),
             writer,
             pending_write: None,
+            pending_close: None,
         }
     }
 
@@ -209,12 +211,13 @@ impl AsyncWrite for Stream {
         let this = self.get_mut();
 
         // Complete any in-flight write before accepting new data.
-        if let Some((future, len)) = this.pending_write.as_mut() {
+        // Return Ok(0) to signal completion without consuming the current buf,
+        // so the caller re-submits its data on the next call.
+        if let Some((future, _)) = this.pending_write.as_mut() {
             std::task::ready!(Pin::new(future).poll(cx))
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e:?}")))?;
-            let written = *len;
             this.pending_write = None;
-            return Poll::Ready(Ok(written));
+            return Poll::Ready(Ok(0));
         }
 
         // Submit new data
@@ -255,7 +258,15 @@ impl AsyncWrite for Stream {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if this.pending_close.is_none() {
+            this.pending_close = Some(JsFuture::from(this.writer.close()));
+        }
+        let future = this.pending_close.as_mut().unwrap();
+        std::task::ready!(Pin::new(future).poll(cx))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e:?}")))?;
+        this.pending_close = None;
         Poll::Ready(Ok(()))
     }
 }
@@ -331,6 +342,14 @@ impl Client {
             .expect("WASM is single-threaded, lock cannot be poisoned")
             .remove(host_key);
     }
+
+    /// Returns true if the error indicates the connection is broken and
+    /// should be evicted from the pool. Transport and I/O errors mean the
+    /// session is dead; RPC-level errors (e.g. insufficient funds) are
+    /// application errors on an otherwise healthy connection.
+    fn should_evict(err: &Error) -> bool {
+        matches!(err, Error::Transport(_) | Error::Io(_))
+    }
 }
 
 #[async_trait(?Send)]
@@ -346,8 +365,10 @@ impl Transport for Client {
             Ok(resp.settings.prices)
         }
         .await;
-        if result.is_err() {
-            self.evict(&host.public_key);
+        if let Err(e) = &result {
+            if Self::should_evict(e) {
+                self.evict(&host.public_key);
+            }
         }
         result
     }
@@ -370,8 +391,10 @@ impl Transport for Client {
             Ok(resp.root)
         }
         .await;
-        if result.is_err() {
-            self.evict(&host.public_key);
+        if let Err(e) = &result {
+            if Self::should_evict(e) {
+                self.evict(&host.public_key);
+            }
         }
         result
     }
@@ -397,8 +420,10 @@ impl Transport for Client {
             Ok(resp.data)
         }
         .await;
-        if result.is_err() {
-            self.evict(&host.public_key);
+        if let Err(e) = &result {
+            if Self::should_evict(e) {
+                self.evict(&host.public_key);
+            }
         }
         result
     }
