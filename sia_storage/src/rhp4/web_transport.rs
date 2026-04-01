@@ -11,7 +11,6 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use js_sys::Uint8Array;
 use log::debug;
@@ -212,13 +211,10 @@ impl AsyncWrite for Stream {
         let this = self.get_mut();
 
         // Complete any in-flight write before accepting new data.
-        // Return Ok(0) to signal completion without consuming the current buf,
-        // so the caller re-submits its data on the next call.
         if let Some((future, _)) = this.pending_write.as_mut() {
             std::task::ready!(Pin::new(future).poll(cx))
                 .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
             this.pending_write = None;
-            return Poll::Ready(Ok(0));
         }
 
         // Submit new data
@@ -337,7 +333,6 @@ impl Client {
     }
 }
 
-#[async_trait(?Send)]
 impl Transport for Client {
     async fn host_prices(&self, host: &HostEndpoint) -> Result<HostPrices, Error> {
         let conn = self.connection(host).await?;

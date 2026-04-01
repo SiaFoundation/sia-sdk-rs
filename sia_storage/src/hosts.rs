@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::rhp4::{DynTransport, HostEndpoint};
+use crate::rhp4::{HostEndpoint, Transport};
 use crate::time::{Duration, Elapsed, Instant, timeout};
 
 /// Represents a host in the Sia network. The
@@ -371,14 +371,14 @@ pub enum RPCError {
 ///
 /// This is public for criterion benchmarks, but not intended for general use
 #[derive(Clone)]
-pub(crate) struct Hosts {
-    transport: Arc<DynTransport>,
+pub(crate) struct Hosts<T: Transport> {
+    transport: T,
     price_cache: Arc<HostCache<HostPrices>>,
     hosts: Arc<HostList>,
 }
 
-impl Hosts {
-    pub fn new(transport: Arc<DynTransport>) -> Self {
+impl<T: Transport> Hosts<T> {
+    pub fn new(transport: T) -> Self {
         Self {
             transport,
             hosts: Arc::new(HostList::new()),
@@ -482,7 +482,7 @@ impl Hosts {
     }
 
     async fn fetch_prices(
-        transport: Arc<DynTransport>,
+        transport: T,
         cache: &HostCache<HostPrices>,
         hosts: &HostList,
         host_endpoint: &HostEndpoint,
@@ -812,7 +812,7 @@ mod test {
     }
 
     async fn test_upload_queue() {
-        let hosts_manager = Hosts::new(Arc::new(MockRHP4Transport::new()));
+        let hosts_manager = Hosts::new(MockRHP4Transport::new());
 
         let hk1 = random_pubkey();
         let hk2 = random_pubkey();

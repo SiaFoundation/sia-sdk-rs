@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use sia_core::rhp4::HostPrices;
@@ -16,18 +15,19 @@ use crate::time::{Duration, sleep};
 use crate::upload::Uploader;
 use crate::{DownloadError, DownloadOptions, Object, PackedUpload, UploadError, UploadOptions};
 
+#[derive(Clone)]
 pub(crate) struct MockRHP4Transport {
-    sectors: RwLock<HashMap<PublicKey, HashMap<Hash256, Bytes>>>,
-    slow_hosts: RwLock<HashSet<PublicKey>>,
-    slow_delay: RwLock<Duration>,
+    sectors: Arc<RwLock<HashMap<PublicKey, HashMap<Hash256, Bytes>>>>,
+    slow_hosts: Arc<RwLock<HashSet<PublicKey>>>,
+    slow_delay: Arc<RwLock<Duration>>,
 }
 
 impl MockRHP4Transport {
     pub fn new() -> Self {
         Self {
-            sectors: RwLock::new(HashMap::new()),
-            slow_hosts: RwLock::new(HashSet::new()),
-            slow_delay: RwLock::new(Duration::ZERO),
+            sectors: Arc::new(RwLock::new(HashMap::new())),
+            slow_hosts: Arc::new(RwLock::new(HashSet::new())),
+            slow_delay: Arc::new(RwLock::new(Duration::ZERO)),
         }
     }
 
@@ -51,8 +51,6 @@ impl MockRHP4Transport {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl Transport for MockRHP4Transport {
     async fn host_prices(&self, _: &HostEndpoint) -> Result<HostPrices, RHP4Error> {
         Ok(HostPrices {
@@ -134,7 +132,7 @@ impl Transport for MockRHP4Transport {
 }
 
 pub struct MockUploader {
-    uploader: Uploader,
+    uploader: Uploader<MockRHP4Transport>,
 }
 
 impl MockUploader {
@@ -186,13 +184,13 @@ impl MockDownloader {
 
 #[derive(Clone)]
 pub struct MockHosts {
-    transport: Arc<MockRHP4Transport>,
-    inner: Hosts,
+    transport: MockRHP4Transport,
+    inner: Hosts<MockRHP4Transport>,
 }
 
 impl MockHosts {
     pub fn new() -> Self {
-        let transport = Arc::new(MockRHP4Transport::new());
+        let transport = MockRHP4Transport::new();
         let hosts = Hosts::new(transport.clone());
         Self {
             transport: transport,

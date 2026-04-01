@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::encryption::{EncryptionKey, encrypt_recovered_shards};
 use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::{Hosts, RPCError};
+use crate::rhp4::Transport;
 use crate::time::{Duration, Elapsed, Instant, sleep};
 use crate::{Object, Sector, Slab};
 use bytes::{Bytes, BytesMut};
@@ -89,8 +90,8 @@ struct SlabDecoded {
 /// benefit is if we want to maintain a version of the download logic
 /// for WASM, we can reuse the state machine and its await points and swap
 /// out the async primitives.
-struct SlabRecovery<T> {
-    client: Hosts,
+struct SlabRecovery<State, T: Transport> {
+    client: Hosts<T>,
     account_key: Arc<PrivateKey>,
 
     min_shards: u8,
@@ -98,11 +99,15 @@ struct SlabRecovery<T> {
     offset: usize,
     length: usize,
 
-    state: T,
+    state: State,
 }
 
-impl SlabRecovery<AwaitingRecovery> {
-    fn new(client: Hosts, account_key: Arc<PrivateKey>, slab: Slab) -> Result<Self, DownloadError> {
+impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
+    fn new(
+        client: Hosts<T>,
+        account_key: Arc<PrivateKey>,
+        slab: Slab,
+    ) -> Result<Self, DownloadError> {
         if slab.min_shards == 0 {
             return Err(DownloadError::InvalidSlab(
                 "min_shards cannot be 0".to_string(),
@@ -137,7 +142,7 @@ impl SlabRecovery<AwaitingRecovery> {
     }
 
     async fn recover_shard(
-        client: Hosts,
+        client: Hosts<T>,
         account_key: Arc<PrivateKey>,
         task: SectorTask,
         sector_offset: usize,
@@ -157,7 +162,7 @@ impl SlabRecovery<AwaitingRecovery> {
         Ok((task.shard_index, data.try_into_mut().unwrap())) // no other references to the data exist, so this is safe
     }
 
-    async fn recover_shards(self) -> Result<SlabRecovery<ShardsRecovered>, DownloadError> {
+    async fn recover_shards(self) -> Result<SlabRecovery<ShardsRecovered, T>, DownloadError> {
         let mut shard_tasks = JoinSet::new();
         let mut shards = vec![None; self.state.sectors.len()];
         let mut sectors = VecDeque::from(self.state.sectors);
@@ -230,8 +235,8 @@ impl SlabRecovery<AwaitingRecovery> {
     }
 }
 
-impl SlabRecovery<ShardsRecovered> {
-    fn decode(self) -> Result<SlabRecovery<SlabDecoded>, DownloadError> {
+impl<T: Transport> SlabRecovery<ShardsRecovered, T> {
+    fn decode(self) -> Result<SlabRecovery<SlabDecoded, T>, DownloadError> {
         let parity_shards = self.state.shards.len() - self.min_shards as usize;
         let rs = ErasureCoder::new(self.min_shards as usize, parity_shards)?;
         let mut shards = self.state.shards;
@@ -260,7 +265,7 @@ impl SlabRecovery<ShardsRecovered> {
     }
 }
 
-impl SlabRecovery<SlabDecoded> {
+impl<T: Transport> SlabRecovery<SlabDecoded, T> {
     async fn write<W: AsyncWrite + Unpin>(self, w: &mut W) -> Result<(), DownloadError> {
         let skip = self.offset % (SEGMENT_SIZE * self.state.data_shards.len());
         ErasureCoder::write_data_shards(w, &self.state.data_shards, skip, self.length).await?;
@@ -329,8 +334,8 @@ impl<'a, const N: usize> Iterator for ChunkIter<'a, N> {
     }
 }
 
-pub(crate) async fn download_object<W: AsyncWrite + Unpin>(
-    hosts: Hosts,
+pub(crate) async fn download_object<W: AsyncWrite + Unpin, T: Transport>(
+    hosts: Hosts<T>,
     account_key: Arc<PrivateKey>,
     w: &mut W,
     object: &Object,
@@ -372,8 +377,9 @@ pub(crate) async fn download_object<W: AsyncWrite + Unpin>(
     }
 
     let semaphore = Arc::new(Semaphore::new(options.max_inflight));
-    let mut chunk_tasks: JoinSet<Result<(usize, SlabRecovery<_>), DownloadError>> = JoinSet::new();
-    let mut completed_chunks: BTreeMap<usize, SlabRecovery<_>> = BTreeMap::new();
+    let mut chunk_tasks: JoinSet<Result<(usize, SlabRecovery<_, T>), DownloadError>> =
+        JoinSet::new();
+    let mut completed_chunks: BTreeMap<usize, SlabRecovery<_, T>> = BTreeMap::new();
     let mut next_write_chunk = chunks.peek().map(|(index, _)| *index).unwrap_or_default(); // the next chunk index to write to the output
     loop {
         tokio::select! {
@@ -431,7 +437,6 @@ mod test {
     use std::io::Cursor;
     use std::sync::{Arc, Mutex};
 
-    use async_trait::async_trait;
     use bytes::BytesMut;
     use chrono::Utc;
     use rand::Rng;
@@ -449,13 +454,12 @@ mod test {
 
     /// A mock RHP client with decreasing delays for read RPCs to simulate
     /// out-of-order chunk completion.
+    #[derive(Clone)]
     struct OOORHPClient {
-        sector_data: Mutex<HashMap<Hash256, Bytes>>,
-        sector_delays: Mutex<HashMap<Hash256, Duration>>,
+        sector_data: Arc<Mutex<HashMap<Hash256, Bytes>>>,
+        sector_delays: Arc<Mutex<HashMap<Hash256, Duration>>>,
     }
 
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl Transport for OOORHPClient {
         async fn host_prices(&self, _: &HostEndpoint) -> Result<HostPrices, rhp4::Error> {
             Ok(HostPrices {
@@ -517,10 +521,10 @@ mod test {
             let upload_options = UploadOptions::default();
             let slab_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
-            let transport = Arc::new(OOORHPClient {
-                sector_data: Mutex::new(HashMap::new()),
-                sector_delays: Mutex::new(HashMap::new()),
-            });
+            let transport = OOORHPClient {
+                sector_data: Arc::new(Mutex::new(HashMap::new())),
+                sector_delays: Arc::new(Mutex::new(HashMap::new())),
+            };
             let hosts = Hosts::new(transport.clone());
             hosts.update(
                 (0..60)
@@ -569,7 +573,7 @@ mod test {
             const PARITY_SHARDS: usize = 4;
             const SLAB_SIZE: usize = SECTOR_SIZE * DATA_SHARDS;
 
-            let transport = Arc::new(MockRHP4Transport::new());
+            let transport = MockRHP4Transport::new();
             let hosts = Hosts::new(transport.clone());
             hosts.update(
                 (0..60)

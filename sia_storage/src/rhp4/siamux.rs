@@ -1,6 +1,5 @@
 use crate::time::{Elapsed, timeout};
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use core::fmt::Debug;
 use ed25519_dalek::{SignatureError, VerifyingKey};
@@ -142,7 +141,6 @@ impl Client {
     }
 }
 
-#[async_trait]
 impl Transport for Client {
     async fn host_prices(&self, host: &HostEndpoint) -> Result<HostPrices, TransportError> {
         let mut stream = self
