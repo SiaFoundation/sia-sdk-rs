@@ -171,6 +171,7 @@ impl SDK {
             total_hosts,
             good_for_upload.len()
         );
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = self.hosts.warm_connections(good_for_upload).await;
         Ok(())
     }
