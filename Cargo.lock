@@ -2715,7 +2715,6 @@ dependencies = [
 name = "sia_storage"
 version = "0.5.0"
 dependencies = [
- "async-trait",
  "base64",
  "blake2",
  "blake2b_simd",

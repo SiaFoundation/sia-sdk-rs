@@ -13,12 +13,13 @@ use tokio::task::JoinSet;
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::{HostQueue, QueueError, RPCError};
+use crate::rhp4::Transport;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Elapsed, Instant, sleep};
 use crate::{Hosts, Object, Sector, Slab};
 
-struct ShardUpload {
-    client: Hosts,
+struct ShardUpload<T: Transport> {
+    client: Hosts<T>,
     hosts: HostQueue,
     account_key: Arc<PrivateKey>,
     data: Bytes,
@@ -26,7 +27,7 @@ struct ShardUpload {
     shard_index: usize,
 }
 
-impl ShardUpload {
+impl<T: Transport> ShardUpload<T> {
     fn spawn_write(
         &self,
         tasks: &mut JoinSet<Result<Sector, UploadError>>,
@@ -235,13 +236,13 @@ impl PackedUpload {
 }
 
 #[derive(Clone)]
-pub(crate) struct Uploader {
+pub(crate) struct Uploader<T: Transport> {
     app_key: Arc<PrivateKey>,
-    hosts: Hosts,
+    hosts: Hosts<T>,
 }
 
-impl Uploader {
-    pub fn new(hosts: Hosts, app_key: Arc<PrivateKey>) -> Self {
+impl<T: Transport> Uploader<T> {
+    pub fn new(hosts: Hosts<T>, app_key: Arc<PrivateKey>) -> Self {
         Uploader { app_key, hosts }
     }
 
@@ -250,7 +251,7 @@ impl Uploader {
     }
 
     async fn upload_slab_shard(
-        shard: ShardUpload,
+        shard: ShardUpload<T>,
         permit: OwnedSemaphorePermit,
         progress_tx: Option<mpsc::UnboundedSender<()>>,
         initial_host: (PublicKey, usize),
@@ -299,7 +300,7 @@ impl Uploader {
     }
 
     pub(crate) async fn upload_slabs<R: AsyncRead + Unpin + Send + 'static>(
-        client: Hosts,
+        client: Hosts<T>,
         app_key: Arc<PrivateKey>,
         r: R,
         options: UploadOptions,

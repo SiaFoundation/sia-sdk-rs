@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use bytes::Bytes;
 use sia_core::encoding;
 use sia_core::rhp4::HostPrices;
@@ -54,22 +53,20 @@ pub(crate) struct HostEndpoint {
     pub addresses: Vec<NetAddress>,
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 /// Trait defining the operations that can be performed on a host.
-/// Send + Sync bounds are applied at the usage site via [`DynTransport`]
-/// rather than on the trait itself, so WASM types that are !Send can
-/// implement this trait without unsafe.
-pub(crate) trait Transport {
-    async fn host_prices(&self, host: &HostEndpoint) -> Result<HostPrices, Error>;
-    async fn write_sector(
+pub(crate) trait Transport: Clone + MaybeSendSync + 'static {
+    fn host_prices(
+        &self,
+        host: &HostEndpoint,
+    ) -> impl Future<Output = Result<HostPrices, Error>> + MaybeSendSync;
+    fn write_sector(
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
         account_key: &PrivateKey,
         sector: Bytes,
-    ) -> Result<Hash256, Error>;
-    async fn read_sector(
+    ) -> impl Future<Output = Result<Hash256, Error>> + MaybeSendSync;
+    fn read_sector(
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
@@ -77,13 +74,14 @@ pub(crate) trait Transport {
         root: Hash256,
         offset: usize,
         length: usize,
-    ) -> Result<Bytes, Error>;
+    ) -> impl Future<Output = Result<Bytes, Error>> + MaybeSendSync;
 }
-
-/// Type alias for `dyn Transport` with conditional Send + Sync bounds.
-/// Use `Arc<DynTransport>` instead of `Arc<dyn Transport>` to avoid
-/// cfg-gates at every use site.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) type DynTransport = dyn Transport + Send + Sync;
+pub(crate) trait MaybeSendSync: Send + Sync {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + Sync> MaybeSendSync for T {}
+
 #[cfg(target_arch = "wasm32")]
-pub(crate) type DynTransport = dyn Transport;
+pub(crate) trait MaybeSendSync {}
+#[cfg(target_arch = "wasm32")]
+impl<T> MaybeSendSync for T {}
