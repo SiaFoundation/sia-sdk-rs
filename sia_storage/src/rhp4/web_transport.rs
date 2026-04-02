@@ -132,7 +132,6 @@ impl Stream {
             .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
         Ok(())
     }
-
 }
 
 /// AsyncRead for reading RPC responses. The JS `reader.read()` returns
