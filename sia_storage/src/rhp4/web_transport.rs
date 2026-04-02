@@ -211,10 +211,15 @@ impl AsyncWrite for Stream {
         let this = self.get_mut();
 
         // Complete any in-flight write before accepting new data.
+        // Return Ok(0) to signal completion without consuming the current buf,
+        // so the caller re-submits its data on the next call. Without this,
+        // write_all would re-submit the same data after Pending, causing a
+        // double write.
         if let Some((future, _)) = this.pending_write.as_mut() {
             std::task::ready!(Pin::new(future).poll(cx))
                 .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
             this.pending_write = None;
+            return Poll::Ready(Ok(0));
         }
 
         // Submit new data
