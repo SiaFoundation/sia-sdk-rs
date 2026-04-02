@@ -43,13 +43,10 @@ getrandom = "0.4"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # do not update to reqwest v0.13 until https://github.com/seanmonstar/reqwest/issues/2968 is resolved
 reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
-rustls = { version = "0.23.37", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tokio = { version = "1.50.0", features = ["fs", "sync", "io-util", "macros", "rt", "time"] }
-quinn = { version = "0.11.9", default-features = false, features = ["bloom", "log", "runtime-tokio", "rustls-ring"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 rayon = "1.11.0"
 sia_mux = { version = "0.1.0", path = "../sia_mux" }
-rustls-platform-verifier = { version = "0.6.2", optional = true }
 
 # --- WASM-only dependencies ---
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -86,9 +83,7 @@ clap = { version = "4.6.0", features = ["derive"] }
 wasm-bindgen-test = "0.3"
 
 [features]
-default = ["platform-verifier"]
 mock = []
-platform-verifier = ["rustls-platform-verifier"]
 
 [[bench]]
 name = "upload"
