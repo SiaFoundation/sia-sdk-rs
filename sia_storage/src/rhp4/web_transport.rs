@@ -4,6 +4,10 @@
 //! browser's WebTransport API, mirroring the siamux client on native.
 //! Connections are pooled per host — one WebTransport session per host,
 //! with multiple bidirectional streams for concurrent RPCs.
+//!
+//! Writes use direct `JsFuture` calls (`write_all_async`) to avoid tokio
+//! poll overhead. Reads use `AsyncRead` — the JS `reader.read()` already
+//! returns large chunks which are buffered internally.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -19,7 +23,7 @@ use sia_core::rhp4::{AccountToken, HostPrices};
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, ReadBuf};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -95,15 +99,13 @@ async fn connect(addr: &str) -> Result<Connection, Error> {
     Ok(conn)
 }
 
-// --- Stream (AsyncRead + AsyncWrite) ---
+// --- Stream ---
 
 struct Stream {
     reader: web_sys::ReadableStreamDefaultReader,
     pending_read: Option<JsFuture>,
     buf: Vec<u8>,
     writer: web_sys::WritableStreamDefaultWriter,
-    pending_write: Option<(JsFuture, usize)>,
-    pending_close: Option<JsFuture>,
 }
 
 impl Stream {
@@ -116,43 +118,13 @@ impl Stream {
             pending_read: None,
             buf: Vec::new(),
             writer,
-            pending_write: None,
-            pending_close: None,
         }
     }
 
-    /// Read exactly `buf.len()` bytes, buffering as needed.
-    /// This is a pure-async method that works without a tokio runtime.
-    #[cfg(test)]
-    async fn read_exact_async(&mut self, buf: &mut [u8]) -> Result<(), std::io::Error> {
-        let mut filled = 0;
-        while filled < buf.len() {
-            if !self.buf.is_empty() {
-                let n = self.buf.len().min(buf.len() - filled);
-                buf[filled..filled + n].copy_from_slice(&self.buf[..n]);
-                self.buf.drain(..n);
-                filled += n;
-                continue;
-            }
-            let result = JsFuture::from(self.reader.read())
-                .await
-                .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-            let chunk: ReadableStreamReadResult = result.unchecked_into();
-            if chunk.is_done() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "stream closed",
-                ));
-            }
-            let data = Uint8Array::new(&chunk.value()).to_vec();
-            self.buf.extend_from_slice(&data);
-        }
-        Ok(())
-    }
-
-    /// Write all bytes. Pure-async, no tokio runtime needed.
-    #[cfg(test)]
-    async fn write_all_async(&mut self, data: &[u8]) -> Result<(), std::io::Error> {
+    /// Write all bytes in one JS call. This bypasses tokio's poll-based
+    /// AsyncWrite which would yield to the JS event loop on every poll.
+    /// RPC requests are encoded into a Vec<u8> first, then sent here.
+    async fn write_all_async(&self, data: &[u8]) -> Result<(), std::io::Error> {
         let array = Uint8Array::new_with_length(data.len() as u32);
         array.copy_from(data);
         JsFuture::from(self.writer.write_with_chunk(&array))
@@ -160,8 +132,12 @@ impl Stream {
             .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
         Ok(())
     }
+
 }
 
+/// AsyncRead for reading RPC responses. The JS `reader.read()` returns
+/// large chunks naturally, which are buffered in `self.buf`. Writes bypass
+/// poll entirely via write_all_async.
 impl AsyncRead for Stream {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -198,74 +174,6 @@ impl AsyncRead for Stream {
             this.buf = data[n..].to_vec();
         }
 
-        Poll::Ready(Ok(()))
-    }
-}
-
-impl AsyncWrite for Stream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        let this = self.get_mut();
-
-        // Complete any in-flight write before accepting new data.
-        // Return Ok(0) to signal completion without consuming the current buf,
-        // so the caller re-submits its data on the next call. Without this,
-        // write_all would re-submit the same data after Pending, causing a
-        // double write.
-        if let Some((future, _)) = this.pending_write.as_mut() {
-            std::task::ready!(Pin::new(future).poll(cx))
-                .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-            this.pending_write = None;
-            return Poll::Ready(Ok(0));
-        }
-
-        // Submit new data
-        let array = Uint8Array::new_with_length(buf.len() as u32);
-        array.copy_from(buf);
-        let future = JsFuture::from(this.writer.write_with_chunk(&array));
-        this.pending_write = Some((future, buf.len()));
-
-        // Poll immediately — if it completes synchronously, report the count
-        let (future, len) = this.pending_write.as_mut().unwrap();
-        match Pin::new(future).poll(cx) {
-            Poll::Ready(Ok(_)) => {
-                let written = *len;
-                this.pending_write = None;
-                Poll::Ready(Ok(written))
-            }
-            Poll::Ready(Err(e)) => {
-                this.pending_write = None;
-                Poll::Ready(Err(std::io::Error::other(format!("{e:?}"))))
-            }
-            // Data is in-flight but not confirmed. The caller will re-call
-            // poll_write; we'll complete the pending write and report its
-            // byte count before accepting new data.
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-        if let Some((future, _)) = this.pending_write.as_mut() {
-            std::task::ready!(Pin::new(future).poll(cx))
-                .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-            this.pending_write = None;
-        }
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-        if this.pending_close.is_none() {
-            this.pending_close = Some(JsFuture::from(this.writer.close()));
-        }
-        let future = this.pending_close.as_mut().unwrap();
-        std::task::ready!(Pin::new(future).poll(cx))
-            .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-        this.pending_close = None;
         Poll::Ready(Ok(()))
     }
 }
@@ -338,15 +246,21 @@ impl Client {
     }
 }
 
+// RPC writes: encode request into a Vec<u8> (instant — Vec impls AsyncWrite),
+// then send the whole buffer with write_all_async in one JS Promise.
+//
+// RPC reads: use AsyncRead on Stream directly. The JS reader.read() already
+// returns large chunks from the network buffer, which Stream stores in
+// self.buf and serves to subsequent poll_read calls without further JS calls.
 impl Transport for Client {
     async fn host_prices(&self, host: &HostEndpoint) -> Result<HostPrices, Error> {
         let conn = self.connection(host).await?;
         let result: Result<HostPrices, Error> = async {
             let mut stream = conn.open_stream().await?;
-            let resp = RPCSettings::send_request(&mut stream)
-                .await?
-                .complete(&mut stream)
-                .await?;
+            let mut buf = Vec::new();
+            let req = RPCSettings::send_request(&mut buf).await?;
+            stream.write_all_async(&buf).await?;
+            let resp = req.complete(&mut stream).await?;
             Ok(resp.settings.prices)
         }
         .await;
@@ -369,10 +283,10 @@ impl Transport for Client {
         let conn = self.connection(host).await?;
         let result: Result<Hash256, Error> = async {
             let mut stream = conn.open_stream().await?;
-            let resp = RPCWriteSector::send_request(&mut stream, prices, token, data)
-                .await?
-                .complete(&mut stream)
-                .await?;
+            let mut buf = Vec::new();
+            let req = RPCWriteSector::send_request(&mut buf, prices, token, data.clone()).await?;
+            stream.write_all_async(&buf).await?;
+            let resp = req.complete(&mut stream).await?;
             Ok(resp.root)
         }
         .await;
@@ -397,11 +311,11 @@ impl Transport for Client {
         let conn = self.connection(host).await?;
         let result: Result<Bytes, Error> = async {
             let mut stream = conn.open_stream().await?;
-            let resp =
-                RPCReadSector::send_request(&mut stream, prices, token, root, offset, length)
-                    .await?
-                    .complete(&mut stream)
-                    .await?;
+            let mut buf = Vec::new();
+            let req =
+                RPCReadSector::send_request(&mut buf, prices, token, root, offset, length).await?;
+            stream.write_all_async(&buf).await?;
+            let resp = req.complete(&mut stream).await?;
             Ok(resp.data)
         }
         .await;
@@ -418,6 +332,7 @@ impl Transport for Client {
 mod tests {
     use super::*;
     use js_sys::Uint8Array;
+    use tokio::io::AsyncReadExt;
     use wasm_bindgen_futures::spawn_local;
     use wasm_bindgen_test::*;
 
@@ -466,7 +381,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_stream_write_basic() {
-        let (mut stream, _, out_reader) = test_stream();
+        let (stream, _, out_reader) = test_stream();
 
         // Write from a spawned task — even with separate TransformStreams,
         // the write-side transform won't pull unless the readable side is
@@ -486,7 +401,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_stream_write_large() {
-        let (mut stream, _, out_reader) = test_stream();
+        let (stream, _, out_reader) = test_stream();
 
         let data = vec![0xABu8; 4096];
         let data_clone = data.clone();
@@ -510,11 +425,11 @@ mod tests {
         feed_async(feeder, b"hello, world!".to_vec());
 
         let mut buf = vec![0u8; 5];
-        stream.read_exact_async(&mut buf).await.unwrap();
+        stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"hello");
 
         let mut buf = vec![0u8; 8];
-        stream.read_exact_async(&mut buf).await.unwrap();
+        stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b", world!");
     }
 
@@ -526,7 +441,7 @@ mod tests {
         let mut total = Vec::new();
         for _ in 0..4 {
             let mut buf = vec![0u8; 256];
-            stream.read_exact_async(&mut buf).await.unwrap();
+            stream.read_exact(&mut buf).await.unwrap();
             total.extend_from_slice(&buf);
         }
         assert_eq!(total, vec![42u8; 1024]);
@@ -544,7 +459,7 @@ mod tests {
         // 1. Feed data into the read side and read it through our Stream
         feed_async(feeder, data.to_vec());
         let mut buf = vec![0u8; data.len()];
-        stream.read_exact_async(&mut buf).await.unwrap();
+        stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, data);
 
         // 2. Write data through our Stream and verify it on the write side
@@ -578,7 +493,7 @@ mod tests {
         });
 
         let mut buf = vec![0u8; 10];
-        stream.read_exact_async(&mut buf).await.unwrap();
+        stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"helloworld");
     }
 }
