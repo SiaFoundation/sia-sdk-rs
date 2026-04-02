@@ -130,8 +130,8 @@ pub enum Error {
 pub struct SDK {
     app_key: Arc<PrivateKey>,
     api_client: app_client::Client,
-    hosts: Hosts,
-    uploader: Uploader,
+    hosts: Hosts<Client>,
+    uploader: Uploader<Client>,
 }
 
 impl SDK {
@@ -180,7 +180,7 @@ impl SDK {
         api_client: app_client::Client,
         app_key: Arc<PrivateKey>,
     ) -> Result<Self, BuilderError> {
-        let hosts = Hosts::new(Arc::new(Client::new()));
+        let hosts = Hosts::new(Client::new());
 
         let uploader = Uploader::new(hosts.clone(), app_key.clone());
         let sdk = Self {
@@ -456,7 +456,7 @@ mod test {
     cross_target_tests! {
         async fn test_upload_download_packed() { run_local(async {
             let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
-            let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
+            let hosts = Hosts::new(MockRHP4Transport::new());
             hosts.update(
                 (0..60)
                     .map(|_| Host {
@@ -541,7 +541,7 @@ mod test {
 
         async fn test_upload_download_packed_spanning() { run_local(async {
             let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
-            let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
+            let hosts = Hosts::new(MockRHP4Transport::new());
             hosts.update(
                 (0..60)
                     .map(|_| Host {
@@ -627,7 +627,7 @@ mod test {
 
     async fn test_upload_download_packed_exact() { run_local(async {
             let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
-            let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
+            let hosts = Hosts::new(MockRHP4Transport::new());
             hosts.update(
                 (0..60)
                     .map(|_| Host {
@@ -684,7 +684,7 @@ mod test {
 
     async fn test_upload_download() { run_local(async {
             let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
-            let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
+            let hosts = Hosts::new(MockRHP4Transport::new());
             hosts.update(
                 (0..60)
                     .map(|_| Host {
@@ -753,7 +753,7 @@ mod test {
             const SEGMENT_SIZE: u64 = 64; // leaf size
 
             let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
-            let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
+            let hosts = Hosts::new(MockRHP4Transport::new());
             hosts.update(
                 (0..60)
                     .map(|_| Host {
@@ -845,7 +845,7 @@ mod test {
 
     async fn test_download_slow_hosts() { run_local(async {
             let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
-            let mock_transport = Arc::new(MockRHP4Transport::new());
+            let mock_transport = MockRHP4Transport::new();
             let hosts = Hosts::new(mock_transport.clone());
 
             // Create 30 hosts and track their public keys
@@ -903,7 +903,7 @@ mod test {
 
     async fn test_upload_no_hosts() { run_local(async {
             let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
-            let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
+            let hosts = Hosts::new(MockRHP4Transport::new());
             let uploader = Uploader::new(hosts.clone(), app_key.clone());
 
             let input: Bytes = Bytes::from("Hello, world!");
@@ -924,7 +924,7 @@ mod test {
         /// This mirrors Go's TestUpload "slow" subtest.
     async fn test_upload_slow_host() { run_local(async {
             let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
-            let mock_transport = Arc::new(MockRHP4Transport::new());
+            let mock_transport = MockRHP4Transport::new();
             let hosts = Hosts::new(mock_transport.clone());
 
             // Create 30 hosts and track their public keys
@@ -971,7 +971,7 @@ mod test {
         // Upload should succeed even if all initial hosts are slow
     async fn test_upload_all_hosts_slow() { run_local(async {
             let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
-            let mock_transport = Arc::new(MockRHP4Transport::new());
+            let mock_transport = MockRHP4Transport::new();
             let hosts = Hosts::new(mock_transport.clone());
 
             // Create 30 hosts and track their public keys
@@ -1012,7 +1012,7 @@ mod test {
 
     async fn test_upload_not_enough_hosts_good_for_upload() { run_local(async {
             let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
-            let hosts = Hosts::new(Arc::new(MockRHP4Transport::new()));
+            let hosts = Hosts::new(MockRHP4Transport::new());
             // Create 30 hosts: 10 good for upload, 20 not good for upload
             let host_keys: Vec<_> = (0..30)
                 .map(|_| PrivateKey::from_seed(&random_seed()).public_key())
