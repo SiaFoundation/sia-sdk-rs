@@ -18,8 +18,9 @@ mod upload;
 pub mod mock;
 
 use std::sync::Arc;
+use std::{fmt::Display, future::Future};
 
-use log::debug;
+use log::{debug, warn};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -29,6 +30,7 @@ use crate::download::download_object;
 pub use crate::hosts::Host;
 use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
+use crate::task::AbortOnDropHandle;
 use crate::upload::Uploader;
 pub use chrono::{DateTime, Utc};
 pub use reqwest::{IntoUrl, Url};
@@ -132,18 +134,22 @@ pub struct SDK {
     api_client: app_client::Client,
     hosts: Hosts<Client>,
     uploader: Uploader<Client>,
+    _host_refresh_task: Arc<AbortOnDropHandle<()>>,
 }
 
 impl SDK {
-    async fn refresh_hosts(&self) -> Result<(), AppApiError> {
+    async fn refresh_hosts_inner(
+        api_client: &app_client::Client,
+        app_key: &PrivateKey,
+        hosts: &Hosts<Client>,
+    ) -> Result<(), AppApiError> {
         const PAGE_SIZE: usize = 100;
         let mut good_for_upload = Vec::new();
         let mut total_hosts: usize = 0;
         for i in (0..).step_by(PAGE_SIZE) {
-            let usable_hosts = self
-                .api_client
+            let usable_hosts = api_client
                 .hosts(
-                    &self.app_key,
+                    app_key,
                     HostQuery {
                         offset: Some(i),
                         limit: Some(PAGE_SIZE as u64),
@@ -161,7 +167,7 @@ impl SDK {
                     addresses: h.addresses.clone(),
                 })
                 .for_each(|h| good_for_upload.push(h));
-            self.hosts.update(usable_hosts, i == 0);
+            hosts.update(usable_hosts, i == 0);
             if n < PAGE_SIZE {
                 break;
             }
@@ -171,8 +177,25 @@ impl SDK {
             total_hosts,
             good_for_upload.len()
         );
-        let _ = self.hosts.warm_connections(good_for_upload).await;
+        let _ = hosts.warm_connections(good_for_upload).await;
         Ok(())
+    }
+
+    fn spawn_host_refresh_task(
+        api_client: app_client::Client,
+        app_key: Arc<PrivateKey>,
+        hosts: Hosts<Client>,
+    ) -> Arc<AbortOnDropHandle<()>> {
+        spawn_refresh_task(
+            time::Duration::from_secs(10 * 60),
+            move || {
+                let api_client = api_client.clone();
+                let app_key = app_key.clone();
+                let hosts = hosts.clone();
+                async move { Self::refresh_hosts_inner(&api_client, &app_key, &hosts).await }
+            },
+            "failed to refresh hosts",
+        )
     }
 
     /// Creates a new SDK instance.
@@ -182,15 +205,17 @@ impl SDK {
     ) -> Result<Self, BuilderError> {
         let hosts = Hosts::new(Client::new());
 
+        Self::refresh_hosts_inner(&api_client, &app_key, &hosts).await?;
+        let host_refresh_task =
+            Self::spawn_host_refresh_task(api_client.clone(), app_key.clone(), hosts.clone());
         let uploader = Uploader::new(hosts.clone(), app_key.clone());
-        let sdk = Self {
+        Ok(Self {
             app_key,
             api_client,
             hosts,
             uploader,
-        };
-        sdk.refresh_hosts().await?;
-        Ok(sdk)
+            _host_refresh_task: host_refresh_task,
+        })
     }
 
     /// Returns the application key used by the SDK.
@@ -409,6 +434,48 @@ impl SDK {
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_refresh_task<F, Fut, E>(
+    interval: time::Duration,
+    mut refresh: F,
+    error_context: &'static str,
+) -> Arc<AbortOnDropHandle<()>>
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), E>> + Send + 'static,
+    E: Display + Send + 'static,
+{
+    Arc::new(AbortOnDropHandle::new(maybe_spawn!(async move {
+        loop {
+            time::sleep(interval).await;
+            if let Err(err) = refresh().await {
+                warn!("{error_context}: {err}");
+            }
+        }
+    })))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn spawn_refresh_task<F, Fut, E>(
+    interval: time::Duration,
+    mut refresh: F,
+    error_context: &'static str,
+) -> Arc<AbortOnDropHandle<()>>
+where
+    F: FnMut() -> Fut + 'static,
+    Fut: Future<Output = Result<(), E>> + 'static,
+    E: Display + 'static,
+{
+    Arc::new(AbortOnDropHandle::new(maybe_spawn!(async move {
+        loop {
+            time::sleep(interval).await;
+            if let Err(err) = refresh().await {
+                warn!("{error_context}: {err}");
+            }
+        }
+    })))
 }
 
 /// Generates a new BIP-39 12-word recovery phrase.
@@ -1052,4 +1119,36 @@ mod test {
             }
         }).await }
         }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn test_refresh_task_stops_on_drop() {
+        use std::convert::Infallible;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let count = Arc::new(AtomicUsize::new(1));
+        let refreshes = count.clone();
+        let task = spawn_refresh_task(
+            Duration::from_millis(10),
+            move || {
+                let refreshes = refreshes.clone();
+                async move {
+                    refreshes.fetch_add(1, Ordering::SeqCst);
+                    Ok::<(), Infallible>(())
+                }
+            },
+            "periodic refresh failed",
+        );
+
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        tokio::task::yield_now().await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(35)).await;
+        let before_drop = count.load(Ordering::SeqCst);
+        assert!(before_drop >= 3);
+
+        drop(task);
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert_eq!(count.load(Ordering::SeqCst), before_drop);
+    }
 }
