@@ -24,7 +24,7 @@ const APP_META: AppMetadata = AppMetadata {
     callback_url: None,
 };
 
-let builder = Builder::new("https://app.sia.storage", APP_META)?;
+let builder = Builder::new("https://sia.storage", APP_META)?;
 let builder = builder.request_connection().await?;
 
 // Display builder.response_url() to the user for approval
@@ -41,7 +41,7 @@ let exported = sdk.app_key().export();
 use sia_storage::{Builder, AppKey};
 
 let app_key = AppKey::import(saved_key);
-let builder = Builder::new("https://app.sia.storage", APP_META)?;
+let builder = Builder::new("https://sia.storage", APP_META)?;
 if let Some(sdk) = builder.connected(&app_key).await? {
     // Connected successfully
 }

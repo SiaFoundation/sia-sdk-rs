@@ -65,7 +65,7 @@ async def main():
     uniffi_set_event_loop(asyncio.get_running_loop())  # type: ignore[arg-type]
     app_id = b"\x01" * 32
 
-    builder = Builder("https://app.sia.storage")
+    builder = Builder("https://sia.storage")
 
     await builder.request_connection(
         AppMeta(

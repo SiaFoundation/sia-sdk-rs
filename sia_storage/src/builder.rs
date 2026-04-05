@@ -84,7 +84,7 @@ impl Builder<DisconnectedState> {
     ///     callback_url: Some("https://myapp.com/callback"),
     /// };
     ///
-    /// let builder = Builder::new("https://app.sia.storage", APP_META).expect("failed to create builder");
+    /// let builder = Builder::new("https://sia.storage", APP_META).expect("failed to create builder");
     /// ```
     pub fn new<U: IntoUrl>(indexer_url: U, app_meta: AppMetadata) -> Result<Self, BuilderError> {
         let client = Client::new(indexer_url)?;

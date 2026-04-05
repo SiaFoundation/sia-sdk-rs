@@ -170,8 +170,7 @@ async fn main() {
     env_logger::init();
 
     // authorize the app to access the user's storage
-    let builder =
-        Builder::new("https://app.sia.storage", APP_META).expect("failed to create builder");
+    let builder = Builder::new("https://sia.storage", APP_META).expect("failed to create builder");
 
     let builder = builder
         .request_connection()

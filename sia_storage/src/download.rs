@@ -578,9 +578,8 @@ mod test {
         }).await }
 
         async fn test_slab_recovery() { run_local(async {
-            const DATA_SHARDS: usize = 10;
-            const PARITY_SHARDS: usize = 4;
-            const SLAB_SIZE: usize = SECTOR_SIZE * DATA_SHARDS;
+            let upload_options = UploadOptions::default();
+            let slab_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
             let transport = MockRHP4Transport::new();
             let hosts = Hosts::new(transport.clone());
@@ -600,7 +599,7 @@ mod test {
                     .collect(),
                 true,
             );
-            let mut data = BytesMut::zeroed(SLAB_SIZE);
+            let mut data = BytesMut::zeroed(slab_size);
             rand::rng().fill_bytes(&mut data);
             let data = data.freeze();
             let app_key = Arc::new(AppKey::import(rand::random()));
@@ -609,25 +608,21 @@ mod test {
                 hosts.clone(),
                 app_key.clone(),
                 Cursor::new(data.clone()),
-                UploadOptions {
-                    data_shards: DATA_SHARDS as u8,
-                    parity_shards: PARITY_SHARDS as u8,
-                    ..Default::default()
-                },
+                upload_options,
             )
             .await
             .unwrap();
 
             let test_cases: Vec<(&str, usize, usize)> = vec![
-                ("full slab", 0, SLAB_SIZE),
-                ("first half", 0, SLAB_SIZE / 2),
-                ("second half", SLAB_SIZE / 2, SLAB_SIZE / 2),
+                ("full slab", 0, slab_size),
+                ("first half", 0, slab_size / 2),
+                ("second half", slab_size / 2, slab_size / 2),
                 ("first 30 bytes", 0, 30),
-                ("middle 30 bytes", SLAB_SIZE / 2 - 15, 30),
-                ("last 30 bytes", SLAB_SIZE - 30, 30),
+                ("middle 30 bytes", slab_size / 2 - 15, 30),
+                ("last 30 bytes", slab_size - 30, 30),
                 ("first 4KiB", 0, 4096),
-                ("middle 4KiB", SLAB_SIZE / 2 - 2048, 4096),
-                ("last 4KiB", SLAB_SIZE - 4096, 4096),
+                ("middle 4KiB", slab_size / 2 - 2048, 4096),
+                ("last 4KiB", slab_size - 4096, 4096),
             ];
 
             for (name, offset, length) in test_cases {
