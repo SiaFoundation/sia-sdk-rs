@@ -22,12 +22,19 @@ use crate::time::{Duration, Elapsed, Instant, timeout};
 /// addresses can be used to connect to the host.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// A storage host on the Sia network.
 pub struct Host {
+    /// The host's public key.
     pub public_key: PublicKey,
+    /// The host's network addresses.
     pub addresses: Vec<NetAddress>,
+    /// The host's ISO 3166-1 alpha-2 country code.
     pub country_code: String,
+    /// The host's latitude coordinate.
     pub latitude: f64,
+    /// The host's longitude coordinate.
     pub longitude: f64,
+    /// Whether the host is currently suitable for uploading data.
     pub good_for_upload: bool,
 }
 
@@ -350,14 +357,18 @@ impl<T> HostCache<T> {
     }
 }
 
+/// Errors that can occur during host RPCs.
 #[derive(Debug, Error)]
 pub enum RPCError {
+    /// The host is not known to the SDK.
     #[error("unknown host: {0}")]
     UnknownHost(PublicKey),
 
+    /// An error in the RHP4 protocol.
     #[error("RHP error: {0}")]
     Rhp(#[from] crate::rhp4::Error),
 
+    /// The RPC timed out.
     #[error("RPC time out after {0:?}")]
     Elapsed(#[from] Elapsed),
 }
@@ -575,14 +586,19 @@ impl<T: Transport> Hosts<T> {
     }
 }
 
+/// Errors from the host selection queue.
 #[derive(Debug, Error)]
 pub enum QueueError {
+    /// All available hosts have been tried and failed.
     #[error("no more hosts available")]
     NoMoreHosts,
+    /// Not enough hosts are available to meet the required shard count.
     #[error("not enough initial hosts")]
     InsufficientHosts,
+    /// The host queue has been closed.
     #[error("client closed")]
     Closed,
+    /// An internal mutex was poisoned.
     #[error("internal mutex error")]
     MutexError,
 }

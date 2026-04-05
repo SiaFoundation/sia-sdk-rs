@@ -2,12 +2,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sia_core::rhp4::SECTOR_SIZE;
 
+use crate::AppKey;
 use crate::encryption::{CipherReader, CipherWriter, EncryptionKey};
 use serde_with::base64::Base64;
 use serde_with::{DefaultOnNull, serde_as};
 use sia_core::blake2::{Blake2b256, Digest};
 use sia_core::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
-use sia_core::signing::{PrivateKey, PublicKey, Signature};
+use sia_core::signing::{PublicKey, Signature};
 use sia_core::types::Hash256;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -21,7 +22,9 @@ use crate::object_encryption::{
 #[serde(rename_all = "camelCase")]
 /// A Sector is a unit of data stored on the Sia network. It can be referenced by its Merkle root.
 pub struct Sector {
+    /// The Merkle root of the sector data.
     pub root: Hash256,
+    /// The public key of the host storing this sector.
     pub host_key: PublicKey,
 }
 
@@ -30,10 +33,15 @@ pub struct Sector {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Slab {
+    /// The encryption key used to encrypt and decrypt this slab's data.
     pub encryption_key: EncryptionKey,
+    /// The minimum number of sectors required to recover the slab's data.
     pub min_shards: u8,
+    /// The sectors that make up this slab, spread across different hosts.
     pub sectors: Vec<Sector>,
+    /// The byte offset of this slab's data within the parent object.
     pub offset: u32,
+    /// The byte length of this slab's data.
     pub length: u32,
 }
 
@@ -89,21 +97,31 @@ impl SiaDecodable for Slab {
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// A slab that has been pinned to the indexer.
 pub struct PinnedSlab {
+    /// The unique identifier of the slab.
     pub id: Hash256,
+    /// The encryption key used to encrypt and decrypt this slab's data.
     pub encryption_key: EncryptionKey,
+    /// The minimum number of sectors required to recover the slab's data.
     pub min_shards: u8,
+    /// The sectors that make up this slab.
     pub sectors: Vec<Sector>,
 }
 
+/// Errors that can occur when opening or verifying a sealed object.
 #[derive(Debug, Error)]
 pub enum SealedObjectError {
+    /// The encrypted data could not be decrypted.
     #[error("decryption error: {0}")]
     Decryption(#[from] DecryptError),
+    /// The sealed object's ID does not match its contents.
     #[error("sealed object ID does not match contents")]
     ContentsMismatch,
+    /// An error occurred during encoding or decoding.
     #[error("encoding error: {0}")]
     Encoding(#[from] encoding::Error),
+    /// The signature on the sealed object is invalid.
     #[error("invalid signature")]
     InvalidSignature,
 }
@@ -111,21 +129,32 @@ pub enum SealedObjectError {
 #[serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// An encrypted, signed representation of an [Object] that can be stored on the indexer.
+///
+/// A sealed object can be opened with [SealedObject::open] using the same [AppKey] that sealed it.
 pub struct SealedObject {
+    /// The encrypted data encryption key.
     #[serde_as(as = "Base64")]
     pub encrypted_data_key: Vec<u8>,
+    /// The erasure-coded slabs that make up the object's data.
     pub slabs: Vec<Slab>,
+    /// A signature over the data key and slabs.
     pub data_signature: Signature,
 
+    /// The encrypted metadata encryption key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[serde_as(as = "DefaultOnNull<Base64>")]
     pub encrypted_metadata_key: Vec<u8>,
+    /// The encrypted metadata.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[serde_as(as = "DefaultOnNull<Base64>")]
     pub encrypted_metadata: Vec<u8>,
+    /// A signature over the metadata key and metadata.
     pub metadata_signature: Signature,
 
+    /// The time the object was created.
     pub created_at: DateTime<Utc>,
+    /// The time the object was last updated.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -196,20 +225,22 @@ impl SealedObject {
         Ok(())
     }
 
+    /// Returns the unique identifier of the sealed object.
     pub fn id(&self) -> Hash256 {
         object_id(&self.slabs)
     }
 
-    pub fn open(self, app_key: &PrivateKey) -> Result<Object, SealedObjectError> {
+    /// Decrypts and verifies the sealed object, returning the underlying [Object].
+    pub fn open(self, app_key: &AppKey) -> Result<Object, SealedObjectError> {
         // verify signatures first
         let object_id = self.id();
         self.verify_signatures(&app_key.public_key(), &object_id)?;
 
         // decrypt data key and metadata
-        let data_key = open_data_key(app_key, &object_id, &self.encrypted_data_key)?;
+        let data_key = open_data_key(&app_key.0, &object_id, &self.encrypted_data_key)?;
         let metadata = if !self.encrypted_metadata.is_empty() {
             let metadata_key =
-                open_metadata_key(app_key, &object_id, &self.encrypted_metadata_key)?;
+                open_metadata_key(&app_key.0, &object_id, &self.encrypted_metadata_key)?;
             open_metadata(&metadata_key, &self.encrypted_metadata)?
         } else {
             Vec::new()
@@ -228,14 +259,20 @@ impl SealedObject {
 /// An ObjectEvent represents an object and whether it was deleted or not.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectEvent {
+    /// The unique identifier of the object.
     pub id: Hash256,
+    /// Whether the object was deleted.
     pub deleted: bool,
+    /// The time the event occurred.
     pub updated_at: DateTime<Utc>,
+    /// The object, if it was not deleted.
     pub object: Option<Object>,
 }
 
-// An Object represents a file stored on the Sia network, consisting of multiple slabs and
-// associated metadata.
+/// A file stored on the Sia network, consisting of erasure-coded slabs and
+/// optional metadata.
+///
+/// Objects can be sealed with [Object::seal] for storage on the indexer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Object {
     data_key: EncryptionKey, // not public to avoid accidental exposure
@@ -244,6 +281,7 @@ pub struct Object {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 
+    /// Application-defined metadata stored alongside the object. Encrypted when sealed.
     pub metadata: Vec<u8>,
 }
 
@@ -258,6 +296,7 @@ impl Object {
         }
     }
 
+    /// Returns the unique identifier of the object.
     pub fn id(&self) -> Hash256 {
         object_id(&self.slabs)
     }
@@ -290,11 +329,12 @@ impl Object {
         })
     }
 
-    pub fn seal(&self, app_key: &PrivateKey) -> SealedObject {
+    /// Encrypts and signs the object, producing a [SealedObject] that can be pinned to the indexer.
+    pub fn seal(&self, app_key: &AppKey) -> SealedObject {
         let object_id = self.id();
 
         // encypt data key and create data signature
-        let encrypted_data_key = seal_data_key(app_key, &object_id, &self.data_key);
+        let encrypted_data_key = seal_data_key(&app_key.0, &object_id, &self.data_key);
         let data_signature = {
             let sig_hash = SealedObject::data_sig_hash(&object_id, &encrypted_data_key);
             app_key.sign(sig_hash.as_ref())
@@ -303,7 +343,7 @@ impl Object {
         // encrypt metadata key and metadata, if present, and create metadata signature
         let (encrypted_metadata_key, encrypted_metadata) = if !self.metadata.is_empty() {
             let metadata_key = EncryptionKey::from(rand::random::<[u8; 32]>());
-            let encrypted_metadata_key = seal_metadata_key(app_key, &object_id, &metadata_key);
+            let encrypted_metadata_key = seal_metadata_key(&app_key.0, &object_id, &metadata_key);
             let encrypted_metadata = seal_metadata(&metadata_key, &self.metadata);
             (encrypted_metadata_key, encrypted_metadata)
         } else {
@@ -515,7 +555,7 @@ mod test {
         obj.metadata = meta.clone();
 
         let seed: [u8; 32] = random_bytes_32();
-        let private_key = PrivateKey::from_seed(&seed);
+        let private_key = AppKey::import(seed);
 
         let sealed = obj.seal(&private_key);
         let opened = sealed.open(&private_key).expect("should open");
@@ -533,7 +573,7 @@ mod test {
             &mut seed,
         )
         .expect("hex");
-        let app_key = PrivateKey::from_seed(&seed);
+        let app_key = AppKey::import(seed);
 
         let mut expected_object_key = [0u8; 32];
         hex::decode_to_slice(

@@ -5,7 +5,7 @@ use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::PrivateKey;
 use sia_core::types::v2::NetAddress;
 use sia_storage::mock::{MockDownloader, MockHosts, MockUploader};
-use sia_storage::{DownloadOptions, Host, Object, UploadOptions};
+use sia_storage::{AppKey, DownloadOptions, Host, Object, UploadOptions};
 use std::io::Cursor;
 use std::sync::Arc;
 use tokio::io::{AsyncWrite, sink};
@@ -83,7 +83,7 @@ fn upload_benchmark(c: &mut Criterion) {
         true,
     );
 
-    let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
+    let app_key = Arc::new(AppKey::import(rand::random()));
     let uploader = Arc::new(MockUploader::new(hosts.clone(), app_key.clone()));
     let downloader = Arc::new(MockDownloader::new(hosts.clone(), app_key.clone()));
     let mut input = BytesMut::zeroed(SECTOR_SIZE * 30); // 3 full slabs

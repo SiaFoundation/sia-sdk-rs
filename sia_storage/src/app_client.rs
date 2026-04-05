@@ -14,18 +14,18 @@ use sia_core::blake2::Blake2b256;
 use thiserror::Error;
 
 use serde::de::DeserializeOwned;
-use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::DecryptError;
 use crate::slabs::Sector;
 use crate::time::Duration;
-use crate::{AppMetadata, Object, PinnedSlab, SealedObject, Slab};
+use crate::{
+    Account, AppMetadata, HostQuery, Object, ObjectsCursor, PinnedSlab, SealedObject, Slab,
+};
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;
-use sia_core::types::v2::Protocol;
 
-pub use reqwest::{IntoUrl, Url};
+pub(crate) use reqwest::{IntoUrl, Url};
 
 const QUERY_PARAM_VALID_UNTIL: &str = "sv";
 const QUERY_PARAM_CREDENTIAL: &str = "sc";
@@ -38,32 +38,42 @@ const SHARE_URL_FETCH_SCHEME: &str = "https";
 #[cfg(test)]
 const SHARE_URL_FETCH_SCHEME: &str = "http";
 
+/// Errors that can occur when communicating with the indexer API.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// The indexer returned an error response.
     #[error("indexd responded with an error: {0}")]
     Api(String),
 
+    /// An invalid HTTP header value was constructed.
     #[error("invalid header value: {0}")]
     InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),
 
+    /// An HTTP request error.
     #[error("http error: {0}")]
     Reqwest(#[from] reqwest::Error),
 
+    /// A JSON serialization or deserialization error.
     #[error("serde error: {0}")]
     Serde(#[from] serde_json::Error),
 
+    /// A URL could not be parsed.
     #[error("url parse error: {0}")]
     UrlParse(#[from] url::ParseError),
 
+    /// The user rejected the connection request during the approval flow.
     #[error("user rejected connection request")]
     UserRejected,
 
+    /// A response from the indexer had an unexpected format.
     #[error("format error: {0}")]
     Format(String),
 
+    /// An error occurred during decryption.
     #[error("decryption error: {0}")]
     Decryption(#[from] DecryptError),
 
+    /// A custom error.
     #[error("custom error: {0}")]
     Custom(String),
 }
@@ -95,83 +105,16 @@ pub(crate) struct SlabPinParams {
     pub sectors: Vec<Sector>,
 }
 
-pub struct ObjectsCursor {
-    pub after: DateTime<Utc>,
-    pub id: Hash256,
-}
-
 /// An SealedObjectEvent represents an object and whether it was deleted or not.
 #[serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SealedObjectEvent {
+pub(crate) struct SealedObjectEvent {
     #[serde(rename = "key")]
     pub id: Hash256,
     pub deleted: bool,
     pub updated_at: DateTime<Utc>,
     pub object: Option<SealedObject>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GeoLocation {
-    pub latitude: f64,
-    pub longitude: f64,
-}
-
-impl Serialize for GeoLocation {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let formatted = format!("({:.6},{:.6})", self.latitude, self.longitude);
-        serializer.serialize_str(&formatted)
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub struct HostQuery {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub location: Option<GeoLocation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub offset: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub protocol: Option<Protocol>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub country: Option<String>,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct App {
-    pub id: Hash256,
-    pub name: String,
-    pub description: String,
-    pub logo_url: Option<String>,
-    pub service_url: Option<String>,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Account {
-    pub account_key: PublicKey,
-    /// The maximum amount of data that can be pinned to the indexer for this account.
-    pub max_pinned_data: u64,
-    /// Remaining amount of data in bytes that can still be pinned, after applying both the account limit and current quota limit.
-    pub remaining_storage: u64,
-    /// The amount of data currently pinned to the indexer for this account. This
-    /// counts towards max pinned data.
-    pub pinned_data: u64,
-    /// The amount of data after erasure encoding. This is the actual amount of data on the network.
-    pub pinned_size: u64,
-    /// Whether the account is ready to be used. After registering an app, the account may not be
-    /// immediately ready as the indexer needs to process the registration and sync with the network.
-    /// The account will become ready once it has propagated on the network.
-    pub ready: bool,
-    pub app: App,
-    pub last_used: DateTime<Utc>,
 }
 
 #[serde_as]
@@ -240,7 +183,7 @@ impl From<&SealedObject> for PinObjectRequest {
 }
 
 #[derive(Clone)]
-pub struct Client {
+pub(crate) struct Client {
     client: reqwest::Client,
     url: Url,
 }
@@ -259,7 +202,7 @@ impl<'de> serde::Deserialize<'de> for EmptyResponse {
 }
 
 impl Client {
-    pub fn new<U: IntoUrl>(base_url: U) -> Result<Self, Error> {
+    pub(crate) fn new<U: IntoUrl>(base_url: U) -> Result<Self, Error> {
         Ok(Self {
             client: reqwest::Client::new(),
             url: base_url.into_url()?,
@@ -268,7 +211,10 @@ impl Client {
 
     /// Checks if the application is authenticated with the indexer. It returns
     /// true if authenticated, false if not, and an error if the request fails.
-    pub async fn check_app_authenticated(&self, app_key: &PrivateKey) -> Result<bool, Error> {
+    pub(crate) async fn check_app_authenticated(
+        &self,
+        app_key: &PrivateKey,
+    ) -> Result<bool, Error> {
         let url = self.url.join("auth/check")?;
         let query_params = sign(
             app_key,
@@ -292,7 +238,7 @@ impl Client {
     }
 
     /// Requests an application connection to the indexer.
-    pub async fn request_app_connection(
+    pub(crate) async fn request_app_connection(
         &self,
         ephemeral_key: &PrivateKey,
         opts: &AppMetadata,
@@ -307,7 +253,7 @@ impl Client {
     /// to derive the application key.
     ///
     /// If the auth request is still pending, it returns None.
-    pub async fn check_request_status(
+    pub(crate) async fn check_request_status(
         &self,
         ephemeral_key: &PrivateKey,
         status_url: Url,
@@ -345,7 +291,7 @@ impl Client {
     }
 
     /// Registers the application key with the indexer.
-    pub async fn register_app(
+    pub(crate) async fn register_app(
         &self,
         signing_key: &PrivateKey,
         app_key: &PrivateKey,
@@ -374,19 +320,27 @@ impl Client {
     ///
     /// # Arguments
     /// * `query` - Parameters to control the hosts listing.
-    pub async fn hosts(&self, app_key: &PrivateKey, query: HostQuery) -> Result<Vec<Host>, Error> {
+    pub(crate) async fn hosts(
+        &self,
+        app_key: &PrivateKey,
+        query: HostQuery,
+    ) -> Result<Vec<Host>, Error> {
         self.get_json("hosts", app_key, Some(&query)).await
     }
 
     /// Retrieves an object from the indexer by its key.
-    pub async fn object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<SealedObject, Error> {
+    pub(crate) async fn object(
+        &self,
+        app_key: &PrivateKey,
+        key: &Hash256,
+    ) -> Result<SealedObject, Error> {
         self.get_json::<_, ()>(&format!("objects/{key}"), app_key, None)
             .await
     }
 
     /// Fetches a list of objects from the indexer. Can be paginated using the
     /// cursor and limit arguments.
-    pub async fn objects(
+    pub(crate) async fn objects(
         &self,
         app_key: &PrivateKey,
         cursor: Option<ObjectsCursor>,
@@ -406,7 +360,7 @@ impl Client {
 
     /// Pins an object to the indexer. If an object with the same ID already
     /// exists for the account, it is overwritten.
-    pub async fn pin_object(
+    pub(crate) async fn pin_object(
         &self,
         app_key: &PrivateKey,
         object: &SealedObject,
@@ -418,18 +372,26 @@ impl Client {
     }
 
     /// Deletes an object from the indexer by its key.
-    pub async fn delete_object(&self, app_key: &PrivateKey, key: &Hash256) -> Result<(), Error> {
+    pub(crate) async fn delete_object(
+        &self,
+        app_key: &PrivateKey,
+        key: &Hash256,
+    ) -> Result<(), Error> {
         self.delete(&format!("objects/{key}"), app_key).await
     }
 
     /// Retrieves a slab from the indexer by its ID.
-    pub async fn slab(&self, app_key: &PrivateKey, slab_id: &Hash256) -> Result<PinnedSlab, Error> {
+    pub(crate) async fn slab(
+        &self,
+        app_key: &PrivateKey,
+        slab_id: &Hash256,
+    ) -> Result<PinnedSlab, Error> {
         self.get_json::<_, ()>(&format!("slabs/{slab_id}"), app_key, None)
             .await
     }
 
     /// Pins slabs to the indexer.
-    pub async fn pin_slabs(
+    pub(crate) async fn pin_slabs(
         &self,
         app_key: &PrivateKey,
         slabs: Vec<SlabPinParams>,
@@ -438,14 +400,14 @@ impl Client {
     }
 
     /// Unpins slabs not used by any object on the account.
-    pub async fn prune_slabs(&self, app_key: &PrivateKey) -> Result<(), Error> {
+    pub(crate) async fn prune_slabs(&self, app_key: &PrivateKey) -> Result<(), Error> {
         self.post_json::<(), EmptyResponse>("slabs/prune", app_key, None)
             .await
             .map(|_| ())
     }
 
     /// Account returns the current account.
-    pub async fn account(&self, app_key: &PrivateKey) -> Result<Account, Error> {
+    pub(crate) async fn account(&self, app_key: &PrivateKey) -> Result<Account, Error> {
         self.get_json::<_, ()>("account", app_key, None).await
     }
 
@@ -496,7 +458,7 @@ impl Client {
     /// # Arguments
     /// - `object` the object to create the link for
     /// - `valid_until` the time the link expires
-    pub fn shared_object_url(
+    pub(crate) fn shared_object_url(
         &self,
         app_key: &PrivateKey,
         object: &Object,
@@ -534,7 +496,7 @@ impl Client {
     ///
     /// # Returns
     /// The metadata needed to download the data
-    pub async fn shared_object(&self, mut share_url: Url) -> Result<Object, Error> {
+    pub(crate) async fn shared_object(&self, mut share_url: Url) -> Result<Object, Error> {
         if share_url.scheme() != SHARE_URL_SCHEME {
             return Err(Error::Format(format!(
                 "invalid url scheme: expected {SHARE_URL_SCHEME}"
@@ -835,7 +797,7 @@ mod tests {
     use sia_core::signing::Signature;
     use sia_core::{hash_256, public_key};
 
-    use crate::AppID;
+    use crate::{AppID, GeoLocation, Protocol};
 
     use super::*;
     use httptest::http::Response;

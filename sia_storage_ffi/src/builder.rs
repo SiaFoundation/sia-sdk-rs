@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use sia_core::seed::{self, Seed};
-use sia_core::signing::{PrivateKey, Signature};
+use sia_core::signing::Signature;
 use sia_storage::{self, Hash256};
 use thiserror::Error;
 
@@ -32,7 +32,7 @@ pub enum AppKeyError {
 /// and inability to access stored objects.
 
 #[derive(uniffi::Object)]
-pub struct AppKey(pub(crate) PrivateKey);
+pub struct AppKey(pub(crate) sia_storage::AppKey);
 
 #[uniffi::export]
 impl AppKey {
@@ -47,7 +47,7 @@ impl AppKey {
         }
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&key);
-        Ok(AppKey(PrivateKey::from_seed(&seed)))
+        Ok(AppKey(sia_storage::AppKey::import(seed)))
     }
 
     /// Exports the AppKey. The app key can be re-imported later
@@ -56,7 +56,7 @@ impl AppKey {
     /// AppKeys should be stored securely by the application in lieu of the
     /// recovery phrase.
     pub fn export(&self) -> Vec<u8> {
-        self.0.as_ref()[..32].to_vec()
+        self.0.export().to_vec()
     }
 
     /// Signs a message using the AppKey.
@@ -90,9 +90,9 @@ impl AppKey {
     }
 }
 
-impl From<PrivateKey> for AppKey {
-    fn from(pk: PrivateKey) -> Self {
-        AppKey(pk)
+impl From<sia_storage::AppKey> for AppKey {
+    fn from(ak: sia_storage::AppKey) -> Self {
+        AppKey(ak)
     }
 }
 
