@@ -12,13 +12,17 @@
 //!
 //! # Getting started
 //!
+//! Define your [AppMetadata] as a constant. The [AppID] is used to derive the
+//! user's encryption keys -- if it changes, previously stored data becomes
+//! inaccessible. Generate it once (e.g. with a random hash) and never change it.
+//!
 //! Use [Builder] to connect to an indexer and obtain an [SDK] instance. There are
 //! two paths:
 //!
 //! - **First time**: Call [Builder::request_connection] to start the approval flow,
-//!   then [Builder::<RequestingApprovalState>::wait_for_approval] once the user has
-//!   approved, and finally [Builder::<ApprovedState>::register] to complete setup.
-//!   This derives an [AppKey] from the user's recovery phrase.
+//!   then [Builder::wait_for_approval] once the user has approved, and finally
+//!   [Builder::register] to complete setup. This derives an [AppKey] from the
+//!   user's recovery phrase.
 //! - **Returning**: Call [Builder::connected] with a previously exported [AppKey].
 //!
 //! Once you have an [SDK], use it to upload, download, and manage objects:
