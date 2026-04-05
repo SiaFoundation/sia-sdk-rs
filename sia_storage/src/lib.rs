@@ -375,8 +375,8 @@ impl SDK {
     ///
     /// This should be kept secret and secure. Applications
     /// should store it safely.
-    pub fn app_key(&self) -> AppKey {
-        self.app_key.as_ref().clone()
+    pub fn app_key(&self) -> &AppKey {
+        &self.app_key
     }
 
     /// Reads until EOF and uploads all slabs.

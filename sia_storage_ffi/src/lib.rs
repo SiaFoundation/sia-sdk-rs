@@ -730,7 +730,7 @@ impl SDK {
     /// must never share their app key publicly. Store
     /// it safely.
     pub fn app_key(&self) -> AppKey {
-        AppKey::from(self.inner.app_key())
+        AppKey::from(self.inner.app_key().clone())
     }
 
     /// Creates a new packed upload. This allows multiple objects to be packed together
