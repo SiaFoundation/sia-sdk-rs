@@ -8,6 +8,7 @@ description = "FFI SDK for interacting with a Sia network indexer"
 authors = ["The Sia Foundation"]
 categories = ["cryptography::cryptocurrencies"]
 keywords = ["sia", "decentralized", "blockchain", "depin", "storage"]
+publish = false
 
 [lib]
 crate-type = ["rlib", "cdylib", "staticlib"]
