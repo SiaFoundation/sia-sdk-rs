@@ -1,3 +1,27 @@
+## 0.5.1 (2026-04-05)
+
+### Features
+
+- Add WebTransport client for WASM target
+- Allow wasm32-unknown-unknown compilation
+- Download objects in chunks to improve streaming.
+- Fixes wasm32 compat framework compilation
+
+#### Replace PrivateKey with AppKey in public API
+
+Replaced all uses of `PrivateKey` in the public API with `AppKey`. `PrivateKey` is no longer re-exported.
+
+Added `UploadOptions::validate` to check erasure coding parameters for sufficient durability.
+
+Made internal `app_client::Client` methods `pub(crate)` and moved data types (`App`, `Account`, `GeoLocation`, `HostQuery`, `ObjectsCursor`) to `lib.rs`.
+
+Added doc strings to all public items.
+
+### Fixes
+
+- Remove dyn dispatch of RHP client type
+- Update account types
+
 ## 0.5.0 (2026-03-23)
 
 ### Breaking Changes
