@@ -16,8 +16,9 @@
 //! two paths:
 //!
 //! - **First time**: Call [Builder::request_connection] to start the approval flow,
-//!   then [Builder::register](Builder::<RequestingApprovalState>::wait_for_approval)
-//!   to complete it. This derives an [AppKey] from the user's recovery phrase.
+//!   then [Builder::<RequestingApprovalState>::wait_for_approval] once the user has
+//!   approved, and finally [Builder::<ApprovedState>::register] to complete setup.
+//!   This derives an [AppKey] from the user's recovery phrase.
 //! - **Returning**: Call [Builder::connected] with a previously exported [AppKey].
 //!
 //! Once you have an [SDK], use it to upload, download, and manage objects:
@@ -150,7 +151,7 @@ pub struct AppMetadata {
 /// An application key used for authentication with the indexd service, derived
 /// from the user's mnemonic and a shared secret from the approval process.
 ///
-/// Use [AppKey::export] to export they key and store it for future connections.
+/// Use [AppKey::export] to export the key and store it for future connections.
 ///
 /// # Security
 /// This exported key is very sensitive and should be stored securely. Anyone with access
@@ -451,7 +452,7 @@ impl SDK {
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
-        let obj = sealed.open(&self.app_key())?;
+        let obj = sealed.open(self.app_key.as_ref())?;
         Ok(obj)
     }
 
@@ -476,7 +477,7 @@ impl SDK {
             .into_iter()
             .map(|event| {
                 let object = match event.object {
-                    Some(sealed) => Some(sealed.open(&self.app_key())?),
+                    Some(sealed) => Some(sealed.open(self.app_key.as_ref())?),
                     None => None,
                 };
                 Ok(ObjectEvent {
@@ -508,7 +509,7 @@ impl SDK {
     /// # Arguments
     /// * `object` - The object to update.
     pub async fn update_object_metadata(&self, object: &Object) -> Result<(), Error> {
-        let sealed = object.seal(&self.app_key());
+        let sealed = object.seal(self.app_key.as_ref());
         self.api_client
             .pin_object(&self.app_key.0, &sealed)
             .await
@@ -573,7 +574,7 @@ impl SDK {
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
         self.api_client
-            .pin_object(&self.app_key.0, &object.seal(&self.app_key()))
+            .pin_object(&self.app_key.0, &object.seal(self.app_key.as_ref()))
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())

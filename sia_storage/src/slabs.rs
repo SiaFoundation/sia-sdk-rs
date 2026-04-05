@@ -333,7 +333,7 @@ impl Object {
     pub fn seal(&self, app_key: &AppKey) -> SealedObject {
         let object_id = self.id();
 
-        // encypt data key and create data signature
+        // encrypt data key and create data signature
         let encrypted_data_key = seal_data_key(&app_key.0, &object_id, &self.data_key);
         let data_signature = {
             let sig_hash = SealedObject::data_sig_hash(&object_id, &encrypted_data_key);

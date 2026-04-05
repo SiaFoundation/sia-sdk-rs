@@ -62,7 +62,7 @@ pub enum DownloadError {
 
 /// Options for configuring a download.
 pub struct DownloadOptions {
-    /// Maximum number of concurrent chunk downloads. Defaults to 30.
+    /// Maximum number of concurrent chunk downloads. Defaults to 80.
     pub max_inflight: usize,
     /// Byte offset to start downloading from.
     pub offset: u64,

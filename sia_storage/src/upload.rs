@@ -124,7 +124,7 @@ pub struct UploadOptions {
     pub data_shards: u8,
     /// The number of parity shards per slab. Defaults to 20.
     pub parity_shards: u8,
-    /// The maximum number of concurrent shard uploads. Defaults to 30.
+    /// The maximum number of concurrent shard uploads. Defaults to 15.
     pub max_inflight: usize,
 
     /// Optional channel to notify when each shard is uploaded.
