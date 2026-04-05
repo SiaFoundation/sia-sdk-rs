@@ -1,11 +1,6 @@
 name: Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      ref:
-        description: 'Git ref to publish from (commit SHA, tag, or branch)'
-        required: true
   pull_request:
     types: [closed]
     branches: [master]
@@ -16,19 +11,17 @@ permissions:
 
 jobs:
   release:
-    if: github.event_name == 'workflow_dispatch' || (github.head_ref == 'release' && github.event.pull_request.merged == true)
+    if: github.head_ref == 'release' && github.event.pull_request.merged == true
     runs-on: tenki-standard-autoscale
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || '' }}
           fetch-depth: 0
       - name: Setup Environment
         run: |
           rustup update stable
           cargo install knope
-      - name: Knope Release
-        if: github.event_name != 'workflow_dispatch'
+      - name: Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: knope release
@@ -37,7 +30,9 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_API_KEY }}
         run: |
           for crate in sia_core_derive sia_core sia_mux sia_storage; do
-            output=$(cargo publish -p "$crate" --registry crates-io 2>&1) || {
+            output=$(cargo publish -p "$crate" --registry crates-io 2>&1) && {
+              echo "Published $crate"
+            } || {
               if echo "$output" | grep -q "already exists"; then
                 echo "Skipping $crate (already published)"
               else
