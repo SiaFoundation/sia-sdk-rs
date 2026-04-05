@@ -1,7 +1,52 @@
+//! A Rust SDK for storing and retrieving data on the Sia decentralized storage network.
+//!
+//! [Sia](https://sia.tech) is a decentralized cloud storage platform where data is
+//! stored across a global network of independent hosts. Storage contracts are
+//! enforced by the Sia blockchain, so no single party controls your data. Compared
+//! to centralized providers, Sia offers lower costs, stronger privacy (data is
+//! client-side encrypted by default), and censorship resistance.
+//!
+//! This crate provides a high-level interface for interacting with Sia through an
+//! indexer service. Data is automatically erasure-coded, encrypted, and distributed
+//! across hosts on the network.
+//!
+//! # Getting started
+//!
+//! Define your [AppMetadata] as a constant. The [AppID] is used to derive the
+//! user's encryption keys -- if it changes, previously stored data becomes
+//! inaccessible. Generate it once (e.g. with a random hash) and never change it.
+//!
+//! Use [Builder] to connect to an indexer and obtain an [SDK] instance. There are
+//! two paths:
+//!
+//! - **First time**: Call [Builder::request_connection] to start the approval flow,
+//!   then [Builder::wait_for_approval] once the user has approved, and finally
+//!   [Builder::register] to complete setup. This derives an [AppKey] from the
+//!   user's recovery phrase.
+//! - **Returning**: Call [Builder::connected] with a previously exported [AppKey].
+//!
+//! Once you have an [SDK], use it to upload, download, and manage objects:
+//!
+//! ```ignore
+//! // Upload
+//! let object = sdk.upload(reader, UploadOptions::default()).await?;
+//! sdk.pin_object(&object).await?;
+//!
+//! // Download
+//! sdk.download(&mut writer, &object, DownloadOptions::default()).await?;
+//! ```
+//!
+//! # Key management
+//!
+//! The [AppKey] grants full access to a user's data. After connecting, retrieve it
+//! with [SDK::app_key], then persist it using [AppKey::export] and restore it with
+//! [AppKey::import] so users don't need to re-approve on every launch.
+
 #[macro_use]
 mod compat;
 
 pub(crate) use compat::{task, time};
+use sia_core::signing::PrivateKey;
 
 mod app_client;
 mod builder;
@@ -35,17 +80,17 @@ pub use reqwest::{IntoUrl, Url};
 #[doc(hidden)]
 pub use sia_core::macros::decode_hex_256;
 pub use sia_core::seed::SeedError;
-pub use sia_core::signing::{PrivateKey, PublicKey};
+pub use sia_core::signing::{PublicKey, Signature};
 pub use sia_core::types::Hash256;
 pub use sia_core::types::v2::Protocol;
 
-pub use app_client::{Account, App, Error as AppApiError, GeoLocation, HostQuery, ObjectsCursor};
+pub use app_client::Error as AppApiError;
 pub use builder::{
     ApprovedState, Builder, BuilderError, DisconnectedState, RequestingApprovalState,
 };
 pub use download::{DownloadError, DownloadOptions};
 pub use encryption::EncryptionKey;
-pub use hosts::QueueError;
+pub use hosts::{QueueError, RPCError};
 pub use slabs::{Object, ObjectEvent, PinnedSlab, SealedObject, SealedObjectError, Sector, Slab};
 pub use upload::{PackedUpload, UploadError, UploadOptions};
 
@@ -74,6 +119,7 @@ macro_rules! app_id {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppMetadata {
+    /// The unique identifier of the application.
     #[serde(rename = "appID")]
     pub id: AppID,
     /// A human-readable name for the application. This is used for display purposes on the indexer
@@ -106,21 +152,157 @@ pub struct AppMetadata {
     pub callback_url: Option<&'static str>,
 }
 
+/// An application key used for authentication with the indexd service, derived
+/// from the user's mnemonic and a shared secret from the approval process.
+///
+/// Use [AppKey::export] to export the key and store it for future connections.
+///
+/// # Security
+/// This exported key is very sensitive and should be stored securely. Anyone with access
+/// to this key can authenticate as the user and access their data and permissions. It is recommended
+/// to store this key in a secure vault or encrypted storage.
+#[derive(Clone)]
+pub struct AppKey(pub(crate) PrivateKey);
+
+impl AppKey {
+    /// Imports an existing app key from a seed previously exported using [AppKey::export].
+    pub fn import(buf: [u8; 32]) -> Self {
+        AppKey(PrivateKey::from_seed(&buf))
+    }
+
+    /// Exports the app key. This can be stored securely and used for future connections.
+    /// The exported key is a 32-byte array that can be used to reconstruct the app key using [AppKey::import].
+    ///
+    /// # Security
+    /// This exported key is very sensitive and should be stored securely. Anyone with access
+    /// to this key can authenticate as the user and access their data and permissions. It is recommended
+    /// to store this key in a secure vault or encrypted storage.
+    pub fn export(&self) -> [u8; 32] {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&self.0.as_ref()[..32]);
+        arr
+    }
+
+    /// Signs a message using the app key
+    pub fn sign(&self, message: &[u8]) -> Signature {
+        self.0.sign(message)
+    }
+
+    /// Returns the public key corresponding to this app key
+    pub fn public_key(&self) -> PublicKey {
+        self.0.public_key()
+    }
+}
+
+/// A cursor for paginating through object events returned by [SDK::object_events].
+pub struct ObjectsCursor {
+    /// Only return events after this timestamp.
+    pub after: DateTime<Utc>,
+    /// Only return events after this object ID.
+    pub id: Hash256,
+}
+
+/// A host's estimated geographic location represented as latitude and longitude coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeoLocation {
+    /// The latitude coordinate.
+    pub latitude: f64,
+    /// The longitude coordinate.
+    pub longitude: f64,
+}
+
+impl Serialize for GeoLocation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let formatted = format!("({:.6},{:.6})", self.latitude, self.longitude);
+        serializer.serialize_str(&formatted)
+    }
+}
+
+/// Parameters for filtering hosts returned by [SDK::hosts].
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct HostQuery {
+    /// Sort hosts by proximity to this location.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<GeoLocation>,
+    /// The number of hosts to skip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+    /// The maximum number of hosts to return.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// Filter hosts by supported protocol.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<Protocol>,
+    /// Filter hosts by country code (ISO 3166-1 alpha-2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+}
+
+/// Metadata about a registered application on the indexer.
+#[derive(Debug, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct App {
+    /// The unique identifier of the application.
+    pub id: Hash256,
+    /// The human-readable name of the application.
+    pub name: String,
+    /// A brief description of the application.
+    pub description: String,
+    /// An optional URL pointing to the application's logo.
+    pub logo_url: Option<String>,
+    /// An optional URL where the application can be accessed.
+    pub service_url: Option<String>,
+}
+
+/// Information about the user's account on the indexer.
+#[derive(Debug, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    /// The public key associated with the account.
+    pub account_key: PublicKey,
+    /// The maximum amount of data that can be pinned to the indexer for this account.
+    pub max_pinned_data: u64,
+    /// Remaining amount of data in bytes that can still be pinned, after applying both the account limit and current quota limit.
+    pub remaining_storage: u64,
+    /// The amount of data currently pinned to the indexer for this account. This
+    /// counts towards max pinned data.
+    pub pinned_data: u64,
+    /// The amount of data after erasure encoding. This is the actual amount of data on the network.
+    pub pinned_size: u64,
+    /// Whether the account is ready to be used. After registering an app, the account may not be
+    /// immediately ready as the indexer needs to process the registration and sync with the network.
+    /// The account will become ready once it has propagated on the network.
+    pub ready: bool,
+    /// The application registered to this account.
+    pub app: App,
+    /// The last time the account was used.
+    pub last_used: DateTime<Utc>,
+}
+
 /// Errors that can occur when using the SDK.
 #[derive(Error, Debug)]
 pub enum Error {
+    /// An error from the indexer API.
     #[error("app error: {0}")]
     App(String),
 
+    /// An error during upload.
     #[error("upload error: {0}")]
     Upload(#[from] UploadError),
 
+    /// An error during download.
     #[error("download error: {0}")]
     Download(#[from] DownloadError),
 
+    /// A TLS connection error.
     #[error("TLS error: {0}")]
     Tls(String),
 
+    /// An error opening or sealing an object.
     #[error("sealed object: {0}")]
     SealedObject(#[from] SealedObjectError),
 }
@@ -128,14 +310,14 @@ pub enum Error {
 /// The main interface with interacting with the Sia storage network. It provides methods for uploading and downloading objects, as well as managing hosts and account information.
 #[derive(Clone)]
 pub struct SDK {
-    app_key: Arc<PrivateKey>,
+    app_key: Arc<AppKey>,
     api_client: app_client::Client,
     hosts: Hosts<Client>,
     uploader: Uploader<Client>,
 }
 
 impl SDK {
-    async fn refresh_hosts(&self) -> Result<(), AppApiError> {
+    async fn refresh_hosts(&self) -> Result<(), app_client::Error> {
         const PAGE_SIZE: usize = 100;
         let mut good_for_upload = Vec::new();
         let mut total_hosts: usize = 0;
@@ -143,7 +325,7 @@ impl SDK {
             let usable_hosts = self
                 .api_client
                 .hosts(
-                    &self.app_key,
+                    &self.app_key.0,
                     HostQuery {
                         offset: Some(i),
                         limit: Some(PAGE_SIZE as u64),
@@ -178,7 +360,7 @@ impl SDK {
     /// Creates a new SDK instance.
     async fn new(
         api_client: app_client::Client,
-        app_key: Arc<PrivateKey>,
+        app_key: Arc<AppKey>,
     ) -> Result<Self, BuilderError> {
         let hosts = Hosts::new(Client::new());
 
@@ -197,7 +379,7 @@ impl SDK {
     ///
     /// This should be kept secret and secure. Applications
     /// should store it safely.
-    pub fn app_key(&self) -> &PrivateKey {
+    pub fn app_key(&self) -> &AppKey {
         &self.app_key
     }
 
@@ -250,7 +432,7 @@ impl SDK {
     /// * `query` - Filtering criteria to select hosts.
     pub async fn hosts(&self, query: HostQuery) -> Result<Vec<Host>, Error> {
         self.api_client
-            .hosts(&self.app_key, query)
+            .hosts(&self.app_key.0, query)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }
@@ -258,7 +440,7 @@ impl SDK {
     /// Retrieves account information from the indexer.
     pub async fn account(&self) -> Result<Account, Error> {
         self.api_client
-            .account(&self.app_key)
+            .account(&self.app_key.0)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }
@@ -270,11 +452,11 @@ impl SDK {
     pub async fn object(&self, key: &Hash256) -> Result<Object, Error> {
         let sealed = self
             .api_client
-            .object(&self.app_key, key)
+            .object(&self.app_key.0, key)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
-        let obj = sealed.open(&self.app_key)?;
+        let obj = sealed.open(self.app_key.as_ref())?;
         Ok(obj)
     }
 
@@ -291,7 +473,7 @@ impl SDK {
     ) -> Result<Vec<ObjectEvent>, Error> {
         let events = self
             .api_client
-            .objects(&self.app_key, cursor, limit)
+            .objects(&self.app_key.0, cursor, limit)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
@@ -299,7 +481,7 @@ impl SDK {
             .into_iter()
             .map(|event| {
                 let object = match event.object {
-                    Some(sealed) => Some(sealed.open(&self.app_key)?),
+                    Some(sealed) => Some(sealed.open(self.app_key.as_ref())?),
                     None => None,
                 };
                 Ok(ObjectEvent {
@@ -319,7 +501,7 @@ impl SDK {
     /// referenced by objects.
     pub async fn prune_slabs(&self) -> Result<(), Error> {
         self.api_client
-            .prune_slabs(&self.app_key)
+            .prune_slabs(&self.app_key.0)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())
@@ -331,9 +513,9 @@ impl SDK {
     /// # Arguments
     /// * `object` - The object to update.
     pub async fn update_object_metadata(&self, object: &Object) -> Result<(), Error> {
-        let sealed = object.seal(&self.app_key);
+        let sealed = object.seal(self.app_key.as_ref());
         self.api_client
-            .pin_object(&self.app_key, &sealed)
+            .pin_object(&self.app_key.0, &sealed)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())
@@ -345,7 +527,7 @@ impl SDK {
     /// * `id` - The id of the object to delete.
     pub async fn delete_object(&self, id: &Hash256) -> Result<(), Error> {
         self.api_client
-            .delete_object(&self.app_key, id)
+            .delete_object(&self.app_key.0, id)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }
@@ -360,7 +542,7 @@ impl SDK {
     /// * `valid_until` - The time until which the shared URL is valid.
     pub fn share_object(&self, object: &Object, valid_until: DateTime<Utc>) -> Result<Url, Error> {
         self.api_client
-            .shared_object_url(&self.app_key, object, valid_until)
+            .shared_object_url(&self.app_key.0, object, valid_until)
             .map_err(|e| Error::App(format!("{e:?}")))
     }
 
@@ -391,12 +573,12 @@ impl SDK {
             .collect();
 
         self.api_client
-            .pin_slabs(&self.app_key, slabs)
+            .pin_slabs(&self.app_key.0, slabs)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
         self.api_client
-            .pin_object(&self.app_key, &object.seal(&self.app_key))
+            .pin_object(&self.app_key.0, &object.seal(self.app_key.as_ref()))
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())
@@ -405,7 +587,7 @@ impl SDK {
     /// Retrieves a pinned slab from the indexer by its id.
     pub async fn slab(&self, id: &Hash256) -> Result<PinnedSlab, Error> {
         self.api_client
-            .slab(&self.app_key, id)
+            .slab(&self.app_key.0, id)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }
@@ -425,8 +607,10 @@ pub fn validate_recovery_phrase(phrase: &str) -> Result<(), SeedError> {
 #[cfg(test)]
 mod test {
     use crate::compat::run_local;
+    use crate::hosts::QueueError;
     use bytes::{Bytes, BytesMut};
     use sia_core::rhp4::SECTOR_SIZE;
+    use sia_core::signing::PrivateKey;
     use sia_core::types::v2::NetAddress;
     use std::io::Cursor;
 
@@ -455,7 +639,7 @@ mod test {
 
     cross_target_tests! {
         async fn test_upload_download_packed() { run_local(async {
-            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let app_key = Arc::new(AppKey::import(random_seed()));
             let hosts = Hosts::new(MockRHP4Transport::new());
             hosts.update(
                 (0..60)
@@ -540,7 +724,7 @@ mod test {
         }).await }
 
         async fn test_upload_download_packed_spanning() { run_local(async {
-            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let app_key = Arc::new(AppKey::import(random_seed()));
             let hosts = Hosts::new(MockRHP4Transport::new());
             hosts.update(
                 (0..60)
@@ -626,7 +810,7 @@ mod test {
         }).await }
 
     async fn test_upload_download_packed_exact() { run_local(async {
-            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let app_key = Arc::new(AppKey::import(random_seed()));
             let hosts = Hosts::new(MockRHP4Transport::new());
             hosts.update(
                 (0..60)
@@ -683,7 +867,7 @@ mod test {
         }).await }
 
     async fn test_upload_download() { run_local(async {
-            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let app_key = Arc::new(AppKey::import(random_seed()));
             let hosts = Hosts::new(MockRHP4Transport::new());
             hosts.update(
                 (0..60)
@@ -752,7 +936,7 @@ mod test {
             use sia_core::rhp4::SECTOR_SIZE;
             const SEGMENT_SIZE: u64 = 64; // leaf size
 
-            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let app_key = Arc::new(AppKey::import(random_seed()));
             let hosts = Hosts::new(MockRHP4Transport::new());
             hosts.update(
                 (0..60)
@@ -844,7 +1028,7 @@ mod test {
         }).await }
 
     async fn test_download_slow_hosts() { run_local(async {
-            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let app_key = Arc::new(AppKey::import(random_seed()));
             let mock_transport = MockRHP4Transport::new();
             let hosts = Hosts::new(mock_transport.clone());
 
@@ -902,7 +1086,7 @@ mod test {
         }).await }
 
     async fn test_upload_no_hosts() { run_local(async {
-            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let app_key = Arc::new(AppKey::import(random_seed()));
             let hosts = Hosts::new(MockRHP4Transport::new());
             let uploader = Uploader::new(hosts.clone(), app_key.clone());
 
@@ -923,7 +1107,7 @@ mod test {
         /// there are enough fast hosts to complete the upload.
         /// This mirrors Go's TestUpload "slow" subtest.
     async fn test_upload_slow_host() { run_local(async {
-            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let app_key = Arc::new(AppKey::import(random_seed()));
             let mock_transport = MockRHP4Transport::new();
             let hosts = Hosts::new(mock_transport.clone());
 
@@ -970,7 +1154,7 @@ mod test {
 
         // Upload should succeed even if all initial hosts are slow
     async fn test_upload_all_hosts_slow() { run_local(async {
-            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let app_key = Arc::new(AppKey::import(random_seed()));
             let mock_transport = MockRHP4Transport::new();
             let hosts = Hosts::new(mock_transport.clone());
 
@@ -1011,7 +1195,7 @@ mod test {
         }).await }
 
     async fn test_upload_not_enough_hosts_good_for_upload() { run_local(async {
-            let app_key = Arc::new(PrivateKey::from_seed(&random_seed()));
+            let app_key = Arc::new(AppKey::import(random_seed()));
             let hosts = Hosts::new(MockRHP4Transport::new());
             // Create 30 hosts: 10 good for upload, 20 not good for upload
             let host_keys: Vec<_> = (0..30)

@@ -1,10 +1,11 @@
 use std::io;
 use std::sync::Arc;
 
+use crate::AppKey;
 use bytes::{Bytes, BytesMut};
 use log::debug;
 use sia_core::rhp4::{self as rhp, SECTOR_SIZE};
-use sia_core::signing::{PrivateKey, PublicKey};
+use sia_core::signing::PublicKey;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWriteExt, BufReader, SimplexStream, WriteHalf, copy, simplex};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
@@ -21,7 +22,7 @@ use crate::{Hosts, Object, Sector, Slab};
 struct ShardUpload<T: Transport> {
     client: Hosts<T>,
     hosts: HostQueue,
-    account_key: Arc<PrivateKey>,
+    account_key: Arc<AppKey>,
     data: Bytes,
     slab_index: usize,
     shard_index: usize,
@@ -44,7 +45,7 @@ impl<T: Transport> ShardUpload<T> {
         join_set_spawn!(tasks, async move {
             let _permit = permit;
             let now = Instant::now();
-            let root = client.write_sector(host_key, &account_key, data, write_timeout).await
+            let root = client.write_sector(host_key, &account_key.0, data, write_timeout).await
             .inspect_err(|e| {
                 debug!(
                     "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {:?} {e}",
@@ -61,50 +62,69 @@ impl<T: Transport> ShardUpload<T> {
     }
 }
 
+/// Errors that can occur during an upload.
 #[derive(Debug, Error)]
 pub enum UploadError {
+    /// The upload options are invalid.
     #[error("invalid options {0}")]
     InvalidOptions(String),
 
+    /// An I/O error occurred while reading the data to upload.
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
 
+    /// A host RPC error occurred during the upload.
     #[error("rhp4 error: {0}")]
     RPC(#[from] RPCError),
 
+    /// The erasure encoder encountered an error.
     #[error("encoder error: {0}")]
     Encoder(#[from] erasure_coding::Error),
+
+    /// Not enough shards were successfully uploaded.
     #[error("not enough shards: {0}/{1}")]
     NotEnoughShards(u8, u8),
 
+    /// The requested range is out of bounds.
     #[error("invalid range: {0}-{1}")]
     OutOfRange(usize, usize),
 
+    /// A host RPC timed out.
     #[error("timeout error: {0}")]
     Timeout(#[from] Elapsed),
 
+    /// An error from the host queue.
     #[error("queue error: {0}")]
     QueueError(#[from] QueueError),
 
+    /// An internal semaphore error.
     #[error("semaphore error: {0}")]
     SemaphoreError(#[from] tokio::sync::AcquireError),
 
+    /// An internal task join error.
     #[error("join error: {0}")]
     JoinError(#[from] tokio::task::JoinError),
 
+    /// An error from the indexer API.
     #[error("api error: {0}")]
     ApiError(#[from] crate::app_client::Error),
 
+    /// The slab ID returned by the indexer does not match the expected value.
     #[error("slab id mismatch")]
     InvalidSlabId,
 
+    /// The upload was cancelled.
     #[error("upload cancelled")]
     Cancelled,
 }
 
+/// Options for configuring an upload.
 pub struct UploadOptions {
+    /// The number of data shards per slab. Defaults to 10.
     pub data_shards: u8,
+    /// The number of parity shards per slab. Defaults to 20.
     pub parity_shards: u8,
+    /// The maximum number of concurrent shard uploads. Defaults to 15.
     pub max_inflight: usize,
 
     /// Optional channel to notify when each shard is uploaded.
@@ -113,12 +133,84 @@ pub struct UploadOptions {
 }
 
 impl UploadOptions {
+    /// Returns the optimal data size per slab in bytes.
     pub fn optimal_data_size(&self) -> u64 {
         SECTOR_SIZE as u64 * self.data_shards as u64
     }
 
+    /// Returns the total slab size including parity shards in bytes.
     pub fn slab_size(&self) -> u64 {
         SECTOR_SIZE as u64 * (self.data_shards as u64 + self.parity_shards as u64)
+    }
+
+    /// Validates the upload options and erasure coding parameters to ensure
+    /// sufficient durability.
+    ///
+    /// This checks that the redundancy ratio is between 1.5x and 4x and that
+    /// the probability of recovering the original data meets a minimum threshold
+    /// of 99.99%.
+    pub fn validate(&self) -> Result<(), UploadError> {
+        const MIN_REDUNDANCY: f64 = 1.5;
+        const MAX_REDUNDANCY: f64 = 4.0;
+        const RECOVERY_PROBABILITY: f64 = 0.75;
+        const MIN_RECOVERY_PROBABILITY: f64 = 99.99;
+        const MAX_TOTAL_SHARDS: u16 = 256;
+
+        if self.max_inflight == 0 {
+            return Err(UploadError::InvalidOptions(
+                "max_inflight must be greater than 0".into(),
+            ));
+        }
+
+        let data_shards = self.data_shards as u16;
+        let parity_shards = self.parity_shards as u16;
+        let total_shards = data_shards + parity_shards;
+
+        if data_shards == 0 {
+            return Err(UploadError::InvalidOptions(
+                "data shards cannot be zero".into(),
+            ));
+        } else if parity_shards == 0 {
+            return Err(UploadError::InvalidOptions(
+                "parity shards cannot be zero".into(),
+            ));
+        } else if total_shards > MAX_TOTAL_SHARDS {
+            return Err(UploadError::InvalidOptions(format!(
+                "total shards {total_shards} exceeds maximum of {MAX_TOTAL_SHARDS}"
+            )));
+        }
+
+        let redundancy = total_shards as f64 / data_shards as f64;
+        if redundancy < MIN_REDUNDANCY {
+            return Err(UploadError::InvalidOptions(format!(
+                "redundancy of {redundancy:.2} is too low"
+            )));
+        } else if redundancy > MAX_REDUNDANCY {
+            return Err(UploadError::InvalidOptions(format!(
+                "redundancy of {redundancy:.2} is too high"
+            )));
+        }
+
+        // Calculate recovery probability using the binomial CDF.
+        // P(X >= data_shards) where X ~ Binomial(total_shards, RECOVERY_PROBABILITY)
+        let q = 1.0 - RECOVERY_PROBABILITY;
+        let mut term = q.powi(total_shards as i32);
+        for i in 0..data_shards {
+            term *= (total_shards - i) as f64 / (i + 1) as f64 * (RECOVERY_PROBABILITY / q);
+        }
+        let mut sum = term;
+        for i in data_shards..total_shards {
+            term *= (total_shards - i) as f64 / (i + 1) as f64 * (RECOVERY_PROBABILITY / q);
+            sum += term;
+        }
+        let prob = sum * 100.0;
+        if prob < MIN_RECOVERY_PROBABILITY {
+            return Err(UploadError::InvalidOptions(format!(
+                "not enough redundancy {data_shards}-of-{total_shards}: recovery probability {:.2}% is below minimum threshold of {MIN_RECOVERY_PROBABILITY:.2}%",
+                (prob * 100.0).floor() / 100.0
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -237,12 +329,12 @@ impl PackedUpload {
 
 #[derive(Clone)]
 pub(crate) struct Uploader<T: Transport> {
-    app_key: Arc<PrivateKey>,
+    app_key: Arc<AppKey>,
     hosts: Hosts<T>,
 }
 
 impl<T: Transport> Uploader<T> {
-    pub fn new(hosts: Hosts<T>, app_key: Arc<PrivateKey>) -> Self {
+    pub fn new(hosts: Hosts<T>, app_key: Arc<AppKey>) -> Self {
         Uploader { app_key, hosts }
     }
 
@@ -301,23 +393,11 @@ impl<T: Transport> Uploader<T> {
 
     pub(crate) async fn upload_slabs<R: AsyncRead + Unpin + Send + 'static>(
         client: Hosts<T>,
-        app_key: Arc<PrivateKey>,
+        app_key: Arc<AppKey>,
         r: R,
         options: UploadOptions,
     ) -> Result<Vec<Slab>, UploadError> {
-        if options.data_shards == 0 {
-            return Err(UploadError::InvalidOptions(
-                "data_shards must be greater than 0".to_string(),
-            ));
-        } else if options.parity_shards == 0 {
-            return Err(UploadError::InvalidOptions(
-                "parity_shards must be greater than 0".to_string(),
-            ));
-        } else if options.max_inflight == 0 {
-            return Err(UploadError::InvalidOptions(
-                "max_inflight must be greater than 0".to_string(),
-            ));
-        }
+        options.validate()?;
         let data_shards = options.data_shards as usize;
         let parity_shards = options.parity_shards as usize;
         let total_shards = data_shards + parity_shards;
@@ -507,6 +587,46 @@ impl<T: Transport> Uploader<T> {
                 let slabs = Self::upload_slabs(client, app_key, reader, options).await?;
                 Ok(slabs)
             })),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(data: u8, parity: u8) -> UploadOptions {
+        UploadOptions {
+            data_shards: data,
+            parity_shards: parity,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_validate_ec_params() {
+        let cases: &[(u8, u8, bool)] = &[
+            (0, 6, false),   // zero data shards
+            (6, 0, false),   // zero parity shards (total < data)
+            (1, 2, false),   // 1-of-3: insufficient recovery probability
+            (2, 4, false),   // 2-of-6: insufficient recovery probability
+            (4, 4, false),   // 4-of-8: insufficient recovery probability
+            (1, 9, false),   // 1-of-10: 10x redundancy is too high
+            (60, 15, false), // 60-of-75: 1.25x redundancy is too low
+            (10, 20, true),  // 10-of-30
+            (40, 40, true),  // 40-of-80
+            (30, 30, true),  // 30-of-60
+        ];
+
+        for &(data, parity, ok) in cases {
+            let total = data as u16 + parity as u16;
+            let result = opts(data, parity).validate();
+            assert_eq!(
+                result.is_ok(),
+                ok,
+                "{data}-of-{total}: expected ok={ok}, got {:?}",
+                result.err()
+            );
         }
     }
 }

@@ -7,53 +7,66 @@ use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::{Hosts, RPCError};
 use crate::rhp4::Transport;
 use crate::time::{Duration, Elapsed, Instant, sleep};
-use crate::{Object, Sector, Slab};
+use crate::{AppKey, Object, Sector, Slab};
 use bytes::{Bytes, BytesMut};
 use log::debug;
 use sia_core::rhp4::SEGMENT_SIZE;
-use sia_core::signing::PrivateKey;
 use thiserror::Error;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
+/// Errors that can occur during a download.
 #[derive(Debug, Error)]
 pub enum DownloadError {
+    /// An I/O error occurred while writing the downloaded data.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// The erasure decoder encountered an error.
     #[error("encoder error: {0}")]
     Encoder(#[from] erasure_coding::Error),
 
+    /// Not enough shards were successfully downloaded to recover the data.
     #[error("not enough shards: {0}/{1}")]
     NotEnoughShards(u8, u8),
 
+    /// The requested range is out of bounds.
     #[error("invalid range: {0}-{1}")]
     OutOfRange(usize, usize),
 
+    /// A host RPC timed out.
     #[error("timeout error: {0}")]
     Timeout(#[from] Elapsed),
 
+    /// An internal semaphore error.
     #[error("semaphore error: {0}")]
     SemaphoreError(#[from] tokio::sync::AcquireError),
 
+    /// An internal task join error.
     #[error("join error: {0}")]
     JoinError(#[from] tokio::task::JoinError),
 
+    /// The slab metadata is invalid.
     #[error("invalid slab: {0}")]
     InvalidSlab(String),
 
+    /// A host RPC error occurred during the download.
     #[error("rhp4 error: {0}")]
     RPC(#[from] RPCError),
 
+    /// A custom error.
     #[error("custom error: {0}")]
     Custom(String),
 }
 
+/// Options for configuring a download.
 pub struct DownloadOptions {
-    /// Maximum number of concurrent chunk downloads.
+    /// Maximum number of concurrent chunk downloads. Defaults to 80.
     pub max_inflight: usize,
+    /// Byte offset to start downloading from.
     pub offset: u64,
+    /// Number of bytes to download. If `None`, downloads the entire object.
     pub length: Option<u64>,
 }
 
@@ -92,7 +105,7 @@ struct SlabDecoded {
 /// out the async primitives.
 struct SlabRecovery<State, T: Transport> {
     client: Hosts<T>,
-    account_key: Arc<PrivateKey>,
+    account_key: Arc<AppKey>,
 
     min_shards: u8,
     encryption_key: EncryptionKey,
@@ -103,11 +116,7 @@ struct SlabRecovery<State, T: Transport> {
 }
 
 impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
-    fn new(
-        client: Hosts<T>,
-        account_key: Arc<PrivateKey>,
-        slab: Slab,
-    ) -> Result<Self, DownloadError> {
+    fn new(client: Hosts<T>, account_key: Arc<AppKey>, slab: Slab) -> Result<Self, DownloadError> {
         if slab.min_shards == 0 {
             return Err(DownloadError::InvalidSlab(
                 "min_shards cannot be 0".to_string(),
@@ -143,7 +152,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
 
     async fn recover_shard(
         client: Hosts<T>,
-        account_key: Arc<PrivateKey>,
+        account_key: Arc<AppKey>,
         task: SectorTask,
         sector_offset: usize,
         sector_length: usize,
@@ -151,7 +160,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
         let data = client
             .read_sector(
                 task.sector.host_key,
-                &account_key,
+                &account_key.0,
                 task.sector.root,
                 sector_offset,
                 sector_length,
@@ -336,7 +345,7 @@ impl<'a, const N: usize> Iterator for ChunkIter<'a, N> {
 
 pub(crate) async fn download_object<W: AsyncWrite + Unpin, T: Transport>(
     hosts: Hosts<T>,
-    account_key: Arc<PrivateKey>,
+    account_key: Arc<AppKey>,
     w: &mut W,
     object: &Object,
     options: DownloadOptions,
@@ -545,7 +554,7 @@ mod test {
             let mut data = BytesMut::zeroed(slab_size);
             rand::rng().fill_bytes(&mut data);
             let data = data.freeze();
-            let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
+            let app_key = Arc::new(AppKey::import(rand::random()));
 
             let uploader = Uploader::new(hosts.clone(), app_key.clone());
             let obj = uploader
@@ -569,9 +578,8 @@ mod test {
         }).await }
 
         async fn test_slab_recovery() { run_local(async {
-            const DATA_SHARDS: usize = 10;
-            const PARITY_SHARDS: usize = 4;
-            const SLAB_SIZE: usize = SECTOR_SIZE * DATA_SHARDS;
+            let upload_options = UploadOptions::default();
+            let slab_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
             let transport = MockRHP4Transport::new();
             let hosts = Hosts::new(transport.clone());
@@ -591,34 +599,30 @@ mod test {
                     .collect(),
                 true,
             );
-            let mut data = BytesMut::zeroed(SLAB_SIZE);
+            let mut data = BytesMut::zeroed(slab_size);
             rand::rng().fill_bytes(&mut data);
             let data = data.freeze();
-            let app_key = Arc::new(PrivateKey::from_seed(&rand::random()));
+            let app_key = Arc::new(AppKey::import(rand::random()));
 
             let slabs = Uploader::upload_slabs(
                 hosts.clone(),
                 app_key.clone(),
                 Cursor::new(data.clone()),
-                UploadOptions {
-                    data_shards: DATA_SHARDS as u8,
-                    parity_shards: PARITY_SHARDS as u8,
-                    ..Default::default()
-                },
+                upload_options,
             )
             .await
             .unwrap();
 
             let test_cases: Vec<(&str, usize, usize)> = vec![
-                ("full slab", 0, SLAB_SIZE),
-                ("first half", 0, SLAB_SIZE / 2),
-                ("second half", SLAB_SIZE / 2, SLAB_SIZE / 2),
+                ("full slab", 0, slab_size),
+                ("first half", 0, slab_size / 2),
+                ("second half", slab_size / 2, slab_size / 2),
                 ("first 30 bytes", 0, 30),
-                ("middle 30 bytes", SLAB_SIZE / 2 - 15, 30),
-                ("last 30 bytes", SLAB_SIZE - 30, 30),
+                ("middle 30 bytes", slab_size / 2 - 15, 30),
+                ("last 30 bytes", slab_size - 30, 30),
                 ("first 4KiB", 0, 4096),
-                ("middle 4KiB", SLAB_SIZE / 2 - 2048, 4096),
-                ("last 4KiB", SLAB_SIZE - 4096, 4096),
+                ("middle 4KiB", slab_size / 2 - 2048, 4096),
+                ("last 4KiB", slab_size - 4096, 4096),
             ];
 
             for (name, offset, length) in test_cases {
