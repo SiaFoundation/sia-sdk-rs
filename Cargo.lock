@@ -2498,7 +2498,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "sia_core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64",
  "bip39",
@@ -2552,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64",
  "blake2",
@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_ffi"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64",
