@@ -387,7 +387,9 @@ impl SDK {
     /// encrypted, and uploaded.
     ///
     /// Pass [Object::default()] for new uploads. To resume a previous upload,
-    /// pass the object returned from the earlier call.
+    /// pass the object returned from the earlier call. Appending data changes 
+    /// an object's ID. It must be re-pinned afterward and any references to 
+    /// the previous ID must be updated.
     ///
     /// # Arguments
     /// * `object` - The object to upload into. Use `Object::default()` for new uploads.
