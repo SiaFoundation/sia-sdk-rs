@@ -891,7 +891,8 @@ impl SDK {
         let object = object.object();
         let object_size = object.size();
         let offset = options.offset;
-        let length = options.length.unwrap_or(object_size - offset);
+        let available = object_size.saturating_sub(offset);
+        let length = options.length.unwrap_or(available).min(available);
         let end = offset + length;
         let max_inflight = options.max_inflight;
         let sdk = self.inner.clone();
