@@ -832,7 +832,8 @@ impl SDK {
     /// * `options` - The [UploadOptions] to use for the upload.
     ///
     /// # Returns
-    /// A new object containing all slabs from the input object plus the newly uploaded slabs.
+    /// A new object containing all slabs from the input object plus the newly
+    /// uploaded slabs. The caller must pin the object to the indexer afterward.
     pub async fn upload(
         &self,
         object: &PinnedObject,

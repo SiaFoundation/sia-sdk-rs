@@ -386,9 +386,9 @@ impl SDK {
     /// Reads until EOF and uploads all slabs. The data will be erasure coded,
     /// encrypted, and uploaded.
     ///
-    /// Pass [Object::default()] for new uploads. To resume a previous upload,
-    /// pass the object returned from the earlier call. Appending data changes 
-    /// an object's ID. It must be re-pinned afterward and any references to 
+    /// Pass [Object::default] for new uploads. To resume a previous upload,
+    /// pass the object returned from the earlier call. Appending data changes
+    /// an object's ID. It must be re-pinned afterward and any references to
     /// the previous ID must be updated.
     ///
     /// # Arguments

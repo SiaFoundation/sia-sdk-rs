@@ -56,9 +56,6 @@ use sia_storage::{Object, UploadOptions, DownloadOptions};
 let object = sdk.upload(Object::default(), reader, UploadOptions::default()).await?;
 sdk.pin_object(&object).await?;
 
-// Resume a previous upload
-let object = sdk.upload(object, more_data, UploadOptions::default()).await?;
-
 // Download
 sdk.download(&mut writer, &object, DownloadOptions::default()).await?;
 ```
