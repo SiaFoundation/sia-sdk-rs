@@ -626,10 +626,17 @@ mod test {
                 ("offset with explicit length", object_size / 2, Some(4096)),
                 ("offset without length", object_size / 2, None),
                 ("offset near end", object_size - 4096, Some(4096)),
+                ("offset at end", object_size, None),
+                ("offset past end", object_size + 1, None),
+                ("offset at end with length", object_size, Some(4096)),
+                ("length exceeds remaining", object_size - 100, Some(4096)),
+                ("zero length", object_size / 2, Some(0)),
             ];
 
             for (name, offset, length) in test_cases {
-                let expected_length = length.unwrap_or(object_size - offset);
+                // replicate the FFI clamping logic
+                let available = object_size.saturating_sub(offset);
+                let expected_length = length.unwrap_or(available).min(available);
                 let end = offset + expected_length;
                 let mut recovered_data = Vec::new();
                 let mut w = Cursor::new(&mut recovered_data);
@@ -655,11 +662,13 @@ mod test {
                     expected_length,
                     "wrong download size for case: {name} (offset={offset}, length={length:?})"
                 );
-                assert_eq!(
-                    &data[offset as usize..offset as usize + expected_length as usize],
-                    &recovered_data[..],
-                    "data mismatch for case: {name}"
-                );
+                if expected_length > 0 {
+                    assert_eq!(
+                        &data[offset as usize..offset as usize + expected_length as usize],
+                        &recovered_data[..],
+                        "data mismatch for case: {name}"
+                    );
+                }
             }
         }).await }
 
