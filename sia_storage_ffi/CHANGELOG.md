@@ -1,3 +1,9 @@
+## 0.6.1 (2026-04-06)
+
+### Features
+
+- Remove redundant FFI chunked download loop and delegate to the SDK directly.
+
 ## 0.6.0 (2026-04-06)
 
 ### Breaking Changes
