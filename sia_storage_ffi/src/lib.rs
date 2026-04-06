@@ -891,19 +891,21 @@ impl SDK {
         let object = object.object();
         let object_size = object.size();
         let offset = options.offset;
-        let max_length = options.length.unwrap_or(object_size);
+        let length = options.length.unwrap_or(object_size - offset);
+        let end = offset + length;
         let max_inflight = options.max_inflight;
         let sdk = self.inner.clone();
         let w = FFIWriter::new(w);
         let mut w = BufWriter::with_capacity(CHUNK_SIZE, w);
         spawn(async move {
-            for offset in (offset..max_length).step_by(CHUNK_SIZE) {
+            for chunk_offset in (offset..end).step_by(CHUNK_SIZE) {
+                let remaining = end - chunk_offset;
                 sdk.download(
                     &mut w,
                     &object,
                     sia_storage::DownloadOptions {
-                        offset,
-                        length: Some(max_length.min(CHUNK_SIZE as u64)),
+                        offset: chunk_offset,
+                        length: Some(remaining.min(CHUNK_SIZE as u64)),
                         max_inflight: max_inflight as usize,
                     },
                 )

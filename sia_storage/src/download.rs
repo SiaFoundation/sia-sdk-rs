@@ -577,6 +577,92 @@ mod test {
             assert_eq!(data, recovered_data);
         }).await }
 
+        /// Regression test for two bugs in the FFI chunked download logic:
+        ///
+        /// 1. The loop range `offset..max_length` was wrong when an offset
+        ///    was provided, causing it to iterate over the wrong byte range.
+        /// 2. The last chunk was not clamped to the remaining bytes, so it
+        ///    would read past the end of the requested range.
+        async fn test_ffi_chunked_download_with_offset() { run_local(async {
+            let upload_options = UploadOptions::default();
+            let slab_size = upload_options.data_shards as usize * SECTOR_SIZE;
+
+            let transport = MockRHP4Transport::new();
+            let hosts = Hosts::new(transport.clone());
+            hosts.update(
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&rand::random()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
+            let mut data = BytesMut::zeroed(slab_size);
+            rand::rng().fill_bytes(&mut data);
+            let data = data.freeze();
+            let app_key = Arc::new(AppKey::import(rand::random()));
+
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+            let obj = uploader
+                .upload(Object::default(), Cursor::new(data.clone()), UploadOptions::default())
+                .await
+                .unwrap();
+
+            let object_size = obj.size();
+
+            // replicate the fixed FFI chunking logic from sia_storage_ffi/src/lib.rs
+            const CHUNK_SIZE: usize = 1 << 19; // 512KiB, same as FFI layer
+
+            let test_cases: Vec<(&str, u64, Option<u64>)> = vec![
+                // (name, offset, length)
+                ("offset with explicit length", object_size / 2, Some(4096)),
+                ("offset without length", object_size / 2, None),
+                ("offset near end", object_size - 4096, Some(4096)),
+            ];
+
+            for (name, offset, length) in test_cases {
+                let expected_length = length.unwrap_or(object_size - offset);
+                let end = offset + expected_length;
+                let mut recovered_data = Vec::new();
+                let mut w = Cursor::new(&mut recovered_data);
+                for chunk_offset in (offset..end).step_by(CHUNK_SIZE) {
+                    let remaining = end - chunk_offset;
+                    download_object(
+                        hosts.clone(),
+                        app_key.clone(),
+                        &mut w,
+                        &obj,
+                        DownloadOptions {
+                            offset: chunk_offset,
+                            length: Some(remaining.min(CHUNK_SIZE as u64)),
+                            max_inflight: 10,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+
+                assert_eq!(
+                    recovered_data.len() as u64,
+                    expected_length,
+                    "wrong download size for case: {name} (offset={offset}, length={length:?})"
+                );
+                assert_eq!(
+                    &data[offset as usize..offset as usize + expected_length as usize],
+                    &recovered_data[..],
+                    "data mismatch for case: {name}"
+                );
+            }
+        }).await }
+
         async fn test_slab_recovery() { run_local(async {
             let upload_options = UploadOptions::default();
             let slab_size = upload_options.data_shards as usize * SECTOR_SIZE;
