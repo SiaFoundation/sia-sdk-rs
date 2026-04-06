@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use sia_storage::{AppMetadata, Builder, DownloadOptions, UploadOptions};
+use sia_storage::{AppMetadata, Builder, DownloadOptions, Object, UploadOptions};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[derive(Parser)]
@@ -210,7 +210,7 @@ async fn main() {
     println!("Uploading random data...");
     let start = Instant::now();
     let obj = sdk
-        .upload(reader, UploadOptions::default())
+        .upload(Object::default(), reader, UploadOptions::default())
         .await
         .expect("failed to upload object");
     let upload_duration = start.elapsed();

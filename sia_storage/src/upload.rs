@@ -540,25 +540,28 @@ impl<T: Transport> Uploader<T> {
         Ok(slabs)
     }
 
-    /// Reads until EOF and uploads all slabs.
-    /// The data will be erasure coded, encrypted,
-    /// and uploaded using the uploader's parameters.
+    /// Reads until EOF and uploads all slabs. The data will be erasure coded,
+    /// encrypted, and uploaded.
+    ///
+    /// Pass [Object::default()] for new uploads. To resume a previous upload,
+    /// pass the object returned from the earlier call.
     ///
     /// # Arguments
+    /// * `object` - The object to upload into. Use `Object::default()` for new uploads.
     /// * `r` - The reader to read the data from. It will be read until EOF.
     /// * `options` - The [UploadOptions] to use for the upload.
     ///
     /// # Returns
-    /// A new object containing the metadata needed to download the object. The caller
-    /// must pin the object to an indexer after uploading.
+    /// The object containing the metadata needed to download. The caller must
+    /// pin the object to the indexer after uploading.
     pub async fn upload<R: AsyncRead + Unpin + Send + 'static>(
         &self,
+        mut object: Object,
         r: R,
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
-        let mut object = Object::default();
         // use a buffered reader since the erasure coder reads 64 bytes at a time.
-        let r = object.reader(BufReader::new(r), 0);
+        let r = object.reader(BufReader::new(r), object.size());
         let new_slabs =
             Self::upload_slabs(self.hosts.clone(), self.app_key.clone(), r, options).await?;
         let slabs = object.slabs_mut();

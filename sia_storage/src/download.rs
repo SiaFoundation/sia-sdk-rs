@@ -558,7 +558,7 @@ mod test {
 
             let uploader = Uploader::new(hosts.clone(), app_key.clone());
             let obj = uploader
-                .upload(Cursor::new(data.clone()), UploadOptions::default())
+                .upload(Object::default(), Cursor::new(data.clone()), UploadOptions::default())
                 .await
                 .unwrap();
 

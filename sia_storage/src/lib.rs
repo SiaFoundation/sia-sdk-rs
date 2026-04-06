@@ -29,7 +29,7 @@
 //!
 //! ```ignore
 //! // Upload
-//! let object = sdk.upload(reader, UploadOptions::default()).await?;
+//! let object = sdk.upload(Object::default(), reader, UploadOptions::default()).await?;
 //! sdk.pin_object(&object).await?;
 //!
 //! // Download
@@ -383,24 +383,27 @@ impl SDK {
         &self.app_key
     }
 
-    /// Reads until EOF and uploads all slabs.
-    /// The data will be erasure coded, encrypted,
-    /// and uploaded using the uploader's parameters.
+    /// Reads until EOF and uploads all slabs. The data will be erasure coded,
+    /// encrypted, and uploaded.
+    ///
+    /// Pass [Object::default()] for new uploads. To resume a previous upload,
+    /// pass the object returned from the earlier call.
     ///
     /// # Arguments
+    /// * `object` - The object to upload into. Use `Object::default()` for new uploads.
     /// * `r` - The reader to read the data from. It will be read until EOF.
     /// * `options` - The [UploadOptions] to use for the upload.
     ///
     /// # Returns
-    /// A new object containing the metadata needed to download the object. The object can be sealed and pinned to the
-    /// indexer when ready.
+    /// The object containing the metadata needed to download. The caller must
+    /// pin the object to the indexer after uploading.
     pub async fn upload<R: AsyncRead + Unpin + Send + 'static>(
         &self,
+        object: Object,
         reader: R,
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
-        let object = self.uploader.upload(reader, options).await?;
-        Ok(object)
+        self.uploader.upload(object, reader, options).await
     }
 
     /// Creates a new packed upload. This allows multiple objects to be packed together
@@ -892,7 +895,7 @@ mod test {
             let input: Bytes = Bytes::from("Hello, world!");
 
             let object = uploader
-                .upload(Cursor::new(input.clone()), UploadOptions::default())
+                .upload(Object::default(), Cursor::new(input.clone()), UploadOptions::default())
                 .await
                 .expect("upload to complete");
 
@@ -931,6 +934,61 @@ mod test {
             assert_eq!(output.freeze(), input.slice(range));
         }).await }
 
+        async fn test_upload_append() { run_local(async {
+            let app_key = Arc::new(AppKey::import(random_seed()));
+            let hosts = Hosts::new(MockRHP4Transport::new());
+            hosts.update(
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
+
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+
+            let part1 = Bytes::from("Hello, ");
+            let part2 = Bytes::from("world!");
+            let expected = Bytes::from("Hello, world!");
+
+            // first upload
+            let object = uploader
+                .upload(Object::default(), Cursor::new(part1.clone()), UploadOptions::default())
+                .await
+                .expect("first upload to complete");
+            assert_eq!(object.size(), part1.len() as u64);
+
+            // resume with second part
+            let object = uploader
+                .upload(object, Cursor::new(part2.clone()), UploadOptions::default())
+                .await
+                .expect("second upload to complete");
+            assert_eq!(object.size(), expected.len() as u64);
+
+            // download the full object and verify concatenation
+            let mut output = BytesMut::zeroed(expected.len());
+            download_object(
+                hosts.clone(),
+                app_key.clone(),
+                &mut Cursor::new(&mut output[..]),
+                &object,
+                DownloadOptions::default(),
+            )
+            .await
+            .expect("download to complete");
+
+            assert_eq!(output.freeze(), expected);
+        }).await }
+
         /// Port of Go SDK's client_test.go:TestDownload "ranges" subtest
     async fn test_download_ranges() { run_local(async {
             use sia_core::rhp4::SECTOR_SIZE;
@@ -967,7 +1025,7 @@ mod test {
             let data = data.freeze();
 
             let object = uploader
-                .upload(Cursor::new(data.clone()), UploadOptions::default())
+                .upload(Object::default(), Cursor::new(data.clone()), UploadOptions::default())
                 .await
                 .expect("upload to complete");
 
@@ -1061,7 +1119,7 @@ mod test {
             let input: Bytes = Bytes::from("Hello, world!");
 
             let object = uploader
-                .upload(Cursor::new(input.clone()), UploadOptions::default())
+                .upload(Object::default(), Cursor::new(input.clone()), UploadOptions::default())
                 .await
                 .expect("upload to complete");
 
@@ -1093,7 +1151,7 @@ mod test {
             let input: Bytes = Bytes::from("Hello, world!");
 
             let err = uploader
-                .upload(Cursor::new(input.clone()), UploadOptions::default())
+                .upload(Object::default(), Cursor::new(input.clone()), UploadOptions::default())
                 .await
                 .expect_err("upload to fail");
 
@@ -1145,7 +1203,7 @@ mod test {
             let input: Bytes = Bytes::from("Hello, world!");
 
             let object = uploader
-                .upload(Cursor::new(input.clone()), UploadOptions::default())
+                .upload(Object::default(), Cursor::new(input.clone()), UploadOptions::default())
                 .await
                 .expect("upload should succeed with 1 slow host");
 
@@ -1189,7 +1247,7 @@ mod test {
             let input: Bytes = Bytes::from("Hello, world!");
 
             let _ = uploader
-                .upload(Cursor::new(input.clone()), UploadOptions::default())
+                .upload(Object::default(), Cursor::new(input.clone()), UploadOptions::default())
                 .await
                 .expect("upload to succeed");
         }).await }
@@ -1226,7 +1284,7 @@ mod test {
             let input: Bytes = Bytes::from("Hello, world!");
 
             let err = uploader
-                .upload(Cursor::new(input.clone()), UploadOptions::default())
+                .upload(Object::default(), Cursor::new(input.clone()), UploadOptions::default())
                 .await
                 .expect_err("upload to fail");
 
