@@ -841,7 +841,7 @@ impl SDK {
         options: UploadOptions,
     ) -> Result<Arc<PinnedObject>, UploadError> {
         let sdk = self.inner.clone();
-        let inner = object.inner.lock().unwrap().clone();
+        let obj = object.object();
         spawn(async move {
             let r = FFIReader::new(r);
             let progress_tx = if let Some(callback) = options.progress_callback {
@@ -863,7 +863,7 @@ impl SDK {
             };
             let obj = sdk
                 .upload(
-                    inner,
+                    obj,
                     r,
                     sia_storage::UploadOptions {
                         max_inflight: options.max_inflight as usize,
@@ -889,29 +889,20 @@ impl SDK {
     ) -> Result<(), DownloadError> {
         const CHUNK_SIZE: usize = 1 << 19; // 512KiB
         let object = object.object();
-        let object_size = object.size();
-        let offset = options.offset;
-        let available = object_size.saturating_sub(offset);
-        let length = options.length.unwrap_or(available).min(available);
-        let end = offset + length;
-        let max_inflight = options.max_inflight;
         let sdk = self.inner.clone();
         let w = FFIWriter::new(w);
         let mut w = BufWriter::with_capacity(CHUNK_SIZE, w);
         spawn(async move {
-            for chunk_offset in (offset..end).step_by(CHUNK_SIZE) {
-                let remaining = end - chunk_offset;
-                sdk.download(
-                    &mut w,
-                    &object,
-                    sia_storage::DownloadOptions {
-                        offset: chunk_offset,
-                        length: Some(remaining.min(CHUNK_SIZE as u64)),
-                        max_inflight: max_inflight as usize,
-                    },
-                )
-                .await?;
-            }
+            sdk.download(
+                &mut w,
+                &object,
+                sia_storage::DownloadOptions {
+                    offset: options.offset,
+                    length: options.length,
+                    max_inflight: options.max_inflight as usize,
+                },
+            )
+            .await?;
             if let Err(e) = w.shutdown().await {
                 debug!("error shutting down writer: {}", e);
             }

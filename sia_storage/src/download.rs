@@ -577,13 +577,10 @@ mod test {
             assert_eq!(data, recovered_data);
         }).await }
 
-        /// Regression test for two bugs in the FFI chunked download logic:
-        ///
-        /// 1. The loop range `offset..max_length` was wrong when an offset
-        ///    was provided, causing it to iterate over the wrong byte range.
-        /// 2. The last chunk was not clamped to the remaining bytes, so it
-        ///    would read past the end of the requested range.
-        async fn test_ffi_chunked_download_with_offset() { run_local(async {
+        /// Validates downloading a subset of an uploaded object with various
+        /// offset and length combinations, including edge cases where
+        /// offset >= object_size or length exceeds the remaining bytes.
+        async fn test_download_partial_range() { run_local(async {
             let upload_options = UploadOptions::default();
             let slab_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
@@ -618,9 +615,6 @@ mod test {
 
             let object_size = obj.size();
 
-            // replicate the fixed FFI chunking logic from sia_storage_ffi/src/lib.rs
-            const CHUNK_SIZE: usize = 1 << 19; // 512KiB, same as FFI layer
-
             let test_cases: Vec<(&str, u64, Option<u64>)> = vec![
                 // (name, offset, length)
                 ("offset with explicit length", object_size / 2, Some(4096)),
@@ -634,28 +628,24 @@ mod test {
             ];
 
             for (name, offset, length) in test_cases {
-                // replicate the FFI clamping logic
                 let available = object_size.saturating_sub(offset);
                 let expected_length = length.unwrap_or(available).min(available);
-                let end = offset + expected_length;
+
                 let mut recovered_data = Vec::new();
                 let mut w = Cursor::new(&mut recovered_data);
-                for chunk_offset in (offset..end).step_by(CHUNK_SIZE) {
-                    let remaining = end - chunk_offset;
-                    download_object(
-                        hosts.clone(),
-                        app_key.clone(),
-                        &mut w,
-                        &obj,
-                        DownloadOptions {
-                            offset: chunk_offset,
-                            length: Some(remaining.min(CHUNK_SIZE as u64)),
-                            max_inflight: 10,
-                        },
-                    )
-                    .await
-                    .unwrap();
-                }
+                download_object(
+                    hosts.clone(),
+                    app_key.clone(),
+                    &mut w,
+                    &obj,
+                    DownloadOptions {
+                        offset,
+                        length,
+                        max_inflight: 10,
+                    },
+                )
+                .await
+                .unwrap();
 
                 assert_eq!(
                     recovered_data.len() as u64,
