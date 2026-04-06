@@ -55,7 +55,10 @@ impl AsyncWrite for TtfbWriter {
 
 async fn upload_object(uploader: Arc<MockUploader>, input: Bytes, opts: UploadOptions) -> Object {
     let r = Cursor::new(input);
-    uploader.upload(r, opts).await.expect("upload failed")
+    uploader
+        .upload(Object::default(), r, opts)
+        .await
+        .expect("upload failed")
 }
 
 fn upload_benchmark(c: &mut Criterion) {

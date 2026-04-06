@@ -145,10 +145,11 @@ impl MockUploader {
 
     pub async fn upload<R: AsyncRead + Send + Sync + Unpin + 'static>(
         &self,
+        object: Object,
         r: R,
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
-        self.uploader.upload(r, options).await
+        self.uploader.upload(object, r, options).await
     }
 
     pub fn upload_packed(&self, options: UploadOptions) -> PackedUpload {

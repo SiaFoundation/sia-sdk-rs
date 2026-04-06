@@ -50,10 +50,10 @@ if let Some(sdk) = builder.connected(&app_key).await? {
 ### Uploading and downloading
 
 ```rust
-use sia_storage::{UploadOptions, DownloadOptions};
+use sia_storage::{Object, UploadOptions, DownloadOptions};
 
 // Upload
-let object = sdk.upload(reader, UploadOptions::default()).await?;
+let object = sdk.upload(Object::default(), reader, UploadOptions::default()).await?;
 sdk.pin_object(&object).await?;
 
 // Download
