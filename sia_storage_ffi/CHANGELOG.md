@@ -1,3 +1,13 @@
+## 0.6.0 (2026-04-06)
+
+### Breaking Changes
+
+#### Resumable uploads
+
+`SDK::upload` now takes an `Object` parameter and appends uploaded slabs to it. This enables resumable uploads by passing the same object back to `upload` with a new reader.
+
+For new uploads, pass `Object::default()` (Rust) or `PinnedObject::new()` (FFI). This is a breaking change to the upload API signature.
+
 ## 0.5.1 (2026-04-05)
 
 ### Features
