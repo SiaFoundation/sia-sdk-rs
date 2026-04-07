@@ -632,6 +632,15 @@ impl SDK {
     }
 }
 
+/// Estimates the on-network encoded size of data after erasure coding.
+pub fn encoded_size(data_size: u64, data_shards: u8, parity_shards: u8) -> u64 {
+    let total_shards = data_shards as u64 + parity_shards as u64;
+    let sector_size = sia_core::rhp4::SECTOR_SIZE as u64;
+    let slab_size = total_shards * sector_size;
+    let slabs = data_size.div_ceil(data_shards as u64 * sector_size);
+    slabs * slab_size
+}
+
 /// Generates a new BIP-39 12-word recovery phrase.
 pub fn generate_recovery_phrase() -> String {
     sia_core::seed::Seed::from_seed(rand::random::<[u8; 16]>()).to_string()
