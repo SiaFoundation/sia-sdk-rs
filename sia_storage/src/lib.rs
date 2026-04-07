@@ -360,7 +360,10 @@ impl SDK {
             good_for_upload.len()
         );
         hosts.update(all_hosts, true);
-        let _ = hosts.warm_connections(good_for_upload).await;
+        let hosts = hosts.clone();
+        maybe_spawn!(async move {
+            hosts.warm_connections(good_for_upload).await;
+        });
         Ok(())
     }
 
