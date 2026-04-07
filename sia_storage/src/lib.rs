@@ -320,14 +320,17 @@ pub struct SDK {
 }
 
 impl SDK {
-    async fn refresh_hosts(&self) -> Result<(), app_client::Error> {
+    async fn refresh_hosts(
+        app_key: &AppKey,
+        api_client: &app_client::Client,
+        hosts: &Hosts<Client>,
+    ) -> Result<(), app_client::Error> {
         const PAGE_SIZE: usize = 100;
-        let mut usable_hosts = Vec::new();
+        let mut all_hosts = Vec::new();
         for i in (0..).step_by(PAGE_SIZE) {
-            let page = self
-                .api_client
+            let page = api_client
                 .hosts(
-                    &self.app_key.0,
+                    &app_key.0,
                     HostQuery {
                         offset: Some(i),
                         limit: Some(PAGE_SIZE as u64),
@@ -336,13 +339,13 @@ impl SDK {
                 )
                 .await?;
             let done = page.len() < PAGE_SIZE;
-            usable_hosts.extend(page);
+            all_hosts.extend(page);
             if done {
                 break;
             }
         }
 
-        let good_for_upload: Vec<_> = usable_hosts
+        let good_for_upload: Vec<_> = all_hosts
             .iter()
             .filter(|h| h.good_for_upload)
             .map(|h| HostEndpoint {
@@ -353,11 +356,11 @@ impl SDK {
 
         debug!(
             "Refreshed hosts: total {}, good for upload {}",
-            usable_hosts.len(),
+            all_hosts.len(),
             good_for_upload.len()
         );
-        self.hosts.update(usable_hosts, true);
-        let _ = self.hosts.warm_connections(good_for_upload).await;
+        hosts.update(all_hosts, true);
+        let _ = hosts.warm_connections(good_for_upload).await;
         Ok(())
     }
 
@@ -367,28 +370,30 @@ impl SDK {
         app_key: Arc<AppKey>,
     ) -> Result<Self, BuilderError> {
         let hosts = Hosts::new(Client::new());
-
+        Self::refresh_hosts(&app_key, &api_client, &hosts).await?;
         let uploader = Uploader::new(hosts.clone(), app_key.clone());
-        let mut sdk = Self {
+        let refresh_task =
+            Self::spawn_refresh_task(app_key.clone(), api_client.clone(), hosts.clone());
+        Ok(Self {
             app_key,
             api_client,
             hosts,
             uploader,
-            _refresh_task: Arc::new(AbortOnDropHandle::new(maybe_spawn!(async {}))),
-        };
-        sdk.refresh_hosts().await?;
-        sdk._refresh_task = Arc::new(sdk.spawn_refresh_task());
-        Ok(sdk)
+            _refresh_task: Arc::new(refresh_task),
+        })
     }
 
     /// Spawns a background task that refreshes the host list every 10 minutes.
-    fn spawn_refresh_task(&self) -> AbortOnDropHandle<()> {
+    fn spawn_refresh_task(
+        app_key: Arc<AppKey>,
+        api_client: app_client::Client,
+        hosts: Hosts<Client>,
+    ) -> AbortOnDropHandle<()> {
         const REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
-        let sdk = self.clone();
         AbortOnDropHandle::new(maybe_spawn!(async move {
             loop {
                 crate::time::sleep(REFRESH_INTERVAL).await;
-                if let Err(err) = sdk.refresh_hosts().await {
+                if let Err(err) = Self::refresh_hosts(&app_key, &api_client, &hosts).await {
                     warn!("failed to refresh hosts: {err}");
                 }
             }
