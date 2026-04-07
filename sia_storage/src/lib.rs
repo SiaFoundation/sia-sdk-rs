@@ -372,8 +372,12 @@ impl SDK {
         let hosts = Hosts::new(Client::new());
         Self::refresh_hosts(&app_key, &api_client, &hosts).await?;
         let uploader = Uploader::new(hosts.clone(), app_key.clone());
-        let refresh_task =
-            Self::spawn_refresh_task(app_key.clone(), api_client.clone(), hosts.clone());
+        let refresh_task = Self::spawn_refresh_task(
+            app_key.clone(),
+            api_client.clone(),
+            hosts.clone(),
+            Duration::from_secs(10 * 60),
+        );
         Ok(Self {
             app_key,
             api_client,
@@ -383,16 +387,16 @@ impl SDK {
         })
     }
 
-    /// Spawns a background task that refreshes the host list every 10 minutes.
+    /// Spawns a background task that refreshes the host list at the given interval.
     fn spawn_refresh_task(
         app_key: Arc<AppKey>,
         api_client: app_client::Client,
         hosts: Hosts<Client>,
+        interval: Duration,
     ) -> AbortOnDropHandle<()> {
-        const REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
         AbortOnDropHandle::new(maybe_spawn!(async move {
             loop {
-                crate::time::sleep(REFRESH_INTERVAL).await;
+                crate::time::sleep(interval).await;
                 if let Err(err) = Self::refresh_hosts(&app_key, &api_client, &hosts).await {
                     warn!("failed to refresh hosts: {err}");
                 }
@@ -1321,4 +1325,112 @@ mod test {
             }
         }).await }
         }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn test_refresh_task_periodic_and_abort() {
+        use httptest::http::{Response, StatusCode};
+        use httptest::matchers::*;
+        use httptest::{Expectation, Server};
+
+        const INTERVAL: Duration = Duration::from_millis(200);
+        const WAIT: Duration = Duration::from_millis(500);
+
+        // API returns hosts with good_for_upload=false so warm_connections is a no-op
+        let hosts: Vec<Host> = (0..3)
+            .map(|_| Host {
+                public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                addresses: vec![NetAddress {
+                    protocol: sia_core::types::v2::Protocol::QUIC,
+                    address: "localhost:1234".to_string(),
+                }],
+                country_code: "US".to_string(),
+                latitude: 0.0,
+                longitude: 0.0,
+                good_for_upload: false,
+            })
+            .collect();
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/hosts"))
+                .times(..)
+                .respond_with(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(serde_json::to_string(&hosts).unwrap())
+                        .unwrap(),
+                ),
+        );
+
+        let app_key = Arc::new(AppKey::import(random_seed()));
+        let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();
+        let hosts = Hosts::new(crate::rhp4::Client::new());
+
+        // helper: seed one good-for-upload host so available_for_upload() == 1
+        let add_upload_host = |hosts: &Hosts<crate::rhp4::Client>| {
+            hosts.update(
+                vec![Host {
+                    public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                    addresses: vec![],
+                    country_code: String::new(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                }],
+                false,
+            );
+        };
+
+        // verify initial refresh replaces hosts
+        add_upload_host(&hosts);
+        assert_eq!(hosts.available_for_upload(), 1);
+        SDK::refresh_hosts(&app_key, &client, &hosts)
+            .await
+            .unwrap();
+        assert_eq!(
+            hosts.available_for_upload(),
+            0,
+            "initial refresh should clear upload hosts"
+        );
+
+        // spawn the periodic refresh task with a short interval
+        add_upload_host(&hosts);
+        assert_eq!(hosts.available_for_upload(), 1);
+        let handle = SDK::spawn_refresh_task(
+            app_key.clone(),
+            client.clone(),
+            hosts.clone(),
+            INTERVAL,
+        );
+
+        // wait for periodic refresh to run
+        tokio::time::sleep(WAIT).await;
+        assert_eq!(
+            hosts.available_for_upload(),
+            0,
+            "periodic refresh should have run"
+        );
+
+        // verify it refreshes again
+        add_upload_host(&hosts);
+        tokio::time::sleep(WAIT).await;
+        assert_eq!(
+            hosts.available_for_upload(),
+            0,
+            "second periodic refresh should have run"
+        );
+
+        // drop handle to abort the task
+        drop(handle);
+        add_upload_host(&hosts);
+        assert_eq!(hosts.available_for_upload(), 1);
+
+        // wait past the interval - should NOT refresh (task aborted)
+        tokio::time::sleep(WAIT).await;
+        assert_eq!(
+            hosts.available_for_upload(),
+            1,
+            "refresh task should be aborted"
+        );
+    }
 }
