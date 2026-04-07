@@ -1384,9 +1384,7 @@ mod test {
         // verify initial refresh replaces hosts
         add_upload_host(&hosts);
         assert_eq!(hosts.available_for_upload(), 1);
-        SDK::refresh_hosts(&app_key, &client, &hosts)
-            .await
-            .unwrap();
+        SDK::refresh_hosts(&app_key, &client, &hosts).await.unwrap();
         assert_eq!(
             hosts.available_for_upload(),
             0,
@@ -1396,12 +1394,8 @@ mod test {
         // spawn the periodic refresh task with a short interval
         add_upload_host(&hosts);
         assert_eq!(hosts.available_for_upload(), 1);
-        let handle = SDK::spawn_refresh_task(
-            app_key.clone(),
-            client.clone(),
-            hosts.clone(),
-            INTERVAL,
-        );
+        let handle =
+            SDK::spawn_refresh_task(app_key.clone(), client.clone(), hosts.clone(), INTERVAL);
 
         // wait for periodic refresh to run
         tokio::time::sleep(WAIT).await;
