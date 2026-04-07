@@ -142,7 +142,8 @@ macro_rules! cross_target_tests {
 }
 
 /// Run an async block inside a `tokio::task::LocalSet` on WASM, or directly
-/// on native. Required for tests that use `join_set_spawn!` / `spawn_local`.
+/// on native. Assumes a tokio runtime is already active (e.g. inside
+/// `#[tokio::main]`, `#[tokio::test]`, or after `Runtime::enter()`).
 #[cfg(all(test, target_arch = "wasm32"))]
 pub(crate) async fn run_local<F: std::future::Future>(f: F) -> F::Output {
     tokio::task::LocalSet::new().run_until(f).await
