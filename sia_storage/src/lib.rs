@@ -64,7 +64,7 @@ pub mod mock;
 
 use std::sync::Arc;
 
-use log::debug;
+use log::{debug, warn};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -74,6 +74,8 @@ use crate::download::download_object;
 pub use crate::hosts::Host;
 use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
+use crate::task::AbortOnDropHandle;
+use crate::time::Duration;
 use crate::upload::Uploader;
 pub use chrono::{DateTime, Utc};
 pub use reqwest::{IntoUrl, Url};
@@ -314,15 +316,15 @@ pub struct SDK {
     api_client: app_client::Client,
     hosts: Hosts<Client>,
     uploader: Uploader<Client>,
+    _refresh_task: Arc<AbortOnDropHandle<()>>,
 }
 
 impl SDK {
     async fn refresh_hosts(&self) -> Result<(), app_client::Error> {
         const PAGE_SIZE: usize = 100;
-        let mut good_for_upload = Vec::new();
-        let mut total_hosts: usize = 0;
+        let mut usable_hosts = Vec::new();
         for i in (0..).step_by(PAGE_SIZE) {
-            let usable_hosts = self
+            let page = self
                 .api_client
                 .hosts(
                     &self.app_key.0,
@@ -333,26 +335,28 @@ impl SDK {
                     },
                 )
                 .await?;
-            let n = usable_hosts.len();
-            total_hosts += n;
-            usable_hosts
-                .iter()
-                .filter(|h| h.good_for_upload)
-                .map(|h| HostEndpoint {
-                    public_key: h.public_key,
-                    addresses: h.addresses.clone(),
-                })
-                .for_each(|h| good_for_upload.push(h));
-            self.hosts.update(usable_hosts, i == 0);
-            if n < PAGE_SIZE {
+            let done = page.len() < PAGE_SIZE;
+            usable_hosts.extend(page);
+            if done {
                 break;
             }
         }
+
+        let good_for_upload: Vec<_> = usable_hosts
+            .iter()
+            .filter(|h| h.good_for_upload)
+            .map(|h| HostEndpoint {
+                public_key: h.public_key,
+                addresses: h.addresses.clone(),
+            })
+            .collect();
+
         debug!(
             "Refreshed hosts: total {}, good for upload {}",
-            total_hosts,
+            usable_hosts.len(),
             good_for_upload.len()
         );
+        self.hosts.update(usable_hosts, true);
         let _ = self.hosts.warm_connections(good_for_upload).await;
         Ok(())
     }
@@ -365,14 +369,30 @@ impl SDK {
         let hosts = Hosts::new(Client::new());
 
         let uploader = Uploader::new(hosts.clone(), app_key.clone());
-        let sdk = Self {
+        let mut sdk = Self {
             app_key,
             api_client,
             hosts,
             uploader,
+            _refresh_task: Arc::new(AbortOnDropHandle::new(maybe_spawn!(async {}))),
         };
         sdk.refresh_hosts().await?;
+        sdk._refresh_task = Arc::new(sdk.spawn_refresh_task());
         Ok(sdk)
+    }
+
+    /// Spawns a background task that refreshes the host list every 10 minutes.
+    fn spawn_refresh_task(&self) -> AbortOnDropHandle<()> {
+        const REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
+        let sdk = self.clone();
+        AbortOnDropHandle::new(maybe_spawn!(async move {
+            loop {
+                crate::time::sleep(REFRESH_INTERVAL).await;
+                if let Err(err) = sdk.refresh_hosts().await {
+                    warn!("failed to refresh hosts: {err}");
+                }
+            }
+        }))
     }
 
     /// Returns the application key used by the SDK.
