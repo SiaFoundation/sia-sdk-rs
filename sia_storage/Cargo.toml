@@ -33,7 +33,7 @@ chrono = { version = "0.4.44", features = ["serde"] }
 blake2 = "0.10.6"
 reed-solomon-erasure = "6.0.0"
 zeroize = { version = "1.8.0", features = ["derive"] }
-hkdf = "0.12.4"
+hkdf = "0.13.0"
 base64 = "0.22.1"
 ed25519-dalek = "2.2.0"
 web-time = "1"
@@ -43,7 +43,7 @@ getrandom = "0.4"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # do not update to reqwest v0.13 until https://github.com/seanmonstar/reqwest/issues/2968 is resolved
 reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
-tokio = { version = "1.50.0", features = ["fs", "sync", "io-util", "macros", "rt", "time"] }
+tokio = { version = "1.51.0", features = ["fs", "sync", "io-util", "macros", "rt", "time"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 rayon = "1.11.0"
 sia_mux = { version = "0.1.0", path = "../sia_mux" }
@@ -51,7 +51,7 @@ sia_mux = { version = "0.1.0", path = "../sia_mux" }
 # --- WASM-only dependencies ---
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 reqwest = { version = "0.12.28", default-features = false, features = ["json"] }
-tokio = { version = "1.50.0", features = ["sync", "io-util", "macros", "rt"] }
+tokio = { version = "1.51.0", features = ["sync", "io-util", "macros", "rt"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
@@ -76,7 +76,7 @@ instant = { version = "0.1", features = ["wasm-bindgen"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 httptest = "0.16.4"
 tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread", "test-util"] }
-env_logger = "0.11.9"
+env_logger = "0.11.10"
 clap = { version = "4.6.0", features = ["derive"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
