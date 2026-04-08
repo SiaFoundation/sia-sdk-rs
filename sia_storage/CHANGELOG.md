@@ -1,3 +1,9 @@
+## 0.6.1 (2026-04-08)
+
+### Fixes
+
+- Refresh hosts periodically
+
 ## 0.6.0 (2026-04-06)
 
 ### Breaking Changes
