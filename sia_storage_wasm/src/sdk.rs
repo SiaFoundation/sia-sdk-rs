@@ -222,44 +222,6 @@ impl Sdk {
         sdk.delete_object(&key).await.map_err(to_js_err)
     }
 
-    /// Uploads data and returns a PinnedObject handle. The object is NOT pinned
-    /// automatically — call `pinObject()` afterward.
-    ///
-    /// The optional `onProgress` callback receives `(shardsUploaded)` each time
-    /// a shard finishes uploading.
-    #[wasm_bindgen(js_name = "upload")]
-    pub async fn upload(
-        &self,
-        data: Vec<u8>,
-        options: Option<UploadOptions>,
-        on_progress: Option<OnShardProgressCallback>,
-    ) -> Result<PinnedObject, JsValue> {
-        let sdk = self.0.clone();
-        let cursor = std::io::Cursor::new(data);
-        let mut opts = options.map(|o| o.to_inner()).unwrap_or_default();
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        opts.shard_uploaded = Some(tx);
-
-        let progress_fn: Option<js_sys::Function> = on_progress.map(|p| p.unchecked_into());
-
-        let obj = run_local(async {
-            if let Some(cb) = progress_fn {
-                tokio::task::spawn_local(async move {
-                    let mut count: u32 = 0;
-                    while rx.recv().await.is_some() {
-                        count += 1;
-                        let _ = cb.call1(&JsValue::NULL, &JsValue::from(count));
-                    }
-                });
-            }
-            sdk.upload(cursor, opts).await
-        })
-        .await
-        .map_err(to_js_err)?;
-        Ok(PinnedObject(obj))
-    }
-
     /// Pins an object to the indexer so it persists beyond temporary storage.
     #[wasm_bindgen(js_name = "pinObject")]
     pub async fn pin_object(&self, object: &PinnedObject) -> Result<(), JsValue> {
