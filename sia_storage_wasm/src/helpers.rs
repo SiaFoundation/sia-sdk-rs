@@ -112,13 +112,13 @@ pub struct Account {
     #[wasm_bindgen(js_name = "accountKey")]
     pub account_key: String,
     #[wasm_bindgen(js_name = "maxPinnedData")]
-    pub max_pinned_data: u64,
+    pub max_pinned_data: f64,
     #[wasm_bindgen(js_name = "remainingStorage")]
-    pub remaining_storage: u64,
+    pub remaining_storage: f64,
     #[wasm_bindgen(js_name = "pinnedData")]
-    pub pinned_data: u64,
+    pub pinned_data: f64,
     #[wasm_bindgen(js_name = "pinnedSize")]
-    pub pinned_size: u64,
+    pub pinned_size: f64,
     pub ready: bool,
     #[wasm_bindgen(js_name = "appName")]
     pub app_name: String,

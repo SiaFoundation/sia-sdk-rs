@@ -136,10 +136,10 @@ impl Sdk {
         let a = sdk.account().await.map_err(to_js_err)?;
         Ok(Account {
             account_key: a.account_key.to_string(),
-            max_pinned_data: a.max_pinned_data,
-            remaining_storage: a.remaining_storage,
-            pinned_data: a.pinned_data,
-            pinned_size: a.pinned_size,
+            max_pinned_data: a.max_pinned_data as f64,
+            remaining_storage: a.remaining_storage as f64,
+            pinned_data: a.pinned_data as f64,
+            pinned_size: a.pinned_size as f64,
             ready: a.ready,
             app_name: a.app.name,
             app_description: a.app.description,

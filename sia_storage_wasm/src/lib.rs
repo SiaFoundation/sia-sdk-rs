@@ -58,6 +58,6 @@ pub fn validate_recovery_phrase(phrase: &str) -> Result<(), JsValue> {
 
 /// Calculates the encoded size of data after erasure coding.
 #[wasm_bindgen]
-pub fn calculate_encoded_size(data_size: u64, data_shards: u8, parity_shards: u8) -> u64 {
-    sia_storage::encoded_size(data_size, data_shards, parity_shards)
+pub fn calculate_encoded_size(data_size: f64, data_shards: u8, parity_shards: u8) -> f64 {
+    sia_storage::encoded_size(data_size as u64, data_shards, parity_shards) as f64
 }
