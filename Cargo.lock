@@ -2658,6 +2658,7 @@ dependencies = [
  "log",
  "serde",
  "serde-wasm-bindgen",
+ "serde_json",
  "sia_core",
  "sia_storage",
  "tokio",

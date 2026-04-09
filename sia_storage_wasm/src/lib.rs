@@ -4,6 +4,7 @@ mod helpers;
 mod object;
 mod packed;
 mod sdk;
+mod sealed;
 mod streaming;
 mod types;
 
