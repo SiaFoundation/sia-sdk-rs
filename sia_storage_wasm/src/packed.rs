@@ -68,15 +68,11 @@ impl PackedUpload {
 
     /// Finalizes the packed upload and returns the resulting objects.
     /// Each object must be pinned separately with `sdk.pinObject()`.
-    pub async fn finalize(self) -> Result<js_sys::Array, JsValue> {
+    pub async fn finalize(self) -> Result<Vec<PinnedObject>, JsValue> {
         let inner = self.inner.borrow_mut().take()
             .ok_or_else(|| JsValue::from_str("upload already finalized"))?;
         let objects = run_local(inner.finalize()).await.map_err(to_js_err)?;
-        let arr = js_sys::Array::new_with_length(objects.len() as u32);
-        for (i, obj) in objects.into_iter().enumerate() {
-            arr.set(i as u32, PinnedObject(obj).into());
-        }
-        Ok(arr)
+        Ok(objects.into_iter().map(PinnedObject).collect())
     }
 
     /// Cancels the packed upload. This is a hard abort — in-flight shard

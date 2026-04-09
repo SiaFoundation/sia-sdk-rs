@@ -118,10 +118,10 @@ impl Sdk {
     }
 
     /// Returns account information from the indexer.
-    pub async fn account(&self) -> Result<JsValue, JsValue> {
+    pub async fn account(&self) -> Result<Account, JsValue> {
         let sdk = self.0.clone();
         let a = sdk.account().await.map_err(to_js_err)?;
-        to_js_value(&AccountInfo {
+        Ok(Account {
             account_key: a.account_key.to_string(),
             max_pinned_data: a.max_pinned_data,
             remaining_storage: a.remaining_storage,
@@ -134,22 +134,21 @@ impl Sdk {
     }
 
     /// Returns a list of usable hosts, optionally filtered by a HostQuery.
-    pub async fn hosts(&self, query: Option<HostQuery>) -> Result<JsValue, JsValue> {
+    pub async fn hosts(&self, query: Option<HostQuery>) -> Result<Vec<Host>, JsValue> {
         let sdk = self.0.clone();
         let q = query.map(|q| q.to_inner()).unwrap_or(StorageHostQuery {
             protocol: Some(Protocol::QUIC),
             ..Default::default()
         });
         let hosts = sdk.hosts(q).await.map_err(to_js_err)?;
-        let list: Vec<HostInfo> = hosts
+        Ok(hosts
             .into_iter()
-            .map(|h| HostInfo {
+            .map(|h| Host {
                 public_key: h.public_key.to_string(),
                 country_code: h.country_code,
                 good_for_upload: h.good_for_upload,
             })
-            .collect();
-        to_js_value(&list)
+            .collect())
     }
 
     /// Retrieves an object from the indexer by its hex ID.
@@ -169,7 +168,7 @@ impl Sdk {
         cursor_id: Option<String>,
         cursor_after: Option<f64>,
         limit: u32,
-    ) -> Result<JsValue, JsValue> {
+    ) -> Result<Vec<ObjectEvent>, JsValue> {
         let cursor = match (cursor_id, cursor_after) {
             (Some(id), Some(after_ms)) => {
                 let secs = (after_ms / 1000.0) as i64;
@@ -186,16 +185,14 @@ impl Sdk {
             .object_events(cursor, Some(limit as usize))
             .await
             .map_err(to_js_err)?;
-        let list: Vec<ObjectEventInfo> = events
+        Ok(events
             .into_iter()
-            .map(|e| ObjectEventInfo {
+            .map(|e| ObjectEvent {
                 id: e.id.to_string(),
                 deleted: e.deleted,
-                updated_at: e.updated_at.timestamp(),
-                object: e.object.as_ref().map(object_to_info),
+                updated_at: e.updated_at.timestamp() as f64,
             })
-            .collect();
-        to_js_value(&list)
+            .collect())
     }
 
     /// Deletes an object from the indexer by its hex ID.
