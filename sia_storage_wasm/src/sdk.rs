@@ -6,7 +6,10 @@ use std::task::{Context, Poll};
 use js_sys::Uint8Array;
 use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
-use sia_storage::{self, DownloadOptions as StorageDownloadOptions, HostQuery as StorageHostQuery, ObjectsCursor, SDK as StorageSdk};
+use sia_storage::{
+    self, DownloadOptions as StorageDownloadOptions, HostQuery as StorageHostQuery, ObjectsCursor,
+    SDK as StorageSdk,
+};
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
 use wasm_bindgen::prelude::*;
@@ -95,7 +98,10 @@ impl AsyncWrite for ChunkWriter {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
         Poll::Ready(Ok(()))
     }
 }

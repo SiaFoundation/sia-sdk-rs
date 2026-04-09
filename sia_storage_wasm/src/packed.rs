@@ -37,14 +37,18 @@ impl PackedUpload {
     /// fit within this size avoids starting a new slab and minimizes padding.
     pub fn remaining(&self) -> Result<f64, JsValue> {
         let inner = self.inner.borrow();
-        let packed = inner.as_ref().ok_or_else(|| JsValue::from_str("upload already finalized"))?;
+        let packed = inner
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("upload already finalized"))?;
         Ok(packed.remaining() as f64)
     }
 
     /// Total bytes added so far across all objects.
     pub fn length(&self) -> Result<f64, JsValue> {
         let inner = self.inner.borrow();
-        let packed = inner.as_ref().ok_or_else(|| JsValue::from_str("upload already finalized"))?;
+        let packed = inner
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("upload already finalized"))?;
         Ok(packed.length() as f64)
     }
 
@@ -52,7 +56,9 @@ impl PackedUpload {
     #[wasm_bindgen(js_name = "slabSize")]
     pub fn slab_size(&self) -> Result<f64, JsValue> {
         let inner = self.inner.borrow();
-        let packed = inner.as_ref().ok_or_else(|| JsValue::from_str("upload already finalized"))?;
+        let packed = inner
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("upload already finalized"))?;
         Ok(packed.slab_size() as f64)
     }
 
@@ -60,7 +66,9 @@ impl PackedUpload {
     /// The object data is provided as a complete `Uint8Array`.
     pub async fn add(&self, data: Vec<u8>) -> Result<f64, JsValue> {
         let mut inner = self.inner.borrow_mut();
-        let packed = inner.as_mut().ok_or_else(|| JsValue::from_str("upload already finalized"))?;
+        let packed = inner
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("upload already finalized"))?;
         let cursor = Cursor::new(data);
         let n = packed.add(cursor).await.map_err(to_js_err)?;
         Ok(n as f64)
@@ -69,7 +77,10 @@ impl PackedUpload {
     /// Finalizes the packed upload and returns the resulting objects.
     /// Each object must be pinned separately with `sdk.pinObject()`.
     pub async fn finalize(self) -> Result<Vec<PinnedObject>, JsValue> {
-        let inner = self.inner.borrow_mut().take()
+        let inner = self
+            .inner
+            .borrow_mut()
+            .take()
             .ok_or_else(|| JsValue::from_str("upload already finalized"))?;
         let objects = run_local(inner.finalize()).await.map_err(to_js_err)?;
         Ok(objects.into_iter().map(PinnedObject).collect())

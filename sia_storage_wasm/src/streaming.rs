@@ -5,7 +5,7 @@ use sia_storage::{Object, SDK, UploadOptions};
 use tokio::io::{AsyncWriteExt, ReadHalf, SimplexStream, WriteHalf};
 use tokio::sync::mpsc;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::{future_to_promise, JsFuture};
+use wasm_bindgen_futures::{JsFuture, future_to_promise};
 
 use crate::helpers::{run_local, to_js_err};
 use crate::object::PinnedObject;
@@ -80,7 +80,9 @@ impl StreamingUpload {
                     });
                 }
                 sdk.upload(reader, opts).await
-            }).await {
+            })
+            .await
+            {
                 Ok(obj) => {
                     *result.borrow_mut() = Some(Ok(obj));
                     Ok(JsValue::UNDEFINED)

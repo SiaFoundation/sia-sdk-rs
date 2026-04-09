@@ -14,7 +14,11 @@ impl UploadOptions {
     /// Creates upload options with the given parameters.
     /// Defaults: data_shards=10, parity_shards=20, max_inflight=15.
     #[wasm_bindgen(constructor)]
-    pub fn new(data_shards: Option<u8>, parity_shards: Option<u8>, max_inflight: Option<u32>) -> Self {
+    pub fn new(
+        data_shards: Option<u8>,
+        parity_shards: Option<u8>,
+        max_inflight: Option<u32>,
+    ) -> Self {
         Self {
             data_shards: data_shards.unwrap_or(10),
             parity_shards: parity_shards.unwrap_or(20),
