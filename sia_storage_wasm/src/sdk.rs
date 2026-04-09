@@ -11,7 +11,6 @@ use sia_storage::{
     SDK as StorageSdk,
 };
 use tokio::io::AsyncWrite;
-use tokio::sync::mpsc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -39,27 +38,22 @@ extern "C" {
 ///
 /// # Uploading
 ///
-/// Three upload methods are available:
+/// Two upload methods are available:
 ///
-/// - **`upload(data)`** — pass the entire file as a `Uint8Array`. Simple, but
-///   the full file must fit in WASM linear memory (~1.5 GB practical limit).
-///   Best for files under ~500 MB. Each slab holds up to 40 MiB of data
-///   (10 data shards × 4 MiB sectors) — files smaller than this still
-///   consume one full slab (120 MiB on-network: 30 shards × 4 MiB each due
-///   to erasure coding).
+/// - **`upload(options?)`** — returns a `StreamingUpload` handle. Push data
+///   with `pushChunk()`, then call `finish()` to get the `PinnedObject`.
+///   Works for any size — the full file never needs to be in memory at once.
+///   Each slab holds up to 40 MiB of data (10 data shards × 4 MiB sectors).
+///   Files smaller than this still consume one full slab (120 MiB on-network
+///   with default 10+20 redundancy).
 ///
-/// - **`uploadStreaming()`** — returns a `StreamingUpload` handle. Push data
-///   incrementally with `pushChunk()`, then call `finish()`. The SDK begins
-///   uploading as chunks arrive — the full file never needs to be in memory
-///   at once. Required for large files.
+/// - **`uploadPacked(options?)`** — returns a `PackedUpload` handle for
+///   efficiently uploading multiple small objects together. Call `add(data)`
+///   for each object, then `finalize()` to get the resulting `PinnedObject`
+///   handles. Objects are packed into shared slabs so a 1 KiB file doesn't
+///   waste an entire 120 MiB slab.
 ///
-/// - **`uploadPacked()`** — returns a `PackedUpload` handle for efficiently
-///   uploading multiple small objects together. Call `add(data)` for each
-///   object, then `finalize()` to get the resulting `PinnedObject` handles.
-///   Objects are packed into shared slabs so a 1 KiB file doesn't waste an
-///   entire 120 MiB slab.
-///
-/// `upload()` and `uploadStreaming()` return a single `PinnedObject`.
+/// `upload().finish()` returns a single `PinnedObject`.
 /// `uploadPacked().finalize()` returns an array of `PinnedObject` handles.
 /// All must be pinned with `pinObject()` afterward to persist on the indexer.
 ///
@@ -289,10 +283,9 @@ impl Sdk {
         Ok(buf)
     }
 
-    /// Starts a streaming upload. Returns a `StreamingUpload` handle.
-    /// Push data incrementally with `pushChunk()`, then call `finish()`.
-    #[wasm_bindgen(js_name = "uploadStreaming")]
-    pub fn upload_streaming(&self, options: Option<UploadOptions>) -> StreamingUpload {
+    /// Starts an upload. Returns a `StreamingUpload` handle.
+    /// Push data with `pushChunk()`, then call `finish()` to get the `PinnedObject`.
+    pub fn upload(&self, options: Option<UploadOptions>) -> StreamingUpload {
         let opts = options.map(|o| o.to_inner()).unwrap_or_default();
         let (reader, writer) = tokio::io::simplex(1024 * 1024);
         StreamingUpload::new(writer, reader, self.0.clone(), opts)
