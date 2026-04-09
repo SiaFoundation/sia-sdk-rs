@@ -1,14 +1,9 @@
-use serde::Serialize;
 use sia_core::types::Hash256;
 use sia_storage::AppMetadata;
 use wasm_bindgen::prelude::*;
 
 pub(crate) fn to_js_err(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
-}
-
-pub(crate) fn to_js_value<T: Serialize>(v: &T) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(v).map_err(to_js_err)
 }
 
 /// Run an async block with a tokio runtime + LocalSet. wasm_bindgen async

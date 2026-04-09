@@ -1,8 +1,8 @@
-use sia_storage::SealedObject;
 use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
-use crate::helpers::{Slab, to_js_err, to_js_value};
+use crate::helpers::{Slab, to_js_err};
+use crate::sealed::SealedObject;
 
 /// An object stored on the Sia network. JS holds this as an opaque handle
 /// and passes it back to Rust for operations like pin, download, share, and
@@ -64,19 +64,14 @@ impl PinnedObject {
     }
 
     /// Seals the object for offline storage or migration.
-    /// The returned JS object contains encrypted keys and slab metadata —
-    /// it can be JSON.stringify'd and stored or transferred to another indexer.
-    pub fn seal(&self, app_key: &AppKey) -> Result<JsValue, JsValue> {
-        let sealed = self.0.seal(&app_key.0);
-        to_js_value(&sealed)
+    pub fn seal(&self, app_key: &AppKey) -> SealedObject {
+        let inner = self.0.seal(&app_key.0);
+        SealedObject { inner }
     }
 
-    /// Opens a previously sealed object. Pass the JS object returned by
-    /// seal() (or parsed from JSON). Returns a PinnedObject handle that
-    /// can be pinned to this or another indexer.
-    pub fn open(app_key: &AppKey, sealed: JsValue) -> Result<PinnedObject, JsValue> {
-        let sealed: SealedObject = serde_wasm_bindgen::from_value(sealed).map_err(to_js_err)?;
-        let obj = sealed.open(&app_key.0).map_err(to_js_err)?;
+    /// Opens a previously sealed object.
+    pub fn open(app_key: &AppKey, sealed: &SealedObject) -> Result<PinnedObject, JsValue> {
+        let obj = sealed.inner.clone().open(&app_key.0).map_err(to_js_err)?;
         Ok(PinnedObject(obj))
     }
 }
