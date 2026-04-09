@@ -18,7 +18,7 @@ use crate::app_key::AppKey;
 use crate::helpers::*;
 use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
-use crate::streaming::StreamingUpload;
+use crate::streaming::Upload;
 use crate::types::{DownloadOptions, HostQuery, UploadOptions};
 
 #[wasm_bindgen]
@@ -40,7 +40,7 @@ extern "C" {
 ///
 /// Two upload methods are available:
 ///
-/// - **`upload(options?)`** — returns a `StreamingUpload` handle. Push data
+/// - **`upload(options?)`** — returns a `Upload` handle. Push data
 ///   with `pushChunk()`, then call `finish()` to get the `PinnedObject`.
 ///   Works for any size — the full file never needs to be in memory at once.
 ///   Each slab holds up to 40 MiB of data (10 data shards × 4 MiB sectors).
@@ -283,12 +283,12 @@ impl Sdk {
         Ok(buf)
     }
 
-    /// Starts an upload. Returns a `StreamingUpload` handle.
+    /// Starts an upload. Returns a `Upload` handle.
     /// Push data with `pushChunk()`, then call `finish()` to get the `PinnedObject`.
-    pub fn upload(&self, options: Option<UploadOptions>) -> StreamingUpload {
+    pub fn upload(&self, options: Option<UploadOptions>) -> Upload {
         let opts = options.map(|o| o.to_inner()).unwrap_or_default();
         let (reader, writer) = tokio::io::simplex(1024 * 1024);
-        StreamingUpload::new(writer, reader, self.0.clone(), opts)
+        Upload::new(writer, reader, self.0.clone(), opts)
     }
 
     /// Starts a packed upload for efficiently uploading multiple small objects.
