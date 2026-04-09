@@ -1,6 +1,6 @@
 use serde::Serialize;
 use sia_core::types::Hash256;
-use sia_storage::{AppMetadata, Object};
+use sia_storage::AppMetadata;
 use wasm_bindgen::prelude::*;
 
 pub(crate) fn to_js_err(e: impl std::fmt::Display) -> JsValue {
@@ -112,52 +112,43 @@ pub(crate) fn make_app_metadata(
     })
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AccountInfo {
+/// Account information returned by `Sdk.account()`.
+#[wasm_bindgen(getter_with_clone)]
+pub struct Account {
+    #[wasm_bindgen(js_name = "accountKey")]
     pub account_key: String,
+    #[wasm_bindgen(js_name = "maxPinnedData")]
     pub max_pinned_data: u64,
+    #[wasm_bindgen(js_name = "remainingStorage")]
     pub remaining_storage: u64,
+    #[wasm_bindgen(js_name = "pinnedData")]
     pub pinned_data: u64,
+    #[wasm_bindgen(js_name = "pinnedSize")]
     pub pinned_size: u64,
     pub ready: bool,
+    #[wasm_bindgen(js_name = "appName")]
     pub app_name: String,
+    #[wasm_bindgen(js_name = "appDescription")]
     pub app_description: String,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct HostInfo {
+/// Host information returned by `Sdk.hosts()`.
+#[wasm_bindgen(getter_with_clone)]
+pub struct Host {
+    #[wasm_bindgen(js_name = "publicKey")]
     pub public_key: String,
+    #[wasm_bindgen(js_name = "countryCode")]
     pub country_code: String,
+    #[wasm_bindgen(js_name = "goodForUpload")]
     pub good_for_upload: bool,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ObjectInfo {
-    pub id: String,
-    pub size: u64,
-    pub encoded_size: u64,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ObjectEventInfo {
+/// Object event returned by `Sdk.objectEvents()`.
+#[wasm_bindgen(getter_with_clone)]
+pub struct ObjectEvent {
     pub id: String,
     pub deleted: bool,
-    pub updated_at: i64,
-    pub object: Option<ObjectInfo>,
+    #[wasm_bindgen(js_name = "updatedAt")]
+    pub updated_at: f64,
 }
 
-pub(crate) fn object_to_info(obj: &Object) -> ObjectInfo {
-    ObjectInfo {
-        id: obj.id().to_string(),
-        size: obj.size(),
-        encoded_size: obj.encoded_size(),
-        created_at: obj.created_at().timestamp(),
-        updated_at: obj.updated_at().timestamp(),
-    }
-}

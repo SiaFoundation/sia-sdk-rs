@@ -47,8 +47,8 @@ impl SdkBuilder {
     }
 
     /// Attempts to connect using an existing AppKey.
-    /// Returns a Sdk if the key is valid, or null if not registered.
-    pub async fn connected(&self, app_key: &AppKey) -> Result<JsValue, JsValue> {
+    /// Returns a Sdk if the key is valid, or undefined if not registered.
+    pub async fn connected(&self, app_key: &AppKey) -> Result<Option<Sdk>, JsValue> {
         let state = self.state.borrow_mut().take();
 
         match state {
@@ -60,14 +60,11 @@ impl SdkBuilder {
                         // Key was recognized — we have a fully initialized SDK.
                         // Transition to Finalized so the builder can't be reused.
                         *self.state.borrow_mut() = Some(BuilderState::Finalized);
-                        Ok(Sdk::new(sdk).into())
+                        Ok(Some(Sdk::new(sdk)))
                     }
                     Ok(None) => {
-                        // Key was not registered with this indexer. Put the builder
-                        // back into Disconnected so the caller can try a different
-                        // key or proceed with the registration flow instead.
                         *self.state.borrow_mut() = Some(BuilderState::Disconnected(builder));
-                        Ok(JsValue::NULL)
+                        Ok(None)
                     }
                     Err(e) => {
                         // Network or indexer error. Restore Disconnected state
