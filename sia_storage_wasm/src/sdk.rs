@@ -13,6 +13,7 @@ use sia_storage::{
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::app_key::AppKey;
 use crate::helpers::*;
@@ -20,6 +21,18 @@ use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
 use crate::streaming::StreamingUpload;
 use crate::types::{DownloadOptions, HostQuery, UploadOptions};
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(typescript_type = "(chunk: Uint8Array) => void")]
+    pub type OnChunkCallback;
+
+    #[wasm_bindgen(typescript_type = "(bytesDownloaded: number, totalBytes: number) => void")]
+    pub type OnProgressCallback;
+
+    #[wasm_bindgen(typescript_type = "(shardsUploaded: number) => void")]
+    pub type OnShardProgressCallback;
+}
 
 /// The main Sia storage SDK. Provides methods for uploading, downloading,
 /// and managing objects on the Sia storage network via an indexer.
@@ -219,7 +232,7 @@ impl Sdk {
         &self,
         data: Vec<u8>,
         options: Option<UploadOptions>,
-        on_progress: Option<js_sys::Function>,
+        on_progress: Option<OnShardProgressCallback>,
     ) -> Result<PinnedObject, JsValue> {
         let sdk = self.0.clone();
         let cursor = std::io::Cursor::new(data);
@@ -228,8 +241,10 @@ impl Sdk {
         let (tx, mut rx) = mpsc::unbounded_channel();
         opts.shard_uploaded = Some(tx);
 
+        let progress_fn: Option<js_sys::Function> = on_progress.map(|p| p.unchecked_into());
+
         let obj = run_local(async {
-            if let Some(cb) = on_progress {
+            if let Some(cb) = progress_fn {
                 tokio::task::spawn_local(async move {
                     let mut count: u32 = 0;
                     while rx.recv().await.is_some() {
@@ -341,8 +356,8 @@ impl Sdk {
     pub async fn download_streaming(
         &self,
         object: &PinnedObject,
-        on_chunk: &js_sys::Function,
-        on_progress: Option<js_sys::Function>,
+        on_chunk: OnChunkCallback,
+        on_progress: Option<OnProgressCallback>,
         options: Option<DownloadOptions>,
     ) -> Result<(), JsValue> {
         let sdk = self.0.clone();
@@ -350,11 +365,14 @@ impl Sdk {
         let total = obj.size() as f64;
         let opts = options.map(|o| o.to_inner()).unwrap_or_default();
 
+        let chunk_fn: js_sys::Function = on_chunk.unchecked_into();
+        let progress_fn: Option<js_sys::Function> = on_progress.map(|p| p.unchecked_into());
+
         let mut writer = ChunkWriter {
-            callback: on_chunk.clone(),
+            callback: chunk_fn,
             written: 0,
             total,
-            on_progress: on_progress.clone(),
+            on_progress: progress_fn,
         };
 
         run_local(sdk.download(&mut writer, &obj, opts))
