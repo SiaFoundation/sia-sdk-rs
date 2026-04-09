@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 use js_sys::Uint8Array;
 use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
-use sia_storage::{self, HostQuery as StorageHostQuery, ObjectsCursor, SDK as StorageSdk};
+use sia_storage::{self, DownloadOptions as StorageDownloadOptions, HostQuery as StorageHostQuery, ObjectsCursor, SDK as StorageSdk};
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
 use wasm_bindgen::prelude::*;
@@ -267,6 +267,40 @@ impl Sdk {
         let size = object.0.size() as usize;
         let mut buf = Vec::with_capacity(size);
         run_local(sdk.download(&mut buf, &object.0, opts))
+            .await
+            .map_err(to_js_err)?;
+        Ok(buf)
+    }
+
+    /// Downloads a single slab by index, returning up to ~40 MiB of
+    /// decrypted data. Use for parallel downloads across Web Workers
+    /// or video seeking.
+    #[wasm_bindgen(js_name = "downloadSlab")]
+    pub async fn download_slab(
+        &self,
+        object: &PinnedObject,
+        slab_index: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        let obj = &object.0;
+        let slabs = obj.slabs();
+        let idx = slab_index as usize;
+        if idx >= slabs.len() {
+            return Err(JsValue::from_str(&format!(
+                "slab index {} out of range (object has {} slabs)",
+                idx,
+                slabs.len()
+            )));
+        }
+        let offset: u64 = slabs[..idx].iter().map(|s| s.length as u64).sum();
+        let length = slabs[idx].length;
+        let mut buf = Vec::with_capacity(length as usize);
+        let opts = StorageDownloadOptions {
+            offset,
+            length: Some(length as u64),
+            ..Default::default()
+        };
+        let sdk = self.0.clone();
+        run_local(sdk.download(&mut buf, obj, opts))
             .await
             .map_err(to_js_err)?;
         Ok(buf)
