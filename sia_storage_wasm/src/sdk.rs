@@ -1,8 +1,8 @@
 use std::rc::Rc;
 use std::str::FromStr;
 
-use sia_core::types::v2::Protocol;
 use sia_core::types::Hash256;
+use sia_core::types::v2::Protocol;
 use sia_storage::{self, HostQuery as StorageHostQuery, ObjectsCursor, SDK as StorageSdk};
 use tokio::sync::mpsc;
 use wasm_bindgen::prelude::*;
@@ -11,6 +11,7 @@ use wasm_bindgen_futures::future_to_promise;
 use crate::app_key::AppKey;
 use crate::helpers::*;
 use crate::object::PinnedObject;
+use crate::packed::PackedUpload;
 use crate::streaming::{StreamingDownload, StreamingUpload};
 use crate::types::{DownloadOptions, HostQuery, UploadOptions};
 
@@ -19,19 +20,29 @@ use crate::types::{DownloadOptions, HostQuery, UploadOptions};
 ///
 /// # Uploading
 ///
-/// Two upload methods are available:
+/// Three upload methods are available:
 ///
 /// - **`upload(data)`** — pass the entire file as a `Uint8Array`. Simple, but
 ///   the full file must fit in WASM linear memory (~1.5 GB practical limit).
-///   Best for files under ~500 MB.
+///   Best for files under ~500 MB. Each slab holds up to 40 MiB of data
+///   (10 data shards × 4 MiB sectors) — files smaller than this still
+///   consume one full slab (120 MiB on-network: 30 shards × 4 MiB each due
+///   to erasure coding).
 ///
 /// - **`uploadStreaming()`** — returns a `StreamingUpload` handle. Push data
 ///   incrementally with `pushChunk()`, then call `finish()`. The SDK begins
 ///   uploading as chunks arrive — the full file never needs to be in memory
 ///   at once. Required for large files.
 ///
-/// Both return an unpinned `PinnedObject` — call `pinObject()` afterward to
-/// persist it on the indexer.
+/// - **`uploadPacked()`** — returns a `PackedUpload` handle for efficiently
+///   uploading multiple small objects together. Call `add(data)` for each
+///   object, then `finalize()` to get the resulting `PinnedObject` handles.
+///   Objects are packed into shared slabs so a 1 KiB file doesn't waste an
+///   entire 120 MiB slab.
+///
+/// `upload()` and `uploadStreaming()` return a single `PinnedObject`.
+/// `uploadPacked().finalize()` returns an array of `PinnedObject` handles.
+/// All must be pinned with `pinObject()` afterward to persist on the indexer.
 ///
 /// # Downloading
 ///
@@ -82,12 +93,10 @@ impl Sdk {
     /// Returns a list of usable hosts, optionally filtered by a HostQuery.
     pub async fn hosts(&self, query: Option<HostQuery>) -> Result<JsValue, JsValue> {
         let sdk = self.0.clone();
-        let q = query
-            .map(|q| q.to_inner())
-            .unwrap_or(StorageHostQuery {
-                protocol: Some(Protocol::QUIC),
-                ..Default::default()
-            });
+        let q = query.map(|q| q.to_inner()).unwrap_or(StorageHostQuery {
+            protocol: Some(Protocol::QUIC),
+            ..Default::default()
+        });
         let hosts = sdk.hosts(q).await.map_err(to_js_err)?;
         let list: Vec<HostInfo> = hosts
             .into_iter()
@@ -122,8 +131,7 @@ impl Sdk {
                 let secs = (after_ms / 1000.0) as i64;
                 let nanos = ((after_ms % 1000.0) * 1_000_000.0) as u32;
                 Some(ObjectsCursor {
-                    after: chrono::DateTime::from_timestamp(secs, nanos)
-                        .unwrap_or_default(),
+                    after: chrono::DateTime::from_timestamp(secs, nanos).unwrap_or_default(),
                     id: Hash256::from_str(&id).map_err(to_js_err)?,
                 })
             }
@@ -232,6 +240,16 @@ impl Sdk {
         StreamingUpload::new(writer, reader, self.0.clone(), opts)
     }
 
+    /// Starts a packed upload for efficiently uploading multiple small objects.
+    /// Objects smaller than the slab size (~40 MiB) are packed into shared slabs
+    /// to avoid wasting storage. Call `add(data)` for each object, then
+    /// `finalize()` to get the resulting `PinnedObject` handles.
+    #[wasm_bindgen(js_name = "uploadPacked")]
+    pub fn upload_packed(&self, options: Option<UploadOptions>) -> PackedUpload {
+        let opts = options.map(|o| o.to_inner()).unwrap_or_default();
+        PackedUpload::new(self.0.upload_packed(opts))
+    }
+
     /// Starts a streaming download. Returns a `StreamingDownload` handle.
     /// Call `readChunk()` in a loop until it returns `null`.
     #[wasm_bindgen(js_name = "downloadStreaming")]
@@ -254,6 +272,36 @@ impl Sdk {
         });
 
         StreamingDownload::new(reader, download_promise)
+    }
+
+    /// Generates a signed share URL for an object. Anyone with the URL can
+    /// download and decrypt the object until `valid_until_ms` (milliseconds
+    /// since epoch, i.e. `Date.getTime()`).
+    #[wasm_bindgen(js_name = "shareObject")]
+    pub fn share_object(
+        &self,
+        object: &PinnedObject,
+        valid_until_ms: f64,
+    ) -> Result<String, JsValue> {
+        let secs = (valid_until_ms / 1000.0) as i64;
+        let nanos = ((valid_until_ms % 1000.0) * 1_000_000.0) as u32;
+        let valid_until = chrono::DateTime::from_timestamp(secs, nanos).unwrap_or_default();
+        let url = self
+            .0
+            .share_object(&object.0, valid_until)
+            .map_err(to_js_err)?;
+        Ok(url.to_string())
+    }
+
+    /// Resolves a share URL (sia://...) and returns the shared object.
+    /// The encryption key is extracted from the URL fragment (never sent
+    /// to the indexer).
+    #[wasm_bindgen(js_name = "sharedObject")]
+    pub async fn shared_object(&self, share_url: &str) -> Result<PinnedObject, JsValue> {
+        let sdk = self.0.clone();
+        let url = share_url.to_string();
+        let obj = sdk.shared_object(url).await.map_err(to_js_err)?;
+        Ok(PinnedObject(obj))
     }
 
     /// Prunes unused slabs from the indexer.

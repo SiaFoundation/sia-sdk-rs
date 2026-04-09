@@ -2,6 +2,7 @@ mod app_key;
 mod builder;
 mod helpers;
 mod object;
+mod packed;
 mod sdk;
 mod streaming;
 mod types;
