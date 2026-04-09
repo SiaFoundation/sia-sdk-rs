@@ -14,7 +14,7 @@ use crate::sdk::OnShardProgressCallback;
 
 type UploadResult = Rc<RefCell<Option<Result<Object, String>>>>;
 
-/// A streaming upload handle. Push data incrementally with `pushChunk()`,
+/// An upload handle. Push data with `pushChunk()`,
 /// then call `finish()` to complete the upload and get the `PinnedObject`.
 ///
 /// This avoids loading the entire file into WASM linear memory at once.

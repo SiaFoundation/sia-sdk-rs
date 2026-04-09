@@ -129,7 +129,7 @@ impl SdkBuilder {
         }
     }
 
-    /// Completes registration and returns a StorageSdk instance.
+    /// Completes registration and returns a Sdk instance.
     pub async fn register(&self, mnemonic: &str) -> Result<Sdk, JsValue> {
         let state = self.state.borrow_mut().take();
         match state {
