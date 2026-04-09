@@ -75,8 +75,7 @@ impl PinnedObject {
     /// seal() (or parsed from JSON). Returns a PinnedObject handle that
     /// can be pinned to this or another indexer.
     pub fn open(app_key: &AppKey, sealed: JsValue) -> Result<PinnedObject, JsValue> {
-        let sealed: SealedObject =
-            serde_wasm_bindgen::from_value(sealed).map_err(to_js_err)?;
+        let sealed: SealedObject = serde_wasm_bindgen::from_value(sealed).map_err(to_js_err)?;
         let obj = sealed.open(&app_key.0).map_err(to_js_err)?;
         Ok(PinnedObject(obj))
     }

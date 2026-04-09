@@ -62,9 +62,8 @@ pub(crate) fn make_app_metadata(
     if id_bytes.len() != 32 {
         return Err(JsValue::from_str("app ID must be 32 bytes (64 hex chars)"));
     }
-    let app_id = Hash256::from(
-        <[u8; 32]>::try_from(id_bytes).expect("length validated as 32 above"),
-    );
+    let app_id =
+        Hash256::from(<[u8; 32]>::try_from(id_bytes).expect("length validated as 32 above"));
 
     CACHED_META.with(|cell| {
         let mut cache = cell.borrow_mut();
@@ -227,9 +226,7 @@ impl Slab {
 
 impl From<&sia_storage::Slab> for Slab {
     fn from(s: &sia_storage::Slab) -> Self {
-        Self {
-            inner: s.clone(),
-        }
+        Self { inner: s.clone() }
     }
 }
 
@@ -241,4 +238,3 @@ pub struct ObjectEvent {
     #[wasm_bindgen(js_name = "updatedAt")]
     pub updated_at: f64,
 }
-
