@@ -10,6 +10,7 @@ use wasm_bindgen_futures::{JsFuture, future_to_promise};
 
 use crate::helpers::{run_local, to_js_err};
 use crate::object::PinnedObject;
+use crate::sdk::OnShardProgressCallback;
 
 type UploadResult = Rc<RefCell<Option<Result<Object, String>>>>;
 
@@ -106,7 +107,7 @@ impl StreamingUpload {
     /// The callback receives `(shardsUploaded: number)` each time a shard
     /// finishes uploading.
     #[wasm_bindgen(js_name = "setOnProgress")]
-    pub fn set_on_progress(&self, callback: crate::sdk::OnShardProgressCallback) {
+    pub fn set_on_progress(&self, callback: OnShardProgressCallback) {
         let func: js_sys::Function = callback.unchecked_into();
         *self.on_progress.borrow_mut() = Some(func);
     }
