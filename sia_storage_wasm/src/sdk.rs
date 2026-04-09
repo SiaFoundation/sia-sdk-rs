@@ -214,6 +214,7 @@ impl Sdk {
                 id: e.id.to_string(),
                 deleted: e.deleted,
                 updated_at: e.updated_at.timestamp() as f64,
+                size: e.object.as_ref().map(|o| o.size() as f64).unwrap_or(-1.0),
             })
             .collect())
     }
@@ -333,8 +334,7 @@ impl Sdk {
         options: Option<DownloadOptions>,
     ) -> Result<(), JsValue> {
         let sdk = self.0.clone();
-        let obj = object.0.clone();
-        let total = obj.size() as f64;
+        let total = object.0.size() as f64;
         let opts = options.map(|o| o.to_inner()).unwrap_or_default();
 
         let chunk_fn: js_sys::Function = on_chunk.unchecked_into();
@@ -347,7 +347,7 @@ impl Sdk {
             on_progress: progress_fn,
         };
 
-        run_local(sdk.download(&mut writer, &obj, opts))
+        run_local(sdk.download(&mut writer, &object.0, opts))
             .await
             .map_err(to_js_err)?;
         Ok(())

@@ -232,4 +232,6 @@ pub struct ObjectEvent {
     pub deleted: bool,
     #[wasm_bindgen(js_name = "updatedAt")]
     pub updated_at: f64,
+    /// Size in bytes, or -1 if the object was deleted.
+    pub size: f64,
 }

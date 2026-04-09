@@ -69,9 +69,9 @@ impl PinnedObject {
         SealedObject { inner }
     }
 
-    /// Opens a previously sealed object.
-    pub fn open(app_key: &AppKey, sealed: &SealedObject) -> Result<PinnedObject, JsValue> {
-        let obj = sealed.inner.clone().open(&app_key.0).map_err(to_js_err)?;
+    /// Opens a previously sealed object. Consumes the `SealedObject`.
+    pub fn open(app_key: &AppKey, sealed: SealedObject) -> Result<PinnedObject, JsValue> {
+        let obj = sealed.inner.open(&app_key.0).map_err(to_js_err)?;
         Ok(PinnedObject(obj))
     }
 }
