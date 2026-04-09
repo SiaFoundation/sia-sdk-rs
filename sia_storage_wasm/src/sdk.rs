@@ -1,18 +1,21 @@
+use std::pin::Pin;
 use std::rc::Rc;
 use std::str::FromStr;
+use std::task::{Context, Poll};
 
+use js_sys::Uint8Array;
 use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
 use sia_storage::{self, HostQuery as StorageHostQuery, ObjectsCursor, SDK as StorageSdk};
+use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::future_to_promise;
 
 use crate::app_key::AppKey;
 use crate::helpers::*;
 use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
-use crate::streaming::{StreamingDownload, StreamingUpload};
+use crate::streaming::StreamingUpload;
 use crate::types::{DownloadOptions, HostQuery, UploadOptions};
 
 /// The main Sia storage SDK. Provides methods for uploading, downloading,
@@ -51,12 +54,52 @@ use crate::types::{DownloadOptions, HostQuery, UploadOptions};
 /// - **`download(object)`** — returns the entire file as a `Uint8Array`.
 ///   Simple, but the full file must fit in WASM memory. Best for small files.
 ///
-/// - **`downloadStreaming(object)`** — returns a `StreamingDownload` handle.
-///   Call `readChunk()` in a loop until it returns `null`. Each chunk is up
-///   to 256 KiB of decoded data. Use for large files, video playback, or
-///   writing directly to disk via the File System Access API.
+/// - **`downloadStreaming(object, onChunk, onProgress?, options?)`** — calls
+///   `onChunk(chunk: Uint8Array)` with each decoded chunk as it arrives.
+///   The optional `onProgress(bytesDownloaded, totalBytes)` callback reports
+///   progress. Use for large files, video playback, or writing directly to
+///   disk via the File System Access API.
 ///
 /// Both require a `PinnedObject` handle from `object()` or `upload()`.
+
+/// An AsyncWrite adapter that calls a JS callback with each chunk of decoded
+/// data. Used by `download_streaming` to push bytes to JS as they arrive
+/// without buffering the entire file.
+struct ChunkWriter {
+    callback: js_sys::Function,
+    written: u64,
+    total: f64,
+    on_progress: Option<js_sys::Function>,
+}
+
+impl AsyncWrite for ChunkWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        let array = Uint8Array::from(buf);
+        let _ = self.callback.call1(&JsValue::NULL, &array);
+        self.written += buf.len() as u64;
+        if let Some(ref cb) = self.on_progress {
+            let _ = cb.call2(
+                &JsValue::NULL,
+                &JsValue::from(self.written as f64),
+                &JsValue::from(self.total),
+            );
+        }
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 #[wasm_bindgen]
 pub struct Sdk(Rc<StorageSdk>);
 
@@ -110,11 +153,12 @@ impl Sdk {
     }
 
     /// Retrieves an object from the indexer by its hex ID.
-    pub async fn object(&self, key_hex: &str) -> Result<JsValue, JsValue> {
+    /// Returns a `PinnedObject` handle for use with download, share, seal, etc.
+    pub async fn object(&self, key_hex: &str) -> Result<PinnedObject, JsValue> {
         let key = Hash256::from_str(key_hex).map_err(to_js_err)?;
         let sdk = self.0.clone();
         let obj = sdk.object(&key).await.map_err(to_js_err)?;
-        to_js_value(&object_to_info(&obj))
+        Ok(PinnedObject(obj))
     }
 
     /// Returns object events for syncing local state with the indexer.
@@ -250,28 +294,36 @@ impl Sdk {
         PackedUpload::new(self.0.upload_packed(opts))
     }
 
-    /// Starts a streaming download. Returns a `StreamingDownload` handle.
-    /// Call `readChunk()` in a loop until it returns `null`.
+    /// Downloads an object with streaming chunks via callbacks.
+    ///
+    /// The `on_chunk` callback receives each decoded chunk as a `Uint8Array`
+    /// as it arrives. This avoids buffering the entire file in memory.
+    ///
+    /// The optional `on_progress` callback receives `(bytesDownloaded, totalBytes)`.
     #[wasm_bindgen(js_name = "downloadStreaming")]
-    pub fn download_streaming(
+    pub async fn download_streaming(
         &self,
         object: &PinnedObject,
+        on_chunk: &js_sys::Function,
+        on_progress: Option<js_sys::Function>,
         options: Option<DownloadOptions>,
-    ) -> StreamingDownload {
-        let opts = options.map(|o| o.to_inner()).unwrap_or_default();
-        let (reader, writer) = tokio::io::simplex(1024 * 1024);
+    ) -> Result<(), JsValue> {
         let sdk = self.0.clone();
-        let obj_clone = object.0.clone();
+        let obj = object.0.clone();
+        let total = obj.size() as f64;
+        let opts = options.map(|o| o.to_inner()).unwrap_or_default();
 
-        let download_promise = future_to_promise(async move {
-            let mut writer = writer;
-            run_local(sdk.download(&mut writer, &obj_clone, opts))
-                .await
-                .map_err(to_js_err)?;
-            Ok(JsValue::UNDEFINED)
-        });
+        let mut writer = ChunkWriter {
+            callback: on_chunk.clone(),
+            written: 0,
+            total,
+            on_progress: on_progress.clone(),
+        };
 
-        StreamingDownload::new(reader, download_promise)
+        run_local(sdk.download(&mut writer, &obj, opts))
+            .await
+            .map_err(to_js_err)?;
+        Ok(())
     }
 
     /// Generates a signed share URL for an object. Anyone with the URL can

@@ -69,16 +69,18 @@ impl StreamingUpload {
         };
 
         let promise = future_to_promise(async move {
-            if let Some(cb) = on_progress {
-                tokio::task::spawn_local(async move {
-                    let mut count: u32 = 0;
-                    while rx.recv().await.is_some() {
-                        count += 1;
-                        let _ = cb.call1(&JsValue::NULL, &JsValue::from(count));
-                    }
-                });
-            }
-            match run_local(sdk.upload(reader, opts)).await {
+            match run_local(async {
+                if let Some(cb) = on_progress {
+                    tokio::task::spawn_local(async move {
+                        let mut count: u32 = 0;
+                        while rx.recv().await.is_some() {
+                            count += 1;
+                            let _ = cb.call1(&JsValue::NULL, &JsValue::from(count));
+                        }
+                    });
+                }
+                sdk.upload(reader, opts).await
+            }).await {
                 Ok(obj) => {
                     *result.borrow_mut() = Some(Ok(obj));
                     Ok(JsValue::UNDEFINED)
@@ -150,55 +152,5 @@ impl StreamingUpload {
             Ok(obj) => Ok(PinnedObject(obj)),
             Err(e) => Err(JsValue::from_str(&e)),
         }
-    }
-}
-
-/// A streaming download handle. Call read_chunk() in a loop to pull
-/// decoded data. Returns null when the download is complete.
-///
-/// This avoids buffering the entire file in WASM linear memory.
-/// The SDK writes decoded chunks into an internal pipe as they're
-/// recovered from hosts.
-#[wasm_bindgen]
-pub struct StreamingDownload {
-    reader: RefCell<Option<ReadHalf<SimplexStream>>>,
-    _download_promise: js_sys::Promise,
-}
-
-impl StreamingDownload {
-    pub(crate) fn new(
-        reader: ReadHalf<SimplexStream>,
-        download_promise: js_sys::Promise,
-    ) -> Self {
-        Self {
-            reader: RefCell::new(Some(reader)),
-            _download_promise: download_promise,
-        }
-    }
-}
-
-#[wasm_bindgen]
-impl StreamingDownload {
-    /// Read the next chunk of decoded data. Returns a Uint8Array, or
-    /// null if the download is complete.
-    #[wasm_bindgen(js_name = "readChunk")]
-    pub async fn read_chunk(&self) -> Result<JsValue, JsValue> {
-        use tokio::io::AsyncReadExt;
-        let mut reader_opt = self.reader.borrow_mut();
-        let reader = match reader_opt.as_mut() {
-            Some(r) => r,
-            None => return Ok(JsValue::NULL),
-        };
-
-        // Read up to 256 KiB per call — matches the SDK's internal chunk size.
-        let mut buf = vec![0u8; 256 * 1024];
-        let n = reader.read(&mut buf).await.map_err(to_js_err)?;
-        if n == 0 {
-            // EOF — download complete.
-            reader_opt.take();
-            return Ok(JsValue::NULL);
-        }
-        buf.truncate(n);
-        Ok(js_sys::Uint8Array::from(&buf[..]).into())
     }
 }
