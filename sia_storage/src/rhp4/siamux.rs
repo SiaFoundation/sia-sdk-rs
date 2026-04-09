@@ -14,10 +14,10 @@ use crate::rhp4::HostEndpoint;
 use crate::time::Duration;
 
 use super::{Error as TransportError, Transport};
-use sia_core::rhp4::protocol::{RPCReadSector, RPCSettings, RPCWriteSector};
+use sia_core::rhp4::protocol::{RPCAccountBalance, RPCReadSector, RPCSettings, RPCWriteSector};
 use sia_core::rhp4::{AccountToken, HostPrices};
 use sia_core::signing::{PrivateKey, PublicKey};
-use sia_core::types::Hash256;
+use sia_core::types::{Currency, Hash256};
 use sia_core::types::v2::Protocol;
 use sia_mux::{Mux, Stream};
 
@@ -192,5 +192,21 @@ impl Transport for Client {
             .complete(&mut stream)
             .await?;
         Ok(resp.data)
+    }
+
+    async fn account_balance(
+        &self,
+        host: &HostEndpoint,
+        account_key: &PrivateKey,
+    ) -> Result<Currency, TransportError> {
+        let mut stream = self
+            .host_stream(host)
+            .await
+            .map_err(|e| TransportError::Transport(e.to_string()))?;
+        let resp = RPCAccountBalance::send_request(&mut stream, account_key.public_key())
+            .await?
+            .complete(&mut stream)
+            .await?;
+        Ok(resp.balance)
     }
 }

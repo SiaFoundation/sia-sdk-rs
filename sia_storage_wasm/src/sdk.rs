@@ -164,6 +164,16 @@ impl Sdk {
             .collect())
     }
 
+    /// Queries a host for the account's remaining balance.
+    /// Returns the balance as a string in hastings (1 SC = 10^24 hastings).
+    #[wasm_bindgen(js_name = "hostAccountBalance")]
+    pub async fn host_account_balance(&self, host_key: &str) -> Result<String, JsValue> {
+        let pk = sia_core::signing::PublicKey::from_str(host_key).map_err(to_js_err)?;
+        let sdk = self.0.clone();
+        let balance = sdk.host_account_balance(pk).await.map_err(to_js_err)?;
+        Ok(balance.to_string())
+    }
+
     /// Retrieves an object from the indexer by its hex ID.
     /// Returns a `PinnedObject` handle for use with download, share, seal, etc.
     pub async fn object(&self, key_hex: &str) -> Result<PinnedObject, JsValue> {

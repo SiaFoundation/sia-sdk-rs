@@ -18,10 +18,10 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use js_sys::Uint8Array;
 use log::debug;
-use sia_core::rhp4::protocol::{RPCReadSector, RPCSettings, RPCWriteSector};
+use sia_core::rhp4::protocol::{RPCAccountBalance, RPCReadSector, RPCSettings, RPCWriteSector};
 use sia_core::rhp4::{AccountToken, HostPrices};
 use sia_core::signing::{PrivateKey, PublicKey};
-use sia_core::types::Hash256;
+use sia_core::types::{Currency, Hash256};
 use sia_core::types::v2::Protocol;
 use tokio::io::{AsyncRead, ReadBuf};
 use wasm_bindgen::prelude::*;
@@ -316,6 +316,29 @@ impl Transport for Client {
             stream.write_all_async(&buf).await?;
             let resp = req.complete(&mut stream).await?;
             Ok(resp.data)
+        }
+        .await;
+        if let Err(e) = &result
+            && Self::should_evict(e)
+        {
+            self.evict(&host.public_key);
+        }
+        result
+    }
+
+    async fn account_balance(
+        &self,
+        host: &HostEndpoint,
+        account_key: &PrivateKey,
+    ) -> Result<Currency, Error> {
+        let conn = self.connection(host).await?;
+        let result: Result<Currency, Error> = async {
+            let mut stream = conn.open_stream().await?;
+            let mut buf = Vec::new();
+            let req = RPCAccountBalance::send_request(&mut buf, account_key.public_key()).await?;
+            stream.write_all_async(&buf).await?;
+            let resp = req.complete(&mut stream).await?;
+            Ok(resp.balance)
         }
         .await;
         if let Err(e) = &result

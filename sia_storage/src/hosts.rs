@@ -8,7 +8,7 @@ use priority_queue::PriorityQueue;
 use serde::{Deserialize, Serialize};
 use sia_core::rhp4::HostPrices;
 use sia_core::signing::{PrivateKey, PublicKey};
-use sia_core::types::Hash256;
+use sia_core::types::{Currency, Hash256};
 use sia_core::types::v2::NetAddress;
 use std::sync::Mutex;
 use thiserror::Error;
@@ -572,6 +572,18 @@ impl<T: Transport> Hosts<T> {
             self.hosts.add_read_sample(host_key, start.elapsed());
         })
         .map_err(RPCError::Rhp)
+    }
+
+    /// Queries a host for the account's remaining balance.
+    pub async fn account_balance(
+        &self,
+        host_key: PublicKey,
+        account_key: &PrivateKey,
+    ) -> Result<Currency, RPCError> {
+        let host = self.host_endpoint(host_key)?;
+        Ok(self.transport
+            .account_balance(&host, account_key)
+            .await?)
     }
 }
 

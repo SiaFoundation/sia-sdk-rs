@@ -36,7 +36,7 @@ pub use reqwest::{IntoUrl, Url};
 pub use sia_core::macros::decode_hex_256;
 pub use sia_core::seed::SeedError;
 pub use sia_core::signing::{PrivateKey, PublicKey};
-pub use sia_core::types::Hash256;
+pub use sia_core::types::{Currency, Hash256};
 pub use sia_core::types::v2::Protocol;
 
 pub use app_client::{Account, App, Error as AppApiError, GeoLocation, HostQuery, ObjectsCursor};
@@ -251,6 +251,17 @@ impl SDK {
     pub async fn hosts(&self, query: HostQuery) -> Result<Vec<Host>, Error> {
         self.api_client
             .hosts(&self.app_key, query)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
+    /// Queries a host for the account's remaining balance.
+    pub async fn host_account_balance(
+        &self,
+        host_key: PublicKey,
+    ) -> Result<Currency, Error> {
+        self.hosts
+            .account_balance(host_key, &self.app_key)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }

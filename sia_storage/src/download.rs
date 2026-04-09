@@ -514,6 +514,14 @@ mod test {
             let sector = sectors.get(&root).expect("sector not found").clone();
             Ok(Bytes::copy_from_slice(&sector[offset..offset + length]))
         }
+
+        async fn account_balance(
+            &self,
+            _: &HostEndpoint,
+            _: &PrivateKey,
+        ) -> Result<Currency, rhp4::Error> {
+            Ok(Currency::zero())
+        }
     }
 
     cross_target_tests! {
