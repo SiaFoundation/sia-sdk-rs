@@ -46,11 +46,11 @@ pub struct DownloadOptions {
 #[wasm_bindgen]
 impl DownloadOptions {
     /// Creates download options with the given parameters.
-    /// Defaults: max_inflight=80, offset=0, length=None (full object).
+    /// Defaults: max_inflight=16, offset=0, length=None (full object).
     #[wasm_bindgen(constructor)]
     pub fn new(max_inflight: Option<u32>, offset: Option<f64>, length: Option<f64>) -> Self {
         Self {
-            max_inflight: max_inflight.unwrap_or(80) as usize,
+            max_inflight: max_inflight.unwrap_or(16) as usize,
             offset: offset.unwrap_or(0.0) as u64,
             length: length.map(|l| l as u64),
         }

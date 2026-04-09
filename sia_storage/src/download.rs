@@ -79,7 +79,7 @@ pub struct DownloadOptions {
 impl Default for DownloadOptions {
     fn default() -> Self {
         Self {
-            max_inflight: 80, // ~20 MiB in memory
+            max_inflight: 16,
             offset: 0,
             length: None,
         }

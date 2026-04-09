@@ -2,7 +2,7 @@ use sia_storage::SealedObject;
 use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
-use crate::helpers::{to_js_err, to_js_value};
+use crate::helpers::{Slab, to_js_err, to_js_value};
 
 /// An object stored on the Sia network. JS holds this as an opaque handle
 /// and passes it back to Rust for operations like pin, download, share, and
@@ -50,6 +50,17 @@ impl PinnedObject {
     #[wasm_bindgen(js_name = "updatedAt")]
     pub fn updated_at(&self) -> f64 {
         self.0.updated_at().timestamp() as f64
+    }
+
+    /// Returns the number of slabs in the object.
+    #[wasm_bindgen(js_name = "slabCount")]
+    pub fn slab_count(&self) -> u32 {
+        self.0.slabs().len() as u32
+    }
+
+    /// Returns the slabs that make up the object.
+    pub fn slabs(&self) -> Vec<Slab> {
+        self.0.slabs().iter().map(Slab::from).collect()
     }
 
     /// Seals the object for offline storage or migration.
