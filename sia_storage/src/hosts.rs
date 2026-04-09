@@ -3,7 +3,7 @@ use std::fmt::{Debug, Display};
 use std::sync::{Arc, RwLock};
 
 use chrono::Utc;
-use log::debug;
+use log::{debug, info};
 use priority_queue::PriorityQueue;
 use serde::{Deserialize, Serialize};
 use sia_core::rhp4::HostPrices;
@@ -13,7 +13,7 @@ use sia_core::types::v2::NetAddress;
 use std::sync::Mutex;
 use thiserror::Error;
 use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
+use crate::task::TaskSet;
 
 use crate::rhp4::{HostEndpoint, Transport};
 use crate::time::{Duration, Elapsed, Instant, timeout};
@@ -386,6 +386,24 @@ impl<T: Transport> Hosts<T> {
         }
     }
 
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
+    pub fn upload_hosts(&self) -> Vec<HostEndpoint> {
+        self.hosts
+            .hosts
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, h)| h.good_for_upload)
+            .map(|(pk, h)| HostEndpoint {
+                public_key: *pk,
+                addresses: h.addresses.clone(),
+            })
+            .collect()
+    }
+
     fn host_endpoint(&self, host_key: PublicKey) -> Result<HostEndpoint, RPCError> {
         let addresses = self.hosts.addresses(&host_key);
         match addresses {
@@ -436,7 +454,8 @@ impl<T: Transport> Hosts<T> {
     pub async fn warm_connections(&self, hosts: Vec<HostEndpoint>) {
         let hosts_len = hosts.len();
         let mut warmed_conns: usize = 0;
-        let mut inflight_scans = JoinSet::new();
+        let warm_start = Instant::now();
+        let mut inflight_scans = TaskSet::new();
         let sema = Arc::new(Semaphore::new(15));
         for host in hosts {
             let transport = self.transport.clone();
@@ -444,7 +463,7 @@ impl<T: Transport> Hosts<T> {
             let hosts = self.hosts.clone();
 
             let sema = sema.clone();
-            join_set_spawn!(inflight_scans, async move {
+            task_set_spawn!(inflight_scans, async move {
                 let _permit = sema.acquire().await.unwrap();
                 let start = Instant::now();
 
@@ -478,7 +497,10 @@ impl<T: Transport> Hosts<T> {
                 warmed_conns += 1;
             }
         }
-        debug!("warmed {warmed_conns}/{hosts_len} connections");
+        info!(
+            "warmed {warmed_conns}/{hosts_len} connections in {:?}",
+            warm_start.elapsed()
+        );
     }
 
     async fn fetch_prices(
@@ -516,28 +538,43 @@ impl<T: Transport> Hosts<T> {
         write_timeout: Duration,
     ) -> Result<Hash256, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        let (prices, _) = Self::fetch_prices(
-            self.transport.clone(),
-            &self.price_cache,
-            &self.hosts,
-            &host,
-            Duration::from_secs(1),
-            false,
-        )
-        .await?;
-        let start = Instant::now();
-        timeout(
-            write_timeout,
-            self.transport
-                .write_sector(&host, prices, account_key, sector),
-        )
-        .await
-        .inspect_err(|_| self.hosts.add_failure(host_key))?
-        .inspect_err(|_| self.hosts.add_failure(host_key))
-        .inspect(|_| {
-            self.hosts.add_write_sample(host_key, start.elapsed());
-        })
-        .map_err(RPCError::Rhp)
+        for retry in 0..2u8 {
+            let (prices, _) = Self::fetch_prices(
+                self.transport.clone(),
+                &self.price_cache,
+                &self.hosts,
+                &host,
+                Duration::from_secs(1),
+                retry > 0,
+            )
+            .await?;
+            let start = Instant::now();
+            match timeout(
+                write_timeout,
+                self.transport
+                    .write_sector(&host, prices, account_key, sector.clone()),
+            )
+            .await
+            {
+                Ok(Ok(root)) => {
+                    self.hosts.add_write_sample(host_key, start.elapsed());
+                    return Ok(root);
+                }
+                Ok(Err(e)) => {
+                    self.hosts.add_failure(host_key);
+                    if retry == 0 {
+                        debug!("write_sector {host_key}: retrying after stale connection: {e}");
+                        continue;
+                    }
+                    return Err(RPCError::Rhp(e));
+                }
+                Err(e) => {
+                    self.hosts.add_failure(host_key);
+                    return Err(e.into());
+                }
+            }
+        }
+        unreachable!()
     }
 
     pub async fn read_sector(
@@ -550,28 +587,43 @@ impl<T: Transport> Hosts<T> {
         read_timeout: Duration,
     ) -> Result<bytes::Bytes, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        let (prices, _) = Self::fetch_prices(
-            self.transport.clone(),
-            &self.price_cache,
-            &self.hosts,
-            &host,
-            Duration::from_secs(1),
-            false,
-        )
-        .await?;
-        let start = Instant::now();
-        timeout(
-            read_timeout,
-            self.transport
-                .read_sector(&host, prices, account_key, root, offset, length),
-        )
-        .await
-        .inspect_err(|_| self.hosts.add_failure(host_key))?
-        .inspect_err(|_| self.hosts.add_failure(host_key))
-        .inspect(|_| {
-            self.hosts.add_read_sample(host_key, start.elapsed());
-        })
-        .map_err(RPCError::Rhp)
+        for retry in 0..2u8 {
+            let (prices, _) = Self::fetch_prices(
+                self.transport.clone(),
+                &self.price_cache,
+                &self.hosts,
+                &host,
+                Duration::from_secs(1),
+                retry > 0,
+            )
+            .await?;
+            let start = Instant::now();
+            match timeout(
+                read_timeout,
+                self.transport
+                    .read_sector(&host, prices, account_key, root, offset, length),
+            )
+            .await
+            {
+                Ok(Ok(data)) => {
+                    self.hosts.add_read_sample(host_key, start.elapsed());
+                    return Ok(data);
+                }
+                Ok(Err(e)) => {
+                    self.hosts.add_failure(host_key);
+                    if retry == 0 {
+                        debug!("read_sector {host_key}: retrying after stale connection: {e}");
+                        continue;
+                    }
+                    return Err(RPCError::Rhp(e));
+                }
+                Err(e) => {
+                    self.hosts.add_failure(host_key);
+                    return Err(e.into());
+                }
+            }
+        }
+        unreachable!()
     }
 
     /// Queries a host for the account's remaining balance.

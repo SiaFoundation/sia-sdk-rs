@@ -15,7 +15,7 @@ use sia_core::signing::PrivateKey;
 use thiserror::Error;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
+use crate::task::{TaskError, TaskSet};
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
@@ -38,7 +38,7 @@ pub enum DownloadError {
     SemaphoreError(#[from] tokio::sync::AcquireError),
 
     #[error("join error: {0}")]
-    JoinError(#[from] tokio::task::JoinError),
+    JoinError(#[from] TaskError),
 
     #[error("invalid slab: {0}")]
     InvalidSlab(String),
@@ -163,7 +163,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
     }
 
     async fn recover_shards(self) -> Result<SlabRecovery<ShardsRecovered, T>, DownloadError> {
-        let mut shard_tasks = JoinSet::new();
+        let mut shard_tasks = TaskSet::new();
         let mut shards = vec![None; self.state.sectors.len()];
         let mut sectors = VecDeque::from(self.state.sectors);
         let min_shards = self.min_shards;
@@ -182,7 +182,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
             let task = sectors
                 .pop_front()
                 .ok_or(DownloadError::NotEnoughShards(i, self.min_shards))?;
-            join_set_spawn!(
+            task_set_spawn!(
                 &mut shard_tasks,
                 Self::recover_shard(
                     client.clone(),
@@ -221,14 +221,14 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                             if recovered_shards as usize + shard_tasks.len() + sectors.len() < min_shards as usize {
                                 return Err(DownloadError::NotEnoughShards(recovered_shards, min_shards));
                             } else if let Some(task) = sectors.pop_front() {
-                                join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, shard_offset, shard_length));
+                                task_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, shard_offset, shard_length));
                             }
                         }
                     }
                 },
                 _ = sleep(Duration::from_millis(500)), if !sectors.is_empty() => {
                     let task = sectors.pop_front().expect("sectors should not be empty");
-                    join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, shard_offset, shard_length));
+                    task_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, shard_offset, shard_length));
                 },
             }
         }
@@ -377,8 +377,8 @@ pub(crate) async fn download_object<W: AsyncWrite + Unpin, T: Transport>(
     }
 
     let semaphore = Arc::new(Semaphore::new(options.max_inflight));
-    let mut chunk_tasks: JoinSet<Result<(usize, SlabRecovery<_, T>), DownloadError>> =
-        JoinSet::new();
+    let mut chunk_tasks: TaskSet<Result<(usize, SlabRecovery<_, T>), DownloadError>> =
+        TaskSet::new();
     let mut completed_chunks: BTreeMap<usize, SlabRecovery<_, T>> = BTreeMap::new();
     let mut next_write_chunk = chunks.peek().map(|(index, _)| *index).unwrap_or_default(); // the next chunk index to write to the output
     loop {
@@ -402,7 +402,7 @@ pub(crate) async fn download_object<W: AsyncWrite + Unpin, T: Transport>(
 
                 let hosts = hosts.clone();
                 let account_key = account_key.clone();
-                join_set_spawn!(chunk_tasks, async move {
+                task_set_spawn!(chunk_tasks, async move {
                     let _permit = permit; // hold the permit for the duration of the task
                     let start = Instant::now();
                     let result = async {

@@ -171,7 +171,26 @@ impl SDK {
             total_hosts,
             good_for_upload.len()
         );
-        let _ = self.hosts.warm_connections(good_for_upload).await;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = self.hosts.warm_connections(good_for_upload).await;
+        }
+        Ok(())
+    }
+
+    /// Warms connections to upload-capable hosts by prefetching prices.
+    /// On WASM, this is not called automatically during SDK creation
+    /// (to avoid wasting WebTransport sessions in workers). Call this
+    /// explicitly from the main thread SDK after creation.
+    pub async fn warm_connections(&self) -> Result<(), AppApiError> {
+        let hosts: Vec<HostEndpoint> = self
+            .hosts
+            .upload_hosts()
+            .into_iter()
+            .take(60)
+            .collect();
+        self.hosts.warm_connections(hosts).await;
+        self.hosts.transport().clear_pool();
         Ok(())
     }
 

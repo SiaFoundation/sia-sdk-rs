@@ -1,0 +1,56 @@
+name: Deploy WASM Example
+
+on:
+  push:
+    branches: [matt/wasm-bindings-pr, matt/sialo-port]
+    paths:
+      - 'sia_storage_wasm/**'
+      - 'sia_storage/src/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM
+        run: |
+          cd sia_storage_wasm
+          RUSTFLAGS='--cfg=web_sys_unstable_apis' wasm-pack build --release --target web
+
+      - name: Prepare Pages artifact
+        run: |
+          cp sia_storage_wasm/pkg/sia_storage_wasm_bg.wasm sia_storage_wasm/example/pkg/
+          cp sia_storage_wasm/pkg/sia_storage_wasm.js sia_storage_wasm/example/pkg/
+          cp sia_storage_wasm/pkg/sia_storage_wasm.d.ts sia_storage_wasm/example/pkg/
+          cp sia_storage_wasm/pkg/sia_storage_wasm_bg.wasm.d.ts sia_storage_wasm/example/pkg/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: sia_storage_wasm/example
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

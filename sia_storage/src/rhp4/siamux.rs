@@ -66,6 +66,10 @@ impl Client {
         }
     }
 
+    pub fn clear_pool(&self) {
+        self.open_conns.write().unwrap().clear();
+    }
+
     fn existing_conn(&self, host: &PublicKey) -> Option<Arc<Mux>> {
         let cache = self.open_conns.read().unwrap();
         cache.get(host).cloned()

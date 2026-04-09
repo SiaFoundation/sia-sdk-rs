@@ -6,18 +6,6 @@ pub(crate) fn to_js_err(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
 }
 
-/// Run an async block with a tokio runtime + LocalSet. wasm_bindgen async
-/// exports run on the JS microtask queue with no tokio runtime in scope,
-/// but the SDK uses tokio primitives (JoinSet::spawn_local, select!, etc.)
-/// that require one.
-pub(crate) async fn run_local<F: std::future::Future>(f: F) -> F::Output {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("failed to create tokio runtime");
-    let _guard = rt.enter();
-    tokio::task::LocalSet::new().run_until(f).await
-}
-
 /// Cached leaked strings for app metadata. Set once on first call;
 /// reused on subsequent calls so we never leak more than one set of strings.
 struct CachedMeta {

@@ -11,7 +11,6 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{JsFuture, future_to_promise};
 
-use crate::helpers::run_local;
 use crate::object::PinnedObject;
 use crate::sdk::OnShardProgressCallback;
 
@@ -135,19 +134,16 @@ impl Upload {
         };
 
         let promise = future_to_promise(async move {
-            match run_local(async {
-                if let Some(cb) = on_progress {
-                    tokio::task::spawn_local(async move {
-                        let mut count: u32 = 0;
-                        while shard_rx.recv().await.is_some() {
-                            count += 1;
-                            let _ = cb.call1(&JsValue::NULL, &JsValue::from(count));
-                        }
-                    });
-                }
-                sdk.upload(reader, opts).await
-            })
-            .await
+            if let Some(cb) = on_progress {
+                wasm_bindgen_futures::spawn_local(async move {
+                    let mut count: u32 = 0;
+                    while shard_rx.recv().await.is_some() {
+                        count += 1;
+                        let _ = cb.call1(&JsValue::NULL, &JsValue::from(count));
+                    }
+                });
+            }
+            match sdk.upload(reader, opts).await
             {
                 Ok(obj) => {
                     *result.borrow_mut() = Some(Ok(obj));

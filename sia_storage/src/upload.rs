@@ -10,7 +10,7 @@ use tokio::io::{
     AsyncBufRead, AsyncRead, AsyncWriteExt, BufReader, SimplexStream, WriteHalf, copy, simplex,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio::task::JoinSet;
+use crate::task::{TaskError, TaskSet};
 
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder};
@@ -32,7 +32,7 @@ struct ShardUpload<T: Transport> {
 impl<T: Transport> ShardUpload<T> {
     fn spawn_write(
         &self,
-        tasks: &mut JoinSet<Result<Sector, UploadError>>,
+        tasks: &mut TaskSet<Result<Sector, UploadError>>,
         host_key: PublicKey,
         write_timeout: Duration,
         permit: OwnedSemaphorePermit,
@@ -43,7 +43,7 @@ impl<T: Transport> ShardUpload<T> {
         let data = self.data.clone();
         let slab_index = self.slab_index;
         let shard_index = self.shard_index;
-        join_set_spawn!(tasks, async move {
+        task_set_spawn!(tasks, async move {
             let _permit = permit;
             let now = Instant::now();
             let root = client.write_sector(host_key, &account_key, data, write_timeout).await
@@ -91,8 +91,8 @@ pub enum UploadError {
     #[error("semaphore error: {0}")]
     SemaphoreError(#[from] tokio::sync::AcquireError),
 
-    #[error("join error: {0}")]
-    JoinError(#[from] tokio::task::JoinError),
+    #[error("task error: {0}")]
+    TaskError(#[from] TaskError),
 
     #[error("api error: {0}")]
     ApiError(#[from] crate::app_client::Error),
@@ -183,7 +183,7 @@ impl PackedUpload {
 
     /// Cancels the upload.
     pub fn cancel(self) {
-        self.upload_handle.abort();
+        drop(self.upload_handle);
     }
 
     /// Finalizes the upload and returns the resulting objects. This will wait for all readers
@@ -261,7 +261,7 @@ impl<T: Transport> Uploader<T> {
         let (host_key, attempts) = initial_host;
         let write_timeout = Self::upload_timeout(attempts);
         let semaphore = permit.semaphore().clone();
-        let mut tasks = JoinSet::new();
+        let mut tasks = TaskSet::new();
         shard.spawn_write(&mut tasks, host_key, write_timeout, permit);
         loop {
             let active = tasks.len();
@@ -341,11 +341,10 @@ impl<T: Transport> Uploader<T> {
 
         // use a buffered reader since the erasure coder reads 64 bytes at a time.
         let mut r = BufReader::new(r);
-        let mut slab_upload_tasks = JoinSet::new();
+        let mut slab_upload_tasks = TaskSet::new();
         let rs = Arc::new(ErasureCoder::new(data_shards, parity_shards).unwrap());
         let mut slab_index: usize = 0;
         loop {
-            let slab_permit = slab_sema.clone().acquire_owned().await?;
             let mut shards = vec![BytesMut::zeroed(SECTOR_SIZE); total_shards];
             let length =
                 ErasureCoder::read_slab_shards(&mut r, options.data_shards as usize, &mut shards)
@@ -359,9 +358,10 @@ impl<T: Transport> Uploader<T> {
             let progress_tx = options.shard_uploaded.clone();
             let rs = rs.clone();
             let shard_sema = shard_sema.clone();
+            let slab_sema = slab_sema.clone();
 
-            join_set_spawn!(slab_upload_tasks, async move {
-                let _slab_guard = slab_permit;
+            task_set_spawn!(slab_upload_tasks, async move {
+                let _slab_guard = slab_sema.acquire_owned().await?;
 
                 // note: it may seem like a good idea to start uploading the data shards
                 // while the parity shards are being calculated, but this also forces
@@ -383,17 +383,22 @@ impl<T: Transport> Uploader<T> {
                 let reserved_hosts = host_queue.pop_n(shards.len())?;
                 let owned_slab_key = Arc::new(slab_key.clone());
                 let start_time = Instant::now();
-                let mut shard_upload_tasks = JoinSet::new();
+                let mut shard_upload_tasks = TaskSet::new();
                 for (shard_index, mut shard) in shards.into_iter().enumerate() {
                     let app_key = app_key.clone();
                     let owned_slab_key = owned_slab_key.clone();
-                    let permit = shard_sema.clone().acquire_owned().await?;
+                    let shard_sema = shard_sema.clone();
                     let host_queue = host_queue.clone();
                     let progress_tx = progress_tx.clone();
                     let initial_host = reserved_hosts[shard_index];
                     let client = client.clone();
-                    // spawn a task to encrypt and upload each shard for this slab.
-                    join_set_spawn!(shard_upload_tasks, async move {
+                    // Acquire the semaphore inside the spawned future so all tasks
+                    // are in the TaskSet before any blocking. With FuturesUnordered
+                    // (WASM), tasks only run when polled via join_next() — acquiring
+                    // outside would deadlock because completed tasks couldn't release
+                    // permits while the spawn loop is blocked on acquire.
+                    task_set_spawn!(shard_upload_tasks, async move {
+                        let permit = shard_sema.acquire_owned().await?;
                         let shard = maybe_spawn_blocking!({
                             encrypt_shard(&owned_slab_key, shard_index as u8, 0, &mut shard);
                             shard

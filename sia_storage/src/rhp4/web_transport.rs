@@ -76,6 +76,25 @@ impl Connection {
     }
 }
 
+/// Maximum number of connections in the pool. When exceeded, the oldest
+/// connection is evicted (closed) before adding a new one. This prevents
+/// hitting Chrome's 64 pending WebTransport session limit.
+const MAX_POOL_SIZE: usize = 30;
+
+/// Connection timeout in milliseconds. Races `ready()` against a
+/// `setTimeout`-based rejection via `Promise.race`. This works because
+/// `run_local` has been eliminated — the wasm_bindgen executor yields
+/// to the event loop between polls, allowing macrotasks (setTimeout) to fire.
+const CONNECT_TIMEOUT_MS: f64 = 3000.0;
+
+fn clear_timeout(timer_id: &JsValue) {
+    let global = js_sys::global();
+    if let Ok(f) = js_sys::Reflect::get(&global, &"clearTimeout".into()) {
+        let f: js_sys::Function = f.into();
+        let _ = f.call1(&JsValue::NULL, timer_id);
+    }
+}
+
 async fn connect(addr: &str) -> Result<Connection, Error> {
     let url = if addr.starts_with("https://") {
         addr.to_string()
@@ -90,13 +109,43 @@ async fn connect(addr: &str) -> Result<Connection, Error> {
     let wt = web_sys::WebTransport::new_with_options(&url, &options)
         .map_err(|e| Error::Transport(format!("WebTransport constructor: {e:?}")))?;
 
-    let conn = Connection { transport: wt };
-    JsFuture::from(conn.transport.ready())
-        .await
-        .map_err(|e| Error::Transport(format!("WebTransport ready: {e:?}")))?;
-
-    debug!("[WT] connected to {url}");
-    Ok(conn)
+    let ready = wt.ready();
+    let wt_clone = wt.clone();
+    let mut timer_id = JsValue::UNDEFINED;
+    let timeout = js_sys::Promise::new(&mut |_, reject| {
+        let global = js_sys::global();
+        let set_timeout: js_sys::Function =
+            js_sys::Reflect::get(&global, &"setTimeout".into())
+                .unwrap()
+                .into();
+        let wt_inner = wt_clone.clone();
+        let cb = wasm_bindgen::closure::Closure::once_into_js(move || {
+            wt_inner.close();
+            let _ = reject.call1(
+                &JsValue::NULL,
+                &JsValue::from_str("WebTransport connect timeout"),
+            );
+        });
+        timer_id = set_timeout
+            .call2(
+                &JsValue::NULL,
+                &cb,
+                &JsValue::from_f64(CONNECT_TIMEOUT_MS),
+            )
+            .unwrap_or(JsValue::UNDEFINED);
+    });
+    let race = js_sys::Promise::race(&js_sys::Array::of2(&ready, &timeout));
+    match JsFuture::from(race).await {
+        Ok(_) => {
+            clear_timeout(&timer_id);
+            debug!("[WT] connected to {url}");
+            Ok(Connection { transport: wt })
+        }
+        Err(e) => {
+            wt.close();
+            Err(Error::Transport(format!("WebTransport ready: {e:?}")))
+        }
+    }
 }
 
 // --- Stream ---
@@ -179,9 +228,15 @@ impl AsyncRead for Stream {
 
 // --- Client with connection pooling ---
 
+/// Maximum concurrent in-flight WebTransport connections. Caps the number
+/// of pending QUIC handshakes to stay well below Chrome's 64-session limit.
+/// Established connections don't count — only in-flight `connect()` calls.
+const MAX_INFLIGHT_CONNECTIONS: usize = 10;
+
 #[derive(Clone)]
 pub struct Client {
     pool: Rc<RefCell<HashMap<PublicKey, Rc<Connection>>>>,
+    connect_semaphore: Rc<tokio::sync::Semaphore>,
 }
 
 impl Default for Client {
@@ -194,6 +249,7 @@ impl Client {
     pub fn new() -> Self {
         Client {
             pool: Rc::new(RefCell::new(HashMap::new())),
+            connect_semaphore: Rc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_CONNECTIONS)),
         }
     }
 
@@ -205,7 +261,27 @@ impl Client {
             return Ok(conn);
         }
 
-        // Connect to first available QUIC address
+        // Evict oldest connections if pool is at capacity to prevent
+        // hitting Chrome's 64 pending WebTransport session limit.
+        {
+            let mut pool = self.pool.borrow_mut();
+            while pool.len() >= MAX_POOL_SIZE {
+                if let Some(key) = pool.keys().next().copied() {
+                    pool.remove(&key);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Acquire semaphore to limit concurrent in-flight connections.
+        // Held until connect resolves (success or timeout), then released.
+        let _permit = self
+            .connect_semaphore
+            .acquire()
+            .await
+            .map_err(|_| Error::Transport("connection semaphore closed".to_string()))?;
+
         let mut last_err = None;
         for addr in &host.addresses {
             if addr.protocol != Protocol::QUIC {
@@ -234,6 +310,10 @@ impl Client {
 
     fn evict(&self, host_key: &PublicKey) {
         self.pool.borrow_mut().remove(host_key);
+    }
+
+    pub fn clear_pool(&self) {
+        self.pool.borrow_mut().clear();
     }
 
     /// Returns true if the error indicates the connection is broken and

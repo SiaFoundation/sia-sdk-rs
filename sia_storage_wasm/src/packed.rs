@@ -4,7 +4,7 @@ use std::io::Cursor;
 use sia_storage::PackedUpload as CorePackedUpload;
 use wasm_bindgen::prelude::*;
 
-use crate::helpers::{run_local, to_js_err};
+use crate::helpers::to_js_err;
 use crate::object::PinnedObject;
 
 /// A packed upload handle for efficiently uploading multiple small objects
@@ -82,7 +82,7 @@ impl PackedUpload {
             .borrow_mut()
             .take()
             .ok_or_else(|| JsValue::from_str("upload already finalized"))?;
-        let objects = run_local(inner.finalize()).await.map_err(to_js_err)?;
+        let objects = inner.finalize().await.map_err(to_js_err)?;
         Ok(objects.into_iter().map(PinnedObject).collect())
     }
 
