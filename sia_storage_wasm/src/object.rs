@@ -19,14 +19,14 @@ impl PinnedObject {
     }
 
     /// Returns the total size of the object in bytes.
-    pub fn size(&self) -> u64 {
-        self.0.size()
+    pub fn size(&self) -> f64 {
+        self.0.size() as f64
     }
 
     /// Returns the encoded (on-network) size after erasure coding.
     #[wasm_bindgen(js_name = "encodedSize")]
-    pub fn encoded_size(&self) -> u64 {
-        self.0.encoded_size()
+    pub fn encoded_size(&self) -> f64 {
+        self.0.encoded_size() as f64
     }
 
     /// Returns the object's metadata as raw bytes.
