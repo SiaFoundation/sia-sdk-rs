@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -107,6 +107,46 @@ impl AsyncRead for FFIReader {
                 Poll::Ready(Ok(()))
             }
             Err(e) => Poll::Ready(Err(e.into())),
+        }
+    }
+}
+
+impl AsyncBufRead for FFIReader {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+        let this = self.get_mut();
+
+        // return buffered data if available
+        if this.pos < this.buf.len() {
+            return Poll::Ready(Ok(&this.buf[this.pos..]));
+        }
+
+        // start a new read if none is pending
+        if this.pending.is_none() {
+            let reader = this.reader.clone();
+            this.pending = Some(Box::pin(async move { reader.read().await }));
+        }
+
+        // poll the pending read
+        let result = ready!(this.pending.as_mut().unwrap().as_mut().poll(cx));
+        this.pending = None;
+
+        match result {
+            Ok(data) if data.is_empty() => Poll::Ready(Ok(&[])), // EOF
+            Ok(data) => {
+                this.buf = data;
+                this.pos = 0;
+                Poll::Ready(Ok(&this.buf))
+            }
+            Err(e) => Poll::Ready(Err(e.into())),
+        }
+    }
+
+    fn consume(self: Pin<&mut Self>, amt: usize) {
+        let this = self.get_mut();
+        this.pos += amt;
+        if this.pos >= this.buf.len() {
+            this.buf.clear();
+            this.pos = 0;
         }
     }
 }

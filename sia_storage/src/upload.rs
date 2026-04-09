@@ -6,7 +6,9 @@ use log::debug;
 use sia_core::rhp4::{self as rhp, SECTOR_SIZE};
 use sia_core::signing::{PrivateKey, PublicKey};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWriteExt, BufReader, SimplexStream, WriteHalf, copy, simplex};
+use tokio::io::{
+    AsyncBufRead, AsyncRead, AsyncWriteExt, BufReader, SimplexStream, WriteHalf, copy, simplex,
+};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinSet;
 
@@ -471,14 +473,13 @@ impl<T: Transport> Uploader<T> {
     /// # Returns
     /// A new object containing the metadata needed to download the object. The caller
     /// must pin the object to an indexer after uploading.
-    pub async fn upload<R: AsyncRead + Unpin + Send + 'static>(
+    pub async fn upload<R: AsyncBufRead + Unpin + Send + 'static>(
         &self,
         r: R,
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
         let mut object = Object::default();
-        // use a buffered reader since the erasure coder reads 64 bytes at a time.
-        let r = object.reader(BufReader::new(r), 0);
+        let r = object.reader(r, 0);
         let new_slabs =
             Self::upload_slabs(self.hosts.clone(), self.app_key.clone(), r, options).await?;
         let slabs = object.slabs_mut();

@@ -22,7 +22,7 @@ use std::sync::Arc;
 use log::debug;
 use serde::Serialize;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncBufRead, AsyncWrite};
 
 use crate::app_client::SlabPinParams;
 use crate::download::download_object;
@@ -212,7 +212,7 @@ impl SDK {
     /// # Returns
     /// A new object containing the metadata needed to download the object. The object can be sealed and pinned to the
     /// indexer when ready.
-    pub async fn upload<R: AsyncRead + Unpin + Send + 'static>(
+    pub async fn upload<R: AsyncBufRead + Unpin + Send + 'static>(
         &self,
         reader: R,
         options: UploadOptions,

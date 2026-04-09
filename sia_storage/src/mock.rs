@@ -6,7 +6,7 @@ use chrono::Utc;
 use sia_core::rhp4::HostPrices;
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::{Currency, Hash256};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncBufRead, AsyncWrite};
 
 use crate::download::download_object;
 use crate::hosts::Hosts;
@@ -150,7 +150,7 @@ impl MockUploader {
         }
     }
 
-    pub async fn upload<R: AsyncRead + Send + Sync + Unpin + 'static>(
+    pub async fn upload<R: AsyncBufRead + Send + Sync + Unpin + 'static>(
         &self,
         r: R,
         options: UploadOptions,

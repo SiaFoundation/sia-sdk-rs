@@ -305,8 +305,7 @@ impl Sdk {
     /// Push data with `pushChunk()`, then call `finish()` to get the `PinnedObject`.
     pub fn upload(&self, options: Option<UploadOptions>) -> Upload {
         let opts = options.map(|o| o.to_inner()).unwrap_or_default();
-        let (reader, writer) = tokio::io::simplex(1024 * 1024);
-        Upload::new(writer, reader, self.0.clone(), opts)
+        Upload::new(self.0.clone(), opts)
     }
 
     /// Starts a packed upload for efficiently uploading multiple small objects.
