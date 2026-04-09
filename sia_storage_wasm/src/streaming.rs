@@ -24,7 +24,7 @@ type UploadResult = Rc<RefCell<Option<Result<Object, String>>>>;
 /// before the first `pushChunk()` call. It receives `(shardsUploaded)`
 /// each time a shard finishes uploading.
 #[wasm_bindgen]
-pub struct StreamingUpload {
+pub struct Upload {
     writer: RefCell<Option<WriteHalf<SimplexStream>>>,
     reader: RefCell<Option<ReadHalf<SimplexStream>>>,
     pub(crate) sdk: Rc<SDK>,
@@ -34,7 +34,7 @@ pub struct StreamingUpload {
     upload_promise: RefCell<Option<JsFuture>>,
 }
 
-impl StreamingUpload {
+impl Upload {
     pub(crate) fn new(
         writer: WriteHalf<SimplexStream>,
         reader: ReadHalf<SimplexStream>,
@@ -102,7 +102,7 @@ impl StreamingUpload {
 }
 
 #[wasm_bindgen]
-impl StreamingUpload {
+impl Upload {
     /// Sets a progress callback. Must be called before the first `pushChunk()`.
     /// The callback receives `(shardsUploaded: number)` each time a shard
     /// finishes uploading.
