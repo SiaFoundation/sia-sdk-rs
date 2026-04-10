@@ -131,6 +131,14 @@ impl Sdk {
         AppKey(self.0.app_key().clone())
     }
 
+    /// Warms connections to all known hosts. This should be called after
+    /// connecting to ensure upload/download hosts are ready.
+    #[wasm_bindgen(js_name = "warmConnections")]
+    pub async fn warm_connections(&self) -> Result<(), JsValue> {
+        let sdk = self.0.clone();
+        sdk.warm_connections().await.map_err(to_js_err)
+    }
+
     /// Returns account information from the indexer.
     pub async fn account(&self) -> Result<Account, JsValue> {
         let sdk = self.0.clone();

@@ -414,6 +414,16 @@ impl SDK {
         &self.app_key
     }
 
+    /// Warms connections to all good-for-upload hosts by prefetching their
+    /// prices. Call this after creating the SDK to ensure hosts are ready
+    /// before the first upload or download.
+    pub async fn warm_connections(&self) -> Result<(), Error> {
+        self.hosts
+            .warm_connections(self.hosts.upload_hosts())
+            .await;
+        Ok(())
+    }
+
     /// Reads until EOF and uploads all slabs. The data will be erasure coded,
     /// encrypted, and uploaded.
     ///
