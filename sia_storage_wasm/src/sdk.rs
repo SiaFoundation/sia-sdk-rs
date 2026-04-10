@@ -18,7 +18,7 @@ use crate::helpers::{run_local, to_js_err};
 use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
 use crate::streaming::Upload;
-use crate::types::{Account, DownloadOptions, Host, HostQuery, ObjectEvent, UploadOptions};
+use crate::types::{Account, DownloadOptions, Host, HostQuery, ObjectEvent, PinnedSlab, UploadOptions};
 
 /// An AsyncWrite adapter that enqueues chunks into a ReadableStream controller.
 struct StreamWriter {
@@ -151,6 +151,14 @@ impl Sdk {
                 size: e.object.as_ref().map(|o| o.size() as f64).unwrap_or(-1.0),
             })
             .collect())
+    }
+
+    /// Retrieves a pinned slab from the indexer by its hex ID.
+    pub async fn slab(&self, slab_id: &str) -> Result<PinnedSlab, JsValue> {
+        let id = Hash256::from_str(slab_id).map_err(to_js_err)?;
+        let sdk = self.0.clone();
+        let slab = sdk.slab(&id).await.map_err(to_js_err)?;
+        Ok(slab.into())
     }
 
     /// Deletes an object from the indexer by its hex ID.
