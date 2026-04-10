@@ -1,6 +1,6 @@
 use sia_core::types::v2::Protocol;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 use crate::helpers::to_js_err;
 
