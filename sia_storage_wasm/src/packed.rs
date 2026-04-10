@@ -9,7 +9,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::helpers::{run_local, to_js_err};
+use crate::helpers::to_js_err;
 use crate::object::PinnedObject;
 
 /// An AsyncRead adapter over a JS ReadableStream.
@@ -184,7 +184,7 @@ impl PackedUpload {
             .borrow_mut()
             .take()
             .ok_or_else(|| JsValue::from_str("upload already finalized"))?;
-        let objects = run_local(inner.finalize()).await.map_err(to_js_err)?;
+        let objects = inner.finalize().await.map_err(to_js_err)?;
         Ok(objects.into_iter().map(PinnedObject).collect())
     }
 

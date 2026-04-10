@@ -6,7 +6,7 @@ use sia_storage::{
 use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
-use crate::helpers::{make_app_metadata, run_local, to_js_err};
+use crate::helpers::{make_app_metadata, to_js_err};
 use crate::sdk::Sdk;
 use crate::types::AppMetadata;
 
@@ -48,7 +48,7 @@ impl Builder {
 
         match state {
             Some(BuilderState::Disconnected(builder)) => {
-                let result = run_local(builder.connected(&app_key.0)).await;
+                let result = builder.connected(&app_key.0).await;
 
                 match result {
                     Ok(Some(sdk)) => {
@@ -129,9 +129,7 @@ impl Builder {
         let state = self.state.borrow_mut().take();
         match state {
             Some(BuilderState::Approved(builder)) => {
-                let sdk = run_local(builder.register(mnemonic))
-                    .await
-                    .map_err(to_js_err)?;
+                let sdk = builder.register(mnemonic).await.map_err(to_js_err)?;
                 *self.state.borrow_mut() = Some(BuilderState::Finalized);
                 Ok(Sdk::new(sdk))
             }
