@@ -24,6 +24,7 @@ versioned_files = [
     "sia_storage/Cargo.toml",
     { path = "sia_storage_ffi/Cargo.toml", dependency = "sia_storage" },
     { path = "sia_storage_napi/Cargo.toml", dependency = "sia_storage" },
+    { path = "sia_storage_wasm/Cargo.toml", dependency = "sia_storage" },
     { path = "Cargo.lock", dependency = "sia_storage" }
 ]
 changelog = "sia_storage/CHANGELOG.md"
@@ -41,6 +42,13 @@ versioned_files = [
     { path = "Cargo.lock", dependency = "sia_storage_napi" }
 ]
 changelog = "sia_storage_napi/CHANGELOG.md"
+
+[packages.sia_storage_wasm]
+versioned_files = [
+    "sia_storage_wasm/Cargo.toml",
+    { path = "Cargo.lock", dependency = "sia_storage_wasm" }
+]
+changelog = "sia_storage_wasm/CHANGELOG.md"
 
 [packages.sia_mux]
 versioned_files = [
