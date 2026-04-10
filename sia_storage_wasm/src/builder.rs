@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 
-use sia_storage::{ApprovedState, Builder, DisconnectedState, RequestingApprovalState};
+use sia_storage::{ApprovedState, Builder as StorageBuilder, DisconnectedState, RequestingApprovalState};
 use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
@@ -9,9 +9,9 @@ use crate::sdk::Sdk;
 use crate::types::AppMetadata;
 
 enum BuilderState {
-    Disconnected(Builder<DisconnectedState>),
-    RequestingApproval(Builder<RequestingApprovalState>),
-    Approved(Builder<ApprovedState>),
+    Disconnected(StorageBuilder<DisconnectedState>),
+    RequestingApproval(StorageBuilder<RequestingApprovalState>),
+    Approved(StorageBuilder<ApprovedState>),
     Finalized,
 }
 
@@ -33,7 +33,7 @@ impl Builder {
             app.logo_url,
             app.callback_url,
         )?;
-        let builder = Builder::new(indexer_url, meta).map_err(to_js_err)?;
+        let builder = StorageBuilder::new(indexer_url, meta).map_err(to_js_err)?;
         Ok(Builder {
             state: RefCell::new(Some(BuilderState::Disconnected(builder))),
         })
