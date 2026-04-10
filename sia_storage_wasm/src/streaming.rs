@@ -81,7 +81,7 @@ impl Upload {
                         }
                     });
                 }
-                sdk.upload(reader, opts).await
+                sdk.upload(sia_storage::Object::default(), reader, opts).await
             })
             .await
             {

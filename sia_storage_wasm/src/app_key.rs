@@ -1,4 +1,4 @@
-use sia_core::signing::{PrivateKey, Signature};
+use sia_core::signing::Signature;
 use wasm_bindgen::prelude::*;
 
 use crate::helpers::to_js_err;
@@ -10,7 +10,7 @@ use crate::helpers::to_js_err;
 /// connections. The key must be stored securely — anyone with access
 /// can authenticate as the user.
 #[wasm_bindgen]
-pub struct AppKey(pub(crate) PrivateKey);
+pub struct AppKey(pub(crate) sia_storage::AppKey);
 
 #[wasm_bindgen]
 impl AppKey {
@@ -22,12 +22,12 @@ impl AppKey {
         }
         let mut buf = [0u8; 32];
         buf.copy_from_slice(seed);
-        Ok(AppKey(PrivateKey::from_seed(&buf)))
+        Ok(AppKey(sia_storage::AppKey::import(buf)))
     }
 
     /// Exports the AppKey as a 32-byte seed (Uint8Array).
     pub fn export(&self) -> Vec<u8> {
-        self.0.as_ref()[..32].to_vec()
+        self.0.export().to_vec()
     }
 
     /// Imports an AppKey from a hex-encoded string (64 hex chars = 32-byte seed,
@@ -39,21 +39,24 @@ impl AppKey {
             32 => {
                 let mut buf = [0u8; 32];
                 buf.copy_from_slice(&bytes);
-                Ok(AppKey(PrivateKey::from_seed(&buf)))
+                Ok(AppKey(sia_storage::AppKey::import(buf)))
             }
-            64 => Ok(AppKey(PrivateKey::from(
-                <[u8; 64]>::try_from(bytes.as_slice()).expect("length checked"),
-            ))),
+            64 => {
+                // 64-byte ed25519 keypair — seed is first 32 bytes
+                let mut buf = [0u8; 32];
+                buf.copy_from_slice(&bytes[..32]);
+                Ok(AppKey(sia_storage::AppKey::import(buf)))
+            }
             _ => Err(JsValue::from_str(
                 "hex string must be 64 chars (32-byte seed) or 128 chars (64-byte keypair)",
             )),
         }
     }
 
-    /// Exports the AppKey as a hex-encoded string (128 hex chars / 64 bytes).
+    /// Exports the AppKey as a hex-encoded string (64 hex chars / 32-byte seed).
     #[wasm_bindgen(js_name = "toHex")]
     pub fn to_hex(&self) -> String {
-        hex::encode(self.0.as_ref())
+        hex::encode(self.0.export())
     }
 
     /// Returns the ed25519 public key as a string (e.g. "ed25519:abc123...").
