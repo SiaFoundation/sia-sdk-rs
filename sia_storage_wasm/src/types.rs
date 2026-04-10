@@ -293,6 +293,50 @@ impl From<&sia_storage::Slab> for Slab {
     }
 }
 
+/// A pinned slab retrieved from the indexer by ID.
+#[wasm_bindgen]
+pub struct PinnedSlab {
+    inner: sia_storage::PinnedSlab,
+}
+
+#[wasm_bindgen]
+impl PinnedSlab {
+    /// The slab's unique identifier as a hex string.
+    pub fn id(&self) -> String {
+        self.inner.id.to_string()
+    }
+
+    /// Returns the slab encryption key.
+    #[wasm_bindgen(js_name = "encryptionKey")]
+    pub fn encryption_key(&self) -> EncryptionKey {
+        EncryptionKey(self.inner.encryption_key.clone())
+    }
+
+    /// Minimum number of sectors needed to reconstruct the data.
+    #[wasm_bindgen(js_name = "minShards")]
+    pub fn min_shards(&self) -> u8 {
+        self.inner.min_shards
+    }
+
+    /// Returns the sectors in this slab.
+    pub fn sectors(&self) -> Vec<Sector> {
+        self.inner
+            .sectors
+            .iter()
+            .map(|s| Sector {
+                root: s.root.to_string(),
+                host_key: s.host_key.to_string(),
+            })
+            .collect()
+    }
+}
+
+impl From<sia_storage::PinnedSlab> for PinnedSlab {
+    fn from(s: sia_storage::PinnedSlab) -> Self {
+        Self { inner: s }
+    }
+}
+
 /// Object event returned by `Sdk.objectEvents()`.
 #[wasm_bindgen(getter_with_clone)]
 pub struct ObjectEvent {
