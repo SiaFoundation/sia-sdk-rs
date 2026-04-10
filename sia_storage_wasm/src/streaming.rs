@@ -143,7 +143,7 @@ impl Upload {
                     }
                 });
             }
-            match sdk.upload(reader, opts).await
+            match sdk.upload(sia_storage::Object::default(), reader, opts).await
             {
                 Ok(obj) => {
                     *result.borrow_mut() = Some(Ok(obj));

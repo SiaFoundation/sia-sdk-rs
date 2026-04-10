@@ -124,17 +124,6 @@ impl Sdk {
 
 #[wasm_bindgen]
 impl Sdk {
-    /// Warms connections to upload-capable hosts by prefetching prices
-    /// and measuring latency. Call from the main thread SDK after creation.
-    /// Workers should skip this to avoid wasting WebTransport sessions.
-    /// Connections go stale after a few seconds of idle (QUIC timeout),
-    /// but price cache and host metrics persist.
-    #[wasm_bindgen(js_name = "warmConnections")]
-    pub async fn warm_connections(&self) -> Result<(), JsValue> {
-        let sdk = self.0.clone();
-        sdk.warm_connections().await.map_err(to_js_err)
-    }
-
     /// Returns the AppKey used by this SDK instance.
     #[wasm_bindgen(js_name = "appKey")]
     pub fn app_key(&self) -> AppKey {

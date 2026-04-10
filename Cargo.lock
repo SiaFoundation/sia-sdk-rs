@@ -2638,7 +2638,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_wasm"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "chrono",
