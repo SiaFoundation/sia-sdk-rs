@@ -71,7 +71,7 @@ extern "C" {
 ///   disk via the File System Access API.
 ///
 /// Both require a `PinnedObject` handle from `object()` or `upload()`.
-
+///
 /// An AsyncWrite adapter that calls a JS callback with each chunk of decoded
 /// data. Used by `download_streaming` to push bytes to JS as they arrive
 /// without buffering the entire file.
