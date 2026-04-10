@@ -25,6 +25,7 @@ pub struct Upload {
     writer: RefCell<Option<WriteHalf<SimplexStream>>>,
     reader: RefCell<Option<ReadHalf<SimplexStream>>>,
     pub(crate) sdk: Rc<SDK>,
+    pub(crate) object: RefCell<Option<Object>>,
     pub(crate) options: UploadOptions,
     on_progress: RefCell<Option<js_sys::Function>>,
     result: UploadResult,
@@ -36,6 +37,7 @@ impl Upload {
         writer: WriteHalf<SimplexStream>,
         reader: ReadHalf<SimplexStream>,
         sdk: Rc<SDK>,
+        object: Object,
         options: UploadOptions,
         on_progress: Option<js_sys::Function>,
     ) -> Self {
@@ -43,6 +45,7 @@ impl Upload {
             writer: RefCell::new(Some(writer)),
             reader: RefCell::new(Some(reader)),
             sdk,
+            object: RefCell::new(Some(object)),
             options,
             on_progress: RefCell::new(on_progress),
             result: Rc::new(RefCell::new(None)),
@@ -59,6 +62,11 @@ impl Upload {
         let sdk = self.sdk.clone();
         let result = self.result.clone();
         let on_progress = self.on_progress.borrow_mut().take();
+        let object = self
+            .object
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| JsValue::from_str("upload already started"))?;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let opts = UploadOptions {
@@ -79,7 +87,7 @@ impl Upload {
                         }
                     });
                 }
-                sdk.upload(sia_storage::Object::default(), reader, opts)
+                sdk.upload(object, reader, opts)
                     .await
             })
             .await

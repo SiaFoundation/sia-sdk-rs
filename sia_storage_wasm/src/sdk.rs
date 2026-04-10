@@ -7,7 +7,7 @@ use js_sys::Uint8Array;
 use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
 use sia_storage::{
-    self, DownloadOptions as StorageDownloadOptions, HostQuery as StorageHostQuery, ObjectsCursor,
+    self, HostQuery as StorageHostQuery, ObjectsCursor,
     SDK as StorageSdk,
 };
 use tokio::io::AsyncWrite;
@@ -265,9 +265,17 @@ impl Sdk {
         Ok(buf)
     }
 
-    /// Starts an upload. Returns a `Upload` handle.
+    /// Starts an upload. Returns an `Upload` handle.
     /// Push data with `pushChunk()`, then call `finish()` to get the `PinnedObject`.
-    pub fn upload(&self, options: Option<UploadOptions>) -> Upload {
+    ///
+    /// Pass an existing `PinnedObject` to append new slabs to it, or `null`
+    /// for a new upload. Appending changes the object's ID — the caller must
+    /// re-pin and update any references to the old ID.
+    pub fn upload(
+        &self,
+        object: Option<PinnedObject>,
+        options: Option<UploadOptions>,
+    ) -> Upload {
         let (on_progress, opts) = match options {
             Some(mut o) => {
                 let cb = o.on_progress.take();
@@ -275,8 +283,9 @@ impl Sdk {
             }
             None => (None, sia_storage::UploadOptions::default()),
         };
+        let obj = object.map(|p| p.0).unwrap_or_default();
         let (reader, writer) = tokio::io::simplex(1024 * 1024);
-        Upload::new(writer, reader, self.0.clone(), opts, on_progress)
+        Upload::new(writer, reader, self.0.clone(), obj, opts, on_progress)
     }
 
     /// Starts a packed upload for efficiently uploading multiple small objects.
