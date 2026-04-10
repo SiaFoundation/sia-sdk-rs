@@ -265,40 +265,6 @@ impl Sdk {
         Ok(buf)
     }
 
-    /// Downloads a single slab by index, returning up to ~40 MiB of
-    /// decrypted data. Use for parallel downloads across Web Workers
-    /// or video seeking.
-    #[wasm_bindgen(js_name = "downloadSlab")]
-    pub async fn download_slab(
-        &self,
-        object: &PinnedObject,
-        slab_index: u32,
-    ) -> Result<Vec<u8>, JsValue> {
-        let obj = &object.0;
-        let slabs = obj.slabs();
-        let idx = slab_index as usize;
-        if idx >= slabs.len() {
-            return Err(JsValue::from_str(&format!(
-                "slab index {} out of range (object has {} slabs)",
-                idx,
-                slabs.len()
-            )));
-        }
-        let offset: u64 = slabs[..idx].iter().map(|s| s.length as u64).sum();
-        let length = slabs[idx].length;
-        let mut buf = Vec::with_capacity(length as usize);
-        let opts = StorageDownloadOptions {
-            offset,
-            length: Some(length as u64),
-            ..Default::default()
-        };
-        let sdk = self.0.clone();
-        run_local(sdk.download(&mut buf, obj, opts))
-            .await
-            .map_err(to_js_err)?;
-        Ok(buf)
-    }
-
     /// Starts an upload. Returns a `Upload` handle.
     /// Push data with `pushChunk()`, then call `finish()` to get the `PinnedObject`.
     pub fn upload(&self, options: Option<UploadOptions>) -> Upload {
