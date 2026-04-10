@@ -4,13 +4,11 @@ use std::rc::Rc;
 use sia_storage::{Object, SDK, UploadOptions};
 use tokio::io::{AsyncWriteExt, ReadHalf, SimplexStream, WriteHalf};
 use tokio::sync::mpsc;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, future_to_promise};
 
 use crate::helpers::{run_local, to_js_err};
 use crate::object::PinnedObject;
-use crate::sdk::OnShardProgressCallback;
 
 type UploadResult = Rc<RefCell<Option<Result<Object, String>>>>;
 
@@ -20,9 +18,8 @@ type UploadResult = Rc<RefCell<Option<Result<Object, String>>>>;
 /// This avoids loading the entire file into WASM linear memory at once.
 /// The SDK reads from an internal pipe as JS pushes chunks in.
 ///
-/// An optional progress callback can be provided via `setOnProgress()`
-/// before the first `pushChunk()` call. It receives `(shardsUploaded)`
-/// each time a shard finishes uploading.
+/// An optional progress callback can be provided via `UploadOptions.onProgress`.
+/// It receives `(shardsUploaded: number)` each time a shard finishes uploading.
 #[wasm_bindgen]
 pub struct Upload {
     writer: RefCell<Option<WriteHalf<SimplexStream>>>,
@@ -40,13 +37,14 @@ impl Upload {
         reader: ReadHalf<SimplexStream>,
         sdk: Rc<SDK>,
         options: UploadOptions,
+        on_progress: Option<js_sys::Function>,
     ) -> Self {
         Self {
             writer: RefCell::new(Some(writer)),
             reader: RefCell::new(Some(reader)),
             sdk,
             options,
-            on_progress: RefCell::new(None),
+            on_progress: RefCell::new(on_progress),
             result: Rc::new(RefCell::new(None)),
             upload_promise: RefCell::new(None),
         }
@@ -104,15 +102,6 @@ impl Upload {
 
 #[wasm_bindgen]
 impl Upload {
-    /// Sets a progress callback. Must be called before the first `pushChunk()`.
-    /// The callback receives `(shardsUploaded: number)` each time a shard
-    /// finishes uploading.
-    #[wasm_bindgen(js_name = "setOnProgress")]
-    pub fn set_on_progress(&self, callback: OnShardProgressCallback) {
-        let func: js_sys::Function = callback.unchecked_into();
-        *self.on_progress.borrow_mut() = Some(func);
-    }
-
     /// Push a chunk of data into the upload stream. The SDK will begin
     /// processing (erasure coding + uploading shards) as soon as enough
     /// data accumulates for a slab.
