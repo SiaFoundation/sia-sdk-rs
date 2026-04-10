@@ -187,7 +187,8 @@ impl Sdk {
                 let secs = (after_ms / 1000.0) as i64;
                 let nanos = ((after_ms % 1000.0) * 1_000_000.0) as u32;
                 Some(ObjectsCursor {
-                    after: chrono::DateTime::from_timestamp(secs, nanos).unwrap_or_default(),
+                    after: chrono::DateTime::from_timestamp(secs, nanos)
+                        .ok_or_else(|| JsValue::from_str("invalid cursor timestamp"))?,
                     id: Hash256::from_str(&id).map_err(to_js_err)?,
                 })
             }
@@ -355,7 +356,8 @@ impl Sdk {
     ) -> Result<String, JsValue> {
         let secs = (valid_until_ms / 1000.0) as i64;
         let nanos = ((valid_until_ms % 1000.0) * 1_000_000.0) as u32;
-        let valid_until = chrono::DateTime::from_timestamp(secs, nanos).unwrap_or_default();
+        let valid_until = chrono::DateTime::from_timestamp(secs, nanos)
+            .ok_or_else(|| JsValue::from_str("invalid timestamp"))?;
         let url = self
             .0
             .share_object(&object.0, valid_until)
