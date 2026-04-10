@@ -13,7 +13,7 @@ use sia_core::types::v2::NetAddress;
 use std::sync::Mutex;
 use thiserror::Error;
 use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
+use crate::task::TaskSet;
 
 use crate::rhp4::{HostEndpoint, Transport};
 use crate::time::{Duration, Elapsed, Instant, timeout};
@@ -447,7 +447,7 @@ impl<T: Transport> Hosts<T> {
     pub async fn warm_connections(&self, hosts: Vec<HostEndpoint>) {
         let hosts_len = hosts.len();
         let mut warmed_conns: usize = 0;
-        let mut inflight_scans = JoinSet::new();
+        let mut inflight_scans = TaskSet::new();
         let sema = Arc::new(Semaphore::new(15));
         for host in hosts {
             let transport = self.transport.clone();
@@ -455,7 +455,7 @@ impl<T: Transport> Hosts<T> {
             let hosts = self.hosts.clone();
 
             let sema = sema.clone();
-            join_set_spawn!(inflight_scans, async move {
+            task_set_spawn!(inflight_scans, async move {
                 let _permit = sema.acquire().await.unwrap();
                 let start = Instant::now();
 
