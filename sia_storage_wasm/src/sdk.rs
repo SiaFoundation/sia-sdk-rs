@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::str::FromStr;
@@ -6,12 +7,10 @@ use std::task::{Context, Poll};
 use js_sys::Uint8Array;
 use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
-use sia_storage::{
-    self, HostQuery as StorageHostQuery, ObjectsCursor,
-    SDK as StorageSdk,
-};
+use sia_storage::{self, HostQuery as StorageHostQuery, ObjectsCursor, SDK as StorageSdk};
 use tokio::io::AsyncWrite;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
@@ -20,16 +19,6 @@ use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
 use crate::streaming::Upload;
 use crate::types::{Account, DownloadOptions, Host, HostQuery, ObjectEvent, UploadOptions};
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(typescript_type = "(chunk: Uint8Array) => void")]
-    pub type OnChunkCallback;
-
-    #[wasm_bindgen(typescript_type = "(bytesDownloaded: number, totalBytes: number) => void")]
-    pub type OnProgressCallback;
-
-}
 
 /// The main Sia storage SDK. Provides methods for uploading, downloading,
 /// and managing objects on the Sia storage network via an indexer.
@@ -70,38 +59,21 @@ extern "C" {
 ///
 /// Both require a `PinnedObject` handle from `object()` or `upload()`.
 ///
-/// An AsyncWrite adapter that calls a JS callback with each chunk of decoded
-/// data. Used by `download_streaming` to push bytes to JS as they arrive
-/// without buffering the entire file.
-struct ChunkWriter {
-    callback: js_sys::Function,
-    written: u64,
-    total: f64,
-    on_progress: Option<js_sys::Function>,
+/// An AsyncWrite adapter that queues chunks into a ReadableStream controller.
+struct StreamWriter {
+    controller: web_sys::ReadableStreamDefaultController,
 }
 
-impl AsyncWrite for ChunkWriter {
+impl AsyncWrite for StreamWriter {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
         let array = Uint8Array::from(buf);
-        if let Err(e) = self.callback.call1(&JsValue::NULL, &array) {
+        if let Err(e) = self.controller.enqueue_with_chunk(&array) {
             return Poll::Ready(Err(std::io::Error::other(format!(
-                "onChunk callback error: {e:?}"
-            ))));
-        }
-        self.written += buf.len() as u64;
-        if let Some(ref cb) = self.on_progress
-            && let Err(e) = cb.call2(
-                &JsValue::NULL,
-                &JsValue::from(self.written as f64),
-                &JsValue::from(self.total),
-            )
-        {
-            return Poll::Ready(Err(std::io::Error::other(format!(
-                "onProgress callback error: {e:?}"
+                "ReadableStream enqueue error: {e:?}"
             ))));
         }
         Poll::Ready(Ok(buf.len()))
@@ -115,6 +87,7 @@ impl AsyncWrite for ChunkWriter {
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
+        self.controller.close().ok();
         Poll::Ready(Ok(()))
     }
 }
@@ -241,28 +214,63 @@ impl Sdk {
             .map_err(to_js_err)
     }
 
-    /// Downloads an object and returns the raw bytes. The entire file is
-    /// buffered in WASM memory — use `downloadStreaming()` for large files.
-    pub async fn download(
+    /// Downloads an object and returns a `ReadableStream` of `Uint8Array` chunks.
+    ///
+    /// ```js
+    /// // as a blob
+    /// const stream = sdk.download(obj);
+    /// const blob = await new Response(stream).blob();
+    ///
+    /// // as a stream
+    /// for await (const chunk of sdk.download(obj)) {
+    ///   console.log('got', chunk.length, 'bytes');
+    /// }
+    /// ```
+    pub fn download(
         &self,
         object: &PinnedObject,
         options: Option<DownloadOptions>,
-    ) -> Result<Vec<u8>, JsValue> {
+    ) -> Result<web_sys::ReadableStream, JsValue> {
         let sdk = self.0.clone();
+        let obj = object.0.clone();
         let opts = options.map(|o| o.to_inner()).unwrap_or_default();
-        let size = object.0.size();
-        const MAX_DOWNLOAD: u64 = 1_536 * 1024 * 1024; // 1.5 GiB
-        if size > MAX_DOWNLOAD {
-            return Err(JsValue::from_str(&format!(
-                "object too large for buffered download ({:.1} GiB). Use downloadStreaming() instead.",
-                size as f64 / (1024.0 * 1024.0 * 1024.0)
-            )));
-        }
-        let mut buf = Vec::with_capacity(size as usize);
-        run_local(sdk.download(&mut buf, &object.0, opts))
-            .await
-            .map_err(to_js_err)?;
-        Ok(buf)
+
+        let controller: Rc<RefCell<Option<web_sys::ReadableStreamDefaultController>>> =
+            Rc::new(RefCell::new(None));
+        let controller_clone = controller.clone();
+
+        let start = Closure::once(move |ctrl: web_sys::ReadableStreamDefaultController| {
+            *controller_clone.borrow_mut() = Some(ctrl);
+        });
+
+        let underlying_source = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &underlying_source,
+            &"start".into(),
+            start.as_ref().unchecked_ref(),
+        )?;
+        start.forget();
+
+        let stream = web_sys::ReadableStream::new_with_underlying_source(&underlying_source)?;
+
+        let controller_for_task = controller.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let ctrl = controller_for_task.borrow().clone().unwrap();
+            let mut writer = StreamWriter {
+                controller: ctrl.clone(),
+            };
+            match run_local(sdk.download(&mut writer, &obj, opts)).await {
+                Ok(()) => {
+                    ctrl.close().ok();
+                }
+                Err(e) => {
+                    let err = JsValue::from_str(&e.to_string());
+                    ctrl.error_with_e(&err);
+                }
+            }
+        });
+
+        Ok(stream)
     }
 
     /// Starts an upload. Returns an `Upload` handle.
@@ -271,11 +279,7 @@ impl Sdk {
     /// Pass an existing `PinnedObject` to append new slabs to it, or `null`
     /// for a new upload. Appending changes the object's ID — the caller must
     /// re-pin and update any references to the old ID.
-    pub fn upload(
-        &self,
-        object: Option<PinnedObject>,
-        options: Option<UploadOptions>,
-    ) -> Upload {
+    pub fn upload(&self, object: Option<PinnedObject>, options: Option<UploadOptions>) -> Upload {
         let (on_progress, opts) = match options {
             Some(mut o) => {
                 let cb = o.on_progress.take();
@@ -296,41 +300,6 @@ impl Sdk {
     pub fn upload_packed(&self, options: Option<UploadOptions>) -> PackedUpload {
         let opts = options.map(|o| o.to_inner()).unwrap_or_default();
         PackedUpload::new(self.0.upload_packed(opts))
-    }
-
-    /// Downloads an object with streaming chunks via callbacks.
-    ///
-    /// The `on_chunk` callback receives each decoded chunk as a `Uint8Array`
-    /// as it arrives. This avoids buffering the entire file in memory.
-    ///
-    /// The optional `on_progress` callback receives `(bytesDownloaded, totalBytes)`.
-    #[wasm_bindgen(js_name = "downloadStreaming")]
-    pub async fn download_streaming(
-        &self,
-        object: &PinnedObject,
-        on_chunk: OnChunkCallback,
-        on_progress: Option<OnProgressCallback>,
-        options: Option<DownloadOptions>,
-    ) -> Result<(), JsValue> {
-        let sdk = self.0.clone();
-        let obj = object.0.clone();
-        let total = obj.size() as f64;
-        let opts = options.map(|o| o.to_inner()).unwrap_or_default();
-
-        let chunk_fn: js_sys::Function = on_chunk.unchecked_into();
-        let progress_fn: Option<js_sys::Function> = on_progress.map(|p| p.unchecked_into());
-
-        let mut writer = ChunkWriter {
-            callback: chunk_fn,
-            written: 0,
-            total,
-            on_progress: progress_fn,
-        };
-
-        run_local(sdk.download(&mut writer, &obj, opts))
-            .await
-            .map_err(to_js_err)?;
-        Ok(())
     }
 
     /// Generates a signed share URL for an object. Anyone with the URL can
