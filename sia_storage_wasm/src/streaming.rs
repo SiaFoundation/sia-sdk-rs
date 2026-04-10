@@ -4,8 +4,8 @@ use std::rc::Rc;
 use sia_storage::{Object, SDK, UploadOptions};
 use tokio::io::{AsyncWriteExt, ReadHalf, SimplexStream, WriteHalf};
 use tokio::sync::mpsc;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, future_to_promise};
 
 use crate::helpers::{run_local, to_js_err};
@@ -81,7 +81,8 @@ impl Upload {
                         }
                     });
                 }
-                sdk.upload(sia_storage::Object::default(), reader, opts).await
+                sdk.upload(sia_storage::Object::default(), reader, opts)
+                    .await
             })
             .await
             {

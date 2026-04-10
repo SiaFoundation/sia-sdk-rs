@@ -69,8 +69,7 @@ impl SealedObject {
     /// Restores a sealed object from a JSON string.
     #[wasm_bindgen(js_name = "fromJson")]
     pub fn from_json(json: &str) -> Result<SealedObject, JsValue> {
-        let inner: sia_storage::SealedObject =
-            serde_json::from_str(json).map_err(to_js_err)?;
+        let inner: sia_storage::SealedObject = serde_json::from_str(json).map_err(to_js_err)?;
         Ok(SealedObject { inner })
     }
 }

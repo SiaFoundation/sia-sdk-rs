@@ -11,16 +11,15 @@ use sia_storage::{
     SDK as StorageSdk,
 };
 use tokio::io::AsyncWrite;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
 use crate::helpers::{run_local, to_js_err};
-use crate::types::{Account, Host, ObjectEvent};
 use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
 use crate::streaming::Upload;
-use crate::types::{DownloadOptions, HostQuery, UploadOptions};
+use crate::types::{Account, DownloadOptions, Host, HostQuery, ObjectEvent, UploadOptions};
 
 #[wasm_bindgen]
 extern "C" {
