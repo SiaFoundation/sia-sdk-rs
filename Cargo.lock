@@ -2639,6 +2639,7 @@ dependencies = [
 name = "sia_storage_wasm"
 version = "0.6.0"
 dependencies = [
+ "bytes",
  "chrono",
  "console_error_panic_hook",
  "console_log",

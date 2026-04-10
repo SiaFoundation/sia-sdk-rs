@@ -14,11 +14,13 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
-use crate::helpers::{run_local, to_js_err};
+use crate::helpers::to_js_err;
 use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
 use crate::streaming::Upload;
-use crate::types::{Account, DownloadOptions, Host, HostQuery, ObjectEvent, PinnedSlab, UploadOptions};
+use crate::types::{
+    Account, DownloadOptions, Host, HostQuery, ObjectEvent, PinnedSlab, UploadOptions,
+};
 
 /// An AsyncWrite adapter that enqueues chunks into a ReadableStream controller.
 struct StreamWriter {
@@ -230,7 +232,7 @@ impl Sdk {
             let mut writer = StreamWriter {
                 controller: ctrl.clone(),
             };
-            match run_local(sdk.download(&mut writer, &obj, opts)).await {
+            match sdk.download(&mut writer, &obj, opts).await {
                 Ok(()) => {
                     ctrl.close().ok();
                 }
@@ -259,8 +261,7 @@ impl Sdk {
             None => (None, sia_storage::UploadOptions::default()),
         };
         let obj = object.map(|p| p.0).unwrap_or_default();
-        let (reader, writer) = tokio::io::simplex(1024 * 1024);
-        Upload::new(writer, reader, self.0.clone(), obj, opts, on_progress)
+        Upload::new(self.0.clone(), obj, opts, on_progress)
     }
 
     /// Starts a packed upload for efficiently uploading multiple small objects.
