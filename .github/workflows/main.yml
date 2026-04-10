@@ -27,7 +27,7 @@ jobs:
         shell: bash
         run: curl https://wasm-bindgen.github.io/wasm-pack/installer/init.sh -sSf | bash
       - name: Clippy (wasm)
-        run: cargo clippy --target wasm32-unknown-unknown --lib --package sia_core --package sia_storage --no-default-features -- -D warnings
+        run: cargo clippy --target wasm32-unknown-unknown --lib --package sia_core --package sia_storage --package sia_storage_wasm --no-default-features -- -D warnings
         env:
           RUSTFLAGS: '--cfg=web_sys_unstable_apis'
       - name: Rustfmt
