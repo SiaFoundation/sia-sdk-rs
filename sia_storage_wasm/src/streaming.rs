@@ -87,8 +87,7 @@ impl Upload {
                         }
                     });
                 }
-                sdk.upload(object, reader, opts)
-                    .await
+                sdk.upload(object, reader, opts).await
             })
             .await
             {

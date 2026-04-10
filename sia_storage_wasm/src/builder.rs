@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 
-use sia_storage::{ApprovedState, Builder as StorageBuilder, DisconnectedState, RequestingApprovalState};
+use sia_storage::{
+    ApprovedState, Builder as StorageBuilder, DisconnectedState, RequestingApprovalState,
+};
 use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
