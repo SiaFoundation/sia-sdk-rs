@@ -8,7 +8,6 @@ mod sealed;
 mod streaming;
 mod types;
 
-use sia_storage;
 use wasm_bindgen::prelude::*;
 
 use crate::helpers::to_js_err;

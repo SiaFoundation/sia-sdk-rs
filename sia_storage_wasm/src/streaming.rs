@@ -122,11 +122,14 @@ impl Upload {
             self.start_upload()?;
         }
 
-        let mut writer_opt = self.writer.borrow_mut();
-        let writer = writer_opt
-            .as_mut()
+        let mut writer = self
+            .writer
+            .borrow_mut()
+            .take()
             .ok_or_else(|| JsValue::from_str("upload already finished"))?;
-        writer.write_all(&data).await.map_err(to_js_err)
+        let result = writer.write_all(&data).await.map_err(to_js_err);
+        *self.writer.borrow_mut() = Some(writer);
+        result
     }
 
     /// Finish the upload. Closes the write end of the pipe so the SDK

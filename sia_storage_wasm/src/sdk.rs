@@ -242,7 +242,7 @@ impl Sdk {
     ) -> Result<Vec<u8>, JsValue> {
         let sdk = self.0.clone();
         let opts = options.map(|o| o.to_inner()).unwrap_or_default();
-        let size = object.0.size() as u64;
+        let size = object.0.size();
         const MAX_DOWNLOAD: u64 = 1_536 * 1024 * 1024; // 1.5 GiB
         if size > MAX_DOWNLOAD {
             return Err(JsValue::from_str(&format!(
