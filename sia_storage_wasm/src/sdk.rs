@@ -204,6 +204,7 @@ impl Sdk {
                 id: e.id.to_string(),
                 deleted: e.deleted,
                 updated_at: e.updated_at.timestamp() as f64,
+                size: e.object.as_ref().map(|o| o.size() as f64).unwrap_or(-1.0),
             })
             .collect())
     }
