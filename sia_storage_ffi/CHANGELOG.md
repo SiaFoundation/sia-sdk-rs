@@ -1,3 +1,40 @@
+## 0.6.1 (2026-04-06)
+
+### Features
+
+- Remove redundant FFI chunked download loop and delegate to the SDK directly.
+
+## 0.6.0 (2026-04-06)
+
+### Breaking Changes
+
+#### Resumable uploads
+
+`SDK::upload` now takes an `Object` parameter and appends uploaded slabs to it. This enables resumable uploads by passing the same object back to `upload` with a new reader.
+
+For new uploads, pass `Object::default()` (Rust) or `PinnedObject::new()` (FFI). This is a breaking change to the upload API signature.
+
+## 0.5.1 (2026-04-05)
+
+### Features
+
+- Download objects in chunks to improve streaming.
+
+#### Replace PrivateKey with AppKey in public API
+
+Replaced all uses of `PrivateKey` in the public API with `AppKey`. `PrivateKey` is no longer re-exported.
+
+Added `UploadOptions::validate` to check erasure coding parameters for sufficient durability.
+
+Made internal `app_client::Client` methods `pub(crate)` and moved data types (`App`, `Account`, `GeoLocation`, `HostQuery`, `ObjectsCursor`) to `lib.rs`.
+
+Added doc strings to all public items.
+
+### Fixes
+
+- Simplified FFI reader and writer by polling the future instead of passing through channels and a background task.
+- Update account types
+
 ## 0.5.0 (2026-03-23)
 
 ### Breaking Changes

@@ -208,6 +208,14 @@ impl PinnedObject {
 
 #[uniffi::export]
 impl PinnedObject {
+    /// Creates a new empty object.
+    #[uniffi::constructor]
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(sia_storage::Object::default())),
+        }
+    }
+
     /// Opens a sealed object using the provided app key.
     ///
     /// # Arguments
@@ -296,6 +304,13 @@ impl PinnedObject {
     pub fn updated_at(&self) -> SystemTime {
         let inner = self.inner.lock().unwrap();
         (*inner.updated_at()).into()
+    }
+}
+
+impl Default for PinnedObject {
+    fn default() -> Self {
+        // satisfies clippy's requirement for a default constructor, but is not intended for general use. Use [PinnedObject::new] instead.
+        Self::new()
     }
 }
 
@@ -804,19 +819,29 @@ impl SDK {
         }
     }
 
-    /// Uploads data to the Sia network and pins it to the indexer
+    /// Uploads data to the Sia network.
+    ///
+    /// Pass [PinnedObject::new] for new uploads. To resume a previous upload,
+    /// pass the object returned from the earlier call. Appending data changes
+    /// an object's ID. It must be re-pinned afterward and any references to
+    /// the previous ID must be updated.
     ///
     /// # Arguments
-    /// * `options` - The [UploadOptions] to use for the upload
+    /// * `object` - The object to upload into. Use [PinnedObject::new] for new uploads.
+    /// * `r` - The reader to read the data from.
+    /// * `options` - The [UploadOptions] to use for the upload.
     ///
     /// # Returns
-    /// An object representing the uploaded data.
+    /// A new object containing all slabs from the input object plus the newly
+    /// uploaded slabs. The caller must pin the object to the indexer afterward.
     pub async fn upload(
         &self,
+        object: &PinnedObject,
         r: Arc<dyn Reader>,
         options: UploadOptions,
-    ) -> Result<PinnedObject, UploadError> {
+    ) -> Result<Arc<PinnedObject>, UploadError> {
         let sdk = self.inner.clone();
+        let obj = object.object();
         spawn(async move {
             let r = FFIReader::new(r);
             let progress_tx = if let Some(callback) = options.progress_callback {
@@ -838,6 +863,7 @@ impl SDK {
             };
             let obj = sdk
                 .upload(
+                    obj,
                     r,
                     sia_storage::UploadOptions {
                         max_inflight: options.max_inflight as usize,
@@ -847,9 +873,9 @@ impl SDK {
                     },
                 )
                 .await?;
-            Ok(PinnedObject {
+            Ok(Arc::new(PinnedObject {
                 inner: Arc::new(Mutex::new(obj)),
-            })
+            }))
         })
         .await?
     }
@@ -863,26 +889,20 @@ impl SDK {
     ) -> Result<(), DownloadError> {
         const CHUNK_SIZE: usize = 1 << 19; // 512KiB
         let object = object.object();
-        let object_size = object.size();
-        let offset = options.offset;
-        let max_length = options.length.unwrap_or(object_size);
-        let max_inflight = options.max_inflight;
         let sdk = self.inner.clone();
         let w = FFIWriter::new(w);
         let mut w = BufWriter::with_capacity(CHUNK_SIZE, w);
         spawn(async move {
-            for offset in (offset..max_length).step_by(CHUNK_SIZE) {
-                sdk.download(
-                    &mut w,
-                    &object,
-                    sia_storage::DownloadOptions {
-                        offset,
-                        length: Some(max_length.min(CHUNK_SIZE as u64)),
-                        max_inflight: max_inflight as usize,
-                    },
-                )
-                .await?;
-            }
+            sdk.download(
+                &mut w,
+                &object,
+                sia_storage::DownloadOptions {
+                    offset: options.offset,
+                    length: options.length,
+                    max_inflight: options.max_inflight as usize,
+                },
+            )
+            .await?;
             if let Err(e) = w.shutdown().await {
                 debug!("error shutting down writer: {}", e);
             }

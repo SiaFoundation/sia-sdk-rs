@@ -1,3 +1,37 @@
+## 0.6.0 (2026-04-06)
+
+### Breaking Changes
+
+#### Resumable uploads
+
+`SDK::upload` now takes an `Object` parameter and appends uploaded slabs to it. This enables resumable uploads by passing the same object back to `upload` with a new reader.
+
+For new uploads, pass `Object::default()` (Rust) or `PinnedObject::new()` (FFI). This is a breaking change to the upload API signature.
+
+## 0.5.1 (2026-04-05)
+
+### Features
+
+- Add WebTransport client for WASM target
+- Allow wasm32-unknown-unknown compilation
+- Download objects in chunks to improve streaming.
+- Fixes wasm32 compat framework compilation
+
+#### Replace PrivateKey with AppKey in public API
+
+Replaced all uses of `PrivateKey` in the public API with `AppKey`. `PrivateKey` is no longer re-exported.
+
+Added `UploadOptions::validate` to check erasure coding parameters for sufficient durability.
+
+Made internal `app_client::Client` methods `pub(crate)` and moved data types (`App`, `Account`, `GeoLocation`, `HostQuery`, `ObjectsCursor`) to `lib.rs`.
+
+Added doc strings to all public items.
+
+### Fixes
+
+- Remove dyn dispatch of RHP client type
+- Update account types
+
 ## 0.5.0 (2026-03-23)
 
 ### Breaking Changes

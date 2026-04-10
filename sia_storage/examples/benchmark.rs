@@ -170,8 +170,7 @@ async fn main() {
     env_logger::init();
 
     // authorize the app to access the user's storage
-    let builder =
-        Builder::new("https://app.sia.storage", APP_META).expect("failed to create builder");
+    let builder = Builder::new("https://sia.storage", APP_META).expect("failed to create builder");
 
     let builder = builder
         .request_connection()
@@ -211,7 +210,7 @@ async fn main() {
     println!("Uploading random data...");
     let start = Instant::now();
     let obj = sdk
-        .upload(reader, UploadOptions::default())
+        .upload(Object::default(), reader, UploadOptions::default())
         .await
         .expect("failed to upload object");
     let upload_duration = start.elapsed();
