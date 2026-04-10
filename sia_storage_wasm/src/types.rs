@@ -54,12 +54,26 @@ impl DownloadOptions {
     /// Creates download options with the given parameters.
     /// Defaults: max_inflight=16, offset=0, length=None (full object).
     #[wasm_bindgen(constructor)]
-    pub fn new(max_inflight: Option<u32>, offset: Option<f64>, length: Option<f64>) -> Self {
-        Self {
+    pub fn new(
+        max_inflight: Option<u32>,
+        offset: Option<f64>,
+        length: Option<f64>,
+    ) -> Result<DownloadOptions, JsValue> {
+        if let Some(o) = offset
+            && o < 0.0
+        {
+            return Err(JsValue::from_str("offset must be non-negative"));
+        }
+        if let Some(l) = length
+            && l < 0.0
+        {
+            return Err(JsValue::from_str("length must be non-negative"));
+        }
+        Ok(Self {
             max_inflight: max_inflight.unwrap_or(16) as usize,
             offset: offset.unwrap_or(0.0) as u64,
             length: length.map(|l| l as u64),
-        }
+        })
     }
 }
 

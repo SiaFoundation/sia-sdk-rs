@@ -90,23 +90,21 @@ impl AsyncWrite for ChunkWriter {
     ) -> Poll<Result<usize, std::io::Error>> {
         let array = Uint8Array::from(buf);
         if let Err(e) = self.callback.call1(&JsValue::NULL, &array) {
-            return Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("onChunk callback error: {e:?}"),
-            )));
+            return Poll::Ready(Err(std::io::Error::other(format!(
+                "onChunk callback error: {e:?}"
+            ))));
         }
         self.written += buf.len() as u64;
-        if let Some(ref cb) = self.on_progress {
-            if let Err(e) = cb.call2(
+        if let Some(ref cb) = self.on_progress
+            && let Err(e) = cb.call2(
                 &JsValue::NULL,
                 &JsValue::from(self.written as f64),
                 &JsValue::from(self.total),
-            ) {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("onProgress callback error: {e:?}"),
-                )));
-            }
+            )
+        {
+            return Poll::Ready(Err(std::io::Error::other(format!(
+                "onProgress callback error: {e:?}"
+            ))));
         }
         Poll::Ready(Ok(buf.len()))
     }
