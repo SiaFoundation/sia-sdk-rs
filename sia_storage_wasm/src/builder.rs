@@ -17,14 +17,14 @@ enum BuilderState {
 
 /// SDK Builder — handles the connection and registration flow with an indexer.
 #[wasm_bindgen]
-pub struct SdkBuilder {
+pub struct Builder {
     state: RefCell<Option<BuilderState>>,
 }
 
 #[wasm_bindgen]
-impl SdkBuilder {
+impl Builder {
     #[wasm_bindgen(constructor)]
-    pub fn new(indexer_url: &str, app: AppMetadata) -> Result<SdkBuilder, JsValue> {
+    pub fn new(indexer_url: &str, app: AppMetadata) -> Result<Builder, JsValue> {
         let meta = make_app_metadata(
             &app.app_id,
             &app.name,
@@ -34,7 +34,7 @@ impl SdkBuilder {
             app.callback_url,
         )?;
         let builder = Builder::new(indexer_url, meta).map_err(to_js_err)?;
-        Ok(SdkBuilder {
+        Ok(Builder {
             state: RefCell::new(Some(BuilderState::Disconnected(builder))),
         })
     }
