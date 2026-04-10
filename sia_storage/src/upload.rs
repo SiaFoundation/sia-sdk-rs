@@ -379,7 +379,7 @@ impl<T: Transport> Uploader<T> {
                         }
                     }
                 },
-                _ = sleep(Duration::from_secs(active as u64)) => {
+                _ = sleep(Duration::from_secs(active.max(1) as u64)) => {
                     if let Ok(racer) = semaphore.clone().try_acquire_owned()
                         && let Ok((host_key, attempts)) = shard.hosts.pop_front() {
                             debug!("slab {} shard {} racing slow host", shard.slab_index, shard.shard_index);
