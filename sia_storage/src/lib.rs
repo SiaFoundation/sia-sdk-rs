@@ -46,7 +46,6 @@
 mod compat;
 
 pub(crate) use compat::{task, time};
-use sia_core::signing::PrivateKey;
 
 mod app_client;
 mod builder;
@@ -82,8 +81,8 @@ pub use reqwest::{IntoUrl, Url};
 #[doc(hidden)]
 pub use sia_core::macros::decode_hex_256;
 pub use sia_core::seed::SeedError;
-pub use sia_core::signing::{PublicKey, Signature};
-pub use sia_core::types::Hash256;
+pub use sia_core::signing::{PrivateKey, PublicKey, Signature};
+pub use sia_core::types::{Currency, Hash256};
 pub use sia_core::types::v2::Protocol;
 
 pub use app_client::Error as AppApiError;
@@ -474,6 +473,17 @@ impl SDK {
             .map_err(|e| Error::App(format!("{e:?}")))
     }
 
+    /// Queries a host for the account's remaining balance.
+    pub async fn host_account_balance(
+        &self,
+        host_key: PublicKey,
+    ) -> Result<Currency, Error> {
+        self.hosts
+            .account_balance(host_key, &self.app_key.0)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
     /// Retrieves account information from the indexer.
     pub async fn account(&self) -> Result<Account, Error> {
         self.api_client
@@ -625,6 +635,45 @@ impl SDK {
     pub async fn slab(&self, id: &Hash256) -> Result<PinnedSlab, Error> {
         self.api_client
             .slab(&self.app_key.0, id)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
+    /// Reads a raw sector from a host. Used for migration and repair.
+    pub async fn read_sector(
+        &self,
+        host_key: PublicKey,
+        root: Hash256,
+        offset: usize,
+        length: usize,
+    ) -> Result<bytes::Bytes, Error> {
+        self.hosts
+            .read_sector(
+                host_key,
+                &self.app_key.0,
+                root,
+                offset,
+                length,
+                Duration::from_secs(60),
+            )
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
+    /// Writes a raw sector to a host. Used for migration and repair.
+    /// Returns the sector's Merkle root.
+    pub async fn write_sector(
+        &self,
+        host_key: PublicKey,
+        sector: bytes::Bytes,
+    ) -> Result<Hash256, Error> {
+        self.hosts
+            .write_sector(
+                host_key,
+                &self.app_key.0,
+                sector,
+                Duration::from_secs(120),
+            )
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }

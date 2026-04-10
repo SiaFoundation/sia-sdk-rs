@@ -30,7 +30,7 @@ impl UploadOptions {
 }
 
 impl UploadOptions {
-    pub(crate) fn to_inner(&self) -> sia_storage::UploadOptions {
+    pub(crate) fn to_inner(self) -> sia_storage::UploadOptions {
         let defaults = sia_storage::UploadOptions::default();
         sia_storage::UploadOptions {
             data_shards: self.data_shards,
@@ -64,7 +64,7 @@ impl DownloadOptions {
 }
 
 impl DownloadOptions {
-    pub(crate) fn to_inner(&self) -> sia_storage::DownloadOptions {
+    pub(crate) fn to_inner(self) -> sia_storage::DownloadOptions {
         sia_storage::DownloadOptions {
             max_inflight: self.max_inflight,
             offset: self.offset,
@@ -96,10 +96,10 @@ impl HostQuery {
 }
 
 impl HostQuery {
-    pub(crate) fn to_inner(&self) -> sia_storage::HostQuery {
+    pub(crate) fn to_inner(self) -> sia_storage::HostQuery {
         sia_storage::HostQuery {
             protocol: Some(Protocol::QUIC),
-            country: self.country.clone(),
+            country: self.country,
             limit: self.limit,
             offset: self.offset,
             ..Default::default()

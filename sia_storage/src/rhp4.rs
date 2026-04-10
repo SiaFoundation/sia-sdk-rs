@@ -3,7 +3,7 @@ use sia_core::encoding;
 use sia_core::rhp4::HostPrices;
 use sia_core::rhp4::protocol::Error as RHP4Error;
 use sia_core::signing::{PrivateKey, PublicKey};
-use sia_core::types::Hash256;
+use sia_core::types::{Currency, Hash256};
 use sia_core::types::v2::NetAddress;
 use thiserror::Error;
 
@@ -75,6 +75,11 @@ pub(crate) trait Transport: Clone + MaybeSendSync + 'static {
         offset: usize,
         length: usize,
     ) -> impl Future<Output = Result<Bytes, Error>> + MaybeSendSync;
+    fn account_balance(
+        &self,
+        host: &HostEndpoint,
+        account_key: &PrivateKey,
+    ) -> impl Future<Output = Result<Currency, Error>> + MaybeSendSync;
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) trait MaybeSendSync: Send + Sync {}

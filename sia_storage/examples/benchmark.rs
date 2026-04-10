@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use sia_storage::{AppMetadata, Builder, DownloadOptions, Object, UploadOptions};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use sia_storage::{AppMetadata, Builder, DownloadOptions, UploadOptions};
+use tokio::io::{AsyncRead, AsyncWrite, BufReader, ReadBuf};
 
 #[derive(Parser)]
 struct Args {
@@ -204,7 +204,7 @@ async fn main() {
     let args = Args::parse();
     let seed: u64 = rand::random();
 
-    let reader = SeededReader::new(seed, args.size);
+    let reader = BufReader::new(SeededReader::new(seed, args.size));
 
     // upload the data to the network
     println!("Uploading random data...");

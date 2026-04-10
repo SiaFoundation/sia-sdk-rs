@@ -6,20 +6,6 @@ pub(crate) fn to_js_err(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
 }
 
-/// Run an async block with a tokio runtime + LocalSet. wasm_bindgen async
-/// exports run on the JS microtask queue with no tokio runtime in scope,
-/// but the SDK uses tokio primitives (JoinSet::spawn_local, select!, etc.)
-/// that require one.
-pub(crate) async fn run_local<F: std::future::Future>(f: F) -> F::Output {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("failed to create tokio runtime");
-    let _guard = rt.enter();
-    tokio::task::LocalSet::new().run_until(f).await
-}
-
-/// Cached leaked strings for app metadata. Set once on first call;
-/// reused on subsequent calls so we never leak more than one set of strings.
 struct CachedMeta {
     id: Hash256,
     name: &'static str,
@@ -29,22 +15,10 @@ struct CachedMeta {
     callback_url: Option<&'static str>,
 }
 
-// AppMetadata requires &'static str fields, but JS strings are heap-allocated.
-// Box::leak promotes them to 'static, but leaks memory on every call.
-// This cache ensures the leak happens at most once per app ID — subsequent
-// SdkBuilder::new() calls reuse the same 'static references.
-// thread_local is used because WASM is single-threaded and RefCell
-// cannot be in a regular static (it's not Sync).
 thread_local! {
     static CACHED_META: std::cell::RefCell<Option<CachedMeta>> = std::cell::RefCell::new(None);
 }
 
-/// Constructs an [`AppMetadata`] from JS-provided strings.
-///
-/// `AppMetadata` requires `&'static str` fields, but strings from JS are
-/// temporary. We use `Box::leak` to promote each string to `'static`
-/// references. The leaked strings are cached so this only happens once —
-/// subsequent calls with the same app ID reuse the cached references.
 pub(crate) fn make_app_metadata(
     id_hex: &str,
     name: &str,
@@ -62,46 +36,26 @@ pub(crate) fn make_app_metadata(
 
     CACHED_META.with(|cell| {
         let mut cache = cell.borrow_mut();
-
-        // Return cached metadata if the app ID matches
         if let Some(ref c) = *cache {
             if c.id == app_id {
                 return Ok(AppMetadata {
-                    id: c.id,
-                    name: c.name,
-                    description: c.description,
-                    service_url: c.service_url,
-                    logo_url: c.logo_url,
-                    callback_url: c.callback_url,
+                    id: c.id, name: c.name, description: c.description,
+                    service_url: c.service_url, logo_url: c.logo_url, callback_url: c.callback_url,
                 });
             }
         }
-
-        // First call (or different app ID) — leak strings and cache them
         let leaked_name: &'static str = Box::leak(name.to_owned().into_boxed_str());
         let leaked_desc: &'static str = Box::leak(description.to_owned().into_boxed_str());
         let leaked_url: &'static str = Box::leak(service_url.to_owned().into_boxed_str());
-        let leaked_logo: Option<&'static str> =
-            logo_url.map(|s| Box::leak(s.into_boxed_str()) as &'static str);
-        let leaked_cb: Option<&'static str> =
-            callback_url.map(|s| Box::leak(s.into_boxed_str()) as &'static str);
-
+        let leaked_logo: Option<&'static str> = logo_url.map(|s| Box::leak(s.into_boxed_str()) as &'static str);
+        let leaked_cb: Option<&'static str> = callback_url.map(|s| Box::leak(s.into_boxed_str()) as &'static str);
         *cache = Some(CachedMeta {
-            id: app_id,
-            name: leaked_name,
-            description: leaked_desc,
-            service_url: leaked_url,
-            logo_url: leaked_logo,
-            callback_url: leaked_cb,
+            id: app_id, name: leaked_name, description: leaked_desc,
+            service_url: leaked_url, logo_url: leaked_logo, callback_url: leaked_cb,
         });
-
         Ok(AppMetadata {
-            id: app_id,
-            name: leaked_name,
-            description: leaked_desc,
-            service_url: leaked_url,
-            logo_url: leaked_logo,
-            callback_url: leaked_cb,
+            id: app_id, name: leaked_name, description: leaked_desc,
+            service_url: leaked_url, logo_url: leaked_logo, callback_url: leaked_cb,
         })
     })
 }

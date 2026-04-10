@@ -7,7 +7,7 @@ use chrono::Utc;
 use sia_core::rhp4::HostPrices;
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::{Currency, Hash256};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncBufRead, AsyncWrite};
 
 use crate::download::download_object;
 use crate::hosts::Hosts;
@@ -130,6 +130,14 @@ impl Transport for MockRHP4Transport {
         sleep(Duration::from_nanos(sector.len() as u64 * 8 / 10)).await; // simulate network latency ~ 10Gbps
         Ok(sector)
     }
+
+    async fn account_balance(
+        &self,
+        _host: &HostEndpoint,
+        _account_key: &PrivateKey,
+    ) -> Result<Currency, RHP4Error> {
+        Ok(Currency::zero())
+    }
 }
 
 pub struct MockUploader {
@@ -143,7 +151,7 @@ impl MockUploader {
         }
     }
 
-    pub async fn upload<R: AsyncRead + Send + Sync + Unpin + 'static>(
+    pub async fn upload<R: AsyncBufRead + Send + Sync + Unpin + 'static>(
         &self,
         object: Object,
         r: R,

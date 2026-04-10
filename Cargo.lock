@@ -2586,6 +2586,7 @@ dependencies = [
  "criterion",
  "ed25519-dalek",
  "env_logger 0.11.9",
+ "futures-util",
  "getrandom 0.2.16",
  "getrandom 0.4.1",
  "hex",
@@ -2637,8 +2638,9 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_wasm"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
+ "bytes",
  "chrono",
  "console_error_panic_hook",
  "console_log",

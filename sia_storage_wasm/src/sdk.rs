@@ -15,8 +15,8 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::app_key::AppKey;
-use crate::helpers::{run_local, to_js_err};
-use crate::types::{Account, Host, ObjectEvent};
+use crate::helpers::to_js_err;
+use crate::types::{Account, EncryptionKey, Host, ObjectEvent};
 use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
 use crate::streaming::Upload;
@@ -165,6 +165,16 @@ impl Sdk {
             .collect())
     }
 
+    /// Queries a host for the account's remaining balance.
+    /// Returns the balance as a string in hastings (1 SC = 10^24 hastings).
+    #[wasm_bindgen(js_name = "hostAccountBalance")]
+    pub async fn host_account_balance(&self, host_key: &str) -> Result<String, JsValue> {
+        let pk = sia_core::signing::PublicKey::from_str(host_key).map_err(to_js_err)?;
+        let sdk = self.0.clone();
+        let balance = sdk.host_account_balance(pk).await.map_err(to_js_err)?;
+        Ok(balance.to_string())
+    }
+
     /// Retrieves an object from the indexer by its hex ID.
     /// Returns a `PinnedObject` handle for use with download, share, seal, etc.
     pub async fn object(&self, key_hex: &str) -> Result<PinnedObject, JsValue> {
@@ -252,7 +262,7 @@ impl Sdk {
             )));
         }
         let mut buf = Vec::with_capacity(size as usize);
-        run_local(sdk.download(&mut buf, &object.0, opts))
+        sdk.download(&mut buf, &object.0, opts)
             .await
             .map_err(to_js_err)?;
         Ok(buf)
@@ -286,7 +296,7 @@ impl Sdk {
             ..Default::default()
         };
         let sdk = self.0.clone();
-        run_local(sdk.download(&mut buf, obj, opts))
+        sdk.download(&mut buf, obj, opts)
             .await
             .map_err(to_js_err)?;
         Ok(buf)
@@ -296,8 +306,7 @@ impl Sdk {
     /// Push data with `pushChunk()`, then call `finish()` to get the `PinnedObject`.
     pub fn upload(&self, options: Option<UploadOptions>) -> Upload {
         let opts = options.map(|o| o.to_inner()).unwrap_or_default();
-        let (reader, writer) = tokio::io::simplex(1024 * 1024);
-        Upload::new(writer, reader, self.0.clone(), opts)
+        Upload::new(self.0.clone(), opts)
     }
 
     /// Starts a packed upload for efficiently uploading multiple small objects.
@@ -325,8 +334,7 @@ impl Sdk {
         options: Option<DownloadOptions>,
     ) -> Result<(), JsValue> {
         let sdk = self.0.clone();
-        let obj = object.0.clone();
-        let total = obj.size() as f64;
+        let total = object.0.size() as f64;
         let opts = options.map(|o| o.to_inner()).unwrap_or_default();
 
         let chunk_fn: js_sys::Function = on_chunk.unchecked_into();
@@ -339,7 +347,7 @@ impl Sdk {
             on_progress: progress_fn,
         };
 
-        run_local(sdk.download(&mut writer, &obj, opts))
+        sdk.download(&mut writer, &object.0, opts)
             .await
             .map_err(to_js_err)?;
         Ok(())
@@ -380,5 +388,56 @@ impl Sdk {
     pub async fn prune_slabs(&self) -> Result<(), JsValue> {
         let sdk = self.0.clone();
         sdk.prune_slabs().await.map_err(to_js_err)
+    }
+
+    /// Reads a raw sector from a host. Returns the sector data as bytes.
+    /// Used for migration and repair operations.
+    #[wasm_bindgen(js_name = "readSector")]
+    pub async fn read_sector(
+        &self,
+        host_key: &str,
+        root_hex: &str,
+        offset: u32,
+        length: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        let pk = sia_core::signing::PublicKey::from_str(host_key).map_err(to_js_err)?;
+        let root = Hash256::from_str(root_hex).map_err(to_js_err)?;
+        let sdk = self.0.clone();
+        let data = sdk
+            .read_sector(pk, root, offset as usize, length as usize)
+            .await
+            .map_err(to_js_err)?;
+        Ok(data.to_vec())
+    }
+
+    /// Writes a raw sector to a host. Returns the sector's Merkle root as hex.
+    /// Used for migration and repair operations.
+    #[wasm_bindgen(js_name = "writeSector")]
+    pub async fn write_sector(
+        &self,
+        host_key: &str,
+        data: Vec<u8>,
+    ) -> Result<String, JsValue> {
+        let pk = sia_core::signing::PublicKey::from_str(host_key).map_err(to_js_err)?;
+        let sdk = self.0.clone();
+        let root = sdk
+            .write_sector(pk, data.into())
+            .await
+            .map_err(to_js_err)?;
+        Ok(root.to_string())
+    }
+
+    /// Assembles a PinnedObject from a data encryption key and slab metadata.
+    /// Used after migration to construct an object with sectors on new hosts.
+    #[wasm_bindgen(js_name = "assembleObject")]
+    pub fn assemble_object(
+        &self,
+        data_key: &EncryptionKey,
+        slabs_json: &str,
+    ) -> Result<PinnedObject, JsValue> {
+        let slabs: Vec<sia_storage::Slab> =
+            serde_json::from_str(slabs_json).map_err(to_js_err)?;
+        let obj = sia_storage::Object::new(data_key.0.clone(), slabs, Vec::new());
+        Ok(PinnedObject(obj))
     }
 }

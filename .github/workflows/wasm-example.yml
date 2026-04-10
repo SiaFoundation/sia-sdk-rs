@@ -2,7 +2,7 @@ name: Deploy WASM Example
 
 on:
   push:
-    branches: [matt/wasm-bindings-pr]
+    branches: [matt/wasm-bindings-pr, matt/sialo-port]
     paths:
       - 'sia_storage_wasm/**'
       - 'sia_storage/src/**'

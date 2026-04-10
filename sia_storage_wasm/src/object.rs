@@ -2,7 +2,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
 use crate::helpers::to_js_err;
-use crate::types::Slab;
+use crate::types::{EncryptionKey, Slab};
 use crate::sealed::SealedObject;
 
 /// An object stored on the Sia network. JS holds this as an opaque handle
@@ -64,15 +64,22 @@ impl PinnedObject {
         self.0.slabs().iter().map(Slab::from).collect()
     }
 
+    /// Returns the object's data encryption key. Used for migration
+    /// and re-encoding slabs with the same key on a different indexer.
+    #[wasm_bindgen(js_name = "dataKey")]
+    pub fn data_key(&self) -> EncryptionKey {
+        EncryptionKey(self.0.data_key().clone())
+    }
+
     /// Seals the object for offline storage or migration.
     pub fn seal(&self, app_key: &AppKey) -> SealedObject {
         let inner = self.0.seal(&app_key.0);
         SealedObject { inner }
     }
 
-    /// Opens a previously sealed object.
-    pub fn open(app_key: &AppKey, sealed: &SealedObject) -> Result<PinnedObject, JsValue> {
-        let obj = sealed.inner.clone().open(&app_key.0).map_err(to_js_err)?;
+    /// Opens a previously sealed object. Consumes the `SealedObject`.
+    pub fn open(app_key: &AppKey, sealed: SealedObject) -> Result<PinnedObject, JsValue> {
+        let obj = sealed.inner.open(&app_key.0).map_err(to_js_err)?;
         Ok(PinnedObject(obj))
     }
 }

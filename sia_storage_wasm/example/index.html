@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sia Storage SDK — WASM API Test</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0a; color: #e0e0e0; padding: 2rem; max-width: 800px; margin: 0 auto; }
+    h1 { color: #10b981; margin-bottom: 0.5rem; font-size: 1.4rem; }
+    h2 { color: #888; font-size: 0.9rem; margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .section { background: #151515; border: 1px solid #222; border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; }
+    label { display: block; color: #888; font-size: 0.8rem; margin-bottom: 0.2rem; }
+    input, textarea { width: 100%; padding: 0.4rem; background: #0a0a0a; border: 1px solid #333; border-radius: 4px; color: #e0e0e0; font-family: monospace; font-size: 0.8rem; margin-bottom: 0.5rem; }
+    textarea { resize: vertical; min-height: 2rem; }
+    button { padding: 0.4rem 1rem; background: #10b981; color: #000; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 0.85rem; margin-right: 0.4rem; margin-bottom: 0.4rem; }
+    button:hover { background: #059669; }
+    button:disabled { background: #333; color: #666; cursor: not-allowed; }
+    .tabs { display: flex; gap: 0; margin-bottom: 0.75rem; }
+    .tab { padding: 0.4rem 0.8rem; background: #1a1a1a; border: 1px solid #333; cursor: pointer; font-size: 0.8rem; color: #888; }
+    .tab:first-child { border-radius: 4px 0 0 4px; }
+    .tab:last-child { border-radius: 0 4px 4px 0; }
+    .tab.active { background: #10b981; color: #000; border-color: #10b981; font-weight: 600; }
+    .hidden { display: none !important; }
+    #log { background: #0a0a0a; border: 1px solid #222; border-radius: 4px; padding: 0.5rem; font-family: monospace; font-size: 0.75rem; max-height: 500px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+    .ok { color: #10b981; }
+    .err { color: #ef4444; }
+    .info { color: #3b82f6; }
+    .dim { color: #666; }
+    .mono { font-family: monospace; font-size: 0.75rem; }
+    .note { color: #f59e0b; font-size: 0.8rem; margin-top: 0.4rem; }
+    .test-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0; border-bottom: 1px solid #1a1a1a; font-size: 0.85rem; }
+    .test-row .status { width: 20px; text-align: center; }
+    .test-row .name { flex: 1; }
+    .test-row .time { color: #666; font-size: 0.75rem; min-width: 60px; text-align: right; }
+    .pass { color: #10b981; }
+    .fail { color: #ef4444; }
+    .running { color: #f59e0b; }
+  </style>
+</head>
+<body>
+
+<h1>Sia Storage SDK — WASM API Test</h1>
+<p style="color:#666; font-size:0.8rem; margin-bottom:1rem;">Exercises every method in the WASM SDK: connect, upload (streaming/packed), download (buffered/streaming/slab), share, seal/open, metadata, host balance, delete.</p>
+
+<div class="section">
+  <div class="tabs">
+    <div class="tab active" data-tab="connect">Connect</div>
+    <div class="tab" data-tab="register">Register</div>
+  </div>
+
+  <div id="tab-connect">
+    <label>Indexer URL</label>
+    <input id="indexer-url" type="text" value="https://sia.storage">
+    <label>App Key (hex)</label>
+    <input id="app-key" type="text" placeholder="paste app key hex">
+    <button id="btn-connect">Connect</button>
+  </div>
+
+  <div id="tab-register" class="hidden">
+    <label>Indexer URL</label>
+    <input id="reg-indexer-url" type="text" value="https://sia.storage">
+    <label>Recovery Phrase</label>
+    <div style="display:flex; gap:0.4rem; margin-bottom:0.5rem;">
+      <textarea id="reg-phrase" rows="2" placeholder="enter or generate" style="flex:1; margin-bottom:0;"></textarea>
+      <button id="btn-gen-phrase" style="white-space:nowrap;">Generate</button>
+    </div>
+    <p class="note hidden" id="reg-phrase-warning">Save this phrase — it cannot be recovered.</p>
+    <button id="btn-register">Register</button>
+    <div id="reg-status" style="margin-top:0.5rem; font-size:0.8rem;"></div>
+  </div>
+</div>
+
+<div class="section hidden" id="test-section">
+  <h2>API Tests</h2>
+  <p style="color:#666; font-size:0.8rem; margin-bottom:0.5rem;">Each test uploads data, downloads it, and verifies the SHA-256 hash.</p>
+  <button id="btn-run-all">Run All Tests</button>
+  <div id="test-results" style="margin-top:0.5rem;"></div>
+</div>
+
+<div class="section">
+  <h2>Log</h2>
+  <div id="log"></div>
+</div>
+
+<script type="module">
+  const $log = document.getElementById('log');
+  function log(msg, cls = '') {
+    const line = document.createElement('div');
+    if (cls) line.className = cls;
+    const ts = new Date().toISOString().slice(11, 23);
+    line.textContent = `[${ts}] ${msg}`;
+    $log.appendChild(line);
+    $log.scrollTop = $log.scrollHeight;
+  }
+
+  function formatBytes(n) {
+    if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GiB';
+    if (n >= 1048576) return (n / 1048576).toFixed(2) + ' MiB';
+    if (n >= 1024) return (n / 1024).toFixed(2) + ' KiB';
+    return n + ' B';
+  }
+
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById('tab-connect').classList.toggle('hidden', tab.dataset.tab !== 'connect');
+      document.getElementById('tab-register').classList.toggle('hidden', tab.dataset.tab !== 'register');
+    });
+  });
+
+  const worker = new Worker('./worker.js?v=2', { type: 'module' });
+  worker.onerror = (e) => { log('Worker error: ' + e.message, 'err'); console.error('Worker error:', e); };
+  let nextId = 1;
+  const pending = {};
+
+  worker.onmessage = (e) => {
+    const { id, result, error, progress } = e.data;
+    if (progress) {
+      if (progress.status) log('  [worker] ' + progress.status, 'dim');
+      if (progress.shards) log('  [worker] shard ' + progress.shards + ' done', 'dim');
+      return;
+    }
+    log('  [rpc] id=' + id + ' ' + (error ? 'ERROR' : 'ok'), 'dim');
+    const p = pending[id];
+    if (!p) return;
+    delete pending[id];
+    if (error) p.reject(new Error(error));
+    else p.resolve(result);
+  };
+
+  function rpc(type, args = {}) {
+    return new Promise((resolve, reject) => {
+      const id = nextId++;
+      pending[id] = { resolve, reject };
+      worker.postMessage({ id, type, args });
+    });
+  }
+
+  const tests = [];
+  const $results = document.getElementById('test-results');
+  let uploadedObjects = {};
+
+  function addTest(name, fn) {
+    tests.push({ name, fn });
+  }
+
+  async function runTests() {
+    uploadedObjects = {};
+    $results.innerHTML = '';
+    for (const test of tests) {
+      const row = document.createElement('div');
+      row.className = 'test-row';
+      row.innerHTML = `<span class="status running">⏳</span><span class="name">${test.name}</span><span class="time"></span>`;
+      $results.appendChild(row);
+
+      const start = performance.now();
+      try {
+        log(`[${test.name}] running...`, 'info');
+        await test.fn();
+        const elapsed = ((performance.now() - start) / 1000).toFixed(1);
+        row.querySelector('.status').textContent = '✓';
+        row.querySelector('.status').className = 'status pass';
+        row.querySelector('.time').textContent = elapsed + 's';
+        log(`[${test.name}] passed (${elapsed}s)`, 'ok');
+      } catch (e) {
+        const elapsed = ((performance.now() - start) / 1000).toFixed(1);
+        row.querySelector('.status').textContent = '✗';
+        row.querySelector('.status').className = 'status fail';
+        row.querySelector('.time').textContent = elapsed + 's';
+        const msg = e.message || e.toString();
+        row.innerHTML += `<div style="color:#ef4444; font-size:0.75rem; margin-top:0.2rem;">${msg}</div>`;
+        log(`[${test.name}] FAILED: ${msg}`, 'err');
+      }
+    }
+    const failed = document.querySelectorAll('.status.fail').length;
+    const passed = document.querySelectorAll('.status.pass').length;
+    log(`All tests complete. ${passed} passed, ${failed} failed.`, failed > 0 ? 'err' : 'ok');
+
+    // Machine-readable result for CI (Playwright/Puppeteer can check this element)
+    let resultEl = document.getElementById('test-result');
+    if (!resultEl) {
+      resultEl = document.createElement('div');
+      resultEl.id = 'test-result';
+      resultEl.style.display = 'none';
+      document.body.appendChild(resultEl);
+    }
+    resultEl.dataset.passed = passed;
+    resultEl.dataset.failed = failed;
+    resultEl.dataset.done = 'true';
+  }
+
+  function assert(cond, msg) { if (!cond) throw new Error(msg); }
+
+  addTest('account', async () => {
+    const account = await rpc('account');
+    assert(account.accountKey, 'missing accountKey');
+    assert(typeof account.maxPinnedData === 'number', 'maxPinnedData not a number');
+    log(`  account: ${account.accountKey.slice(0, 20)}... pinned=${formatBytes(account.pinnedData)}`, 'dim');
+  });
+
+  addTest('hosts', async () => {
+    const hosts = await rpc('hosts');
+    assert(Array.isArray(hosts), 'hosts not an array');
+    assert(hosts.length > 0, 'no hosts');
+    const upload = hosts.filter(h => h.goodForUpload).length;
+    log(`  ${hosts.length} hosts, ${upload} for upload`, 'dim');
+  });
+
+  addTest('appKey', async () => {
+    const info = await rpc('appKey');
+    assert(info.publicKey.startsWith('ed25519:'), 'bad publicKey format');
+    assert(info.exportLength === 32, 'export should be 32 bytes');
+    log(`  publicKey: ${info.publicKey.slice(0, 30)}...`, 'dim');
+  });
+
+  addTest('appKey sign/verify', async () => {
+    const appKeyHex = document.getElementById('app-key').value.trim();
+    const info = await rpc('testAppKey', { appKeyHex });
+    assert(info.valid, 'signature verification failed');
+    assert(info.signatureLength === 64, 'signature should be 64 bytes');
+    assert(info.exportRoundtrip, 'export/import roundtrip failed');
+  });
+
+  addTest('encodedSize', async () => {
+    const size = await rpc('encodedSize', { dataSize: 1048576, dataShards: 10, parityShards: 20 });
+    assert(size > 1048576, 'encoded size should be larger than input');
+    log(`  1 MiB → ${formatBytes(size)} encoded`, 'dim');
+  });
+
+  addTest('upload (streaming)', async () => {
+    const r = await rpc('upload', { size: 1024 * 100 });
+    assert(r.id && r.id.length === 64, 'bad object id');
+    assert(r.hash && r.hash.length === 64, 'bad hash');
+    assert(r.slabCount > 0, 'expected at least 1 slab');
+    uploadedObjects.uploaded = r;
+    log(`  id=${r.id.slice(0, 16)}... size=${formatBytes(r.size)} slabs=${r.slabCount}`, 'dim');
+  });
+
+  addTest('download (buffered) + verify hash', async () => {
+    const u = uploadedObjects.uploaded;
+    assert(u, 'no upload to download');
+    const r = await rpc('download', { objectId: u.id });
+    assert(r.hash === u.hash, `hash mismatch: ${r.hash.slice(0, 16)} !== ${u.hash.slice(0, 16)}`);
+    log(`  hash verified ✓`, 'dim');
+  });
+
+  addTest('download (streaming) + verify hash', async () => {
+    const u = uploadedObjects.uploaded;
+    assert(u, 'no upload to download');
+    const r = await rpc('downloadStreaming', { objectId: u.id });
+    assert(r.hash === u.hash, `hash mismatch: ${r.hash.slice(0, 16)} !== ${u.hash.slice(0, 16)}`);
+    log(`  streaming hash verified ✓ (${formatBytes(r.size)})`, 'dim');
+  });
+
+  addTest('downloadSlab (slab 0) + verify size', async () => {
+    const u = uploadedObjects.uploaded;
+    assert(u, 'no upload to download');
+    const r = await rpc('downloadSlab', { objectId: u.id, slabIndex: 0 });
+    assert(r.size > 0, 'slab data should not be empty');
+    assert(r.size <= u.size, 'slab should not exceed object size');
+    log(`  slab 0: ${formatBytes(r.size)}`, 'dim');
+  });
+
+  addTest('upload (packed, 3 small files)', async () => {
+    const r = await rpc('uploadPacked', { sizes: [1024, 2048, 4096] });
+    assert(r.objects.length === 3, `expected 3 objects, got ${r.objects.length}`);
+    uploadedObjects.packed = r.objects;
+    for (const o of r.objects) log(`  packed id=${o.id} size=${formatBytes(o.size)}`, 'dim');
+  });
+
+  addTest('download each packed object + verify hashes', async () => {
+    const packed = uploadedObjects.packed;
+    assert(packed, 'no packed uploads to download');
+    for (const obj of packed) {
+      const r = await rpc('download', { objectId: obj.id });
+      assert(r.hash === obj.hash, `hash mismatch for ${obj.id.slice(0, 16)}`);
+    }
+    log(`  all ${packed.length} hashes verified ✓`, 'dim');
+  });
+
+  addTest('shareObject + sharedObject + verify hash', async () => {
+    const u = uploadedObjects.uploaded;
+    assert(u, 'no upload to share');
+    const r = await rpc('shareObject', { objectId: u.id });
+    assert(r.idMatch, 'shared object ID does not match original');
+    assert(r.hash === u.hash, 'shared download hash mismatch');
+    log(`  share URL: ${r.shareUrl.slice(0, 50)}...`, 'dim');
+  });
+
+  addTest('seal + open roundtrip', async () => {
+    const u = uploadedObjects.uploaded;
+    assert(u, 'no upload to seal');
+    const r = await rpc('sealOpen', { objectId: u.id });
+    assert(r.match, `ID mismatch: ${r.originalId.slice(0, 16)} !== ${r.reopenedId.slice(0, 16)}`);
+    assert(r.slabCount > 0, 'sealed object should have slabs');
+    log(`  sealed JSON: ${formatBytes(r.sealedJsonLength)}, ${r.slabCount} slabs`, 'dim');
+  });
+
+  addTest('updateMetadata', async () => {
+    const u = uploadedObjects.uploaded;
+    assert(u, 'no upload for metadata test');
+    const r = await rpc('metadata', { objectId: u.id });
+    assert(r.metaMatch, 'metadata roundtrip failed');
+    log(`  metadata updated: ${r.originalMetaSize} → ${r.updatedMetaSize} bytes`, 'dim');
+  });
+
+  addTest('objectEvents (with size)', async () => {
+    const r = await rpc('objectEvents');
+    assert(Array.isArray(r.events), 'events not an array');
+    assert(r.count > 0, 'expected at least one event');
+    const withSize = r.events.filter(e => e.size > 0);
+    log(`  ${r.count} events, ${withSize.length} with size data`, 'dim');
+    if (withSize.length > 0) {
+      log(`  first: id=${withSize[0].id.slice(0, 16)}... size=${formatBytes(withSize[0].size)}`, 'dim');
+    }
+  });
+
+  addTest('hostAccountBalance', async () => {
+    const hosts = await rpc('hosts');
+    assert(hosts.length > 0, 'no hosts available');
+    const host = hosts[0];
+    const r = await rpc('hostAccountBalance', { hostKey: host.publicKey });
+    assert(typeof r.balance === 'string', 'balance should be a string');
+    log(`  host=${host.publicKey.slice(0, 20)}... balance=${r.balance} H`, 'dim');
+  });
+
+  addTest('deleteObject', async () => {
+    const u = uploadedObjects.uploaded;
+    assert(u, 'no upload to delete');
+    await rpc('deleteObject', { objectId: u.id });
+    try {
+      await rpc('download', { objectId: u.id });
+      throw new Error('download should have failed after delete');
+    } catch (e) {
+      if (e.message.includes('should have failed')) throw e;
+      log(`  deleted and verified inaccessible ✓`, 'dim');
+    }
+  });
+
+  async function onConnected() {
+    log('Fetching account...', 'info');
+    const account = await rpc('account');
+    log(`Connected. Pinned: ${formatBytes(account.pinnedData)} / ${formatBytes(account.maxPinnedData)}`, 'ok');
+    document.getElementById('test-section').classList.remove('hidden');
+  }
+
+  async function onConnect() {
+    const indexerUrl = document.getElementById('indexer-url').value.trim();
+    const appKeyHex = document.getElementById('app-key').value.trim();
+    if (!indexerUrl || !appKeyHex) { log('Fill in URL and key.', 'err'); return; }
+    const btn = document.getElementById('btn-connect');
+    btn.disabled = true;
+    try {
+      log('Connecting (includes warm connections)...', 'info');
+      const t0 = performance.now();
+      const r = await rpc('connect', { indexerUrl, appKeyHex });
+      if (!r.connected) { log('Key not registered.', 'err'); return; }
+      localStorage.setItem('sia-demo-indexer-url', indexerUrl);
+      localStorage.setItem('sia-demo-app-key', appKeyHex);
+      log(`Connected in ${((performance.now() - t0) / 1000).toFixed(1)}s`, 'ok');
+      await onConnected();
+    } catch (e) { log('Error: ' + e.message, 'err'); }
+    finally { btn.disabled = false; }
+  }
+
+  async function onGeneratePhrase() {
+    const { phrase } = await rpc('generatePhrase');
+    document.getElementById('reg-phrase').value = phrase;
+    document.getElementById('reg-phrase-warning').classList.remove('hidden');
+  }
+
+  async function onRegister() {
+    const indexerUrl = document.getElementById('reg-indexer-url').value.trim();
+    const phrase = document.getElementById('reg-phrase').value.trim();
+    if (!indexerUrl || !phrase) { log('Fill in URL and phrase.', 'err'); return; }
+    const btn = document.getElementById('btn-register');
+    const status = document.getElementById('reg-status');
+    btn.disabled = true;
+    try {
+      const { valid, error } = await rpc('validatePhrase', { phrase });
+      if (!valid) { log('Invalid phrase: ' + error, 'err'); return; }
+      log('Requesting connection...', 'info');
+      const { responseUrl } = await rpc('requestConnection', { indexerUrl });
+      status.innerHTML = `<a href="${responseUrl}" target="_blank" style="color:#3b82f6;">Approve connection</a>`;
+      window.open(responseUrl, '_blank');
+      log('Waiting for approval...', 'info');
+      await rpc('waitForApproval');
+      log('Approved. Registering (includes warm connections)...', 'ok');
+      const t0 = performance.now();
+      const { appKeyHex } = await rpc('register', { mnemonic: phrase });
+      status.innerHTML = `<span style="color:#888;">App Key:</span><br><span class="mono">${appKeyHex}</span>`;
+      document.getElementById('app-key').value = appKeyHex;
+      localStorage.setItem('sia-demo-indexer-url', indexerUrl);
+      localStorage.setItem('sia-demo-app-key', appKeyHex);
+      log(`Registered in ${((performance.now() - t0) / 1000).toFixed(1)}s`, 'ok');
+      await onConnected();
+    } catch (e) { log('Error: ' + e.message, 'err'); }
+    finally { btn.disabled = false; }
+  }
+
+  async function main() {
+    log('Loading WASM...', 'info');
+    await rpc('init', { wasmUrl: './pkg/sia_storage_wasm_bg.wasm' });
+    log('WASM ready.', 'ok');
+
+    document.getElementById('btn-connect').addEventListener('click', onConnect);
+    document.getElementById('btn-gen-phrase').addEventListener('click', onGeneratePhrase);
+    document.getElementById('btn-register').addEventListener('click', onRegister);
+    document.getElementById('btn-run-all').addEventListener('click', () => runTests());
+
+    // URL params for CI: ?url=https://...&key=HEXKEY&autorun
+    const params = new URLSearchParams(location.search);
+    const paramUrl = params.get('url');
+    const paramKey = params.get('key');
+    const autorun = params.has('autorun');
+
+    const savedUrl = paramUrl || localStorage.getItem('sia-demo-indexer-url');
+    const savedKey = paramKey || localStorage.getItem('sia-demo-app-key');
+    if (savedUrl && savedKey) {
+      document.getElementById('indexer-url').value = savedUrl;
+      document.getElementById('app-key').value = savedKey;
+      try {
+        await onConnect();
+        if (autorun) await runTests();
+      } catch (e) { log('Auto-connect failed: ' + (e.message || e), 'err'); }
+    }
+  }
+
+  main().catch(e => log('Fatal: ' + e.message, 'err'));
+</script>
+
+</body>
+</html>

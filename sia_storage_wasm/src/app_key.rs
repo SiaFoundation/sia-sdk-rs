@@ -42,7 +42,6 @@ impl AppKey {
                 Ok(AppKey(sia_storage::AppKey::import(buf)))
             }
             64 => {
-                // 64-byte ed25519 keypair — seed is first 32 bytes
                 let mut buf = [0u8; 32];
                 buf.copy_from_slice(&bytes[..32]);
                 Ok(AppKey(sia_storage::AppKey::import(buf)))
