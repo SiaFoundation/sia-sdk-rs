@@ -2,8 +2,8 @@ use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
 use crate::helpers::to_js_err;
-use crate::types::Slab;
 use crate::sealed::SealedObject;
+use crate::types::Slab;
 
 /// An object stored on the Sia network. JS holds this as an opaque handle
 /// and passes it back to Rust for operations like pin, download, share, and
