@@ -49,7 +49,7 @@ impl<T: Transport> ShardUpload<T> {
             let root = client.write_sector(host_key, &account_key, data, write_timeout).await
             .inspect_err(|e| {
                 debug!(
-                    "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {:?} {e}",
+                    "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {:?}: {e}",
                     now.elapsed()
                 );
                 let _ = hosts.retry(host_key);
@@ -279,17 +279,26 @@ impl<T: Transport> Uploader<T> {
                             }
                             return Ok((shard.shard_index, sector));
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            debug!("slab {} shard {} task failed: {e}, active={}, queue has hosts: {}",
+                                shard.slab_index, shard.shard_index, tasks.len(),
+                                shard.hosts.len());
                             if tasks.is_empty() {
-                                let (host_key, attempts) = shard.hosts.pop_front()?;
-                                let write_timeout = Self::upload_timeout(attempts);
-                                let permit = semaphore.clone().acquire_owned().await?;
-                                shard.spawn_write(&mut tasks, host_key, write_timeout, permit);
+                                match shard.hosts.pop_front() {
+                                    Ok((host_key, attempts)) => {
+                                        debug!("slab {} shard {} retrying with host {} (attempt {})",
+                                            shard.slab_index, shard.shard_index, host_key, attempts);
+                                        let write_timeout = Self::upload_timeout(attempts);
+                                        let permit = semaphore.clone().acquire_owned().await?;
+                                        shard.spawn_write(&mut tasks, host_key, write_timeout, permit);
+                                    }
+                                    Err(e) => return Err(e.into()),
+                                }
                             }
                         }
                     }
                 },
-                _ = sleep(Duration::from_secs(active as u64)) => {
+                _ = sleep(Duration::from_secs(active.max(1) as u64)) => {
                     if let Ok(racer) = semaphore.clone().try_acquire_owned()
                         && let Ok((host_key, attempts)) = shard.hosts.pop_front() {
                             debug!("slab {} shard {} racing slow host", shard.slab_index, shard.shard_index);
@@ -324,8 +333,9 @@ impl<T: Transport> Uploader<T> {
         let parity_shards = options.parity_shards as usize;
         let total_shards = data_shards + parity_shards;
 
-        // fail fast if there aren't enough hosts before doing any encoding
-        if client.available_for_upload() < total_shards {
+        let available = client.available_for_upload();
+        debug!("upload_slabs: {available} hosts available, need {total_shards} per slab, max_inflight={}", options.max_inflight);
+        if available < total_shards {
             return Err(QueueError::InsufficientHosts.into());
         }
 
@@ -379,8 +389,9 @@ impl<T: Transport> Uploader<T> {
                 let slab_key: EncryptionKey = rand::random::<[u8; 32]>().into();
 
                 let host_queue = client.upload_queue();
-                // reserve one host per shard upfront to guarantee each shard has at least one host
+                debug!("slab {slab_index}: encoded, reserving {} hosts", shards.len());
                 let reserved_hosts = host_queue.pop_n(shards.len())?;
+                debug!("slab {slab_index}: reserved {} hosts, starting shard uploads", reserved_hosts.len());
                 let owned_slab_key = Arc::new(slab_key.clone());
                 let start_time = Instant::now();
                 let mut shard_upload_tasks = TaskSet::new();

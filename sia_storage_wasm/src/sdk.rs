@@ -15,7 +15,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::app_key::AppKey;
-use crate::helpers::*;
+use crate::helpers::{Account, EncryptionKey, Host, ObjectEvent, to_js_err};
 use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
 use crate::streaming::Upload;
@@ -398,5 +398,56 @@ impl Sdk {
     pub async fn prune_slabs(&self) -> Result<(), JsValue> {
         let sdk = self.0.clone();
         sdk.prune_slabs().await.map_err(to_js_err)
+    }
+
+    /// Reads a raw sector from a host. Returns the sector data as bytes.
+    /// Used for migration and repair operations.
+    #[wasm_bindgen(js_name = "readSector")]
+    pub async fn read_sector(
+        &self,
+        host_key: &str,
+        root_hex: &str,
+        offset: u32,
+        length: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        let pk = sia_core::signing::PublicKey::from_str(host_key).map_err(to_js_err)?;
+        let root = Hash256::from_str(root_hex).map_err(to_js_err)?;
+        let sdk = self.0.clone();
+        let data = sdk
+            .read_sector(pk, root, offset as usize, length as usize)
+            .await
+            .map_err(to_js_err)?;
+        Ok(data.to_vec())
+    }
+
+    /// Writes a raw sector to a host. Returns the sector's Merkle root as hex.
+    /// Used for migration and repair operations.
+    #[wasm_bindgen(js_name = "writeSector")]
+    pub async fn write_sector(
+        &self,
+        host_key: &str,
+        data: Vec<u8>,
+    ) -> Result<String, JsValue> {
+        let pk = sia_core::signing::PublicKey::from_str(host_key).map_err(to_js_err)?;
+        let sdk = self.0.clone();
+        let root = sdk
+            .write_sector(pk, data.into())
+            .await
+            .map_err(to_js_err)?;
+        Ok(root.to_string())
+    }
+
+    /// Assembles a PinnedObject from a data encryption key and slab metadata.
+    /// Used after migration to construct an object with sectors on new hosts.
+    #[wasm_bindgen(js_name = "assembleObject")]
+    pub fn assemble_object(
+        &self,
+        data_key: &EncryptionKey,
+        slabs_json: &str,
+    ) -> Result<PinnedObject, JsValue> {
+        let slabs: Vec<sia_storage::Slab> =
+            serde_json::from_str(slabs_json).map_err(to_js_err)?;
+        let obj = sia_storage::Object::new(data_key.0.clone(), slabs, Vec::new());
+        Ok(PinnedObject(obj))
     }
 }

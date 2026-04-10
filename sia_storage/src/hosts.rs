@@ -681,6 +681,10 @@ impl HostQueue {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.inner.lock().map(|i| i.hosts.len()).unwrap_or(0)
+    }
+
     pub fn pop_front(&self) -> Result<(PublicKey, usize), QueueError> {
         let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
         let host_key = inner.hosts.pop_front().ok_or(QueueError::NoMoreHosts)?;

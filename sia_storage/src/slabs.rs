@@ -248,7 +248,7 @@ pub struct Object {
 }
 
 impl Object {
-    pub(crate) fn new(data_key: EncryptionKey, slabs: Vec<Slab>, metadata: Vec<u8>) -> Self {
+    pub fn new(data_key: EncryptionKey, slabs: Vec<Slab>, metadata: Vec<u8>) -> Self {
         Object {
             data_key,
             slabs,
@@ -349,7 +349,7 @@ impl Object {
     /// Returns the object's encryption key.
     ///
     /// Be careful when using this function to avoid accidental exposure.
-    pub(crate) fn data_key(&self) -> &EncryptionKey {
+    pub fn data_key(&self) -> &EncryptionKey {
         &self.data_key
     }
 }
