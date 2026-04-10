@@ -36,7 +36,7 @@ struct CachedMeta {
 // thread_local is used because WASM is single-threaded and RefCell
 // cannot be in a regular static (it's not Sync).
 thread_local! {
-    static CACHED_META: std::cell::RefCell<Option<CachedMeta>> = std::cell::RefCell::new(None);
+    static CACHED_META: std::cell::RefCell<Option<CachedMeta>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Constructs an [`AppMetadata`] from JS-provided strings.
@@ -64,17 +64,17 @@ pub(crate) fn make_app_metadata(
         let mut cache = cell.borrow_mut();
 
         // Return cached metadata if the app ID matches
-        if let Some(ref c) = *cache {
-            if c.id == app_id {
-                return Ok(AppMetadata {
-                    id: c.id,
-                    name: c.name,
-                    description: c.description,
-                    service_url: c.service_url,
-                    logo_url: c.logo_url,
-                    callback_url: c.callback_url,
-                });
-            }
+        if let Some(ref c) = *cache
+            && c.id == app_id
+        {
+            return Ok(AppMetadata {
+                id: c.id,
+                name: c.name,
+                description: c.description,
+                service_url: c.service_url,
+                logo_url: c.logo_url,
+                callback_url: c.callback_url,
+            });
         }
 
         // First call (or different app ID) — leak strings and cache them

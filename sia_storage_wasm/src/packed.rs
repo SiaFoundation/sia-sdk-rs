@@ -65,13 +65,15 @@ impl PackedUpload {
     /// Adds an object to the packed upload. Returns the number of bytes written.
     /// The object data is provided as a complete `Uint8Array`.
     pub async fn add(&self, data: Vec<u8>) -> Result<f64, JsValue> {
-        let mut inner = self.inner.borrow_mut();
-        let packed = inner
-            .as_mut()
+        let mut packed = self
+            .inner
+            .borrow_mut()
+            .take()
             .ok_or_else(|| JsValue::from_str("upload already finalized"))?;
         let cursor = Cursor::new(data);
-        let n = packed.add(cursor).await.map_err(to_js_err)?;
-        Ok(n as f64)
+        let result = packed.add(cursor).await.map_err(to_js_err);
+        *self.inner.borrow_mut() = Some(packed);
+        Ok(result? as f64)
     }
 
     /// Finalizes the packed upload and returns the resulting objects.
