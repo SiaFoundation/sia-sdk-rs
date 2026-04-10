@@ -6,6 +6,7 @@ use wasm_bindgen::prelude::*;
 use crate::app_key::AppKey;
 use crate::helpers::{make_app_metadata, run_local, to_js_err};
 use crate::sdk::Sdk;
+use crate::types::AppMetadata;
 
 enum BuilderState {
     Disconnected(Builder<DisconnectedState>),
@@ -23,22 +24,14 @@ pub struct SdkBuilder {
 #[wasm_bindgen]
 impl SdkBuilder {
     #[wasm_bindgen(constructor)]
-    pub fn new(
-        indexer_url: &str,
-        app_id_hex: &str,
-        name: &str,
-        description: &str,
-        service_url: &str,
-        logo_url: Option<String>,
-        callback_url: Option<String>,
-    ) -> Result<SdkBuilder, JsValue> {
+    pub fn new(indexer_url: &str, app: AppMetadata) -> Result<SdkBuilder, JsValue> {
         let meta = make_app_metadata(
-            app_id_hex,
-            name,
-            description,
-            service_url,
-            logo_url,
-            callback_url,
+            &app.app_id,
+            &app.name,
+            &app.description,
+            &app.service_url,
+            app.logo_url,
+            app.callback_url,
         )?;
         let builder = Builder::new(indexer_url, meta).map_err(to_js_err)?;
         Ok(SdkBuilder {

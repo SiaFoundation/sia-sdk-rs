@@ -4,6 +4,49 @@ use wasm_bindgen::JsCast;
 
 use crate::helpers::to_js_err;
 
+/// Application metadata passed to `SdkBuilder`.
+#[wasm_bindgen(getter_with_clone)]
+pub struct AppMetadata {
+    /// App ID as a 64-character hex string (32 bytes).
+    #[wasm_bindgen(js_name = "appId")]
+    pub app_id: String,
+    /// Display name for the application.
+    pub name: String,
+    /// Short description of the application.
+    pub description: String,
+    /// URL of the application's website or service.
+    #[wasm_bindgen(js_name = "serviceUrl")]
+    pub service_url: String,
+    /// Optional URL to the application's logo.
+    #[wasm_bindgen(js_name = "logoUrl")]
+    pub logo_url: Option<String>,
+    /// Optional callback URL for the application.
+    #[wasm_bindgen(js_name = "callbackUrl")]
+    pub callback_url: Option<String>,
+}
+
+#[wasm_bindgen]
+impl AppMetadata {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        app_id: String,
+        name: String,
+        description: String,
+        service_url: String,
+        logo_url: Option<String>,
+        callback_url: Option<String>,
+    ) -> Self {
+        Self {
+            app_id,
+            name,
+            description,
+            service_url,
+            logo_url,
+            callback_url,
+        }
+    }
+}
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(typescript_type = "(shardsUploaded: number) => void")]
