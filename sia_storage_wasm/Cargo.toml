@@ -6,8 +6,7 @@ repository = "https://github.com/SiaFoundation/sia-sdk-rs"
 license = "MIT"
 description = "WASM bindings for the Sia storage SDK"
 authors = ["The Sia Foundation"]
-categories = ["cryptography::cryptocurrencies"]
-keywords = ["sia", "decentralized", "blockchain", "depin", "storage"]
+publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
