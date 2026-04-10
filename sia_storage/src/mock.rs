@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
+use crate::AppKey;
 use bytes::Bytes;
 use chrono::Utc;
 use sia_core::rhp4::HostPrices;
@@ -136,7 +137,7 @@ pub struct MockUploader {
 }
 
 impl MockUploader {
-    pub fn new(hosts: MockHosts, app_key: Arc<PrivateKey>) -> Self {
+    pub fn new(hosts: MockHosts, app_key: Arc<AppKey>) -> Self {
         Self {
             uploader: Uploader::new(hosts.inner, app_key),
         }
@@ -144,10 +145,11 @@ impl MockUploader {
 
     pub async fn upload<R: AsyncRead + Send + Sync + Unpin + 'static>(
         &self,
+        object: Object,
         r: R,
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
-        self.uploader.upload(r, options).await
+        self.uploader.upload(object, r, options).await
     }
 
     pub fn upload_packed(&self, options: UploadOptions) -> PackedUpload {
@@ -157,11 +159,11 @@ impl MockUploader {
 
 pub struct MockDownloader {
     hosts: MockHosts,
-    app_key: Arc<PrivateKey>,
+    app_key: Arc<AppKey>,
 }
 
 impl MockDownloader {
-    pub fn new(hosts: MockHosts, app_key: Arc<PrivateKey>) -> Self {
+    pub fn new(hosts: MockHosts, app_key: Arc<AppKey>) -> Self {
         Self { hosts, app_key }
     }
 

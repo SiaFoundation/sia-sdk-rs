@@ -13,7 +13,7 @@ use url::Url;
 use crate::app_client::{self, Client};
 use crate::object_encryption::derive;
 use crate::time::Duration;
-use crate::{AppID, AppMetadata, SDK};
+use crate::{AppID, AppKey, AppMetadata, SDK};
 
 /// The initial state of the SDK builder, before connecting to the indexd service.
 pub struct DisconnectedState;
@@ -43,18 +43,23 @@ pub struct Builder<S> {
 /// Errors that can occur during the SDK building process.
 #[derive(Error, Debug)]
 pub enum BuilderError {
+    /// A URL could not be parsed.
     #[error("url error: {0}")]
     Url(#[from] url::ParseError),
 
+    /// An error from the indexer API client.
     #[error("client error: {0}")]
     Client(#[from] app_client::Error),
 
+    /// A transport-level connection error.
     #[error("transport error: {0}")]
     Transport(String),
 
+    /// The recovery phrase is invalid.
     #[error("mnemonic error: {0}")]
     Mnemonic(#[from] seed::SeedError),
 
+    /// The connection approval request expired before the user approved it.
     #[error("request expired")]
     RequestExpired,
 }
@@ -79,7 +84,7 @@ impl Builder<DisconnectedState> {
     ///     callback_url: Some("https://myapp.com/callback"),
     /// };
     ///
-    /// let builder = Builder::new("https://app.sia.storage", APP_META).expect("failed to create builder");
+    /// let builder = Builder::new("https://sia.storage", APP_META).expect("failed to create builder");
     /// ```
     pub fn new<U: IntoUrl>(indexer_url: U, app_meta: AppMetadata) -> Result<Self, BuilderError> {
         let client = Client::new(indexer_url)?;
@@ -98,8 +103,8 @@ impl Builder<DisconnectedState> {
     ///
     /// # Arguments
     /// * `app_key` - The application key used for authentication.
-    pub async fn connected(&self, app_key: &PrivateKey) -> Result<Option<SDK>, BuilderError> {
-        let connected = self.client.check_app_authenticated(app_key).await?;
+    pub async fn connected(&self, app_key: &AppKey) -> Result<Option<SDK>, BuilderError> {
+        let connected = self.client.check_app_authenticated(&app_key.0).await?;
         if !connected {
             return Ok(None);
         }
@@ -181,15 +186,15 @@ impl Builder<ApprovedState> {
     /// # Errors
     /// Returns [BuilderError] if the registration fails or the SDK cannot be created.
     pub async fn register(self, mnemonic: &str) -> Result<SDK, BuilderError> {
-        let app_key = derive_app_key(mnemonic, &self.app_meta.id, &self.state.user_secret)?;
+        let private_key = derive_app_key(mnemonic, &self.app_meta.id, &self.state.user_secret)?;
         self.client
             .register_app(
                 &self.ephemeral_key,
-                &app_key,
+                &private_key,
                 self.state.register_url.clone(),
             )
             .await?;
-        SDK::new(self.client, Arc::new(app_key)).await
+        SDK::new(self.client, Arc::new(AppKey(private_key))).await
     }
 }
 

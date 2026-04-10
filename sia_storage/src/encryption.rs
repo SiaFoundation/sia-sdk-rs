@@ -12,6 +12,7 @@ use std::task::{Context, Poll, ready};
 use tokio::io::{AsyncRead, AsyncWrite};
 use zeroize::ZeroizeOnDrop;
 
+/// A 256-bit symmetric encryption key used to encrypt and decrypt slab data.
 #[derive(SiaEncode, SiaDecode, Clone, Debug, ZeroizeOnDrop, PartialEq)]
 pub struct EncryptionKey([u8; 32]);
 
@@ -105,7 +106,7 @@ pub(crate) fn encrypt_recovered_shards(
     });
 }
 
-pub struct CipherReader<R: AsyncRead> {
+pub(crate) struct CipherReader<R: AsyncRead> {
     inner: R,
     cipher: Chacha20Cipher,
 }
@@ -135,7 +136,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for CipherReader<R> {
     }
 }
 
-pub struct CipherWriter<W: AsyncWrite> {
+pub(crate) struct CipherWriter<W: AsyncWrite> {
     inner: W,
     cipher: Chacha20Cipher,
     buf: Vec<u8>,

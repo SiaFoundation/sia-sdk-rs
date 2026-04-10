@@ -1,6 +1,6 @@
 [package]
 name = "sia_storage"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 repository = "https://github.com/SiaFoundation/sia-sdk-rs"
 license = "MIT"
@@ -18,7 +18,7 @@ bench = false
 serde = "1.0.228"
 serde_json = "1.0.149"
 thiserror = "2.0.18"
-sia_core = { path = "../sia_core", version = "0.3.0" }
+sia_core = { path = "../sia_core", version = "0.3.1" }
 rand = "0.10.0"
 blake2b_simd = "1.0.4"
 url = { version = "2.5.8", features = ["serde"] }
@@ -75,7 +75,7 @@ instant = { version = "0.1", features = ["wasm-bindgen"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 httptest = "0.16.4"
-tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread", "test-util"] }
 env_logger = "0.11.9"
 clap = { version = "4.6.0", features = ["derive"] }
 

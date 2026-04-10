@@ -1,3 +1,9 @@
+## 0.3.1 (2026-04-05)
+
+### Fixes
+
+- Misc consensus fixes
+
 ## 0.3.0 (2026-03-23)
 
 ### Breaking Changes
