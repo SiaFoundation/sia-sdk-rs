@@ -20,46 +20,7 @@ use crate::packed::PackedUpload;
 use crate::streaming::Upload;
 use crate::types::{Account, DownloadOptions, Host, HostQuery, ObjectEvent, UploadOptions};
 
-/// The main Sia storage SDK. Provides methods for uploading, downloading,
-/// and managing objects on the Sia storage network via an indexer.
-///
-/// # Uploading
-///
-/// Two upload methods are available:
-///
-/// - **`upload(options?)`** — returns a `Upload` handle. Push data
-///   with `pushChunk()`, then call `finish()` to get the `PinnedObject`.
-///   Works for any size — the full file never needs to be in memory at once.
-///   Each slab holds up to 40 MiB of data (10 data shards × 4 MiB sectors).
-///   Files smaller than this still consume one full slab (120 MiB on-network
-///   with default 10+20 redundancy).
-///
-/// - **`uploadPacked(options?)`** — returns a `PackedUpload` handle for
-///   efficiently uploading multiple small objects together. Call `add(data)`
-///   for each object, then `finalize()` to get the resulting `PinnedObject`
-///   handles. Objects are packed into shared slabs so a 1 KiB file doesn't
-///   waste an entire 120 MiB slab.
-///
-/// `upload().finish()` returns a single `PinnedObject`.
-/// `uploadPacked().finalize()` returns an array of `PinnedObject` handles.
-/// All must be pinned with `pinObject()` afterward to persist on the indexer.
-///
-/// # Downloading
-///
-/// Two download methods are available:
-///
-/// - **`download(object)`** — returns the entire file as a `Uint8Array`.
-///   Simple, but the full file must fit in WASM memory. Best for small files.
-///
-/// - **`downloadStreaming(object, onChunk, onProgress?, options?)`** — calls
-///   `onChunk(chunk: Uint8Array)` with each decoded chunk as it arrives.
-///   The optional `onProgress(bytesDownloaded, totalBytes)` callback reports
-///   progress. Use for large files, video playback, or writing directly to
-///   disk via the File System Access API.
-///
-/// Both require a `PinnedObject` handle from `object()` or `upload()`.
-///
-/// An AsyncWrite adapter that queues chunks into a ReadableStream controller.
+/// An AsyncWrite adapter that enqueues chunks into a ReadableStream controller.
 struct StreamWriter {
     controller: web_sys::ReadableStreamDefaultController,
 }
@@ -92,6 +53,8 @@ impl AsyncWrite for StreamWriter {
     }
 }
 
+/// The main Sia storage SDK. Provides methods for uploading, downloading,
+/// and managing objects on the Sia storage network via an indexer.
 #[wasm_bindgen]
 pub struct Sdk(Rc<StorageSdk>);
 
