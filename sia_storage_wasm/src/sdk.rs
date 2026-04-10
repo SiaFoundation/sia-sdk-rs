@@ -29,8 +29,6 @@ extern "C" {
     #[wasm_bindgen(typescript_type = "(bytesDownloaded: number, totalBytes: number) => void")]
     pub type OnProgressCallback;
 
-    #[wasm_bindgen(typescript_type = "(shardsUploaded: number) => void")]
-    pub type OnShardProgressCallback;
 }
 
 /// The main Sia storage SDK. Provides methods for uploading, downloading,
@@ -213,6 +211,7 @@ impl Sdk {
                 id: e.id.to_string(),
                 deleted: e.deleted,
                 updated_at: e.updated_at.timestamp() as f64,
+                // report size as -1 if not present
                 size: e.object.as_ref().map(|o| o.size() as f64).unwrap_or(-1.0),
             })
             .collect())
@@ -303,9 +302,15 @@ impl Sdk {
     /// Starts an upload. Returns a `Upload` handle.
     /// Push data with `pushChunk()`, then call `finish()` to get the `PinnedObject`.
     pub fn upload(&self, options: Option<UploadOptions>) -> Upload {
-        let opts = options.map(|o| o.to_inner()).unwrap_or_default();
+        let (on_progress, opts) = match options {
+            Some(mut o) => {
+                let cb = o.on_progress.take();
+                (cb, o.to_inner())
+            }
+            None => (None, sia_storage::UploadOptions::default()),
+        };
         let (reader, writer) = tokio::io::simplex(1024 * 1024);
-        Upload::new(writer, reader, self.0.clone(), opts)
+        Upload::new(writer, reader, self.0.clone(), opts, on_progress)
     }
 
     /// Starts a packed upload for efficiently uploading multiple small objects.

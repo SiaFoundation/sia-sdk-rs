@@ -1,7 +1,14 @@
 use sia_core::types::v2::Protocol;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::helpers::to_js_err;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(typescript_type = "(shardsUploaded: number) => void")]
+    pub type OnShardProgressCallback;
+}
 
 /// Options for uploading data.
 #[wasm_bindgen]
@@ -9,6 +16,7 @@ pub struct UploadOptions {
     pub(crate) data_shards: u8,
     pub(crate) parity_shards: u8,
     pub(crate) max_inflight: usize,
+    pub(crate) on_progress: Option<js_sys::Function>,
 }
 
 #[wasm_bindgen]
@@ -20,11 +28,13 @@ impl UploadOptions {
         data_shards: Option<u8>,
         parity_shards: Option<u8>,
         max_inflight: Option<u32>,
+        on_progress: Option<OnShardProgressCallback>,
     ) -> Self {
         Self {
             data_shards: data_shards.unwrap_or(10),
             parity_shards: parity_shards.unwrap_or(20),
             max_inflight: max_inflight.unwrap_or(15) as usize,
+            on_progress: on_progress.map(|cb| cb.unchecked_into()),
         }
     }
 }
