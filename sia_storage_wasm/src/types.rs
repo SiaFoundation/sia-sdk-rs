@@ -1,6 +1,8 @@
 use sia_core::types::v2::Protocol;
 use wasm_bindgen::prelude::*;
 
+use crate::helpers::to_js_err;
+
 /// Options for uploading data.
 #[wasm_bindgen]
 pub struct UploadOptions {
@@ -103,4 +105,134 @@ impl HostQuery {
             ..Default::default()
         }
     }
+}
+
+/// Account information returned by `Sdk.account()`.
+#[wasm_bindgen(getter_with_clone)]
+pub struct Account {
+    #[wasm_bindgen(js_name = "accountKey")]
+    pub account_key: String,
+    #[wasm_bindgen(js_name = "maxPinnedData")]
+    pub max_pinned_data: f64,
+    #[wasm_bindgen(js_name = "remainingStorage")]
+    pub remaining_storage: f64,
+    #[wasm_bindgen(js_name = "pinnedData")]
+    pub pinned_data: f64,
+    #[wasm_bindgen(js_name = "pinnedSize")]
+    pub pinned_size: f64,
+    pub ready: bool,
+    #[wasm_bindgen(js_name = "appName")]
+    pub app_name: String,
+    #[wasm_bindgen(js_name = "appDescription")]
+    pub app_description: String,
+}
+
+/// Host information returned by `Sdk.hosts()`.
+#[wasm_bindgen(getter_with_clone)]
+pub struct Host {
+    #[wasm_bindgen(js_name = "publicKey")]
+    pub public_key: String,
+    #[wasm_bindgen(js_name = "countryCode")]
+    pub country_code: String,
+    #[wasm_bindgen(js_name = "goodForUpload")]
+    pub good_for_upload: bool,
+}
+
+/// A 32-byte encryption key used for slab-level encryption.
+#[wasm_bindgen]
+pub struct EncryptionKey(pub(crate) sia_storage::EncryptionKey);
+
+#[wasm_bindgen]
+impl EncryptionKey {
+    /// Returns the key as a hex-encoded string (64 chars).
+    #[wasm_bindgen(js_name = "toHex")]
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0.as_ref())
+    }
+
+    /// Returns the raw 32 bytes as a Uint8Array.
+    pub fn bytes(&self) -> Vec<u8> {
+        self.0.as_ref().to_vec()
+    }
+
+    /// Parses an encryption key from a hex string (64 chars).
+    #[wasm_bindgen(js_name = "fromHex")]
+    pub fn from_hex(hex_str: &str) -> Result<EncryptionKey, JsValue> {
+        let bytes = hex::decode(hex_str).map_err(to_js_err)?;
+        if bytes.len() != 32 {
+            return Err(JsValue::from_str("encryption key must be 32 bytes of hex"));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(EncryptionKey(sia_storage::EncryptionKey::from(arr)))
+    }
+}
+
+/// A sector stored on a specific host.
+#[wasm_bindgen(getter_with_clone)]
+pub struct Sector {
+    pub root: String,
+    #[wasm_bindgen(js_name = "hostKey")]
+    pub host_key: String,
+}
+
+/// A slab — an erasure-coded segment of a file. Contains up to 30 sectors
+/// (10 data + 20 parity by default), each stored on a different host.
+#[wasm_bindgen]
+pub struct Slab {
+    inner: sia_storage::Slab,
+}
+
+#[wasm_bindgen]
+impl Slab {
+    /// Returns the slab encryption key.
+    #[wasm_bindgen(js_name = "encryptionKey")]
+    pub fn encryption_key(&self) -> EncryptionKey {
+        EncryptionKey(self.inner.encryption_key.clone())
+    }
+
+    /// Minimum number of sectors needed to reconstruct the data.
+    #[wasm_bindgen(js_name = "minShards")]
+    pub fn min_shards(&self) -> u8 {
+        self.inner.min_shards
+    }
+
+    /// Byte offset within the object.
+    pub fn offset(&self) -> u32 {
+        self.inner.offset
+    }
+
+    /// Data length in bytes.
+    pub fn length(&self) -> u32 {
+        self.inner.length
+    }
+
+    /// Returns the sectors in this slab.
+    pub fn sectors(&self) -> Vec<Sector> {
+        self.inner
+            .sectors
+            .iter()
+            .map(|s| Sector {
+                root: s.root.to_string(),
+                host_key: s.host_key.to_string(),
+            })
+            .collect()
+    }
+}
+
+impl From<&sia_storage::Slab> for Slab {
+    fn from(s: &sia_storage::Slab) -> Self {
+        Self { inner: s.clone() }
+    }
+}
+
+/// Object event returned by `Sdk.objectEvents()`.
+#[wasm_bindgen(getter_with_clone)]
+pub struct ObjectEvent {
+    pub id: String,
+    pub deleted: bool,
+    #[wasm_bindgen(js_name = "updatedAt")]
+    pub updated_at: f64,
+    /// Size in bytes, or -1 if the object was deleted.
+    pub size: f64,
 }

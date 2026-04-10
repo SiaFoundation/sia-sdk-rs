@@ -1,6 +1,7 @@
 use wasm_bindgen::prelude::*;
 
-use crate::helpers::{Slab, to_js_err};
+use crate::helpers::to_js_err;
+use crate::types::Slab;
 
 /// A sealed object for offline storage or migration between indexers.
 /// Contains encrypted keys, slab metadata, and signatures.
