@@ -1287,7 +1287,7 @@ mod tests {
                 &ephemeral_key,
                 &AppMetadata {
                     id: app_id,
-                    name: "name",
+                    name: "name".into(),
                     description: "description",
                     service_url: "https://service.com",
                     logo_url: Some("https://logo.com"),

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sia_core::rhp4::SECTOR_SIZE;
 
 use crate::AppKey;
-use crate::encryption::{CipherReader, CipherWriter, EncryptionKey};
+use crate::encryption::{Chacha20Cipher, CipherReader, EncryptionKey};
 use serde_with::base64::Base64;
 use serde_with::{DefaultOnNull, serde_as};
 use sia_core::blake2::{Blake2b256, Digest};
@@ -11,7 +11,7 @@ use sia_core::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode}
 use sia_core::signing::{PublicKey, Signature};
 use sia_core::types::Hash256;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::AsyncRead;
 
 use crate::object_encryption::{
     DecryptError, open_data_key, open_metadata, open_metadata_key, seal_data_key, seal_metadata,
@@ -381,9 +381,9 @@ impl Object {
         CipherReader::new(r, self.data_key.clone(), offset)
     }
 
-    /// Returns a writer that encrypts data on-the-fly using the object's encryption key.
-    pub(crate) fn writer<W: AsyncWrite + Unpin>(&self, w: W, offset: u64) -> CipherWriter<W> {
-        CipherWriter::new(w, self.data_key.clone(), offset)
+    /// Returns a cipher that can be used to encrypt or decrypt data using the object's encryption key.
+    pub(crate) fn cipher(&self, offset: u64) -> Chacha20Cipher {
+        Chacha20Cipher::new(self.data_key.clone(), offset)
     }
 
     /// Returns the object's encryption key.

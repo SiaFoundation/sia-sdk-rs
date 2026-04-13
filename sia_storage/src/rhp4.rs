@@ -9,17 +9,23 @@ use thiserror::Error;
 
 use crate::time::Elapsed;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(test, feature = "mock", target_arch = "wasm32")))]
 mod siamux;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(test, feature = "mock", target_arch = "wasm32")))]
 pub use siamux::Client;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(not(test), not(feature = "mock"), target_arch = "wasm32"))]
 mod web_transport;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(not(test), not(feature = "mock"), target_arch = "wasm32"))]
 pub use web_transport::Client;
+
+#[cfg(any(test, feature = "mock"))]
+mod mock;
+
+#[cfg(any(test, feature = "mock"))]
+pub use mock::Client;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -47,14 +53,13 @@ pub enum Error {
 
 /// A host endpoint contains the information needed to connect to a host.
 // dead code until WebTransport client is implemented
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) struct HostEndpoint {
     pub public_key: PublicKey,
     pub addresses: Vec<NetAddress>,
 }
 
 /// Trait defining the operations that can be performed on a host.
-pub(crate) trait Transport: Clone + MaybeSendSync + 'static {
+pub(crate) trait Transport: Clone + Unpin + MaybeSendSync + 'static {
     fn host_prices(
         &self,
         host: &HostEndpoint,

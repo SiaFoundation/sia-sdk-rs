@@ -8,50 +8,8 @@ use sia_storage::mock::{MockDownloader, MockHosts, MockUploader};
 use sia_storage::{AppKey, DownloadOptions, Host, Object, UploadOptions};
 use std::io::Cursor;
 use std::sync::Arc;
-use tokio::io::{AsyncWrite, sink};
+use tokio::io::{AsyncReadExt, sink};
 use tokio::runtime;
-
-struct TtfbWriter {
-    start: std::time::Instant,
-    ttfb: Option<std::time::Duration>,
-}
-
-impl TtfbWriter {
-    fn new(start: std::time::Instant) -> Self {
-        Self { start, ttfb: None }
-    }
-
-    fn ttfb(&self) -> Option<std::time::Duration> {
-        self.ttfb
-    }
-}
-
-impl AsyncWrite for TtfbWriter {
-    fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        _: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        if self.ttfb.is_none() {
-            self.ttfb = Some(self.start.elapsed());
-        }
-        std::task::Poll::Ready(Ok(buf.len()))
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        _: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        _: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-}
 
 async fn upload_object(uploader: Arc<MockUploader>, input: Bytes, opts: UploadOptions) -> Object {
     let r = Cursor::new(input);
@@ -151,15 +109,14 @@ fn upload_benchmark(c: &mut Criterion) {
         &object,
         |b, object| {
             b.to_async(&runtime).iter(|| async {
-                downloader
-                    .download(
-                        &mut sink(),
-                        object,
-                        DownloadOptions {
-                            max_inflight: 30,
-                            ..Default::default()
-                        },
-                    )
+                let mut reader = downloader.download(
+                    object,
+                    DownloadOptions {
+                        max_inflight: 30,
+                        ..Default::default()
+                    },
+                );
+                tokio::io::copy(&mut reader, &mut sink())
                     .await
                     .expect("download to complete");
             });
@@ -171,15 +128,14 @@ fn upload_benchmark(c: &mut Criterion) {
         &object,
         |b, object| {
             b.to_async(&runtime).iter(|| async {
-                downloader
-                    .download(
-                        &mut sink(),
-                        object,
-                        DownloadOptions {
-                            max_inflight: 10,
-                            ..Default::default()
-                        },
-                    )
+                let mut reader = downloader.download(
+                    object,
+                    DownloadOptions {
+                        max_inflight: 10,
+                        ..Default::default()
+                    },
+                );
+                tokio::io::copy(&mut reader, &mut sink())
                     .await
                     .expect("download to complete");
             });
@@ -191,8 +147,8 @@ fn upload_benchmark(c: &mut Criterion) {
         &object,
         |b, object| {
             b.to_async(&runtime).iter(|| async {
-                downloader
-                    .download(&mut sink(), object, DownloadOptions::default())
+                let mut reader = downloader.download(object, DownloadOptions::default());
+                tokio::io::copy(&mut reader, &mut sink())
                     .await
                     .expect("download to complete");
             });
@@ -210,12 +166,11 @@ fn upload_benchmark(c: &mut Criterion) {
             async move {
                 let mut total = std::time::Duration::ZERO;
                 for _ in 0..iters {
-                    let mut w = TtfbWriter::new(std::time::Instant::now());
-                    downloader
-                        .download(&mut w, &object, DownloadOptions::default())
-                        .await
-                        .expect("download to complete");
-                    total += w.ttfb().unwrap_or_else(|| w.start.elapsed());
+                    let start = std::time::Instant::now();
+                    let mut reader = downloader.download(&object, DownloadOptions::default());
+                    let mut buf = [0u8; 1];
+                    reader.read(&mut buf).await.expect("read to succeed");
+                    total += start.elapsed();
                 }
                 total
             }
@@ -229,19 +184,17 @@ fn upload_benchmark(c: &mut Criterion) {
             async move {
                 let mut total = std::time::Duration::ZERO;
                 for _ in 0..iters {
-                    let mut w = TtfbWriter::new(std::time::Instant::now());
-                    downloader
-                        .download(
-                            &mut w,
-                            &object,
-                            DownloadOptions {
-                                length: Some(64),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .expect("download to complete");
-                    total += w.ttfb().unwrap_or_else(|| w.start.elapsed());
+                    let start = std::time::Instant::now();
+                    let mut reader = downloader.download(
+                        &object,
+                        DownloadOptions {
+                            length: Some(64),
+                            ..Default::default()
+                        },
+                    );
+                    let mut buf = [0u8; 1];
+                    reader.read(&mut buf).await.expect("read to succeed");
+                    total += start.elapsed();
                 }
                 total
             }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, ReadBuf};
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -111,80 +111,11 @@ impl AsyncRead for FFIReader {
     }
 }
 
-/// A foreign writer that can be used to transfer data across FFI boundaries.
-/// The data may be sent in multiple chunks. The implementation should handle
-/// buffering and writing the data as it is received.
-#[uniffi::export(with_foreign)]
-#[async_trait::async_trait]
-pub trait Writer: Send + Sync {
-    async fn write(&self, data: Vec<u8>) -> Result<(), IOError>;
-}
-
-/// Adapts a foreign Writer into an AsyncWrite by polling the write future directly.
-pub(crate) struct FFIWriter {
-    writer: Arc<dyn Writer>,
-    pending: Option<BoxFuture<Result<(), IOError>>>,
-}
-
-impl FFIWriter {
-    pub fn new(writer: Arc<dyn Writer>) -> Self {
-        Self {
-            writer,
-            pending: None,
-        }
-    }
-}
-
-impl AsyncWrite for FFIWriter {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-
-        // finish pending writes first
-        if let Some(fut) = this.pending.as_mut() {
-            match ready!(fut.as_mut().poll(cx)) {
-                Ok(()) => this.pending = None,
-                Err(e) => {
-                    this.pending = None;
-                    return Poll::Ready(Err(e.into()));
-                }
-            }
-        }
-
-        let n = buf.len();
-        let writer = this.writer.clone();
-        let data = buf.to_vec();
-        this.pending = Some(Box::pin(async move { writer.write(data).await }));
-        Poll::Ready(Ok(n))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        if let Some(fut) = this.pending.as_mut() {
-            match ready!(fut.as_mut().poll(cx)) {
-                Ok(()) => this.pending = None,
-                Err(e) => {
-                    this.pending = None;
-                    return Poll::Ready(Err(e.into()));
-                }
-            }
-        }
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_flush(cx)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
 
     const CHUNK_SIZE: usize = 64;
 
@@ -213,31 +144,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct VecWriter {
-        data: Mutex<Vec<u8>>,
-    }
-
-    impl VecWriter {
-        fn new() -> Self {
-            Self {
-                data: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn into_inner(self) -> Vec<u8> {
-            self.data.into_inner().unwrap()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Writer for VecWriter {
-        async fn write(&self, data: Vec<u8>) -> Result<(), IOError> {
-            self.data.lock().unwrap().extend_from_slice(&data);
-            Ok(())
-        }
-    }
-
     #[tokio::test]
     async fn test_ffi_reader() {
         let input: Vec<u8> = (0..=255).cycle().take(CHUNK_SIZE * 5 + 17).collect();
@@ -246,49 +152,6 @@ mod tests {
 
         let mut output = Vec::new();
         r.read_to_end(&mut output).await.unwrap();
-        assert_eq!(output, input);
-    }
-
-    #[tokio::test]
-    async fn test_ffi_writer() {
-        let input: Vec<u8> = (0..=255).cycle().take(CHUNK_SIZE * 5 + 17).collect();
-        let writer = Arc::new(VecWriter::new());
-        let mut w = FFIWriter::new(writer.clone());
-
-        for chunk in input.chunks(CHUNK_SIZE) {
-            w.write_all(chunk).await.unwrap();
-        }
-        w.shutdown().await.unwrap();
-        drop(w);
-
-        let output = Arc::try_unwrap(writer).unwrap().into_inner();
-        assert_eq!(output, input);
-    }
-
-    #[tokio::test]
-    async fn test_ffi_reader_writer_roundtrip() {
-        let input: Vec<u8> = (0..=255).cycle().take(CHUNK_SIZE * 10).collect();
-
-        // read the input through FFIReader
-        let reader = Arc::new(VecReader::new(input.clone()));
-        let mut r = FFIReader::new(reader);
-
-        // pipe it through FFIWriter
-        let writer = Arc::new(VecWriter::new());
-        let mut w = FFIWriter::new(writer.clone());
-
-        let mut buf = vec![0u8; CHUNK_SIZE];
-        loop {
-            let n = r.read(&mut buf).await.unwrap();
-            if n == 0 {
-                break;
-            }
-            w.write_all(&buf[..n]).await.unwrap();
-        }
-        w.shutdown().await.unwrap();
-        drop(w);
-
-        let output = Arc::try_unwrap(writer).unwrap().into_inner();
         assert_eq!(output, input);
     }
 }

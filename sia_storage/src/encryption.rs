@@ -8,8 +8,8 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelI
 use serde::{Deserialize, Serialize};
 use sia_core::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use std::pin::Pin;
-use std::task::{Context, Poll, ready};
-use tokio::io::{AsyncRead, AsyncWrite};
+use std::task::{Context, Poll};
+use tokio::io::AsyncRead;
 use zeroize::ZeroizeOnDrop;
 
 /// A 256-bit symmetric encryption key used to encrypt and decrypt slab data.
@@ -136,94 +136,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for CipherReader<R> {
     }
 }
 
-pub(crate) struct CipherWriter<W: AsyncWrite> {
-    inner: W,
-    cipher: Chacha20Cipher,
-    buf: Vec<u8>,
-    // offset into buf where unwritten encrypted data begins
-    buf_pos: usize,
-}
-
-impl<W: AsyncWrite + Unpin> CipherWriter<W> {
-    pub fn new(inner: W, key: EncryptionKey, offset: u64) -> Self {
-        Self {
-            inner,
-            cipher: Chacha20Cipher::new(key, offset),
-            buf: Vec::new(),
-            buf_pos: 0,
-        }
-    }
-
-    fn poll_drain(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        while self.buf_pos < self.buf.len() {
-            let n = ready!(Pin::new(&mut self.inner).poll_write(cx, &self.buf[self.buf_pos..]))?;
-            if n == 0 {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "write zero",
-                )));
-            }
-            self.buf_pos += n;
-        }
-        self.buf.clear();
-        self.buf_pos = 0;
-        Poll::Ready(Ok(()))
-    }
-}
-
-impl<W: AsyncWrite + Unpin> AsyncWrite for CipherWriter<W> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        let this = self.get_mut();
-
-        ready!(this.poll_drain(cx))?;
-
-        // Encrypt new data into the buffer. Once apply_keystream is called the
-        // cipher has advanced, so this data is committed — we must report it as
-        // accepted regardless of whether the inner write completes immediately.
-        this.buf.resize(buf.len(), 0);
-        this.buf_pos = 0;
-        this.buf.copy_from_slice(buf);
-        this.cipher.apply_keystream(&mut this.buf);
-
-        match Pin::new(&mut this.inner).poll_write(cx, &this.buf) {
-            Poll::Ready(Ok(0)) => {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "write zero",
-                )));
-            }
-            Poll::Ready(Ok(n)) => {
-                this.buf_pos = n;
-                if this.buf_pos == this.buf.len() {
-                    this.buf.clear();
-                    this.buf_pos = 0;
-                }
-            }
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            // apply_keystream has been called we must commit and report all the data as accepted even if the inner writer isn't ready yet
-            _ => {}
-        }
-        Poll::Ready(Ok(buf.len()))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-        ready!(this.poll_drain(cx))?;
-        Pin::new(&mut this.inner).poll_flush(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-        ready!(this.poll_drain(cx))?;
-        Pin::new(&mut this.inner).poll_shutdown(cx)
-    }
-}
-
-struct Chacha20Cipher {
+pub(crate) struct Chacha20Cipher {
     inner: XChaCha20,
     key: EncryptionKey,
     nonce: [u8; 24],
@@ -293,7 +206,7 @@ impl StreamCipher for Chacha20Cipher {
 
 #[cfg(test)]
 mod test {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
 
     use sia_core::rhp4::SECTOR_SIZE;
 
@@ -318,66 +231,6 @@ mod test {
         shards.iter_mut().enumerate().for_each(|(i, shard)| {
             encrypt_shard(key, shard_start + i as u8, offset, shard);
         });
-    }
-
-    /// A writer that accepts at most `max_bytes_per_write` bytes per poll_write
-    /// call, simulating short writes from a slow or buffered inner writer.
-    struct ShortWriter {
-        inner: Vec<u8>,
-        max_bytes_per_write: usize,
-    }
-
-    impl AsyncWrite for ShortWriter {
-        fn poll_write(
-            mut self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<std::io::Result<usize>> {
-            let n = buf.len().min(self.max_bytes_per_write);
-            self.inner.extend_from_slice(&buf[..n]);
-            Poll::Ready(Ok(n))
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    /// A writer that returns Poll::Pending on every other poll_write call,
-    /// simulating an async file writer whose internal spawn_blocking task
-    /// hasn't completed yet.
-    struct PendingWriter {
-        inner: Vec<u8>,
-        call_count: usize,
-    }
-
-    impl AsyncWrite for PendingWriter {
-        fn poll_write(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<std::io::Result<usize>> {
-            self.call_count += 1;
-            if self.call_count % 2 == 1 {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            } else {
-                self.inner.extend_from_slice(buf);
-                Poll::Ready(Ok(buf.len()))
-            }
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
     }
 
     cross_target_tests! {
@@ -419,7 +272,7 @@ mod test {
         assert_eq!(shards[1], vec![4, 5, 6]);
     }
 
-    async fn test_cipher_reader_writer() {
+    async fn test_cipher_reader_roundtrip() {
         let key = EncryptionKey::from([1u8; 32]);
         let data = b"lorem ipsum dolor sit amet, consectetur adipiscing elit";
 
@@ -429,9 +282,9 @@ mod test {
             reader.read_exact(&mut cipher_text).await.unwrap();
             assert_ne!(cipher_text, data);
 
-            let mut writer = CipherWriter::new(Vec::new(), key.clone(), offset);
-            writer.write_all(&cipher_text).await.unwrap();
-            let plaintext = writer.inner;
+            let mut reader = CipherReader::new(cipher_text.as_slice(), key.clone(), offset);
+            let mut plaintext = vec![0u8; data.len()];
+            reader.read_exact(&mut plaintext).await.unwrap();
             assert_eq!(plaintext, data);
         }
     }
@@ -466,91 +319,11 @@ mod test {
             let mut ciphertext = vec![0u8; data.len()];
             reader.read_exact(&mut ciphertext).await.unwrap();
 
-            let mut writer = CipherWriter::new(Vec::new(), key.clone(), offset);
-            writer.write_all(&ciphertext).await.unwrap();
-            let plaintext = writer.inner;
+            let mut reader = CipherReader::new(ciphertext.as_slice(), key.clone(), offset);
+            let mut plaintext = vec![0u8; data.len()];
+            reader.read_exact(&mut plaintext).await.unwrap();
 
             assert_eq!(plaintext, data, "roundtrip failed at offset {offset}");
-        }
-    }
-    /// Tests that CipherWriter produces correct output when the inner writer
-    /// only accepts a few bytes at a time (short writes).
-    async fn test_cipher_writer_short_writes() {
-        let key = random_key();
-        let mut data = vec![0u8; 4096];
-        random_bytes(&mut data);
-
-        // Encrypt with CipherReader
-        let mut reader = CipherReader::new(data.as_slice(), key.clone(), 0);
-        let mut ciphertext = vec![0u8; data.len()];
-        reader.read_exact(&mut ciphertext).await.unwrap();
-
-        // Decrypt with CipherWriter wrapping a ShortWriter that only accepts
-        // small chunks, forcing write_all to retry with remaining bytes.
-        for max_bytes in [1, 7, 13, 31, 64, 100, 512] {
-            let short = ShortWriter {
-                inner: Vec::new(),
-                max_bytes_per_write: max_bytes,
-            };
-            let mut writer = CipherWriter::new(short, key.clone(), 0);
-            writer.write_all(&ciphertext).await.unwrap();
-            writer.flush().await.unwrap();
-            assert_eq!(
-                writer.inner.inner, data,
-                "short write failed with max_bytes={max_bytes}"
-            );
-        }
-    }
-
-    /// Tests that CipherWriter produces correct output when the inner writer
-    /// returns Poll::Pending on alternating calls, simulating tokio::fs::File
-    /// behavior that caused the original decryption bug.
-    async fn test_cipher_writer_pending_writes() {
-        let key = random_key();
-        let mut data = vec![0u8; 4096];
-        random_bytes(&mut data);
-
-        // Encrypt
-        let mut reader = CipherReader::new(data.as_slice(), key.clone(), 0);
-        let mut ciphertext = vec![0u8; data.len()];
-        reader.read_exact(&mut ciphertext).await.unwrap();
-
-        // Decrypt through a writer that returns Pending every other call
-        let pending = PendingWriter {
-            inner: Vec::new(),
-            call_count: 0,
-        };
-        let mut writer = CipherWriter::new(pending, key.clone(), 0);
-        writer.write_all(&ciphertext).await.unwrap();
-        writer.flush().await.unwrap();
-        assert_eq!(writer.inner.inner, data);
-    }
-
-    /// Tests that CipherWriter handles combined short writes + Pending at
-    /// various offsets (exercises nonce rotation under adversarial I/O).
-    async fn test_cipher_writer_short_writes_with_offset() {
-        const MAX_BYTES_PER_NONCE: u64 = u32::MAX as u64 * 64;
-
-        let key = random_key();
-        let mut data = vec![0u8; 4096];
-        random_bytes(&mut data);
-
-        for offset in [0, 64, 2048, MAX_BYTES_PER_NONCE - 64, MAX_BYTES_PER_NONCE] {
-            let mut reader = CipherReader::new(data.as_slice(), key.clone(), offset);
-            let mut ciphertext = vec![0u8; data.len()];
-            reader.read_exact(&mut ciphertext).await.unwrap();
-
-            let short = ShortWriter {
-                inner: Vec::new(),
-                max_bytes_per_write: 37, // prime-sized to misalign with blocks
-            };
-            let mut writer = CipherWriter::new(short, key.clone(), offset);
-            writer.write_all(&ciphertext).await.unwrap();
-            writer.flush().await.unwrap();
-            assert_eq!(
-                writer.inner.inner, data,
-                "short write + offset failed at offset={offset}"
-            );
         }
     }
     }

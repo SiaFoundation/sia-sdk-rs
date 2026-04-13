@@ -669,9 +669,8 @@ impl HostQueue {
 
 #[cfg(test)]
 mod test {
+    use crate::rhp4::Client;
     use sia_core::signing::PrivateKey;
-
-    use crate::mock::MockRHP4Transport;
 
     use super::*;
 
@@ -828,7 +827,7 @@ mod test {
     }
 
     async fn test_upload_queue() {
-        let hosts_manager = Hosts::new(MockRHP4Transport::new());
+        let hosts_manager = Hosts::new(Client::new());
 
         let hk1 = random_pubkey();
         let hk2 = random_pubkey();
