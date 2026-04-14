@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["sia_core", "sia_core_derive", "sia_storage", "sia_storage_ffi", "sia_mux"]
+members = ["sia_core", "sia_core_derive", "sia_storage", "sia_storage_ffi", "sia_storage_napi", "sia_mux"]
 
 # CPU-intensive operations (erasure coding, hashing, encryption) are
 # ~100x slower without optimizations. Some tests will be extremely
