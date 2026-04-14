@@ -2,7 +2,6 @@ use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use sia_core::seed::Seed;
 use sia_core::signing::Signature;
 use sia_storage::Hash256;
 
