@@ -716,8 +716,10 @@ pub struct Download {
 
 #[uniffi::export]
 impl Download {
-    /// Reads the next chunk of decoded data. Returns an empty Vec on EOF or
-    /// after [Download::close] has been called.
+    /// Reads the next chunk of decoded data.
+    ///
+    /// # Returns
+    /// An empty Vec on EOF or [DownloadError::Cancelled] if the download has been cancelled. Otherwise, returns a chunk of decoded data.
     pub async fn read(&self) -> Result<Vec<u8>, DownloadError> {
         let inner = self.inner.clone();
         let cancel = self.cancel.clone();
