@@ -103,6 +103,9 @@ pub enum DownloadError {
 
     #[error("task error: {0}")]
     JoinError(#[from] tokio::task::JoinError),
+
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// Metadata about an application connecting to the indexer.
@@ -720,7 +723,7 @@ impl Download {
         let cancel = self.cancel.clone();
         spawn(async move {
             tokio::select! {
-                _ = cancel.cancelled() => Ok(Vec::new()),
+                _ = cancel.cancelled() => Err(DownloadError::Cancelled),
                 result = async {
                     let mut guard = inner.lock().await;
                     let Some(reader) = guard.as_mut() else {
