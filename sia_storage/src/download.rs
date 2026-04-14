@@ -408,12 +408,39 @@ impl Download {
         }
     }
 
+    /// Returns the next decoded chunk of data. Returns an empty `Vec` on EOF.
+    /// Chunks are typically up to 256 KiB.
+    ///
+    /// This is primarily intended for FFI bindings to enable zero-copy
+    /// transfer of an owned `Vec<u8>`. For general use, prefer the
+    /// [AsyncRead] implementation.
+    #[doc(hidden)]
+    pub async fn read_chunk(&mut self) -> Result<Vec<u8>, DownloadError> {
+        // If a previous AsyncRead poll left a partial buffer, drain it first
+        // so callers mixing read_chunk and poll_read don't lose data.
+        if !self.buf.is_empty() {
+            return Ok(std::mem::take(&mut self.buf).to_vec());
+        }
+        let Some(chunk_handle) = self.queue.pop_front() else {
+            return Ok(Vec::new()); // EOF
+        };
+        let mut result = chunk_handle.await??;
+        self.spawn_next();
+        self.cipher.apply_keystream(&mut result); // decrypt
+        Ok(result)
+    }
+
     pub(crate) fn new(
         object: &Object,
         hosts: Hosts<Client>,
         account_key: Arc<AppKey>,
         options: DownloadOptions,
-    ) -> Self {
+    ) -> Result<Self, DownloadError> {
+        if options.max_inflight == 0 {
+            return Err(DownloadError::Custom(
+                "max_inflight must be greater than 0".to_string(),
+            ));
+        }
         let object_size = object.size();
         let cipher = object.cipher(options.offset);
         let available = object_size.saturating_sub(options.offset);
@@ -431,7 +458,7 @@ impl Download {
         for _ in 0..options.max_inflight {
             download.spawn_next();
         }
-        download
+        Ok(download)
     }
 }
 
@@ -496,7 +523,8 @@ mod test {
                 hosts.clone(),
                 app_key.clone(),
                 DownloadOptions::default(),
-            );
+            )
+            .unwrap();
             tokio::io::copy(&mut download, &mut recovered_data)
                 .await
                 .unwrap();

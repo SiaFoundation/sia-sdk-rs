@@ -33,7 +33,7 @@
 //! sdk.pin_object(&object).await?;
 //!
 //! // Download
-//! let mut reader = sdk.download(&object, DownloadOptions::default());
+//! let mut reader = sdk.download(&object, DownloadOptions::default())?;
 //! tokio::io::copy(&mut reader, &mut writer).await?;
 //! ```
 //!
@@ -93,7 +93,6 @@ pub use builder::{
 pub use download::{Download, DownloadError, DownloadOptions};
 pub use encryption::EncryptionKey;
 pub use hosts::{QueueError, RPCError};
-pub use rhp4::Client as Transport;
 pub use slabs::{Object, ObjectEvent, PinnedSlab, SealedObject, SealedObjectError, Sector, Slab};
 pub use upload::{PackedUpload, UploadError, UploadOptions};
 
@@ -457,7 +456,11 @@ impl SDK {
     /// implements [tokio::io::AsyncRead] — pipe it into any writer with
     /// [tokio::io::copy] or read chunks directly. In-flight chunk recovery is
     /// cancelled when the handle is dropped.
-    pub fn download(&self, object: &Object, options: DownloadOptions) -> Download {
+    pub fn download(
+        &self,
+        object: &Object,
+        options: DownloadOptions,
+    ) -> Result<Download, DownloadError> {
         Download::new(object, self.hosts.clone(), self.app_key.clone(), options)
     }
 
@@ -739,7 +742,8 @@ mod test {
                 hosts.clone(),
                 app_key.clone(),
                 DownloadOptions::default(),
-            );
+            )
+            .unwrap();
             copy(&mut download, &mut Cursor::new(&mut output[..]))
                 .await
                 .expect("download to complete");
@@ -752,7 +756,8 @@ mod test {
                 hosts.clone(),
                 app_key.clone(),
                 DownloadOptions::default(),
-            );
+            )
+            .unwrap();
             copy(&mut download, &mut Cursor::new(&mut output[..]))
                 .await
                 .expect("download to complete");
@@ -825,7 +830,8 @@ mod test {
                 hosts.clone(),
                 app_key.clone(),
                 DownloadOptions::default(),
-            );
+            )
+            .unwrap();
             copy(&mut download, &mut Cursor::new(&mut output[..]))
                 .await
                 .expect("download to complete");
@@ -838,7 +844,8 @@ mod test {
                 hosts.clone(),
                 app_key.clone(),
                 DownloadOptions::default(),
-            );
+            )
+            .unwrap();
             copy(&mut download, &mut Cursor::new(&mut output[..]))
                 .await
                 .expect("download to complete");
@@ -895,7 +902,8 @@ mod test {
                 hosts.clone(),
                 app_key.clone(),
                 DownloadOptions::default(),
-            );
+            )
+            .unwrap();
             copy(&mut download, &mut Cursor::new(&mut output[..]))
                 .await
                 .expect("download to complete");
@@ -935,7 +943,7 @@ mod test {
         assert_eq!(object.size(), 13);
 
         let mut output = BytesMut::zeroed(object.size() as usize);
-        let mut download = Download::new(&object, hosts.clone(), app_key.clone(), DownloadOptions::default());
+        let mut download = Download::new(&object, hosts.clone(), app_key.clone(), DownloadOptions::default()).unwrap();
 
         copy(&mut download, &mut Cursor::new(&mut output[..]))
             .await
@@ -949,7 +957,7 @@ mod test {
             offset: range.start as u64,
             length: Some((range.end - range.start) as u64),
             ..Default::default()
-        });
+        }).unwrap();
         copy(&mut download, &mut Cursor::new(&mut output[..]))
             .await
             .expect("download to complete");
@@ -1004,7 +1012,8 @@ mod test {
                 hosts.clone(),
                 app_key.clone(),
                 DownloadOptions::default(),
-            );
+            )
+            .unwrap();
             copy(&mut download, &mut Cursor::new(&mut output[..]))
                 .await
                 .expect("download to complete");
@@ -1087,7 +1096,8 @@ mod test {
                         length: Some(length),
                         ..Default::default()
                     },
-                );
+                )
+                .unwrap();
                 copy(&mut download, &mut output).await.unwrap();
 
                 let clamped_length = if offset >= data_size {
@@ -1156,7 +1166,8 @@ mod test {
                 hosts.clone(),
                 app_key.clone(),
                 DownloadOptions::default(),
-            );
+            )
+            .unwrap();
             copy(&mut download, &mut Cursor::new(&mut output[..]))
                 .await
                 .expect("download to complete");

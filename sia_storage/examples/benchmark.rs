@@ -223,7 +223,9 @@ async fn main() {
     println!("Downloading object...");
     let start = Instant::now();
     let mut verifier = SeededVerifier::new(seed, args.size);
-    let mut reader = sdk.download(&obj, DownloadOptions::default());
+    let mut reader = sdk
+        .download(&obj, DownloadOptions::default())
+        .expect("failed to start download");
     copy(&mut reader, &mut verifier)
         .await
         .expect("failed to copy data");

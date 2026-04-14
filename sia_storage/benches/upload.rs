@@ -115,7 +115,7 @@ fn upload_benchmark(c: &mut Criterion) {
                         max_inflight: 30,
                         ..Default::default()
                     },
-                );
+                ).unwrap();
                 tokio::io::copy(&mut reader, &mut sink())
                     .await
                     .expect("download to complete");
@@ -134,7 +134,7 @@ fn upload_benchmark(c: &mut Criterion) {
                         max_inflight: 10,
                         ..Default::default()
                     },
-                );
+                ).unwrap();
                 tokio::io::copy(&mut reader, &mut sink())
                     .await
                     .expect("download to complete");
@@ -147,7 +147,7 @@ fn upload_benchmark(c: &mut Criterion) {
         &object,
         |b, object| {
             b.to_async(&runtime).iter(|| async {
-                let mut reader = downloader.download(object, DownloadOptions::default());
+                let mut reader = downloader.download(object, DownloadOptions::default()).unwrap();
                 tokio::io::copy(&mut reader, &mut sink())
                     .await
                     .expect("download to complete");
@@ -167,7 +167,7 @@ fn upload_benchmark(c: &mut Criterion) {
                 let mut total = std::time::Duration::ZERO;
                 for _ in 0..iters {
                     let start = std::time::Instant::now();
-                    let mut reader = downloader.download(&object, DownloadOptions::default());
+                    let mut reader = downloader.download(&object, DownloadOptions::default()).unwrap();
                     let mut buf = [0u8; 1];
                     reader.read(&mut buf).await.expect("read to succeed");
                     total += start.elapsed();
@@ -191,7 +191,7 @@ fn upload_benchmark(c: &mut Criterion) {
                             length: Some(64),
                             ..Default::default()
                         },
-                    );
+                    ).unwrap();
                     let mut buf = [0u8; 1];
                     reader.read(&mut buf).await.expect("read to succeed");
                     total += start.elapsed();

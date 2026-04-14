@@ -8,7 +8,7 @@ use crate::hosts::Hosts;
 use crate::rhp4::Client;
 use crate::time::Duration;
 use crate::upload::Uploader;
-use crate::{AppKey, DownloadOptions, Object, PackedUpload, UploadError, UploadOptions};
+use crate::{AppKey, DownloadError, DownloadOptions, Object, PackedUpload, UploadError, UploadOptions};
 
 pub struct MockUploader {
     uploader: Uploader<Client>,
@@ -49,7 +49,7 @@ impl MockDownloader {
         &self,
         object: &Object,
         options: DownloadOptions,
-    ) -> impl tokio::io::AsyncRead + Unpin {
+    ) -> Result<impl tokio::io::AsyncRead + Unpin, DownloadError> {
         Download::new(
             object,
             self.hosts.inner.clone(),

@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
 use tokio::runtime::{self, Runtime};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::AbortOnDropHandle;
@@ -704,35 +703,46 @@ impl PackedUpload {
 }
 
 /// A download handle. Call [Download::read] repeatedly to receive chunks of
-/// decoded data. An empty chunk signals end of stream. All in-flight work is
+/// decoded data. An empty Vec signals end of stream. All in-flight work is
 /// cancelled when the handle is dropped or [Download::close] is called.
 #[derive(uniffi::Object)]
 pub struct Download {
-    inner: tokio::sync::Mutex<Option<sia_storage::Download>>,
+    inner: Arc<tokio::sync::Mutex<Option<sia_storage::Download>>>,
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 #[uniffi::export]
 impl Download {
-    /// Reads the next chunk of decoded data. Returns an empty Vec on EOF
-    /// or after [Download::close] has been called.
+    /// Reads the next chunk of decoded data. Returns an empty Vec on EOF or
+    /// after [Download::close] has been called.
     pub async fn read(&self) -> Result<Vec<u8>, DownloadError> {
-        const CHUNK_SIZE: usize = 1 << 19; // 512 KiB
-        let mut guard = self.inner.lock().await;
-        let Some(reader) = guard.as_mut() else {
-            return Ok(Vec::new());
-        };
-        let mut buf = vec![0u8; CHUNK_SIZE];
-        let n = AsyncReadExt::read(reader, &mut buf)
-            .await
-            .map_err(sia_storage::DownloadError::from)?;
-        buf.truncate(n);
-        Ok(buf)
+        let inner = self.inner.clone();
+        let cancel = self.cancel.clone();
+        spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => Ok(Vec::new()),
+                result = async {
+                    let mut guard = inner.lock().await;
+                    let Some(reader) = guard.as_mut() else {
+                        return Ok(Vec::new());
+                    };
+                    Ok::<_, DownloadError>(reader.read_chunk().await?)
+                } => result,
+            }
+        })
+        .await?
     }
 
     /// Cancels the download and aborts any in-flight chunk recovery tasks.
-    /// Subsequent reads return an empty Vec.
+    /// Interrupts an in-flight [Download::read] immediately. Subsequent reads
+    /// return an empty Vec.
     pub async fn close(&self) {
-        self.inner.lock().await.take();
+        self.cancel.cancel();
+        let inner = self.inner.clone();
+        let _ = spawn(async move {
+            inner.lock().await.take();
+        })
+        .await;
     }
 }
 
@@ -914,18 +924,26 @@ impl SDK {
 
     /// Initiates a download of the data referenced by the object, starting at `offset` and reading `length` bytes.
     /// Returns a [Download] handle that yields chunks via [Download::read].
-    pub fn download(&self, object: Arc<PinnedObject>, options: DownloadOptions) -> Download {
-        let r = self.inner.download(
+    pub fn download(
+        &self,
+        object: Arc<PinnedObject>,
+        options: DownloadOptions,
+    ) -> Result<Download, DownloadError> {
+        // Enter the runtime so Download::new's spawned recovery tasks have a
+        // reactor in scope.
+        let _guard = RUNTIME.handle().enter();
+        let reader = self.inner.download(
             &object.object(),
             sia_storage::DownloadOptions {
                 offset: options.offset,
                 length: options.length,
                 max_inflight: options.max_inflight as usize,
             },
-        );
-        Download {
-            inner: tokio::sync::Mutex::new(Some(r)),
-        }
+        )?;
+        Ok(Download {
+            inner: Arc::new(tokio::sync::Mutex::new(Some(reader))),
+            cancel: tokio_util::sync::CancellationToken::new(),
+        })
     }
 
     /// Returns a list of all usable hosts.
