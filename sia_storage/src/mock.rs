@@ -8,7 +8,9 @@ use crate::hosts::Hosts;
 use crate::rhp4::Client;
 use crate::time::Duration;
 use crate::upload::Uploader;
-use crate::{AppKey, DownloadError, DownloadOptions, Object, PackedUpload, UploadError, UploadOptions};
+use crate::{
+    AppKey, DownloadError, DownloadOptions, Object, PackedUpload, UploadError, UploadOptions,
+};
 
 pub struct MockUploader {
     uploader: Uploader<Client>,
