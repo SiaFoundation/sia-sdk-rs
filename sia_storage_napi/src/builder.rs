@@ -70,15 +70,13 @@ impl AppKey {
 /// Generates a new BIP-39 12-word recovery phrase.
 #[napi]
 pub fn generate_recovery_phrase() -> String {
-    let seed: [u8; 16] = rand::random();
-    Seed::from_seed(seed).to_string()
+    sia_storage::generate_recovery_phrase()
 }
 
 /// Validates a BIP-39 recovery phrase.
 #[napi]
 pub fn validate_recovery_phrase(phrase: String) -> Result<()> {
-    Seed::new(&phrase).map_err(|e| Error::from_reason(e.to_string()))?;
-    Ok(())
+    sia_storage::validate_recovery_phrase(&phrase).map_err(|e| Error::from_reason(e.to_string()))
 }
 
 enum BuilderState {

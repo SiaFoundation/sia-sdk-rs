@@ -2,4 +2,4 @@
 sia_storage_napi: major
 ---
 
-# Initialize
+# Initialize nodejs bindings
