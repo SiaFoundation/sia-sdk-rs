@@ -740,7 +740,7 @@ impl Download {
 
     /// Cancels the download and aborts any in-flight chunk recovery tasks.
     /// Interrupts an in-flight [Download::read] immediately. Subsequent reads
-    /// return an empty Vec.
+    /// return [DownloadError::Cancelled].
     pub async fn close(&self) {
         self.cancel.cancel();
         let inner = self.inner.clone();

@@ -60,6 +60,10 @@ pub enum DownloadError {
     /// A custom error.
     #[error("custom error: {0}")]
     Custom(String),
+
+    /// The download previously errored and can no longer be read from.
+    #[error("download errored")]
+    Errored,
 }
 
 /// Options for configuring a download.
@@ -356,6 +360,12 @@ pub struct Download {
     buf: Bytes,
     queue: VecDeque<AbortOnDropHandle<Result<Vec<u8>, DownloadError>>>,
     chunk_iter: ChunkIter<CHUNK_SIZE>,
+    // sticky error
+    //
+    // note: in Go we would store the error and return it, but that would
+    // require all the enum variants to be Clone which is not the case, so
+    // a generic variant is returned after the first error.
+    errored: bool,
 }
 
 impl AsyncRead for Download {
@@ -364,14 +374,27 @@ impl AsyncRead for Download {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
+        if self.errored {
+            return Poll::Ready(Err(std::io::Error::other(DownloadError::Errored)));
+        }
+
         if !self.buf.is_empty() {
             self.drain_buf(buf);
             return Poll::Ready(Ok(()));
         }
 
         if let Some(chunk_handle) = self.queue.front_mut() {
-            let mut result =
-                ready!(Pin::new(chunk_handle).poll(cx))?.map_err(std::io::Error::other)?;
+            let mut result = match ready!(Pin::new(chunk_handle).poll(cx)) {
+                Ok(Ok(data)) => data,
+                Ok(Err(e)) => {
+                    self.set_err();
+                    return Poll::Ready(Err(std::io::Error::other(e)));
+                }
+                Err(e) => {
+                    self.set_err();
+                    return Poll::Ready(Err(std::io::Error::other(e)));
+                }
+            };
             self.queue.pop_front();
             self.spawn_next();
             self.cipher.apply_keystream(&mut result); // decrypt
@@ -387,6 +410,14 @@ impl Download {
         let to_copy = std::cmp::min(buf.remaining(), self.buf.len());
         buf.put_slice(&self.buf[..to_copy]);
         self.buf.advance(to_copy);
+    }
+
+    /// Marks the download as errored and aborts all in-flight chunk tasks.
+    /// Subsequent reads will return [DownloadError::Errored].
+    fn set_err(&mut self) {
+        self.errored = true;
+        self.buf = Bytes::new();
+        self.queue.clear();
     }
 
     fn spawn_next(&mut self) {
@@ -409,13 +440,16 @@ impl Download {
     }
 
     /// Returns the next decoded chunk of data. Returns an empty `Vec` on EOF.
-    /// Chunks are typically up to 256 KiB.
+    /// Chunks are up to 256 KiB.
     ///
     /// This is primarily intended for FFI bindings to enable zero-copy
     /// transfer of an owned `Vec<u8>`. For general use, prefer the
     /// [AsyncRead] implementation.
     #[doc(hidden)]
     pub async fn read_chunk(&mut self) -> Result<Vec<u8>, DownloadError> {
+        if self.errored {
+            return Err(DownloadError::Errored);
+        }
         // If a previous AsyncRead poll left a partial buffer, drain it first
         // so callers mixing read_chunk and poll_read don't lose data.
         if !self.buf.is_empty() {
@@ -424,7 +458,17 @@ impl Download {
         let Some(chunk_handle) = self.queue.pop_front() else {
             return Ok(Vec::new()); // EOF
         };
-        let mut result = chunk_handle.await??;
+        let mut result = match chunk_handle.await {
+            Ok(Ok(data)) => data,
+            Ok(Err(e)) => {
+                self.set_err();
+                return Err(e);
+            }
+            Err(e) => {
+                self.set_err();
+                return Err(e.into());
+            }
+        };
         self.spawn_next();
         self.cipher.apply_keystream(&mut result); // decrypt
         Ok(result)
@@ -454,6 +498,7 @@ impl Download {
             buf: Bytes::new(),
             queue: VecDeque::with_capacity(options.max_inflight),
             chunk_iter,
+            errored: false,
         };
         for _ in 0..options.max_inflight {
             download.spawn_next();
