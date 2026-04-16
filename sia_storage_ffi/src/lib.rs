@@ -1,6 +1,5 @@
 uniffi::setup_scaffolding!();
 
-use base64::prelude::*;
 use sia_core::encoding;
 use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::{PublicKey, Signature};
@@ -131,47 +130,6 @@ pub enum AddressProtocol {
 pub struct NetAddress {
     pub protocol: AddressProtocol,
     pub address: String,
-}
-
-#[derive(Debug, Error, uniffi::Error)]
-#[uniffi(flat_error)]
-pub enum EncryptionKeyParseError {
-    #[error("failed to decode base64: {0}")]
-    Base64(#[from] base64::DecodeError),
-    #[error("invalid key length: {0}, expected 32 bytes")]
-    KeyLength(usize),
-}
-
-#[derive(uniffi::Object)]
-pub struct EncryptionKey(sia_storage::EncryptionKey);
-
-#[uniffi::export]
-impl EncryptionKey {
-    #[uniffi::constructor]
-    pub fn parse(str: String) -> Result<Self, EncryptionKeyParseError> {
-        let data = BASE64_STANDARD.decode(str.as_bytes())?;
-        if data.len() != 32 {
-            return Err(EncryptionKeyParseError::KeyLength(data.len()));
-        }
-        Ok(Self(sia_storage::EncryptionKey::from(
-            <[u8; 32]>::try_from(data).unwrap(),
-        )))
-    }
-
-    /// Exports the key as a base64 encoded string.
-    ///
-    /// This should be used to store the key securely.
-    /// The key should never be shared or transmitted
-    /// in plaintext.
-    pub fn export(&self) -> String {
-        BASE64_STANDARD.encode(self.0.as_ref())
-    }
-}
-
-impl From<sia_storage::EncryptionKey> for EncryptionKey {
-    fn from(key: sia_storage::EncryptionKey) -> Self {
-        Self(key)
-    }
 }
 
 #[derive(Debug, Error, uniffi::Error)]

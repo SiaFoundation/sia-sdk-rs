@@ -379,7 +379,7 @@ impl<T: Transport> Uploader<T> {
                         }
                     }
                 },
-                _ = sleep(Duration::from_secs(active as u64)) => {
+                _ = sleep(Duration::from_secs(active.max(1) as u64)) => {
                     if let Ok(racer) = semaphore.clone().try_acquire_owned()
                         && let Ok((host_key, attempts)) = shard.hosts.pop_front() {
                             debug!("slab {} shard {} racing slow host", shard.slab_index, shard.shard_index);
@@ -391,7 +391,7 @@ impl<T: Transport> Uploader<T> {
         }
     }
 
-    pub(crate) async fn upload_slabs<R: AsyncRead + Unpin + Send + 'static>(
+    pub(crate) async fn upload_slabs<R: AsyncRead + Unpin + 'static>(
         client: Hosts<T>,
         app_key: Arc<AppKey>,
         r: R,
@@ -556,7 +556,7 @@ impl<T: Transport> Uploader<T> {
     /// # Returns
     /// The object containing the metadata needed to download. The caller must
     /// pin the object to the indexer after uploading.
-    pub async fn upload<R: AsyncRead + Unpin + Send + 'static>(
+    pub async fn upload<R: AsyncRead + Unpin + 'static>(
         &self,
         mut object: Object,
         r: R,

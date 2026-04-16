@@ -245,7 +245,7 @@ pub struct HostQuery {
 }
 
 /// Metadata about a registered application on the indexer.
-#[derive(Debug, serde::Deserialize, PartialEq)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct App {
     /// The unique identifier of the application.
@@ -261,7 +261,7 @@ pub struct App {
 }
 
 /// Information about the user's account on the indexer.
-#[derive(Debug, serde::Deserialize, PartialEq)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     /// The public key associated with the account.
@@ -431,7 +431,7 @@ impl SDK {
     /// # Returns
     /// The object containing the metadata needed to download. The caller must
     /// pin the object to the indexer after uploading.
-    pub async fn upload<R: AsyncRead + Unpin + Send + 'static>(
+    pub async fn upload<R: AsyncRead + Unpin + 'static>(
         &self,
         object: Object,
         reader: R,
@@ -630,6 +630,15 @@ impl SDK {
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }
+}
+
+/// Estimates the on-network encoded size of data after erasure coding.
+pub fn encoded_size(data_size: u64, data_shards: u8, parity_shards: u8) -> u64 {
+    let total_shards = data_shards as u64 + parity_shards as u64;
+    let sector_size = sia_core::rhp4::SECTOR_SIZE as u64;
+    let slab_size = total_shards * sector_size;
+    let slabs = data_size.div_ceil(data_shards as u64 * sector_size);
+    slabs * slab_size
 }
 
 /// Generates a new BIP-39 12-word recovery phrase.

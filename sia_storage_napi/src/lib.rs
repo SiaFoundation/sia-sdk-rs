@@ -1,4 +1,3 @@
-use base64::prelude::*;
 use chrono::{DateTime, Utc};
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -43,36 +42,6 @@ pub enum AddressProtocol {
 pub struct NetAddress {
     pub protocol: AddressProtocol,
     pub address: String,
-}
-
-/// An encryption key wrapper.
-#[napi]
-pub struct EncryptionKey(sia_storage::EncryptionKey);
-
-#[napi]
-impl EncryptionKey {
-    /// Parses an encryption key from a base64-encoded string.
-    #[napi(factory)]
-    pub fn parse(s: String) -> Result<Self> {
-        let data = BASE64_STANDARD
-            .decode(s.as_bytes())
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-        if data.len() != 32 {
-            return Err(Error::from_reason(format!(
-                "invalid key length: {}, expected 32 bytes",
-                data.len()
-            )));
-        }
-        Ok(Self(sia_storage::EncryptionKey::from(
-            <[u8; 32]>::try_from(data).unwrap(),
-        )))
-    }
-
-    /// Exports the key as a base64-encoded string.
-    #[napi]
-    pub fn export(&self) -> String {
-        BASE64_STANDARD.encode(self.0.as_ref())
-    }
 }
 
 /// A sealed object for offline storage.
@@ -906,8 +875,5 @@ impl Sdk {
 #[napi]
 pub fn encoded_size(size: BigInt, data_shards: u8, parity_shards: u8) -> BigInt {
     let (_, size, _) = size.get_u64();
-    let total_shards = data_shards as u64 + parity_shards as u64;
-    let slab_size = total_shards * SECTOR_SIZE as u64;
-    let slabs = size.div_ceil(data_shards as u64 * SECTOR_SIZE as u64);
-    BigInt::from(slabs * slab_size)
+    sia_storage::encoded_size(size, data_shards, parity_shards).into()
 }

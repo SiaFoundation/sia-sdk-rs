@@ -11,18 +11,17 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-base64 = "0.22.1"
 bytes = "1.11.1"
-futures-core = "0.3"
+futures-core = "0.3.32"
 log = "0.4.29"
 chrono = { version = "0.4", features = ["serde"] }
-napi = { version = "3", features = ["async", "napi8", "chrono_date", "web_stream"] }
-napi-derive = "3"
+napi = { version = "3.8.5", features = ["async", "napi8", "chrono_date", "web_stream"] }
+napi-derive = "3.5.4"
 rand = "0.10.0"
 sia_core = { version = "0.3.0", path = "../sia_core" }
 sia_storage = { version = "0.6.0", path = "../sia_storage" }
 thiserror = "2.0.18"
-tokio = { version = "1.50.0", features = ["rt-multi-thread", "sync"] }
+tokio = { version = "1.52.0", features = ["rt-multi-thread", "sync"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }
 
