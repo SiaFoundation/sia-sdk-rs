@@ -1,0 +1,30 @@
+[package]
+name = "sia_storage_napi"
+version = "0.5.0"
+edition = "2024"
+repository = "https://github.com/SiaFoundation/sia-sdk-rs"
+license = "MIT"
+description = "Node.js N-API bindings for interacting with a Sia network indexer"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+base64 = "0.22.1"
+bytes = "1.11.1"
+futures-core = "0.3"
+log = "0.4.29"
+chrono = { version = "0.4", features = ["serde"] }
+napi = { version = "3", features = ["async", "napi8", "chrono_date", "web_stream"] }
+napi-derive = "3"
+rand = "0.10.0"
+sia_core = { version = "0.3.0", path = "../sia_core" }
+sia_storage = { version = "0.6.0", path = "../sia_storage" }
+thiserror = "2.0.18"
+tokio = { version = "1.50.0", features = ["rt-multi-thread", "sync"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["io"] }
+
+[build-dependencies]
+napi-build = "2"
