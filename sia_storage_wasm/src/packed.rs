@@ -1,116 +1,40 @@
-use std::cell::RefCell;
-use std::pin::Pin;
-use std::rc::Rc;
-use std::task::{Context, Poll};
+use std::cell::Cell;
+use std::sync::Arc;
+use tokio::sync::{Mutex, Notify};
+use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 use sia_storage::PackedUpload as CorePackedUpload;
-use tokio::io::{AsyncRead, ReadBuf};
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
 
 use crate::helpers::to_js_err;
 use crate::object::PinnedObject;
-
-/// An AsyncRead adapter over a JS ReadableStream.
-struct ReadableStreamReader {
-    reader: web_sys::ReadableStreamDefaultReader,
-    pending: Option<JsFuture>,
-    buf: Vec<u8>,
-    pos: usize,
-}
-
-impl ReadableStreamReader {
-    fn new(stream: web_sys::ReadableStream) -> Result<Self, JsValue> {
-        let reader = stream
-            .get_reader()
-            .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
-        Ok(Self {
-            reader,
-            pending: None,
-            buf: Vec::new(),
-            pos: 0,
-        })
-    }
-}
-
-impl AsyncRead for ReadableStreamReader {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        if self.pos < self.buf.len() {
-            let n = std::cmp::min(buf.remaining(), self.buf.len() - self.pos);
-            buf.put_slice(&self.buf[self.pos..self.pos + n]);
-            self.pos += n;
-            if self.pos >= self.buf.len() {
-                self.buf.clear();
-                self.pos = 0;
-            }
-            return Poll::Ready(Ok(()));
-        }
-
-        if self.pending.is_none() {
-            self.pending = Some(JsFuture::from(self.reader.read()));
-        }
-
-        let future = self.pending.as_mut().unwrap();
-        match Pin::new(future).poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(e)) => {
-                self.pending = None;
-                Poll::Ready(Err(std::io::Error::other(format!(
-                    "ReadableStream error: {e:?}"
-                ))))
-            }
-            Poll::Ready(Ok(val)) => {
-                self.pending = None;
-                let done = js_sys::Reflect::get(&val, &"done".into())
-                    .unwrap_or(JsValue::TRUE)
-                    .as_bool()
-                    .unwrap_or(true);
-                if done {
-                    return Poll::Ready(Ok(()));
-                }
-                let value = js_sys::Reflect::get(&val, &"value".into())
-                    .map_err(|e| std::io::Error::other(format!("missing value: {e:?}")))?;
-                let array: js_sys::Uint8Array = value.unchecked_into();
-                let bytes = array.to_vec();
-                if bytes.is_empty() {
-                    return Poll::Ready(Ok(()));
-                }
-                let n = std::cmp::min(buf.remaining(), bytes.len());
-                buf.put_slice(&bytes[..n]);
-                if n < bytes.len() {
-                    self.buf = bytes;
-                    self.pos = n;
-                }
-                Poll::Ready(Ok(()))
-            }
-        }
-    }
-}
 
 /// A packed upload handle for efficiently uploading multiple objects
 /// together. Objects are packed into shared slabs to avoid wasting storage.
 ///
 /// ```js
 /// const packed = sdk.uploadPacked();
-/// await packed.add(file1);
-/// await packed.add(file2);
+/// await packed.add(file1.stream());
+/// await packed.add(file2.stream());
 /// const objects = await packed.finalize();
 /// for (const obj of objects) await sdk.pinObject(obj);
 /// ```
 #[wasm_bindgen]
 pub struct PackedUpload {
-    inner: Rc<RefCell<Option<CorePackedUpload>>>,
+    inner: Arc<Mutex<Option<CorePackedUpload>>>,
+    cancelled: Arc<Notify>,
+    slab_size: f64,
+    length: Cell<f64>,
 }
 
 impl PackedUpload {
     pub(crate) fn new(inner: CorePackedUpload) -> Self {
+        let slab_size = inner.slab_size() as f64;
         Self {
-            inner: Rc::new(RefCell::new(Some(inner))),
+            inner: Arc::new(Mutex::new(Some(inner))),
+            cancelled: Arc::new(Notify::new()),
+            slab_size,
+            length: Cell::new(0.0),
         }
     }
 }
@@ -119,79 +43,82 @@ impl PackedUpload {
 impl PackedUpload {
     /// Bytes remaining until the current slab is full. Adding objects that
     /// fit within this size avoids starting a new slab and minimizes padding.
-    pub fn remaining(&self) -> Result<f64, JsValue> {
-        let inner = self.inner.borrow();
-        let packed = inner
-            .as_ref()
-            .ok_or_else(|| JsValue::from_str("upload already finalized"))?;
-        Ok(packed.remaining() as f64)
+    pub fn remaining(&self) -> f64 {
+        let length = self.length.get();
+        if length == 0.0 {
+            self.slab_size
+        } else {
+            (self.slab_size - (length % self.slab_size)) % self.slab_size
+        }
     }
 
     /// Total bytes added so far across all objects.
-    pub fn length(&self) -> Result<f64, JsValue> {
-        let inner = self.inner.borrow();
-        let packed = inner
-            .as_ref()
-            .ok_or_else(|| JsValue::from_str("upload already finalized"))?;
-        Ok(packed.length() as f64)
+    pub fn length(&self) -> f64 {
+        self.length.get()
     }
 
     /// Optimal size of each slab in bytes.
     #[wasm_bindgen(js_name = "slabSize")]
-    pub fn slab_size(&self) -> Result<f64, JsValue> {
-        let inner = self.inner.borrow();
-        let packed = inner
-            .as_ref()
-            .ok_or_else(|| JsValue::from_str("upload already finalized"))?;
-        Ok(packed.slab_size() as f64)
+    pub fn slab_size(&self) -> f64 {
+        self.slab_size
     }
 
-    /// Adds an object to the packed upload. Accepts a `File`, `Blob`, or
-    /// `ReadableStream`. Returns the number of bytes written.
+    /// Adds an object to the packed upload. Returns the number of bytes written.
     ///
     /// ```js
     /// const packed = sdk.uploadPacked();
-    /// await packed.add(file);
-    /// await packed.add(blob);
-    /// await packed.add(readableStream);
+    /// await packed.add(file.stream());
+    /// await packed.add(blob.stream());
     /// ```
-    pub async fn add(&self, source: JsValue) -> Result<f64, JsValue> {
-        let stream: web_sys::ReadableStream = if source.has_type::<web_sys::ReadableStream>() {
-            source.unchecked_into()
-        } else if let Ok(blob) = source.dyn_into::<web_sys::Blob>() {
-            blob.stream()
-        } else {
-            return Err(JsValue::from_str(
-                "add() expects a File, Blob, or ReadableStream",
-            ));
-        };
-        let reader = ReadableStreamReader::new(stream)?;
-        let mut packed = self
-            .inner
-            .borrow_mut()
-            .take()
-            .ok_or_else(|| JsValue::from_str("upload already finalized"))?;
-        let result = packed.add(reader).await.map_err(to_js_err);
-        *self.inner.borrow_mut() = Some(packed);
-        Ok(result? as f64)
+    pub async fn add(&self, stream: web_sys::ReadableStream) -> Result<f64, JsError> {
+        let reader = wasm_streams::ReadableStream::from_raw(stream)
+            .into_async_read()
+            .compat();
+        let inner = self.inner.clone();
+        let cancelled = self.cancelled.clone();
+        let (size, length) = crate::run_local(async move {
+            let mut guard = tokio::select! {
+                _ = cancelled.notified() => {
+                    return Err(JsError::new("upload cancelled"));
+                }
+                guard = inner.lock() => guard,
+            };
+            let packed = guard
+                .as_mut()
+                .ok_or_else(|| JsError::new("upload already finalized"))?;
+            let size = tokio::select! {
+                _ = cancelled.notified() => {
+                    guard.take();
+                    return Err(JsError::new("upload cancelled"));
+                }
+                result = packed.add(reader) => result.map_err(to_js_err)?,
+            };
+            let length = packed.length() as f64;
+            Ok((size as f64, length))
+        })
+        .await?;
+        self.length.set(length);
+        Ok(size)
     }
 
     /// Finalizes the packed upload and returns the resulting objects.
     /// Each object must be pinned separately with `sdk.pinObject()`.
-    pub async fn finalize(self) -> Result<Vec<PinnedObject>, JsValue> {
-        let inner = self
-            .inner
-            .borrow_mut()
-            .take()
-            .ok_or_else(|| JsValue::from_str("upload already finalized"))?;
-        let objects = inner.finalize().await.map_err(to_js_err)?;
+    pub async fn finalize(self) -> Result<Vec<PinnedObject>, JsError> {
+        let inner = self.inner.clone();
+        let objects = crate::run_local(async move {
+            let packed = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| JsError::new("upload already finalized"))?;
+            packed.finalize().await.map_err(to_js_err)
+        })
+        .await?;
         Ok(objects.into_iter().map(PinnedObject).collect())
     }
 
-    /// Cancels the packed upload. This is a hard abort — in-flight shard
-    /// uploads are abandoned and partially uploaded data is orphaned on hosts
-    /// until it expires from temporary storage.
+    /// Cancels the packed upload. Immediately interrupts any in-flight `add`.
     pub fn cancel(&self) {
-        self.inner.borrow_mut().take();
+        self.cancelled.notify_waiters();
     }
 }

@@ -1,68 +1,30 @@
-use std::cell::RefCell;
-use std::pin::Pin;
-use std::rc::Rc;
 use std::str::FromStr;
-use std::task::{Context, Poll};
 
-use js_sys::Uint8Array;
 use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
 use sia_storage::{self, HostQuery as StorageHostQuery, ObjectsCursor, SDK as StorageSdk};
-use tokio::io::AsyncWrite;
-use wasm_bindgen::JsCast;
-use wasm_bindgen::closure::Closure;
+use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
 use crate::helpers::to_js_err;
 use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
-use crate::streaming::Upload;
+use crate::run_local;
 use crate::types::{
     Account, DownloadOptions, Host, HostQuery, ObjectEvent, PinnedSlab, UploadOptions,
 };
 
-/// An AsyncWrite adapter that enqueues chunks into a ReadableStream controller.
-struct StreamWriter {
-    controller: web_sys::ReadableStreamDefaultController,
-}
-
-impl AsyncWrite for StreamWriter {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
-        let array = Uint8Array::from(buf);
-        if let Err(e) = self.controller.enqueue_with_chunk(&array) {
-            return Poll::Ready(Err(std::io::Error::other(format!(
-                "ReadableStream enqueue error: {e:?}"
-            ))));
-        }
-        Poll::Ready(Ok(buf.len()))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        self.controller.close().ok();
-        Poll::Ready(Ok(()))
-    }
-}
-
 /// The main Sia storage SDK. Provides methods for uploading, downloading,
 /// and managing objects on the Sia storage network via an indexer.
 #[wasm_bindgen]
-pub struct Sdk(Rc<StorageSdk>);
+pub struct Sdk {
+    inner: StorageSdk,
+}
 
 impl Sdk {
-    pub(crate) fn new(sdk: StorageSdk) -> Self {
-        Self(Rc::new(sdk))
+    pub(crate) fn new(inner: StorageSdk) -> Self {
+        Self { inner }
     }
 }
 
@@ -71,13 +33,15 @@ impl Sdk {
     /// Returns the AppKey used by this SDK instance.
     #[wasm_bindgen(js_name = "appKey")]
     pub fn app_key(&self) -> AppKey {
-        AppKey(self.0.app_key().clone())
+        AppKey(self.inner.app_key().clone())
     }
 
     /// Returns account information from the indexer.
-    pub async fn account(&self) -> Result<Account, JsValue> {
-        let sdk = self.0.clone();
-        let a = sdk.account().await.map_err(to_js_err)?;
+    pub async fn account(&self) -> Result<Account, JsError> {
+        let sdk = self.inner.clone();
+        let a = run_local(async move { sdk.account().await })
+            .await
+            .map_err(to_js_err)?;
         Ok(Account {
             account_key: a.account_key.to_string(),
             max_pinned_data: a.max_pinned_data as f64,
@@ -91,13 +55,15 @@ impl Sdk {
     }
 
     /// Returns a list of usable hosts, optionally filtered by a HostQuery.
-    pub async fn hosts(&self, query: Option<HostQuery>) -> Result<Vec<Host>, JsValue> {
-        let sdk = self.0.clone();
-        let q = query.map(|q| q.to_inner()).unwrap_or(StorageHostQuery {
+    pub async fn hosts(&self, query: Option<HostQuery>) -> Result<Vec<Host>, JsError> {
+        let sdk = self.inner.clone();
+        let q = query.map(|q| q.into()).unwrap_or(StorageHostQuery {
             protocol: Some(Protocol::QUIC),
             ..Default::default()
         });
-        let hosts = sdk.hosts(q).await.map_err(to_js_err)?;
+        let hosts = run_local(async move { sdk.hosts(q).await })
+            .await
+            .map_err(to_js_err)?;
         Ok(hosts
             .into_iter()
             .map(|h| Host {
@@ -110,10 +76,12 @@ impl Sdk {
 
     /// Retrieves an object from the indexer by its hex ID.
     /// Returns a `PinnedObject` handle for use with download, share, seal, etc.
-    pub async fn object(&self, key_hex: &str) -> Result<PinnedObject, JsValue> {
+    pub async fn object(&self, key_hex: &str) -> Result<PinnedObject, JsError> {
+        let sdk = self.inner.clone();
         let key = Hash256::from_str(key_hex).map_err(to_js_err)?;
-        let sdk = self.0.clone();
-        let obj = sdk.object(&key).await.map_err(to_js_err)?;
+        let obj = run_local(async move { sdk.object(&key).await })
+            .await
+            .map_err(to_js_err)?;
         Ok(PinnedObject(obj))
     }
 
@@ -125,64 +93,71 @@ impl Sdk {
         cursor_id: Option<String>,
         cursor_after: Option<f64>,
         limit: u32,
-    ) -> Result<Vec<ObjectEvent>, JsValue> {
+    ) -> Result<Vec<ObjectEvent>, JsError> {
+        let sdk = self.inner.clone();
         let cursor = match (cursor_id, cursor_after) {
             (Some(id), Some(after_ms)) => {
                 let secs = (after_ms / 1000.0) as i64;
                 let nanos = ((after_ms % 1000.0) * 1_000_000.0) as u32;
                 Some(ObjectsCursor {
                     after: chrono::DateTime::from_timestamp(secs, nanos)
-                        .ok_or_else(|| JsValue::from_str("invalid cursor timestamp"))?,
+                        .ok_or_else(|| JsError::new("invalid cursor timestamp"))?,
                     id: Hash256::from_str(&id).map_err(to_js_err)?,
                 })
             }
             _ => None,
         };
-        let sdk = self.0.clone();
-        let events = sdk
-            .object_events(cursor, Some(limit as usize))
-            .await
-            .map_err(to_js_err)?;
+        let events =
+            run_local(async move { sdk.object_events(cursor, Some(limit as usize)).await })
+                .await
+                .map_err(to_js_err)?;
         Ok(events
             .into_iter()
             .map(|e| ObjectEvent {
                 id: e.id.to_string(),
                 deleted: e.deleted,
                 updated_at: e.updated_at.timestamp() as f64,
-                // report size as -1 if not present
                 size: e.object.as_ref().map(|o| o.size() as f64).unwrap_or(-1.0),
             })
             .collect())
     }
 
     /// Retrieves a pinned slab from the indexer by its hex ID.
-    pub async fn slab(&self, slab_id: &str) -> Result<PinnedSlab, JsValue> {
+    pub async fn slab(&self, slab_id: &str) -> Result<PinnedSlab, JsError> {
+        let sdk = self.inner.clone();
         let id = Hash256::from_str(slab_id).map_err(to_js_err)?;
-        let sdk = self.0.clone();
-        let slab = sdk.slab(&id).await.map_err(to_js_err)?;
+        let slab = run_local(async move { sdk.slab(&id).await })
+            .await
+            .map_err(to_js_err)?;
         Ok(slab.into())
     }
 
     /// Deletes an object from the indexer by its hex ID.
     #[wasm_bindgen(js_name = "deleteObject")]
-    pub async fn delete_object(&self, key_hex: &str) -> Result<(), JsValue> {
+    pub async fn delete_object(&self, key_hex: &str) -> Result<(), JsError> {
+        let sdk = self.inner.clone();
         let key = Hash256::from_str(key_hex).map_err(to_js_err)?;
-        let sdk = self.0.clone();
-        sdk.delete_object(&key).await.map_err(to_js_err)
+        run_local(async move { sdk.delete_object(&key).await })
+            .await
+            .map_err(to_js_err)
     }
 
     /// Pins an object to the indexer so it persists beyond temporary storage.
     #[wasm_bindgen(js_name = "pinObject")]
-    pub async fn pin_object(&self, object: &PinnedObject) -> Result<(), JsValue> {
-        let sdk = self.0.clone();
-        sdk.pin_object(&object.0).await.map_err(to_js_err)
+    pub async fn pin_object(&self, object: &PinnedObject) -> Result<(), JsError> {
+        let sdk = self.inner.clone();
+        let obj = object.0.clone();
+        run_local(async move { sdk.pin_object(&obj).await })
+            .await
+            .map_err(to_js_err)
     }
 
     /// Updates an object's metadata on the indexer.
     #[wasm_bindgen(js_name = "updateObjectMetadata")]
-    pub async fn update_object_metadata(&self, object: &PinnedObject) -> Result<(), JsValue> {
-        let sdk = self.0.clone();
-        sdk.update_object_metadata(&object.0)
+    pub async fn update_object_metadata(&self, object: &PinnedObject) -> Result<(), JsError> {
+        let sdk = self.inner.clone();
+        let obj = object.0.clone();
+        run_local(async move { sdk.update_object_metadata(&obj).await })
             .await
             .map_err(to_js_err)
     }
@@ -203,65 +178,40 @@ impl Sdk {
         &self,
         object: &PinnedObject,
         options: Option<DownloadOptions>,
-    ) -> Result<web_sys::ReadableStream, JsValue> {
-        let sdk = self.0.clone();
+    ) -> Result<web_sys::ReadableStream, JsError> {
+        const CHUNK_SIZE: usize = 1 << 18; // matches sia_storage chunk size for optimal performance
         let obj = object.0.clone();
-        let opts = options.map(|o| o.to_inner()).unwrap_or_default();
-
-        let controller: Rc<RefCell<Option<web_sys::ReadableStreamDefaultController>>> =
-            Rc::new(RefCell::new(None));
-        let controller_clone = controller.clone();
-
-        let start = Closure::once(move |ctrl: web_sys::ReadableStreamDefaultController| {
-            *controller_clone.borrow_mut() = Some(ctrl);
-        });
-
-        let underlying_source = js_sys::Object::new();
-        js_sys::Reflect::set(
-            &underlying_source,
-            &"start".into(),
-            start.as_ref().unchecked_ref(),
-        )?;
-        start.forget();
-
-        let stream = web_sys::ReadableStream::new_with_underlying_source(&underlying_source)?;
-
-        let controller_for_task = controller.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let ctrl = controller_for_task.borrow().clone().unwrap();
-            let mut writer = StreamWriter {
-                controller: ctrl.clone(),
-            };
-            match sdk.download(&mut writer, &obj, opts).await {
-                Ok(()) => {
-                    ctrl.close().ok();
-                }
-                Err(e) => {
-                    let err = JsValue::from_str(&e.to_string());
-                    ctrl.error_with_e(&err);
-                }
-            }
-        });
-
-        Ok(stream)
+        let opts = options.map(|o| o.into()).unwrap_or_default();
+        let download = self.inner.download(&obj, opts).map_err(to_js_err)?;
+        Ok(wasm_streams::ReadableStream::from_async_read(download.compat(), CHUNK_SIZE).into_raw())
     }
 
-    /// Starts an upload. Returns an `Upload` handle.
-    /// Push data with `pushChunk()`, then call `finish()` to get the `PinnedObject`.
+    /// Uploads data from a `ReadableStream` to the Sia network.
     ///
     /// Pass an existing `PinnedObject` to append new slabs to it, or `null`
     /// for a new upload. Appending changes the object's ID — the caller must
     /// re-pin and update any references to the old ID.
-    pub fn upload(&self, object: Option<PinnedObject>, options: Option<UploadOptions>) -> Upload {
-        let (on_progress, opts) = match options {
-            Some(mut o) => {
-                let cb = o.on_progress.take();
-                (cb, o.to_inner())
-            }
-            None => (None, sia_storage::UploadOptions::default()),
-        };
-        let obj = object.map(|p| p.0).unwrap_or_default();
-        Upload::new(self.0.clone(), obj, opts, on_progress)
+    ///
+    /// ```js
+    /// const obj = await sdk.upload(file.stream(), null, options);
+    /// await sdk.pinObject(obj);
+    /// ```
+    pub async fn upload(
+        &self,
+        source: web_sys::ReadableStream,
+        object: PinnedObject,
+        options: Option<UploadOptions>,
+    ) -> Result<PinnedObject, JsError> {
+        let sdk = self.inner.clone();
+        let opts = options.map(|o| o.into()).unwrap_or_default();
+        let obj = object.0;
+        let reader = wasm_streams::ReadableStream::from_raw(source)
+            .into_async_read()
+            .compat();
+        let result = run_local(async move { sdk.upload(obj, reader, opts).await })
+            .await
+            .map_err(to_js_err)?;
+        Ok(PinnedObject(result))
     }
 
     /// Starts a packed upload for efficiently uploading multiple small objects.
@@ -270,8 +220,8 @@ impl Sdk {
     /// `finalize()` to get the resulting `PinnedObject` handles.
     #[wasm_bindgen(js_name = "uploadPacked")]
     pub fn upload_packed(&self, options: Option<UploadOptions>) -> PackedUpload {
-        let opts = options.map(|o| o.to_inner()).unwrap_or_default();
-        PackedUpload::new(self.0.upload_packed(opts))
+        let opts = options.map(|o| o.into()).unwrap_or_default();
+        PackedUpload::new(self.inner.upload_packed(opts))
     }
 
     /// Generates a signed share URL for an object. Anyone with the URL can
@@ -282,13 +232,13 @@ impl Sdk {
         &self,
         object: &PinnedObject,
         valid_until_ms: f64,
-    ) -> Result<String, JsValue> {
+    ) -> Result<String, JsError> {
         let secs = (valid_until_ms / 1000.0) as i64;
         let nanos = ((valid_until_ms % 1000.0) * 1_000_000.0) as u32;
         let valid_until = chrono::DateTime::from_timestamp(secs, nanos)
-            .ok_or_else(|| JsValue::from_str("invalid timestamp"))?;
+            .ok_or_else(|| JsError::new("invalid timestamp"))?;
         let url = self
-            .0
+            .inner
             .share_object(&object.0, valid_until)
             .map_err(to_js_err)?;
         Ok(url.to_string())
@@ -298,17 +248,21 @@ impl Sdk {
     /// The encryption key is extracted from the URL fragment (never sent
     /// to the indexer).
     #[wasm_bindgen(js_name = "sharedObject")]
-    pub async fn shared_object(&self, share_url: &str) -> Result<PinnedObject, JsValue> {
-        let sdk = self.0.clone();
+    pub async fn shared_object(&self, share_url: &str) -> Result<PinnedObject, JsError> {
+        let sdk = self.inner.clone();
         let url = share_url.to_string();
-        let obj = sdk.shared_object(url).await.map_err(to_js_err)?;
+        let obj = run_local(async move { sdk.shared_object(url).await })
+            .await
+            .map_err(to_js_err)?;
         Ok(PinnedObject(obj))
     }
 
     /// Prunes unused slabs from the indexer.
     #[wasm_bindgen(js_name = "pruneSlabs")]
-    pub async fn prune_slabs(&self) -> Result<(), JsValue> {
-        let sdk = self.0.clone();
-        sdk.prune_slabs().await.map_err(to_js_err)
+    pub async fn prune_slabs(&self) -> Result<(), JsError> {
+        let sdk = self.inner.clone();
+        run_local(async move { sdk.prune_slabs().await })
+            .await
+            .map_err(to_js_err)
     }
 }

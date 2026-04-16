@@ -431,7 +431,7 @@ impl SDK {
     /// # Returns
     /// The object containing the metadata needed to download. The caller must
     /// pin the object to the indexer after uploading.
-    pub async fn upload<R: AsyncRead + Unpin + Send + 'static>(
+    pub async fn upload<R: AsyncRead + Unpin + 'static>(
         &self,
         object: Object,
         reader: R,

@@ -1,0 +1,30 @@
+<!--
+  Build and run:
+    cd sia_storage_wasm
+    RUSTFLAGS="--cfg=web_sys_unstable_apis" wasm-pack build --target web --release --out-dir examples/pkg
+    python3 -m http.server 8080 --directory examples
+    open http://localhost:8080
+-->
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>sia-storage wasm example</title>
+  <style>
+    body { font-family: monospace; margin: 2em; }
+    #input-area { margin-bottom: 1em; }
+    #input-area input { width: 400px; font-family: monospace; }
+    #input-area button { font-family: monospace; }
+    pre { background: #f4f4f4; padding: 1em; overflow: auto; max-height: 80vh; }
+  </style>
+</head>
+<body>
+  <div id="input-area" style="display: none;">
+    <label id="input-label"></label><br>
+    <input id="input-field" type="text" />
+    <button id="input-submit">Submit</button>
+  </div>
+  <pre id="log"></pre>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

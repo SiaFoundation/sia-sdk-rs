@@ -16,9 +16,9 @@ pub struct AppKey(pub(crate) sia_storage::AppKey);
 impl AppKey {
     /// Imports an AppKey from a 32-byte seed (Uint8Array).
     #[wasm_bindgen(constructor)]
-    pub fn new(seed: &[u8]) -> Result<AppKey, JsValue> {
+    pub fn new(seed: &[u8]) -> Result<AppKey, JsError> {
         if seed.len() != 32 {
-            return Err(JsValue::from_str("app key seed must be 32 bytes"));
+            return Err(JsError::new("app key seed must be 32 bytes"));
         }
         let mut buf = [0u8; 32];
         buf.copy_from_slice(seed);
@@ -33,7 +33,7 @@ impl AppKey {
     /// Imports an AppKey from a hex-encoded string (64 hex chars = 32-byte seed,
     /// or 128 hex chars = 64-byte ed25519 keypair).
     #[wasm_bindgen(js_name = "fromHex")]
-    pub fn from_hex(hex_str: &str) -> Result<AppKey, JsValue> {
+    pub fn from_hex(hex_str: &str) -> Result<AppKey, JsError> {
         let bytes = hex::decode(hex_str).map_err(to_js_err)?;
         match bytes.len() {
             32 => {
@@ -47,7 +47,7 @@ impl AppKey {
                 buf.copy_from_slice(&bytes[..32]);
                 Ok(AppKey(sia_storage::AppKey::import(buf)))
             }
-            _ => Err(JsValue::from_str(
+            _ => Err(JsError::new(
                 "hex string must be 64 chars (32-byte seed) or 128 chars (64-byte keypair)",
             )),
         }
@@ -73,9 +73,9 @@ impl AppKey {
     /// Verifies a signature for a given message.
     /// Returns true if the signature is valid.
     #[wasm_bindgen(js_name = "verifySignature")]
-    pub fn verify_signature(&self, message: &[u8], signature: &[u8]) -> Result<bool, JsValue> {
+    pub fn verify_signature(&self, message: &[u8], signature: &[u8]) -> Result<bool, JsError> {
         if signature.len() != 64 {
-            return Err(JsValue::from_str("signature must be 64 bytes"));
+            return Err(JsError::new("signature must be 64 bytes"));
         }
         let mut sig_bytes = [0u8; 64];
         sig_bytes.copy_from_slice(signature);

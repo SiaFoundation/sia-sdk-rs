@@ -82,14 +82,32 @@ impl UploadOptions {
     }
 }
 
-impl UploadOptions {
-    pub(crate) fn to_inner(&self) -> sia_storage::UploadOptions {
-        let defaults = sia_storage::UploadOptions::default();
-        sia_storage::UploadOptions {
-            data_shards: self.data_shards,
-            parity_shards: self.parity_shards,
-            max_inflight: self.max_inflight,
-            ..defaults
+impl From<UploadOptions> for sia_storage::UploadOptions {
+    fn from(mut opts: UploadOptions) -> Self {
+        let shard_uploaded = opts.on_progress.take().map(|cb| {
+            let total_shards = opts.data_shards as u64 + opts.parity_shards as u64;
+            let slab_size = total_shards * sia_core::rhp4::SECTOR_SIZE as u64;
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::task::spawn_local(async move {
+                let mut sectors: u64 = 0;
+                while rx.recv().await.is_some() {
+                    sectors += 1;
+                    let uploaded = sectors * sia_core::rhp4::SECTOR_SIZE as u64;
+                    let encoded = sectors.div_ceil(total_shards) * slab_size;
+                    let _ = cb.call2(
+                        &wasm_bindgen::JsValue::NULL,
+                        &wasm_bindgen::JsValue::from(uploaded as f64),
+                        &wasm_bindgen::JsValue::from(encoded as f64),
+                    );
+                }
+            });
+            tx
+        });
+        Self {
+            data_shards: opts.data_shards,
+            parity_shards: opts.parity_shards,
+            max_inflight: opts.max_inflight,
+            shard_uploaded,
         }
     }
 }
@@ -111,16 +129,16 @@ impl DownloadOptions {
         max_inflight: Option<u32>,
         offset: Option<f64>,
         length: Option<f64>,
-    ) -> Result<DownloadOptions, JsValue> {
+    ) -> Result<DownloadOptions, JsError> {
         if let Some(o) = offset
             && o < 0.0
         {
-            return Err(JsValue::from_str("offset must be non-negative"));
+            return Err(JsError::new("offset must be non-negative"));
         }
         if let Some(l) = length
             && l < 0.0
         {
-            return Err(JsValue::from_str("length must be non-negative"));
+            return Err(JsError::new("length must be non-negative"));
         }
         Ok(Self {
             max_inflight: max_inflight.unwrap_or(16) as usize,
@@ -130,12 +148,12 @@ impl DownloadOptions {
     }
 }
 
-impl DownloadOptions {
-    pub(crate) fn to_inner(&self) -> sia_storage::DownloadOptions {
-        sia_storage::DownloadOptions {
-            max_inflight: self.max_inflight,
-            offset: self.offset,
-            length: self.length,
+impl From<DownloadOptions> for sia_storage::DownloadOptions {
+    fn from(opts: DownloadOptions) -> Self {
+        Self {
+            max_inflight: opts.max_inflight,
+            offset: opts.offset,
+            length: opts.length,
         }
     }
 }
@@ -162,13 +180,13 @@ impl HostQuery {
     }
 }
 
-impl HostQuery {
-    pub(crate) fn to_inner(&self) -> sia_storage::HostQuery {
-        sia_storage::HostQuery {
+impl From<HostQuery> for sia_storage::HostQuery {
+    fn from(q: HostQuery) -> Self {
+        Self {
             protocol: Some(Protocol::QUIC),
-            country: self.country.clone(),
-            limit: self.limit,
-            offset: self.offset,
+            country: q.country,
+            limit: q.limit,
+            offset: q.offset,
             ..Default::default()
         }
     }
@@ -224,10 +242,10 @@ impl EncryptionKey {
 
     /// Parses an encryption key from a hex string (64 chars).
     #[wasm_bindgen(js_name = "fromHex")]
-    pub fn from_hex(hex_str: &str) -> Result<EncryptionKey, JsValue> {
+    pub fn from_hex(hex_str: &str) -> Result<EncryptionKey, JsError> {
         let bytes = hex::decode(hex_str).map_err(to_js_err)?;
         if bytes.len() != 32 {
-            return Err(JsValue::from_str("encryption key must be 32 bytes of hex"));
+            return Err(JsError::new("encryption key must be 32 bytes of hex"));
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);

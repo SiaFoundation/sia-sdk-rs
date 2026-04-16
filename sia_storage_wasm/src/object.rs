@@ -10,10 +10,17 @@ use crate::types::Slab;
 /// metadata updates. The internal state (encryption keys, slab data) cannot
 /// be serialized to JS.
 #[wasm_bindgen]
+#[derive(Default)]
 pub struct PinnedObject(pub(crate) sia_storage::Object);
 
 #[wasm_bindgen]
 impl PinnedObject {
+    /// Creates a new empty object.
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Returns the object's ID as a hex string.
     pub fn id(&self) -> String {
         self.0.id().to_string()
@@ -71,7 +78,7 @@ impl PinnedObject {
     }
 
     /// Opens a previously sealed object.
-    pub fn open(app_key: &AppKey, sealed: &SealedObject) -> Result<PinnedObject, JsValue> {
+    pub fn open(app_key: &AppKey, sealed: &SealedObject) -> Result<PinnedObject, JsError> {
         let obj = sealed.inner.clone().open(&app_key.0).map_err(to_js_err)?;
         Ok(PinnedObject(obj))
     }

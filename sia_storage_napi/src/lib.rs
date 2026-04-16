@@ -906,8 +906,5 @@ impl Sdk {
 #[napi]
 pub fn encoded_size(size: BigInt, data_shards: u8, parity_shards: u8) -> BigInt {
     let (_, size, _) = size.get_u64();
-    let total_shards = data_shards as u64 + parity_shards as u64;
-    let slab_size = total_shards * SECTOR_SIZE as u64;
-    let slabs = size.div_ceil(data_shards as u64 * SECTOR_SIZE as u64);
-    BigInt::from(slabs * slab_size)
+    sia_storage::encoded_size(size, data_shards, parity_shards).into()
 }

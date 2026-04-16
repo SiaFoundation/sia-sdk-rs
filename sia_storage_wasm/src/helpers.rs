@@ -2,8 +2,8 @@ use sia_core::types::Hash256;
 use sia_storage::AppMetadata;
 use wasm_bindgen::prelude::*;
 
-pub(crate) fn to_js_err(e: impl std::fmt::Display) -> JsValue {
-    JsValue::from_str(&e.to_string())
+pub(crate) fn to_js_err(e: impl std::fmt::Display) -> JsError {
+    JsError::new(&e.to_string())
 }
 
 /// Cached leaked strings for app metadata. Set once on first call;
@@ -40,10 +40,10 @@ pub(crate) fn make_app_metadata(
     service_url: &str,
     logo_url: Option<String>,
     callback_url: Option<String>,
-) -> Result<AppMetadata, JsValue> {
+) -> Result<AppMetadata, JsError> {
     let id_bytes = hex::decode(id_hex).map_err(to_js_err)?;
     if id_bytes.len() != 32 {
-        return Err(JsValue::from_str("app ID must be 32 bytes (64 hex chars)"));
+        return Err(JsError::new("app ID must be 32 bytes (64 hex chars)"));
     }
     let app_id =
         Hash256::from(<[u8; 32]>::try_from(id_bytes).expect("length validated as 32 above"));
