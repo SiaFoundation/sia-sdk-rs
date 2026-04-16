@@ -33,7 +33,8 @@
 //! sdk.pin_object(&object).await?;
 //!
 //! // Download
-//! sdk.download(&mut writer, &object, DownloadOptions::default()).await?;
+//! let mut reader = sdk.download(&object, DownloadOptions::default())?;
+//! tokio::io::copy(&mut reader, &mut writer).await?;
 //! ```
 //!
 //! # Key management
@@ -67,10 +68,9 @@ use std::sync::Arc;
 use log::{debug, warn};
 use serde::Serialize;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::AsyncRead;
 
 use crate::app_client::SlabPinParams;
-use crate::download::download_object;
 pub use crate::hosts::Host;
 use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
@@ -90,7 +90,7 @@ pub use app_client::Error as AppApiError;
 pub use builder::{
     ApprovedState, Builder, BuilderError, DisconnectedState, RequestingApprovalState,
 };
-pub use download::{DownloadError, DownloadOptions};
+pub use download::{Download, DownloadError, DownloadOptions};
 pub use encryption::EncryptionKey;
 pub use hosts::{QueueError, RPCError};
 pub use slabs::{Object, ObjectEvent, PinnedSlab, SealedObject, SealedObjectError, Sector, Slab};
@@ -452,14 +452,16 @@ impl SDK {
         self.uploader.upload_packed(options)
     }
 
-    /// Downloads an object using the provided writer and options.
-    pub async fn download<W: AsyncWrite + Unpin>(
+    /// Returns a [Download] handle that streams the object's data. The handle
+    /// implements [tokio::io::AsyncRead] — pipe it into any writer with
+    /// [tokio::io::copy] or read chunks directly. In-flight chunk recovery is
+    /// cancelled when the handle is dropped.
+    pub fn download(
         &self,
-        w: &mut W,
         object: &Object,
         options: DownloadOptions,
-    ) -> Result<(), DownloadError> {
-        download_object(self.hosts.clone(), self.app_key.clone(), w, object, options).await
+    ) -> Result<Download, DownloadError> {
+        Download::new(object, self.hosts.clone(), self.app_key.clone(), options)
     }
 
     /// Retrieves a list of hosts from the indexer matching the provided query
@@ -644,14 +646,15 @@ pub fn validate_recovery_phrase(phrase: &str) -> Result<(), SeedError> {
 #[cfg(test)]
 mod test {
     use crate::compat::run_local;
+    use crate::download::Download;
     use crate::hosts::QueueError;
     use bytes::{Bytes, BytesMut};
     use sia_core::rhp4::SECTOR_SIZE;
     use sia_core::signing::PrivateKey;
     use sia_core::types::v2::NetAddress;
     use std::io::Cursor;
+    use tokio::io::copy;
 
-    use crate::mock::MockRHP4Transport;
     use crate::time::Duration;
 
     use super::*;
@@ -677,7 +680,7 @@ mod test {
     cross_target_tests! {
         async fn test_upload_download_packed() { run_local(async {
             let app_key = Arc::new(AppKey::import(random_seed()));
-            let hosts = Hosts::new(MockRHP4Transport::new());
+            let hosts = Hosts::new(Client::new());
             hosts.update(
                 (0..60)
                     .map(|_| Host {
@@ -734,26 +737,28 @@ mod test {
             assert_eq!(objects[1].size(), 13);
 
             let mut output = BytesMut::zeroed(13);
-            download_object(
+            let mut download = Download::new(
+                &objects[0],
                 hosts.clone(),
                 app_key.clone(),
-                &mut Cursor::new(&mut output[..]),
-                    &objects[0],
-                    DownloadOptions::default(),
-                )
+                DownloadOptions::default(),
+            )
+            .unwrap();
+            copy(&mut download, &mut Cursor::new(&mut output[..]))
                 .await
                 .expect("download to complete");
 
             assert_eq!(output.freeze(), input.clone());
 
             let mut output = BytesMut::zeroed(13);
-            download_object(
+            let mut download = Download::new(
+                &objects[1],
                 hosts.clone(),
                 app_key.clone(),
-                &mut Cursor::new(&mut output[..]),
-                    &objects[1],
-                    DownloadOptions::default(),
-                )
+                DownloadOptions::default(),
+            )
+            .unwrap();
+            copy(&mut download, &mut Cursor::new(&mut output[..]))
                 .await
                 .expect("download to complete");
 
@@ -762,7 +767,7 @@ mod test {
 
         async fn test_upload_download_packed_spanning() { run_local(async {
             let app_key = Arc::new(AppKey::import(random_seed()));
-            let hosts = Hosts::new(MockRHP4Transport::new());
+            let hosts = Hosts::new(Client::new());
             hosts.update(
                 (0..60)
                     .map(|_| Host {
@@ -820,26 +825,28 @@ mod test {
             assert_eq!(objects[1].slabs()[1].length, 18 + 13);
 
             let mut output = BytesMut::zeroed(objects[0].size() as usize);
-            download_object(
+            let mut download = Download::new(
+                &objects[0],
                 hosts.clone(),
                 app_key.clone(),
-                &mut Cursor::new(&mut output[..]),
-                    &objects[0],
-                    DownloadOptions::default(),
-                )
+                DownloadOptions::default(),
+            )
+            .unwrap();
+            copy(&mut download, &mut Cursor::new(&mut output[..]))
                 .await
                 .expect("download to complete");
 
             assert_eq!(output.freeze(), small_input);
 
             let mut output = BytesMut::zeroed(objects[1].size() as usize);
-            download_object(
+            let mut download = Download::new(
+                &objects[1],
                 hosts.clone(),
                 app_key.clone(),
-                &mut Cursor::new(&mut output[..]),
-                    &objects[1],
-                    DownloadOptions::default(),
-                )
+                DownloadOptions::default(),
+            )
+            .unwrap();
+            copy(&mut download, &mut Cursor::new(&mut output[..]))
                 .await
                 .expect("download to complete");
 
@@ -848,7 +855,7 @@ mod test {
 
     async fn test_upload_download_packed_exact() { run_local(async {
             let app_key = Arc::new(AppKey::import(random_seed()));
-            let hosts = Hosts::new(MockRHP4Transport::new());
+            let hosts = Hosts::new(Client::new());
             hosts.update(
                 (0..60)
                     .map(|_| Host {
@@ -890,13 +897,14 @@ mod test {
             assert_eq!(objects[0].slabs()[0].length, SLAB_SIZE as u32);
 
             let mut output = BytesMut::zeroed(objects[0].size() as usize);
-            download_object(
+            let mut download = Download::new(
+                &objects[0],
                 hosts.clone(),
                 app_key.clone(),
-                &mut Cursor::new(&mut output[..]),
-                    &objects[0],
-                    DownloadOptions::default(),
-                )
+                DownloadOptions::default(),
+            )
+            .unwrap();
+            copy(&mut download, &mut Cursor::new(&mut output[..]))
                 .await
                 .expect("download to complete");
 
@@ -904,73 +912,62 @@ mod test {
         }).await }
 
     async fn test_upload_download() { run_local(async {
-            let app_key = Arc::new(AppKey::import(random_seed()));
-            let hosts = Hosts::new(MockRHP4Transport::new());
-            hosts.update(
-                (0..60)
-                    .map(|_| Host {
-                        public_key: PrivateKey::from_seed(&random_seed()).public_key(),
-                        addresses: vec![NetAddress {
-                            protocol: sia_core::types::v2::Protocol::QUIC,
-                            address: "localhost:1234".to_string(),
-                        }],
-                        country_code: "US".to_string(),
-                        latitude: 0.0,
-                        longitude: 0.0,
-                        good_for_upload: true,
-                    })
-                    .collect(),
-                true,
-            );
+        let app_key = Arc::new(AppKey::import(random_seed()));
+        let hosts = Hosts::new(Client::new());
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: sia_core::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                })
+                .collect(),
+            true,
+        );
 
-            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+        let uploader = Uploader::new(hosts.clone(), app_key.clone());
+        let input: Bytes = Bytes::from("Hello, world!");
 
+        let object = uploader
+            .upload(Object::default(), Cursor::new(input.clone()), UploadOptions::default())
+            .await
+            .expect("upload to complete");
 
-            let input: Bytes = Bytes::from("Hello, world!");
+        assert_eq!(object.slabs().len(), 1);
+        assert_eq!(object.size(), 13);
 
-            let object = uploader
-                .upload(Object::default(), Cursor::new(input.clone()), UploadOptions::default())
-                .await
-                .expect("upload to complete");
+        let mut output = BytesMut::zeroed(object.size() as usize);
+        let mut download = Download::new(&object, hosts.clone(), app_key.clone(), DownloadOptions::default()).unwrap();
 
-            assert_eq!(object.slabs().len(), 1);
-            assert_eq!(object.size(), 13);
+        copy(&mut download, &mut Cursor::new(&mut output[..]))
+            .await
+            .expect("download to complete");
 
-            let mut output = BytesMut::zeroed(object.size() as usize);
-            download_object(
-                hosts.clone(),
-                app_key.clone(),
-                &mut Cursor::new(&mut output[..]),
-                    &object,
-                    DownloadOptions::default(),
-                )
-                .await
-                .expect("download to complete");
+        assert_eq!(output.freeze(), input.clone());
 
-            assert_eq!(output.freeze(), input.clone());
+        let range = 7..13;
+        let mut output = BytesMut::zeroed(range.end - range.start);
+        let mut download = Download::new(&object, hosts.clone(), app_key.clone(), DownloadOptions {
+            offset: range.start as u64,
+            length: Some((range.end - range.start) as u64),
+            ..Default::default()
+        }).unwrap();
+        copy(&mut download, &mut Cursor::new(&mut output[..]))
+            .await
+            .expect("download to complete");
 
-            let range = 7..13;
-            let mut output = BytesMut::zeroed(range.end - range.start);
-            download_object(
-                hosts.clone(),
-                app_key.clone(),
-                &mut Cursor::new(&mut output[..]),
-                    &object,
-                    DownloadOptions {
-                        offset: range.start as u64,
-                        length: Some((range.end - range.start) as u64),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .expect("download to complete");
-
-            assert_eq!(output.freeze(), input.slice(range));
-        }).await }
+        assert_eq!(output.freeze(), input.slice(range));
+    }).await }
 
         async fn test_upload_append() { run_local(async {
             let app_key = Arc::new(AppKey::import(random_seed()));
-            let hosts = Hosts::new(MockRHP4Transport::new());
+            let hosts = Hosts::new(Client::new());
             hosts.update(
                 (0..60)
                     .map(|_| Host {
@@ -1010,15 +1007,16 @@ mod test {
 
             // download the full object and verify concatenation
             let mut output = BytesMut::zeroed(expected.len());
-            download_object(
+            let mut download = Download::new(
+                &object,
                 hosts.clone(),
                 app_key.clone(),
-                &mut Cursor::new(&mut output[..]),
-                &object,
                 DownloadOptions::default(),
             )
-            .await
-            .expect("download to complete");
+            .unwrap();
+            copy(&mut download, &mut Cursor::new(&mut output[..]))
+                .await
+                .expect("download to complete");
 
             assert_eq!(output.freeze(), expected);
         }).await }
@@ -1029,7 +1027,7 @@ mod test {
             const SEGMENT_SIZE: u64 = 64; // leaf size
 
             let app_key = Arc::new(AppKey::import(random_seed()));
-            let hosts = Hosts::new(MockRHP4Transport::new());
+            let hosts = Hosts::new(Client::new());
             hosts.update(
                 (0..60)
                     .map(|_| Host {
@@ -1089,19 +1087,18 @@ mod test {
 
             for (offset, length) in cases {
                 let mut output = Vec::with_capacity(length as usize);
-                download_object(
+                let mut download = Download::new(
+                    &object,
                     hosts.clone(),
                     app_key.clone(),
-                    &mut output,
-                    &object,
                     DownloadOptions {
                         offset,
                         length: Some(length),
                         ..Default::default()
                     },
                 )
-                .await
                 .unwrap();
+                copy(&mut download, &mut output).await.unwrap();
 
                 let clamped_length = if offset >= data_size {
                     0
@@ -1121,7 +1118,7 @@ mod test {
 
     async fn test_download_slow_hosts() { run_local(async {
             let app_key = Arc::new(AppKey::import(random_seed()));
-            let mock_transport = MockRHP4Transport::new();
+            let mock_transport = Client::new();
             let hosts = Hosts::new(mock_transport.clone());
 
             // Create 30 hosts and track their public keys
@@ -1164,13 +1161,14 @@ mod test {
             );
 
             let mut output = BytesMut::zeroed(object.size() as usize);
-            download_object(
+            let mut download = Download::new(
+                &object,
                 hosts.clone(),
                 app_key.clone(),
-                &mut Cursor::new(&mut output[..]),
-                    &object,
-                    DownloadOptions::default(),
-                )
+                DownloadOptions::default(),
+            )
+            .unwrap();
+            copy(&mut download, &mut Cursor::new(&mut output[..]))
                 .await
                 .expect("download to complete");
 
@@ -1179,7 +1177,7 @@ mod test {
 
     async fn test_upload_no_hosts() { run_local(async {
             let app_key = Arc::new(AppKey::import(random_seed()));
-            let hosts = Hosts::new(MockRHP4Transport::new());
+            let hosts = Hosts::new(Client::new());
             let uploader = Uploader::new(hosts.clone(), app_key.clone());
 
             let input: Bytes = Bytes::from("Hello, world!");
@@ -1200,7 +1198,7 @@ mod test {
         /// This mirrors Go's TestUpload "slow" subtest.
     async fn test_upload_slow_host() { run_local(async {
             let app_key = Arc::new(AppKey::import(random_seed()));
-            let mock_transport = MockRHP4Transport::new();
+            let mock_transport = Client::new();
             let hosts = Hosts::new(mock_transport.clone());
 
             // Create 30 hosts and track their public keys
@@ -1247,7 +1245,7 @@ mod test {
         // Upload should succeed even if all initial hosts are slow
     async fn test_upload_all_hosts_slow() { run_local(async {
             let app_key = Arc::new(AppKey::import(random_seed()));
-            let mock_transport = MockRHP4Transport::new();
+            let mock_transport = Client::new();
             let hosts = Hosts::new(mock_transport.clone());
 
             // Create 30 hosts and track their public keys
@@ -1288,7 +1286,7 @@ mod test {
 
     async fn test_upload_not_enough_hosts_good_for_upload() { run_local(async {
             let app_key = Arc::new(AppKey::import(random_seed()));
-            let hosts = Hosts::new(MockRHP4Transport::new());
+            let hosts = Hosts::new(Client::new());
             // Create 30 hosts: 10 good for upload, 20 not good for upload
             let host_keys: Vec<_> = (0..30)
                 .map(|_| PrivateKey::from_seed(&random_seed()).public_key())

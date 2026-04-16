@@ -7,7 +7,7 @@ use clap::Parser;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use sia_storage::{AppMetadata, Builder, DownloadOptions, Object, UploadOptions};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, copy};
 
 #[derive(Parser)]
 struct Args {
@@ -223,9 +223,12 @@ async fn main() {
     println!("Downloading object...");
     let start = Instant::now();
     let mut verifier = SeededVerifier::new(seed, args.size);
-    sdk.download(&mut verifier, &obj, DownloadOptions::default())
+    let mut reader = sdk
+        .download(&obj, DownloadOptions::default())
+        .expect("failed to start download");
+    copy(&mut reader, &mut verifier)
         .await
-        .expect("failed to download object");
+        .expect("failed to copy data");
     let download_duration = start.elapsed();
     println!(
         "Object uploaded ID: {}\tSize: {}\tEncoded: {}\tElapsed: {:?}\tThroughput: {}\tEncoded Throughput: {}",

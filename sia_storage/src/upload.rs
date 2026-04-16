@@ -567,7 +567,7 @@ impl<T: Transport> Uploader<T> {
         let new_slabs =
             Self::upload_slabs(self.hosts.clone(), self.app_key.clone(), r, options).await?;
         let slabs = object.slabs_mut();
-        slabs.extend(new_slabs.into_iter());
+        slabs.extend(new_slabs);
         Ok(object)
     }
 

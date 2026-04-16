@@ -57,7 +57,8 @@ let object = sdk.upload(Object::default(), reader, UploadOptions::default()).awa
 sdk.pin_object(&object).await?;
 
 // Download
-sdk.download(&mut writer, &object, DownloadOptions::default()).await?;
+let mut reader = sdk.download(&object, DownloadOptions::default())?;
+tokio::io::copy(&mut reader, &mut writer).await?;
 ```
 
 ## Key management

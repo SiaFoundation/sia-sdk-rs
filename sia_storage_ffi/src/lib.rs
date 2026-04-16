@@ -1,7 +1,6 @@
 uniffi::setup_scaffolding!();
 
 use base64::prelude::*;
-use log::debug;
 use sia_core::encoding;
 use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::{PublicKey, Signature};
@@ -12,7 +11,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 use thiserror::Error;
-use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::runtime::{self, Runtime};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::AbortOnDropHandle;
@@ -105,6 +103,9 @@ pub enum DownloadError {
 
     #[error("task error: {0}")]
     JoinError(#[from] tokio::task::JoinError),
+
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// Metadata about an application connecting to the indexer.
@@ -704,6 +705,52 @@ impl PackedUpload {
     }
 }
 
+/// A download handle. Call [Download::read] repeatedly to receive chunks of
+/// decoded data. An empty Vec signals end of stream. All in-flight work is
+/// cancelled when the handle is dropped or [Download::close] is called.
+#[derive(uniffi::Object)]
+pub struct Download {
+    inner: Arc<tokio::sync::Mutex<Option<sia_storage::Download>>>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+#[uniffi::export]
+impl Download {
+    /// Reads the next chunk of decoded data.
+    ///
+    /// # Returns
+    /// An empty Vec on EOF or [DownloadError::Cancelled] if the download has been cancelled. Otherwise, returns a chunk of decoded data.
+    pub async fn read(&self) -> Result<Vec<u8>, DownloadError> {
+        let inner = self.inner.clone();
+        let cancel = self.cancel.clone();
+        spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+                result = async {
+                    let mut guard = inner.lock().await;
+                    let Some(reader) = guard.as_mut() else {
+                        return Ok(Vec::new());
+                    };
+                    Ok::<_, DownloadError>(reader.read_chunk().await?)
+                } => result,
+            }
+        })
+        .await?
+    }
+
+    /// Cancels the download and aborts any in-flight chunk recovery tasks.
+    /// Interrupts an in-flight [Download::read] immediately. Subsequent reads
+    /// return [DownloadError::Cancelled].
+    pub async fn close(&self) {
+        self.cancel.cancel();
+        let inner = self.inner.clone();
+        let _ = spawn(async move {
+            inner.lock().await.take();
+        })
+        .await;
+    }
+}
+
 /// Provides options for an upload operation.
 #[derive(uniffi::Record)]
 pub struct UploadOptions {
@@ -881,34 +928,27 @@ impl SDK {
     }
 
     /// Initiates a download of the data referenced by the object, starting at `offset` and reading `length` bytes.
-    pub async fn download(
+    /// Returns a [Download] handle that yields chunks via [Download::read].
+    pub fn download(
         &self,
-        w: Arc<dyn Writer>,
         object: Arc<PinnedObject>,
         options: DownloadOptions,
-    ) -> Result<(), DownloadError> {
-        const CHUNK_SIZE: usize = 1 << 19; // 512KiB
-        let object = object.object();
-        let sdk = self.inner.clone();
-        let w = FFIWriter::new(w);
-        let mut w = BufWriter::with_capacity(CHUNK_SIZE, w);
-        spawn(async move {
-            sdk.download(
-                &mut w,
-                &object,
-                sia_storage::DownloadOptions {
-                    offset: options.offset,
-                    length: options.length,
-                    max_inflight: options.max_inflight as usize,
-                },
-            )
-            .await?;
-            if let Err(e) = w.shutdown().await {
-                debug!("error shutting down writer: {}", e);
-            }
-            Ok(())
+    ) -> Result<Download, DownloadError> {
+        // Enter the runtime so Download::new's spawned recovery tasks have a
+        // reactor in scope.
+        let _guard = RUNTIME.handle().enter();
+        let reader = self.inner.download(
+            &object.object(),
+            sia_storage::DownloadOptions {
+                offset: options.offset,
+                length: options.length,
+                max_inflight: options.max_inflight as usize,
+            },
+        )?;
+        Ok(Download {
+            inner: Arc::new(tokio::sync::Mutex::new(Some(reader))),
+            cancel: tokio_util::sync::CancellationToken::new(),
         })
-        .await?
     }
 
     /// Returns a list of all usable hosts.
