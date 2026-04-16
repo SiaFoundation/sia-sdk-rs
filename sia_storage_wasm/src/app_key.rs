@@ -1,8 +1,6 @@
 use sia_core::signing::Signature;
 use wasm_bindgen::prelude::*;
 
-use crate::helpers::to_js_err;
-
 /// An application key used for authentication with the indexer.
 ///
 /// AppKeys are derived from a BIP-39 recovery phrase during registration.
@@ -28,35 +26,6 @@ impl AppKey {
     /// Exports the AppKey as a 32-byte seed (Uint8Array).
     pub fn export(&self) -> Vec<u8> {
         self.0.export().to_vec()
-    }
-
-    /// Imports an AppKey from a hex-encoded string (64 hex chars = 32-byte seed,
-    /// or 128 hex chars = 64-byte ed25519 keypair).
-    #[wasm_bindgen(js_name = "fromHex")]
-    pub fn from_hex(hex_str: &str) -> Result<AppKey, JsError> {
-        let bytes = hex::decode(hex_str).map_err(to_js_err)?;
-        match bytes.len() {
-            32 => {
-                let mut buf = [0u8; 32];
-                buf.copy_from_slice(&bytes);
-                Ok(AppKey(sia_storage::AppKey::import(buf)))
-            }
-            64 => {
-                // 64-byte ed25519 keypair — seed is first 32 bytes
-                let mut buf = [0u8; 32];
-                buf.copy_from_slice(&bytes[..32]);
-                Ok(AppKey(sia_storage::AppKey::import(buf)))
-            }
-            _ => Err(JsError::new(
-                "hex string must be 64 chars (32-byte seed) or 128 chars (64-byte keypair)",
-            )),
-        }
-    }
-
-    /// Exports the AppKey as a hex-encoded string (64 hex chars / 32-byte seed).
-    #[wasm_bindgen(js_name = "toHex")]
-    pub fn to_hex(&self) -> String {
-        hex::encode(self.0.export())
     }
 
     /// Returns the ed25519 public key as a string (e.g. "ed25519:abc123...").

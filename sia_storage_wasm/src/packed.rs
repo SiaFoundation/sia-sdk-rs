@@ -57,6 +57,16 @@ impl PackedUpload {
         self.length.get()
     }
 
+    /// Number of slabs in the upload.
+    pub fn slabs(&self) -> f64 {
+        let length = self.length.get();
+        if length == 0.0 {
+            0.0
+        } else {
+            (length / self.slab_size).ceil()
+        }
+    }
+
     /// Optimal size of each slab in bytes.
     #[wasm_bindgen(js_name = "slabSize")]
     pub fn slab_size(&self) -> f64 {

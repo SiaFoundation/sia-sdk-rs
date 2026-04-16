@@ -3,7 +3,7 @@ use wasm_bindgen::prelude::*;
 use crate::app_key::AppKey;
 use crate::helpers::to_js_err;
 use crate::sealed::SealedObject;
-use crate::types::Slab;
+use crate::types;
 
 /// An object stored on the Sia network. JS holds this as an opaque handle
 /// and passes it back to Rust for operations like pin, download, share, and
@@ -48,38 +48,32 @@ impl PinnedObject {
         self.0.metadata = metadata;
     }
 
-    /// Returns the creation time as a unix timestamp (seconds).
+    /// Returns the creation time.
     #[wasm_bindgen(js_name = "createdAt")]
-    pub fn created_at(&self) -> f64 {
-        self.0.created_at().timestamp() as f64
+    pub fn created_at(&self) -> js_sys::Date {
+        js_sys::Date::new(&JsValue::from(self.0.created_at().timestamp_millis() as f64))
     }
 
-    /// Returns the last updated time as a unix timestamp (seconds).
+    /// Returns the last updated time.
     #[wasm_bindgen(js_name = "updatedAt")]
-    pub fn updated_at(&self) -> f64 {
-        self.0.updated_at().timestamp() as f64
-    }
-
-    /// Returns the number of slabs in the object.
-    #[wasm_bindgen(js_name = "slabCount")]
-    pub fn slab_count(&self) -> u32 {
-        self.0.slabs().len() as u32
+    pub fn updated_at(&self) -> js_sys::Date {
+        js_sys::Date::new(&JsValue::from(self.0.updated_at().timestamp_millis() as f64))
     }
 
     /// Returns the slabs that make up the object.
-    pub fn slabs(&self) -> Vec<Slab> {
-        self.0.slabs().iter().map(Slab::from).collect()
+    #[wasm_bindgen(unchecked_return_type = "Slab[]")]
+    pub fn slabs(&self) -> Result<JsValue, JsError> {
+        types::to_js(self.0.slabs())
     }
 
-    /// Seals the object for offline storage or migration.
+    /// Seals the object for offline storage.
     pub fn seal(&self, app_key: &AppKey) -> SealedObject {
-        let inner = self.0.seal(&app_key.0);
-        SealedObject { inner }
+        SealedObject(self.0.seal(&app_key.0))
     }
 
     /// Opens a previously sealed object.
-    pub fn open(app_key: &AppKey, sealed: &SealedObject) -> Result<PinnedObject, JsError> {
-        let obj = sealed.inner.clone().open(&app_key.0).map_err(to_js_err)?;
+    pub fn open(app_key: &AppKey, sealed_obj: SealedObject) -> Result<PinnedObject, JsError> {
+        let obj = sealed_obj.0.open(&app_key.0).map_err(to_js_err)?;
         Ok(PinnedObject(obj))
     }
 }

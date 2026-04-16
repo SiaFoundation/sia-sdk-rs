@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
-use sia_storage::{self, HostQuery as StorageHostQuery, ObjectsCursor, SDK as StorageSdk};
+use sia_storage::{self, HostQuery as StorageHostQuery, SDK as StorageSdk};
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use wasm_bindgen::prelude::*;
 
@@ -12,7 +12,7 @@ use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
 use crate::run_local;
 use crate::types::{
-    Account, DownloadOptions, Host, HostQuery, ObjectEvent, PinnedSlab, UploadOptions,
+    self, DownloadOptions, HostQuery, ObjectEvent, ObjectsCursor, UploadOptions, ms_to_chrono,
 };
 
 /// The main Sia storage SDK. Provides methods for uploading, downloading,
@@ -37,41 +37,34 @@ impl Sdk {
     }
 
     /// Returns account information from the indexer.
-    pub async fn account(&self) -> Result<Account, JsError> {
+    #[wasm_bindgen(unchecked_return_type = "Account")]
+    pub async fn account(&self) -> Result<JsValue, JsError> {
         let sdk = self.inner.clone();
         let a = run_local(async move { sdk.account().await })
             .await
             .map_err(to_js_err)?;
-        Ok(Account {
-            account_key: a.account_key.to_string(),
-            max_pinned_data: a.max_pinned_data as f64,
-            remaining_storage: a.remaining_storage as f64,
-            pinned_data: a.pinned_data as f64,
-            pinned_size: a.pinned_size as f64,
-            ready: a.ready,
-            app_name: a.app.name,
-            app_description: a.app.description,
-        })
+        types::to_js(&a)
     }
 
     /// Returns a list of usable hosts, optionally filtered by a HostQuery.
-    pub async fn hosts(&self, query: Option<HostQuery>) -> Result<Vec<Host>, JsError> {
+    #[wasm_bindgen(unchecked_return_type = "Host[]")]
+    pub async fn hosts(&self, query: Option<HostQuery>) -> Result<JsValue, JsError> {
         let sdk = self.inner.clone();
-        let q = query.map(|q| q.into()).unwrap_or(StorageHostQuery {
-            protocol: Some(Protocol::QUIC),
-            ..Default::default()
-        });
+        let q: StorageHostQuery = match query {
+            Some(hq) => {
+                let mut q: StorageHostQuery = hq.into();
+                q.protocol = Some(Protocol::QUIC);
+                q
+            }
+            None => StorageHostQuery {
+                protocol: Some(Protocol::QUIC),
+                ..Default::default()
+            },
+        };
         let hosts = run_local(async move { sdk.hosts(q).await })
             .await
             .map_err(to_js_err)?;
-        Ok(hosts
-            .into_iter()
-            .map(|h| Host {
-                public_key: h.public_key.to_string(),
-                country_code: h.country_code,
-                good_for_upload: h.good_for_upload,
-            })
-            .collect())
+        types::to_js(&hosts)
     }
 
     /// Retrieves an object from the indexer by its hex ID.
@@ -86,50 +79,36 @@ impl Sdk {
     }
 
     /// Returns object events for syncing local state with the indexer.
-    /// `cursor_after` is milliseconds since epoch (JS `Date.getTime()`).
     #[wasm_bindgen(js_name = "objectEvents")]
     pub async fn object_events(
         &self,
-        cursor_id: Option<String>,
-        cursor_after: Option<f64>,
+        cursor: Option<ObjectsCursor>,
         limit: u32,
     ) -> Result<Vec<ObjectEvent>, JsError> {
         let sdk = self.inner.clone();
-        let cursor = match (cursor_id, cursor_after) {
-            (Some(id), Some(after_ms)) => {
-                let secs = (after_ms / 1000.0) as i64;
-                let nanos = ((after_ms % 1000.0) * 1_000_000.0) as u32;
-                Some(ObjectsCursor {
-                    after: chrono::DateTime::from_timestamp(secs, nanos)
-                        .ok_or_else(|| JsError::new("invalid cursor timestamp"))?,
-                    id: Hash256::from_str(&id).map_err(to_js_err)?,
-                })
-            }
-            _ => None,
+        let cursor = match cursor {
+            Some(c) => Some(sia_storage::ObjectsCursor {
+                id: Hash256::from_str(&c.id).map_err(to_js_err)?,
+                after: ms_to_chrono(c.after.get_time())?,
+            }),
+            None => None,
         };
         let events =
             run_local(async move { sdk.object_events(cursor, Some(limit as usize)).await })
                 .await
                 .map_err(to_js_err)?;
-        Ok(events
-            .into_iter()
-            .map(|e| ObjectEvent {
-                id: e.id.to_string(),
-                deleted: e.deleted,
-                updated_at: e.updated_at.timestamp() as f64,
-                size: e.object.as_ref().map(|o| o.size() as f64).unwrap_or(-1.0),
-            })
-            .collect())
+        Ok(events.into_iter().map(ObjectEvent::from).collect())
     }
 
     /// Retrieves a pinned slab from the indexer by its hex ID.
-    pub async fn slab(&self, slab_id: &str) -> Result<PinnedSlab, JsError> {
+    #[wasm_bindgen(unchecked_return_type = "PinnedSlab")]
+    pub async fn slab(&self, slab_id: &str) -> Result<JsValue, JsError> {
         let sdk = self.inner.clone();
         let id = Hash256::from_str(slab_id).map_err(to_js_err)?;
         let slab = run_local(async move { sdk.slab(&id).await })
             .await
             .map_err(to_js_err)?;
-        Ok(slab.into())
+        types::to_js(&slab)
     }
 
     /// Deletes an object from the indexer by its hex ID.
@@ -181,7 +160,7 @@ impl Sdk {
     ) -> Result<web_sys::ReadableStream, JsError> {
         const CHUNK_SIZE: usize = 1 << 18; // matches sia_storage chunk size for optimal performance
         let obj = object.0.clone();
-        let opts = options.map(|o| o.into()).unwrap_or_default();
+        let opts: sia_storage::DownloadOptions = options.map(|o| o.into()).unwrap_or_default();
         let download = self.inner.download(&obj, opts).map_err(to_js_err)?;
         Ok(wasm_streams::ReadableStream::from_async_read(download.compat(), CHUNK_SIZE).into_raw())
     }
@@ -193,17 +172,21 @@ impl Sdk {
     /// re-pin and update any references to the old ID.
     ///
     /// ```js
-    /// const obj = await sdk.upload(file.stream(), null, options);
+    /// const obj = await sdk.upload(file.stream(), new PinnedObject());
     /// await sdk.pinObject(obj);
     /// ```
     pub async fn upload(
         &self,
         source: web_sys::ReadableStream,
         object: PinnedObject,
-        options: Option<UploadOptions>,
+        #[wasm_bindgen(unchecked_optional_param_type = "UploadOptions")] options: JsValue,
     ) -> Result<PinnedObject, JsError> {
         let sdk = self.inner.clone();
-        let opts = options.map(|o| o.into()).unwrap_or_default();
+        let opts: sia_storage::UploadOptions = if options.is_undefined() || options.is_null() {
+            Default::default()
+        } else {
+            UploadOptions::from_js(options)?.into()
+        };
         let obj = object.0;
         let reader = wasm_streams::ReadableStream::from_raw(source)
             .into_async_read()
@@ -219,9 +202,16 @@ impl Sdk {
     /// to avoid wasting storage. Call `add(data)` for each object, then
     /// `finalize()` to get the resulting `PinnedObject` handles.
     #[wasm_bindgen(js_name = "uploadPacked")]
-    pub fn upload_packed(&self, options: Option<UploadOptions>) -> PackedUpload {
-        let opts = options.map(|o| o.into()).unwrap_or_default();
-        PackedUpload::new(self.inner.upload_packed(opts))
+    pub fn upload_packed(
+        &self,
+        #[wasm_bindgen(unchecked_optional_param_type = "UploadOptions")] options: JsValue,
+    ) -> Result<PackedUpload, JsError> {
+        let opts: sia_storage::UploadOptions = if options.is_undefined() || options.is_null() {
+            Default::default()
+        } else {
+            UploadOptions::from_js(options)?.into()
+        };
+        Ok(PackedUpload::new(self.inner.upload_packed(opts)))
     }
 
     /// Generates a signed share URL for an object. Anyone with the URL can
@@ -231,12 +221,9 @@ impl Sdk {
     pub fn share_object(
         &self,
         object: &PinnedObject,
-        valid_until_ms: f64,
+        valid_until: js_sys::Date,
     ) -> Result<String, JsError> {
-        let secs = (valid_until_ms / 1000.0) as i64;
-        let nanos = ((valid_until_ms % 1000.0) * 1_000_000.0) as u32;
-        let valid_until = chrono::DateTime::from_timestamp(secs, nanos)
-            .ok_or_else(|| JsError::new("invalid timestamp"))?;
+        let valid_until = ms_to_chrono(valid_until.get_time())?;
         let url = self
             .inner
             .share_object(&object.0, valid_until)

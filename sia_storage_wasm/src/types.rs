@@ -1,91 +1,87 @@
 use sia_core::types::v2::Protocol;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
 use crate::helpers::to_js_err;
+use crate::object::PinnedObject;
 
-/// Application metadata passed to `SdkBuilder`.
-#[wasm_bindgen(getter_with_clone)]
+/// Application metadata deserialized from a plain JS object.
+#[derive(serde::Deserialize, tsify::Tsify)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
 pub struct AppMetadata {
-    /// App ID as a 64-character hex string (32 bytes).
-    #[wasm_bindgen(js_name = "appId")]
     pub app_id: String,
-    /// Display name for the application.
     pub name: String,
-    /// Short description of the application.
     pub description: String,
-    /// URL of the application's website or service.
-    #[wasm_bindgen(js_name = "serviceUrl")]
     pub service_url: String,
-    /// Optional URL to the application's logo.
-    #[wasm_bindgen(js_name = "logoUrl")]
     pub logo_url: Option<String>,
-    /// Optional callback URL for the application.
-    #[wasm_bindgen(js_name = "callbackUrl")]
     pub callback_url: Option<String>,
 }
 
-#[wasm_bindgen]
-impl AppMetadata {
-    #[wasm_bindgen(constructor)]
-    pub fn new(
-        app_id: String,
-        name: String,
-        description: String,
-        service_url: String,
-        logo_url: Option<String>,
-        callback_url: Option<String>,
-    ) -> Self {
-        Self {
-            app_id,
-            name,
-            description,
-            service_url,
-            logo_url,
-            callback_url,
-        }
-    }
-}
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(typescript_type = "(shardsUploaded: number) => void")]
-    pub type OnShardProgressCallback;
-}
-
-/// Options for uploading data.
-#[wasm_bindgen]
+/// Options for uploading data. Deserialized from a plain JS object.
+/// The `onProgress` callback is extracted separately since JS functions
+/// can't pass through serde.
 pub struct UploadOptions {
-    pub(crate) data_shards: u8,
-    pub(crate) parity_shards: u8,
-    pub(crate) max_inflight: usize,
-    pub(crate) on_progress: Option<js_sys::Function>,
+    pub data_shards: Option<u8>,
+    pub parity_shards: Option<u8>,
+    pub max_inflight: Option<usize>,
+    pub on_progress: Option<js_sys::Function>,
 }
 
-#[wasm_bindgen]
+// Manually generate the TS interface since tsify can't handle the mixed
+// serde + JS function field.
+#[wasm_bindgen(typescript_custom_section)]
+const _: &str = r#"
+export interface UploadOptions {
+    dataShards?: number;
+    parityShards?: number;
+    maxInflight?: number;
+    onProgress?: (uploaded: number, encodedSize: number) => void;
+}
+"#;
+
 impl UploadOptions {
-    /// Creates upload options with the given parameters.
-    /// Defaults: data_shards=10, parity_shards=20, max_inflight=15.
-    #[wasm_bindgen(constructor)]
-    pub fn new(
-        data_shards: Option<u8>,
-        parity_shards: Option<u8>,
-        max_inflight: Option<u32>,
-        on_progress: Option<OnShardProgressCallback>,
-    ) -> Self {
-        Self {
-            data_shards: data_shards.unwrap_or(10),
-            parity_shards: parity_shards.unwrap_or(20),
-            max_inflight: max_inflight.unwrap_or(15) as usize,
-            on_progress: on_progress.map(|cb| cb.unchecked_into()),
+    /// Deserializes from a JsValue, extracting the onProgress callback separately.
+    pub fn from_js(val: JsValue) -> Result<Self, JsError> {
+        use wasm_bindgen::JsCast;
+
+        // Extract the callback before deserializing the rest
+        let on_progress = js_sys::Reflect::get(&val, &"onProgress".into())
+            .ok()
+            .filter(|v| v.is_function())
+            .map(|v| v.unchecked_into::<js_sys::Function>());
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Opts {
+            data_shards: Option<u8>,
+            parity_shards: Option<u8>,
+            max_inflight: Option<usize>,
         }
+
+        let opts: Opts = serde_wasm_bindgen::from_value(val).map_err(to_js_err)?;
+        Ok(Self {
+            data_shards: opts.data_shards,
+            parity_shards: opts.parity_shards,
+            max_inflight: opts.max_inflight,
+            on_progress,
+        })
     }
 }
 
 impl From<UploadOptions> for sia_storage::UploadOptions {
-    fn from(mut opts: UploadOptions) -> Self {
-        let shard_uploaded = opts.on_progress.take().map(|cb| {
-            let total_shards = opts.data_shards as u64 + opts.parity_shards as u64;
+    fn from(opts: UploadOptions) -> Self {
+        let mut merged = sia_storage::UploadOptions::default();
+        if let Some(v) = opts.data_shards {
+            merged.data_shards = v;
+        }
+        if let Some(v) = opts.parity_shards {
+            merged.parity_shards = v;
+        }
+        if let Some(v) = opts.max_inflight {
+            merged.max_inflight = v;
+        }
+        merged.shard_uploaded = opts.on_progress.map(|cb| {
+            let total_shards = merged.data_shards as u64 + merged.parity_shards as u64;
             let slab_size = total_shards * sia_core::rhp4::SECTOR_SIZE as u64;
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             tokio::task::spawn_local(async move {
@@ -103,81 +99,44 @@ impl From<UploadOptions> for sia_storage::UploadOptions {
             });
             tx
         });
-        Self {
-            data_shards: opts.data_shards,
-            parity_shards: opts.parity_shards,
-            max_inflight: opts.max_inflight,
-            shard_uploaded,
-        }
+        merged
     }
 }
 
 /// Options for downloading data.
-#[wasm_bindgen]
+#[derive(serde::Deserialize, tsify::Tsify)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
 pub struct DownloadOptions {
-    pub(crate) max_inflight: usize,
-    pub(crate) offset: u64,
-    pub(crate) length: Option<u64>,
-}
-
-#[wasm_bindgen]
-impl DownloadOptions {
-    /// Creates download options with the given parameters.
-    /// Defaults: max_inflight=16, offset=0, length=None (full object).
-    #[wasm_bindgen(constructor)]
-    pub fn new(
-        max_inflight: Option<u32>,
-        offset: Option<f64>,
-        length: Option<f64>,
-    ) -> Result<DownloadOptions, JsError> {
-        if let Some(o) = offset
-            && o < 0.0
-        {
-            return Err(JsError::new("offset must be non-negative"));
-        }
-        if let Some(l) = length
-            && l < 0.0
-        {
-            return Err(JsError::new("length must be non-negative"));
-        }
-        Ok(Self {
-            max_inflight: max_inflight.unwrap_or(16) as usize,
-            offset: offset.unwrap_or(0.0) as u64,
-            length: length.map(|l| l as u64),
-        })
-    }
+    pub max_inflight: Option<usize>,
+    pub offset: Option<f64>,
+    pub length: Option<f64>,
 }
 
 impl From<DownloadOptions> for sia_storage::DownloadOptions {
     fn from(opts: DownloadOptions) -> Self {
-        Self {
-            max_inflight: opts.max_inflight,
-            offset: opts.offset,
-            length: opts.length,
+        let mut merged = sia_storage::DownloadOptions::default();
+        if let Some(v) = opts.max_inflight {
+            merged.max_inflight = v;
         }
+        if let Some(v) = opts.offset {
+            merged.offset = v as u64;
+        }
+        if let Some(v) = opts.length {
+            merged.length = Some(v as u64);
+        }
+        merged
     }
 }
 
-/// Query parameters for filtering hosts. Always filters for QUIC-only hosts
-/// since WASM uses WebTransport exclusively.
-#[wasm_bindgen]
+/// Query parameters for filtering hosts.
+#[derive(serde::Deserialize, tsify::Tsify)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
 pub struct HostQuery {
-    pub(crate) country: Option<String>,
-    pub(crate) limit: Option<u64>,
-    pub(crate) offset: Option<u64>,
-}
-
-#[wasm_bindgen]
-impl HostQuery {
-    /// Creates a host query. All parameters are optional.
-    #[wasm_bindgen(constructor)]
-    pub fn new(country: Option<String>, limit: Option<u32>, offset: Option<u32>) -> Self {
-        Self {
-            country,
-            limit: limit.map(|l| l as u64),
-            offset: offset.map(|o| o as u64),
-        }
-    }
+    pub country: Option<String>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
 }
 
 impl From<HostQuery> for sia_storage::HostQuery {
@@ -192,176 +151,121 @@ impl From<HostQuery> for sia_storage::HostQuery {
     }
 }
 
-/// Account information returned by `Sdk.account()`.
-#[wasm_bindgen(getter_with_clone)]
-pub struct Account {
-    #[wasm_bindgen(js_name = "accountKey")]
-    pub account_key: String,
-    #[wasm_bindgen(js_name = "maxPinnedData")]
-    pub max_pinned_data: f64,
-    #[wasm_bindgen(js_name = "remainingStorage")]
-    pub remaining_storage: f64,
-    #[wasm_bindgen(js_name = "pinnedData")]
-    pub pinned_data: f64,
-    #[wasm_bindgen(js_name = "pinnedSize")]
-    pub pinned_size: f64,
-    pub ready: bool,
-    #[wasm_bindgen(js_name = "appName")]
-    pub app_name: String,
-    #[wasm_bindgen(js_name = "appDescription")]
-    pub app_description: String,
+/// Converts milliseconds since epoch to a chrono::DateTime<Utc>.
+pub(crate) fn ms_to_chrono(ms: f64) -> Result<chrono::DateTime<chrono::Utc>, JsError> {
+    let secs = (ms / 1000.0) as i64;
+    let nanos = ((ms % 1000.0) * 1_000_000.0) as u32;
+    chrono::DateTime::from_timestamp(secs, nanos).ok_or_else(|| JsError::new("invalid timestamp"))
 }
 
-/// Host information returned by `Sdk.hosts()`.
-#[wasm_bindgen(getter_with_clone)]
-pub struct Host {
-    #[wasm_bindgen(js_name = "publicKey")]
-    pub public_key: String,
-    #[wasm_bindgen(js_name = "countryCode")]
-    pub country_code: String,
-    #[wasm_bindgen(js_name = "goodForUpload")]
-    pub good_for_upload: bool,
-}
-
-/// A 32-byte encryption key used for slab-level encryption.
-#[wasm_bindgen]
-pub struct EncryptionKey(pub(crate) sia_storage::EncryptionKey);
-
-#[wasm_bindgen]
-impl EncryptionKey {
-    /// Returns the key as a hex-encoded string (64 chars).
-    #[wasm_bindgen(js_name = "toHex")]
-    pub fn to_hex(&self) -> String {
-        hex::encode(self.0.as_ref())
-    }
-
-    /// Returns the raw 32 bytes as a Uint8Array.
-    pub fn bytes(&self) -> Vec<u8> {
-        self.0.as_ref().to_vec()
-    }
-
-    /// Parses an encryption key from a hex string (64 chars).
-    #[wasm_bindgen(js_name = "fromHex")]
-    pub fn from_hex(hex_str: &str) -> Result<EncryptionKey, JsError> {
-        let bytes = hex::decode(hex_str).map_err(to_js_err)?;
-        if bytes.len() != 32 {
-            return Err(JsError::new("encryption key must be 32 bytes of hex"));
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        Ok(EncryptionKey(sia_storage::EncryptionKey::from(arr)))
-    }
-}
-
-/// A sector stored on a specific host.
-#[wasm_bindgen(getter_with_clone)]
-pub struct Sector {
-    pub root: String,
-    #[wasm_bindgen(js_name = "hostKey")]
-    pub host_key: String,
-}
-
-/// A slab — an erasure-coded segment of a file. Contains up to 30 sectors
-/// (10 data + 20 parity by default), each stored on a different host.
-#[wasm_bindgen]
-pub struct Slab {
-    inner: sia_storage::Slab,
-}
-
-#[wasm_bindgen]
-impl Slab {
-    /// Returns the slab encryption key.
-    #[wasm_bindgen(js_name = "encryptionKey")]
-    pub fn encryption_key(&self) -> EncryptionKey {
-        EncryptionKey(self.inner.encryption_key.clone())
-    }
-
-    /// Minimum number of sectors needed to reconstruct the data.
-    #[wasm_bindgen(js_name = "minShards")]
-    pub fn min_shards(&self) -> u8 {
-        self.inner.min_shards
-    }
-
-    /// Byte offset within the object.
-    pub fn offset(&self) -> u32 {
-        self.inner.offset
-    }
-
-    /// Data length in bytes.
-    pub fn length(&self) -> u32 {
-        self.inner.length
-    }
-
-    /// Returns the sectors in this slab.
-    pub fn sectors(&self) -> Vec<Sector> {
-        self.inner
-            .sectors
-            .iter()
-            .map(|s| Sector {
-                root: s.root.to_string(),
-                host_key: s.host_key.to_string(),
-            })
-            .collect()
-    }
-}
-
-impl From<&sia_storage::Slab> for Slab {
-    fn from(s: &sia_storage::Slab) -> Self {
-        Self { inner: s.clone() }
-    }
-}
-
-/// A pinned slab retrieved from the indexer by ID.
-#[wasm_bindgen]
-pub struct PinnedSlab {
-    inner: sia_storage::PinnedSlab,
-}
-
-#[wasm_bindgen]
-impl PinnedSlab {
-    /// The slab's unique identifier as a hex string.
-    pub fn id(&self) -> String {
-        self.inner.id.to_string()
-    }
-
-    /// Returns the slab encryption key.
-    #[wasm_bindgen(js_name = "encryptionKey")]
-    pub fn encryption_key(&self) -> EncryptionKey {
-        EncryptionKey(self.inner.encryption_key.clone())
-    }
-
-    /// Minimum number of sectors needed to reconstruct the data.
-    #[wasm_bindgen(js_name = "minShards")]
-    pub fn min_shards(&self) -> u8 {
-        self.inner.min_shards
-    }
-
-    /// Returns the sectors in this slab.
-    pub fn sectors(&self) -> Vec<Sector> {
-        self.inner
-            .sectors
-            .iter()
-            .map(|s| Sector {
-                root: s.root.to_string(),
-                host_key: s.host_key.to_string(),
-            })
-            .collect()
-    }
-}
-
-impl From<sia_storage::PinnedSlab> for PinnedSlab {
-    fn from(s: sia_storage::PinnedSlab) -> Self {
-        Self { inner: s }
-    }
-}
-
-/// Object event returned by `Sdk.objectEvents()`.
-#[wasm_bindgen(getter_with_clone)]
-pub struct ObjectEvent {
+/// A cursor for paginating through object events.
+#[derive(serde::Deserialize, tsify::Tsify)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectsCursor {
     pub id: String,
-    pub deleted: bool,
-    #[wasm_bindgen(js_name = "updatedAt")]
-    pub updated_at: f64,
-    /// Size in bytes, or -1 if the object was deleted.
-    pub size: f64,
+    #[tsify(type = "Date")]
+    #[serde(with = "serde_wasm_bindgen::preserve")]
+    pub after: js_sys::Date,
+}
+
+/// An object event from the indexer.
+#[wasm_bindgen]
+pub struct ObjectEvent {
+    id: String,
+    deleted: bool,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    object: Option<PinnedObject>,
+}
+
+#[wasm_bindgen]
+impl ObjectEvent {
+    #[wasm_bindgen(getter)]
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn deleted(&self) -> bool {
+        self.deleted
+    }
+
+    /// Returns the time the event occurred.
+    #[wasm_bindgen(getter, js_name = "updatedAt")]
+    pub fn updated_at(&self) -> js_sys::Date {
+        js_sys::Date::new(&JsValue::from(self.updated_at.timestamp_millis() as f64))
+    }
+
+    /// Returns the object associated with this event, if it exists.
+    #[wasm_bindgen(getter)]
+    pub fn object(&self) -> Option<PinnedObject> {
+        self.object.as_ref().map(|o| PinnedObject(o.0.clone()))
+    }
+}
+
+impl From<sia_storage::ObjectEvent> for ObjectEvent {
+    fn from(e: sia_storage::ObjectEvent) -> Self {
+        Self {
+            id: e.id.to_string(),
+            deleted: e.deleted,
+            updated_at: e.updated_at,
+            object: e.object.map(PinnedObject),
+        }
+    }
+}
+
+/// Manual TypeScript declarations for core types that can't use tsify
+/// (defined in sia_storage, not this crate).
+#[wasm_bindgen(typescript_custom_section)]
+const _: &str = r#"
+export interface Sector {
+    root: string;
+    hostKey: string;
+}
+
+export interface Slab {
+    encryptionKey: string;
+    minShards: number;
+    offset: number;
+    length: number;
+    sectors: Sector[];
+}
+
+export interface PinnedSlab {
+    id: string;
+    encryptionKey: string;
+    minShards: number;
+    sectors: Sector[];
+}
+
+export interface Account {
+    accountKey: string;
+    maxPinnedData: number;
+    remainingStorage: number;
+    pinnedData: number;
+    pinnedSize: number;
+    ready: boolean;
+    app: {
+        id: string;
+        name: string;
+        description: string;
+        serviceUrl?: string;
+        logoUrl?: string;
+    };
+    lastUsed: string;
+}
+
+export interface Host {
+    publicKey: string;
+    addresses: { protocol: string; address: string }[];
+    countryCode: string;
+    latitude: number;
+    longitude: number;
+    goodForUpload: boolean;
+}
+"#;
+
+/// Serializes a value to a JsValue via serde_wasm_bindgen.
+pub(crate) fn to_js<T: serde::Serialize + ?Sized>(val: &T) -> Result<JsValue, JsError> {
+    serde_wasm_bindgen::to_value(val).map_err(to_js_err)
 }

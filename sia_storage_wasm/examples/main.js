@@ -4,7 +4,6 @@ import init, {
   generate_recovery_phrase,
   validate_recovery_phrase,
   calculate_encoded_size,
-  AppMetadata,
   PinnedObject,
 } from './pkg/sia_storage_wasm.js';
 
@@ -60,9 +59,12 @@ async function main() {
   log('Encoded size of 1024 bytes (10/20):', encoded);
 
   // -- builder flow --
-  const appId = '01'.repeat(32);
-  const meta = new AppMetadata(appId, 'wasm example', 'an example app', 'https://example.com');
-  const builder = new Builder(INDEXER_URL, meta);
+  const builder = new Builder(INDEXER_URL, {
+    appId: '01'.repeat(32),
+    name: 'wasm example',
+    description: 'an example app',
+    serviceUrl: 'https://example.com',
+  });
 
   await builder.requestConnection();
   log('Approve connection:', builder.responseUrl());
@@ -75,13 +77,17 @@ async function main() {
   const sdk = await builder.register(phrase2);
   log('Registered. Public key:', sdk.appKey().publicKey());
 
-  // -- packed upload --
+  // -- upload --
   const uploadSize = 1024 * 1024 * 4; // 4 MiB
   const uploadData = randomBytes(uploadSize);
   log(`\nUploading ${(uploadSize / 1024 / 1024).toFixed(1)} MiB of random data...`);
 
   const uploadStart = performance.now();
-  const obj = await sdk.upload(new Blob([uploadData]).stream(), new PinnedObject());
+  const obj = await sdk.upload(new Blob([uploadData]).stream(), new PinnedObject(), {
+    onProgress: (uploaded, encodedSize) => {
+      log(`  progress: ${(uploaded / 1024 / 1024).toFixed(1)} MiB uploaded, ${(encodedSize / 1024 / 1024).toFixed(1)} MiB encoded`);
+    },
+  });
   const uploadElapsed = (performance.now() - uploadStart) / 1000;
   const rawMiB = uploadSize / 1024 / 1024;
   const encodedMiB = obj.encodedSize() / 1024 / 1024;

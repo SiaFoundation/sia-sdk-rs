@@ -245,7 +245,7 @@ pub struct HostQuery {
 }
 
 /// Metadata about a registered application on the indexer.
-#[derive(Debug, serde::Deserialize, PartialEq)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct App {
     /// The unique identifier of the application.
@@ -261,7 +261,7 @@ pub struct App {
 }
 
 /// Information about the user's account on the indexer.
-#[derive(Debug, serde::Deserialize, PartialEq)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     /// The public key associated with the account.
