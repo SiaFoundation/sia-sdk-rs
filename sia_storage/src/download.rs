@@ -3,13 +3,14 @@ use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Poll, ready};
+use std::time::Instant;
 
 use crate::encryption::{Chacha20Cipher, EncryptionKey, encrypt_recovered_shards};
 use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::{Hosts, RPCError};
 use crate::rhp4::{Client, Transport};
 use crate::time::{Duration, Elapsed, sleep};
-use crate::{AppKey, Object, Sector, Slab};
+use crate::{AppKey, DownloadOptions, Object, Sector, ShardProgress, ShardProgressCallback, Slab};
 use bytes::{Buf, Bytes, BytesMut};
 use chacha20::cipher::StreamCipher;
 use sia_core::rhp4::SEGMENT_SIZE;
@@ -66,26 +67,6 @@ pub enum DownloadError {
     Errored,
 }
 
-/// Options for configuring a download.
-pub struct DownloadOptions {
-    /// Maximum number of concurrent chunk downloads. Defaults to 80.
-    pub max_inflight: usize,
-    /// Byte offset to start downloading from.
-    pub offset: u64,
-    /// Number of bytes to download. If `None`, downloads the entire object.
-    pub length: Option<u64>,
-}
-
-impl Default for DownloadOptions {
-    fn default() -> Self {
-        Self {
-            max_inflight: 80, // ~20 MiB in memory
-            offset: 0,
-            length: None,
-        }
-    }
-}
-
 struct SectorTask {
     sector: Sector,
     shard_index: usize,
@@ -113,6 +94,7 @@ struct SlabRecovery<State, T: Transport> {
     client: Hosts<T>,
     account_key: Arc<AppKey>,
 
+    slab_index: usize,
     min_shards: u8,
     encryption_key: EncryptionKey,
     offset: usize,
@@ -122,20 +104,25 @@ struct SlabRecovery<State, T: Transport> {
 }
 
 impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
-    fn new(client: Hosts<T>, account_key: Arc<AppKey>, slab: Slab) -> Result<Self, DownloadError> {
-        if slab.min_shards == 0 {
+    fn new(
+        client: Hosts<T>,
+        account_key: Arc<AppKey>,
+        slab: ChunkSlab,
+    ) -> Result<Self, DownloadError> {
+        if slab.slab.min_shards == 0 {
             return Err(DownloadError::InvalidSlab(
                 "min_shards cannot be 0".to_string(),
             ));
-        } else if slab.min_shards as usize > slab.sectors.len() {
+        } else if slab.slab.min_shards as usize > slab.slab.sectors.len() {
             return Err(DownloadError::InvalidSlab(format!(
                 "min_shards {} cannot be greater than number of sectors {}",
-                slab.min_shards,
-                slab.sectors.len()
+                slab.slab.min_shards,
+                slab.slab.sectors.len()
             )));
         }
 
         let mut sectors = slab
+            .slab
             .sectors
             .iter()
             .enumerate()
@@ -148,10 +135,11 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
         Ok(Self {
             client,
             account_key,
-            min_shards: slab.min_shards,
-            encryption_key: slab.encryption_key,
-            offset: slab.offset as usize,
-            length: slab.length as usize,
+            slab_index: slab.index,
+            min_shards: slab.slab.min_shards,
+            encryption_key: slab.slab.encryption_key,
+            offset: slab.slab.offset as usize,
+            length: slab.slab.length as usize,
             state: AwaitingRecovery { sectors },
         })
     }
@@ -160,9 +148,11 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
         client: Hosts<T>,
         account_key: Arc<AppKey>,
         task: SectorTask,
+        slab_index: usize,
         sector_offset: usize,
         sector_length: usize,
-    ) -> Result<(usize, BytesMut), DownloadError> {
+    ) -> Result<(usize, BytesMut, ShardProgress), DownloadError> {
+        let start = Instant::now();
         let data = client
             .read_sector(
                 task.sector.host_key,
@@ -174,10 +164,24 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                 Duration::from_secs(60),
             )
             .await?;
-        Ok((task.shard_index, data.try_into_mut().unwrap())) // no other references to the data exist, so this is safe
+        let elapsed = start.elapsed();
+        Ok((
+            task.shard_index,
+            data.try_into_mut().unwrap(),
+            ShardProgress {
+                host_key: task.sector.host_key,
+                shard_size: sector_length,
+                shard_index: task.shard_index,
+                slab_index,
+                elapsed,
+            },
+        )) // no other references to the data exist, so this is safe
     }
 
-    async fn recover_shards(self) -> Result<SlabRecovery<ShardsRecovered, T>, DownloadError> {
+    async fn recover_shards(
+        self,
+        shard_downloaded: Option<ShardProgressCallback>,
+    ) -> Result<SlabRecovery<ShardsRecovered, T>, DownloadError> {
         let mut shard_tasks = JoinSet::new();
         let mut shards = vec![None; self.state.sectors.len()];
         let mut sectors = VecDeque::from(self.state.sectors);
@@ -203,6 +207,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                     client.clone(),
                     account_key.clone(),
                     task,
+                    self.slab_index,
                     shard_offset,
                     shard_length,
                 )
@@ -214,14 +219,18 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
             tokio::select! {
                 Some(res) = shard_tasks.join_next() => {
                     match res? {
-                        Ok((index, data)) => {
+                        Ok((index, data, progress)) => {
                             shards[index] = Some(data);
                             recovered_shards += 1;
+                            if let Some(callback) = &shard_downloaded {
+                                callback(progress);
+                            }
                             if recovered_shards >= min_shards {
                                 return Ok(SlabRecovery {
                                     client,
                                     account_key,
                                     min_shards,
+                                    slab_index: self.slab_index,
                                     encryption_key,
                                     offset: self.offset,
                                     length: self.length,
@@ -236,14 +245,14 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                             if recovered_shards as usize + shard_tasks.len() + sectors.len() < min_shards as usize {
                                 return Err(DownloadError::NotEnoughShards(recovered_shards, min_shards));
                             } else if let Some(task) = sectors.pop_front() {
-                                join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, shard_offset, shard_length));
+                                join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, self.slab_index, shard_offset, shard_length));
                             }
                         }
                     }
                 },
                 _ = sleep(Duration::from_millis(500)), if !sectors.is_empty() => {
                     let task = sectors.pop_front().expect("sectors should not be empty");
-                    join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, shard_offset, shard_length));
+                    join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, self.slab_index, shard_offset, shard_length));
                 },
             }
         }
@@ -272,6 +281,7 @@ impl<T: Transport> SlabRecovery<ShardsRecovered, T> {
             client: self.client,
             account_key: self.account_key,
             min_shards: self.min_shards,
+            slab_index: self.slab_index,
             encryption_key: self.encryption_key,
             offset: self.offset,
             length: self.length,
@@ -286,6 +296,11 @@ impl<T: Transport> SlabRecovery<SlabDecoded, T> {
         ErasureCoder::write_data_shards(w, &self.state.data_shards, skip, self.length).await?;
         Ok(())
     }
+}
+
+struct ChunkSlab {
+    slab: Slab,
+    index: usize,
 }
 
 /// Downloads an object by recovering chunks of each slab in parallel and
@@ -323,9 +338,9 @@ impl<const N: usize> ChunkIter<N> {
 }
 
 impl<const N: usize> Iterator for ChunkIter<N> {
-    type Item = Slab;
+    type Item = ChunkSlab;
 
-    fn next(&mut self) -> Option<Slab> {
+    fn next(&mut self) -> Option<ChunkSlab> {
         if self.remaining == 0 {
             return None;
         }
@@ -345,7 +360,10 @@ impl<const N: usize> Iterator for ChunkIter<N> {
         let mut chunk = slab.clone();
         chunk.offset = slab_offset as u32;
         chunk.length = slab_length as u32;
-        Some(chunk)
+        Some(ChunkSlab {
+            slab: chunk,
+            index: self.slab_idx,
+        })
     }
 }
 
@@ -366,6 +384,8 @@ pub struct Download {
     // require all the enum variants to be Clone which is not the case, so
     // a generic variant is returned after the first error.
     errored: bool,
+
+    shard_downloaded: Option<ShardProgressCallback>,
 }
 
 impl AsyncRead for Download {
@@ -424,12 +444,13 @@ impl Download {
         if let Some(chunk_slab) = self.chunk_iter.next() {
             let hosts = self.hosts.clone();
             let account_key = self.account_key.clone();
+            let shard_progress_callback = self.shard_downloaded.clone();
             self.queue
                 .push_back(AbortOnDropHandle::new(maybe_spawn!(async move {
-                    let len = chunk_slab.length as usize;
+                    let len = chunk_slab.slab.length as usize;
                     let mut buf = Vec::with_capacity(len);
                     SlabRecovery::new(hosts, account_key, chunk_slab)?
-                        .recover_shards()
+                        .recover_shards(shard_progress_callback)
                         .await?
                         .decode()?
                         .write(&mut buf)
@@ -499,6 +520,7 @@ impl Download {
             queue: VecDeque::with_capacity(options.max_inflight),
             chunk_iter,
             errored: false,
+            shard_downloaded: options.shard_downloaded,
         };
         for _ in 0..options.max_inflight {
             download.spawn_next();
@@ -631,9 +653,9 @@ mod test {
                 slab.length = length as u32;
 
                 let mut recovered_data = Vec::with_capacity(length);
-                SlabRecovery::new(hosts.clone(), app_key.clone(), slab)
+                SlabRecovery::new(hosts.clone(), app_key.clone(), ChunkSlab { slab, index: 0 })
                     .unwrap()
-                    .recover_shards()
+                    .recover_shards(None)
                     .await
                     .unwrap()
                     .decode()

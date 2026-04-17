@@ -5,7 +5,7 @@ use sia_core::signing::Signature;
 use sia_storage::{self, Hash256};
 use thiserror::Error;
 
-use crate::{AppMeta, SDK, spawn};
+use crate::{AppMeta, Sdk, spawn};
 
 #[derive(Debug, Error, uniffi::Error)]
 #[uniffi(flat_error)]
@@ -229,11 +229,11 @@ impl Builder {
     ///
     /// # Arguments
     /// * `app_key` - The application key used for authentication.
-    pub async fn connected(&self, app_key: Arc<AppKey>) -> Result<Option<Arc<SDK>>, BuilderError> {
+    pub async fn connected(&self, app_key: Arc<AppKey>) -> Result<Option<Arc<Sdk>>, BuilderError> {
         self.with_state_transition(|state| async move {
             match state {
                 BuilderState::Disconnected(builder) => match builder.connected(&app_key.0).await? {
-                    Some(sdk) => Ok((BuilderState::Finalized, Some(Arc::new(SDK { inner: sdk })))),
+                    Some(sdk) => Ok((BuilderState::Finalized, Some(Arc::new(Sdk { inner: sdk })))),
                     None => Ok((BuilderState::Disconnected(builder), None)),
                 },
                 _ => Err(BuilderError::InvalidState),
@@ -301,12 +301,12 @@ impl Builder {
     ///
     /// # Arguments
     /// * `mnemonic` - The user's mnemonic phrase used to derive the application key.
-    pub async fn register(&self, mnemonic: String) -> Result<Arc<SDK>, BuilderError> {
+    pub async fn register(&self, mnemonic: String) -> Result<Arc<Sdk>, BuilderError> {
         self.with_state_transition(|state| async move {
             match state {
                 BuilderState::Approved(builder) => {
                     let sdk = builder.register(&mnemonic).await?;
-                    Ok((BuilderState::Finalized, Arc::new(SDK { inner: sdk })))
+                    Ok((BuilderState::Finalized, Arc::new(Sdk { inner: sdk })))
                 }
                 _ => Err(BuilderError::InvalidState),
             }

@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
-use sia_storage::{self, HostQuery as StorageHostQuery, SDK as StorageSdk};
+use sia_storage::{self, HostQuery as StorageHostQuery, Sdk as StorageSdk};
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use wasm_bindgen::prelude::*;
 
@@ -12,7 +12,8 @@ use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
 use crate::run_local;
 use crate::types::{
-    self, DownloadOptions, HostQuery, ObjectEvent, ObjectsCursor, UploadOptions, ms_to_chrono,
+    self, HostQuery, ObjectEvent, ObjectsCursor, download_options_from_js, ms_to_chrono,
+    upload_options_from_js,
 };
 
 /// The main Sia storage SDK. Provides methods for uploading, downloading,
@@ -153,14 +154,15 @@ impl Sdk {
     ///   console.log('got', chunk.length, 'bytes');
     /// }
     /// ```
+    #[wasm_bindgen(unchecked_return_type = "ReadableStream")]
     pub fn download(
         &self,
         object: &PinnedObject,
-        options: Option<DownloadOptions>,
+        options: Option<JsValue>,
     ) -> Result<web_sys::ReadableStream, JsError> {
         const CHUNK_SIZE: usize = 1 << 18; // matches sia_storage chunk size for optimal performance
         let obj = object.0.clone();
-        let opts: sia_storage::DownloadOptions = options.map(|o| o.into()).unwrap_or_default();
+        let opts = options.map(download_options_from_js).unwrap_or_default();
         let download = self.inner.download(&obj, opts).map_err(to_js_err)?;
         Ok(wasm_streams::ReadableStream::from_async_read(download.compat(), CHUNK_SIZE).into_raw())
     }
@@ -177,16 +179,12 @@ impl Sdk {
     /// ```
     pub async fn upload(
         &self,
-        source: web_sys::ReadableStream,
         object: PinnedObject,
-        #[wasm_bindgen(unchecked_optional_param_type = "UploadOptions")] options: JsValue,
+        source: web_sys::ReadableStream,
+        options: Option<JsValue>,
     ) -> Result<PinnedObject, JsError> {
         let sdk = self.inner.clone();
-        let opts: sia_storage::UploadOptions = if options.is_undefined() || options.is_null() {
-            Default::default()
-        } else {
-            UploadOptions::from_js(options)?.into()
-        };
+        let opts = options.map(upload_options_from_js).unwrap_or_default();
         let obj = object.0;
         let reader = wasm_streams::ReadableStream::from_raw(source)
             .into_async_read()
@@ -202,15 +200,8 @@ impl Sdk {
     /// to avoid wasting storage. Call `add(data)` for each object, then
     /// `finalize()` to get the resulting `PinnedObject` handles.
     #[wasm_bindgen(js_name = "uploadPacked")]
-    pub fn upload_packed(
-        &self,
-        #[wasm_bindgen(unchecked_optional_param_type = "UploadOptions")] options: JsValue,
-    ) -> Result<PackedUpload, JsError> {
-        let opts: sia_storage::UploadOptions = if options.is_undefined() || options.is_null() {
-            Default::default()
-        } else {
-            UploadOptions::from_js(options)?.into()
-        };
+    pub fn upload_packed(&self, options: Option<JsValue>) -> Result<PackedUpload, JsError> {
+        let opts = options.map(upload_options_from_js).unwrap_or_default();
         Ok(PackedUpload::new(self.inner.upload_packed(opts)))
     }
 
@@ -253,3 +244,12 @@ impl Sdk {
             .map_err(to_js_err)
     }
 }
+
+#[wasm_bindgen(typescript_custom_section)]
+const _: &str = r#"
+interface Sdk {
+    download(object: PinnedObject, options?: DownloadOptions): ReadableStream;
+    upload(object: PinnedObject, source: ReadableStream, options?: UploadOptions): Promise<PinnedObject>;
+    uploadPacked(options?: UploadOptions): PackedUpload;
+}
+"#;

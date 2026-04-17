@@ -13,7 +13,7 @@ use url::Url;
 use crate::app_client::{self, Client};
 use crate::object_encryption::derive;
 use crate::time::Duration;
-use crate::{AppID, AppKey, AppMetadata, SDK};
+use crate::{AppID, AppKey, AppMetadata, Sdk};
 
 /// The initial state of the SDK builder, before connecting to the indexd service.
 pub struct DisconnectedState;
@@ -103,12 +103,12 @@ impl Builder<DisconnectedState> {
     ///
     /// # Arguments
     /// * `app_key` - The application key used for authentication.
-    pub async fn connected(&self, app_key: &AppKey) -> Result<Option<SDK>, BuilderError> {
+    pub async fn connected(&self, app_key: &AppKey) -> Result<Option<Sdk>, BuilderError> {
         let connected = self.client.check_app_authenticated(&app_key.0).await?;
         if !connected {
             return Ok(None);
         }
-        let sdk = SDK::new(self.client.clone(), Arc::new(app_key.clone())).await?;
+        let sdk = Sdk::new(self.client.clone(), Arc::new(app_key.clone())).await?;
         Ok(Some(sdk))
     }
 
@@ -185,7 +185,7 @@ impl Builder<ApprovedState> {
     ///
     /// # Errors
     /// Returns [BuilderError] if the registration fails or the SDK cannot be created.
-    pub async fn register(self, mnemonic: &str) -> Result<SDK, BuilderError> {
+    pub async fn register(self, mnemonic: &str) -> Result<Sdk, BuilderError> {
         let private_key = derive_app_key(mnemonic, &self.app_meta.id, &self.state.user_secret)?;
         self.client
             .register_app(
@@ -194,7 +194,7 @@ impl Builder<ApprovedState> {
                 self.state.register_url.clone(),
             )
             .await?;
-        SDK::new(self.client, Arc::new(AppKey(private_key))).await
+        Sdk::new(self.client, Arc::new(AppKey(private_key))).await
     }
 }
 

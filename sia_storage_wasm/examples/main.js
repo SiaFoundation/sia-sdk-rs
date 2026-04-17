@@ -1,9 +1,7 @@
 import init, {
   Builder,
-  set_log_level,
-  generate_recovery_phrase,
-  validate_recovery_phrase,
-  calculate_encoded_size,
+  setLogLevel,
+  generateRecoveryPhrase,
   PinnedObject,
 } from './pkg/sia_storage_wasm.js';
 
@@ -47,16 +45,7 @@ function askUser(label) {
 
 async function main() {
   await init();
-  set_log_level('debug');
-
-  // -- offline utilities --
-  const phrase = generate_recovery_phrase();
-  log('Recovery phrase:', phrase);
-  validate_recovery_phrase(phrase);
-  log('Phrase is valid');
-
-  const encoded = calculate_encoded_size(1024, 10, 20);
-  log('Encoded size of 1024 bytes (10/20):', encoded);
+  setLogLevel('info');
 
   // -- builder flow --
   const builder = new Builder(INDEXER_URL, {
@@ -71,7 +60,7 @@ async function main() {
   await builder.waitForApproval();
 
   const mnemonic = await askUser('Enter mnemonic (or leave empty to generate new):');
-  const phrase2 = mnemonic || generate_recovery_phrase();
+  const phrase2 = mnemonic || generateRecoveryPhrase();
   if (!mnemonic) log('Generated mnemonic:', phrase2);
 
   const sdk = await builder.register(phrase2);
@@ -83,9 +72,9 @@ async function main() {
   log(`\nUploading ${(uploadSize / 1024 / 1024).toFixed(1)} MiB of random data...`);
 
   const uploadStart = performance.now();
-  const obj = await sdk.upload(new Blob([uploadData]).stream(), new PinnedObject(), {
-    onProgress: (uploaded, encodedSize) => {
-      log(`  progress: ${(uploaded / 1024 / 1024).toFixed(1)} MiB uploaded, ${(encodedSize / 1024 / 1024).toFixed(1)} MiB encoded`);
+  const obj = await sdk.upload(new PinnedObject(), new Blob([uploadData]).stream(),  {
+    onShardUploaded: (progress) => {
+      log(progress);
     },
   });
   const uploadElapsed = (performance.now() - uploadStart) / 1000;

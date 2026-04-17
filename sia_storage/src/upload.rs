@@ -1,14 +1,14 @@
 use std::io;
 use std::sync::Arc;
 
-use crate::AppKey;
+use crate::{AppKey, ShardProgress, ShardProgressCallback, UploadOptions};
 use bytes::{Bytes, BytesMut};
 use log::debug;
 use sia_core::rhp4::{self as rhp, SECTOR_SIZE};
 use sia_core::signing::PublicKey;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWriteExt, BufReader, SimplexStream, WriteHalf, copy, simplex};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::encryption::{EncryptionKey, encrypt_shard};
@@ -31,7 +31,7 @@ struct ShardUpload<T: Transport> {
 impl<T: Transport> ShardUpload<T> {
     fn spawn_write(
         &self,
-        tasks: &mut JoinSet<Result<Sector, UploadError>>,
+        tasks: &mut JoinSet<Result<(Sector, Duration), UploadError>>,
         host_key: PublicKey,
         write_timeout: Duration,
         permit: OwnedSemaphorePermit,
@@ -53,11 +53,12 @@ impl<T: Transport> ShardUpload<T> {
                 );
                 let _ = hosts.retry(host_key);
             })?;
+            let elapsed = now.elapsed();
             debug!(
                 "slab {slab_index} shard {shard_index} uploaded to {host_key} in {:?}",
-                now.elapsed()
+                elapsed
             );
-            Ok(Sector { root, host_key })
+            Ok((Sector { root, host_key }, elapsed))
         });
     }
 }
@@ -116,113 +117,6 @@ pub enum UploadError {
     /// The upload was cancelled.
     #[error("upload cancelled")]
     Cancelled,
-}
-
-/// Options for configuring an upload.
-pub struct UploadOptions {
-    /// The number of data shards per slab. Defaults to 10.
-    pub data_shards: u8,
-    /// The number of parity shards per slab. Defaults to 20.
-    pub parity_shards: u8,
-    /// The maximum number of concurrent shard uploads. Defaults to 15.
-    pub max_inflight: usize,
-
-    /// Optional channel to notify when each shard is uploaded.
-    /// This can be used to implement progress reporting.
-    pub shard_uploaded: Option<mpsc::UnboundedSender<()>>,
-}
-
-impl UploadOptions {
-    /// Returns the optimal data size per slab in bytes.
-    pub fn optimal_data_size(&self) -> u64 {
-        SECTOR_SIZE as u64 * self.data_shards as u64
-    }
-
-    /// Returns the total slab size including parity shards in bytes.
-    pub fn slab_size(&self) -> u64 {
-        SECTOR_SIZE as u64 * (self.data_shards as u64 + self.parity_shards as u64)
-    }
-
-    /// Validates the upload options and erasure coding parameters to ensure
-    /// sufficient durability.
-    ///
-    /// This checks that the redundancy ratio is between 1.5x and 4x and that
-    /// the probability of recovering the original data meets a minimum threshold
-    /// of 99.99%.
-    pub fn validate(&self) -> Result<(), UploadError> {
-        const MIN_REDUNDANCY: f64 = 1.5;
-        const MAX_REDUNDANCY: f64 = 4.0;
-        const RECOVERY_PROBABILITY: f64 = 0.75;
-        const MIN_RECOVERY_PROBABILITY: f64 = 99.99;
-        const MAX_TOTAL_SHARDS: u16 = 256;
-
-        if self.max_inflight == 0 {
-            return Err(UploadError::InvalidOptions(
-                "max_inflight must be greater than 0".into(),
-            ));
-        }
-
-        let data_shards = self.data_shards as u16;
-        let parity_shards = self.parity_shards as u16;
-        let total_shards = data_shards + parity_shards;
-
-        if data_shards == 0 {
-            return Err(UploadError::InvalidOptions(
-                "data shards cannot be zero".into(),
-            ));
-        } else if parity_shards == 0 {
-            return Err(UploadError::InvalidOptions(
-                "parity shards cannot be zero".into(),
-            ));
-        } else if total_shards > MAX_TOTAL_SHARDS {
-            return Err(UploadError::InvalidOptions(format!(
-                "total shards {total_shards} exceeds maximum of {MAX_TOTAL_SHARDS}"
-            )));
-        }
-
-        let redundancy = total_shards as f64 / data_shards as f64;
-        if redundancy < MIN_REDUNDANCY {
-            return Err(UploadError::InvalidOptions(format!(
-                "redundancy of {redundancy:.2} is too low"
-            )));
-        } else if redundancy > MAX_REDUNDANCY {
-            return Err(UploadError::InvalidOptions(format!(
-                "redundancy of {redundancy:.2} is too high"
-            )));
-        }
-
-        // Calculate recovery probability using the binomial CDF.
-        // P(X >= data_shards) where X ~ Binomial(total_shards, RECOVERY_PROBABILITY)
-        let q = 1.0 - RECOVERY_PROBABILITY;
-        let mut term = q.powi(total_shards as i32);
-        for i in 0..data_shards {
-            term *= (total_shards - i) as f64 / (i + 1) as f64 * (RECOVERY_PROBABILITY / q);
-        }
-        let mut sum = term;
-        for i in data_shards..total_shards {
-            term *= (total_shards - i) as f64 / (i + 1) as f64 * (RECOVERY_PROBABILITY / q);
-            sum += term;
-        }
-        let prob = sum * 100.0;
-        if prob < MIN_RECOVERY_PROBABILITY {
-            return Err(UploadError::InvalidOptions(format!(
-                "not enough redundancy {data_shards}-of-{total_shards}: recovery probability {:.2}% is below minimum threshold of {MIN_RECOVERY_PROBABILITY:.2}%",
-                (prob * 100.0).floor() / 100.0
-            )));
-        }
-        Ok(())
-    }
-}
-
-impl Default for UploadOptions {
-    fn default() -> Self {
-        Self {
-            data_shards: 10,
-            parity_shards: 20,
-            max_inflight: 15,
-            shard_uploaded: None,
-        }
-    }
 }
 
 struct ObjectUpload {
@@ -345,7 +239,7 @@ impl<T: Transport> Uploader<T> {
     async fn upload_slab_shard(
         shard: ShardUpload<T>,
         permit: OwnedSemaphorePermit,
-        progress_tx: Option<mpsc::UnboundedSender<()>>,
+        progress_callback: Option<ShardProgressCallback>,
         initial_host: (PublicKey, usize),
     ) -> Result<(usize, Sector), UploadError> {
         let (host_key, attempts) = initial_host;
@@ -359,13 +253,19 @@ impl<T: Transport> Uploader<T> {
                 biased;
                 Some(res) = tasks.join_next() => {
                     match res.unwrap() {
-                        Ok(sector) => {
+                        Ok((sector, elapsed)) => {
                             if sector.host_key != host_key {
                                 debug!("slab {} shard {} penalizing original host {}", shard.slab_index, shard.shard_index, host_key);
                                 shard.client.add_failure(host_key)
                             }
-                            if let Some(progress_tx) = progress_tx {
-                                let _ = progress_tx.send(());
+                            if let Some(progress_callback) = progress_callback {
+                                progress_callback(ShardProgress {
+                                    host_key: sector.host_key,
+                                    shard_index: shard.shard_index,
+                                    slab_index: shard.slab_index,
+                                    shard_size: SECTOR_SIZE,
+                                    elapsed,
+                                });
                             }
                             return Ok((shard.shard_index, sector));
                         }

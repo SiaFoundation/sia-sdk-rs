@@ -4,6 +4,31 @@ use wasm_bindgen::prelude::*;
 use crate::helpers::to_js_err;
 use crate::object::PinnedObject;
 
+/// Progress information about a successfully uploaded or downloaded shard.
+#[derive(serde::Serialize, tsify::Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct ShardProgress {
+    pub host_key: String,
+    pub shard_size: usize,
+    pub shard_index: usize,
+    pub slab_index: usize,
+    /// Elapsed time in milliseconds since the start of the upload or download.
+    pub elapsed: f64,
+}
+
+impl From<sia_storage::ShardProgress> for ShardProgress {
+    fn from(p: sia_storage::ShardProgress) -> Self {
+        Self {
+            host_key: p.host_key.to_string(),
+            shard_size: p.shard_size,
+            shard_index: p.shard_index,
+            slab_index: p.slab_index,
+            elapsed: p.elapsed.as_millis() as f64,
+        }
+    }
+}
+
 /// Application metadata deserialized from a plain JS object.
 #[derive(serde::Deserialize, tsify::Tsify)]
 #[tsify(from_wasm_abi)]
@@ -17,116 +42,80 @@ pub struct AppMetadata {
     pub callback_url: Option<String>,
 }
 
-/// Options for uploading data. Deserialized from a plain JS object.
-/// The `onProgress` callback is extracted separately since JS functions
-/// can't pass through serde.
-pub struct UploadOptions {
-    pub data_shards: Option<u8>,
-    pub parity_shards: Option<u8>,
-    pub max_inflight: Option<usize>,
-    pub on_progress: Option<js_sys::Function>,
-}
-
-// Manually generate the TS interface since tsify can't handle the mixed
-// serde + JS function field.
 #[wasm_bindgen(typescript_custom_section)]
 const _: &str = r#"
 export interface UploadOptions {
     dataShards?: number;
     parityShards?: number;
     maxInflight?: number;
-    onProgress?: (uploaded: number, encodedSize: number) => void;
+    onShardUploaded?: (progress: ShardProgress) => void;
 }
 "#;
 
-impl UploadOptions {
-    /// Deserializes from a JsValue, extracting the onProgress callback separately.
-    pub fn from_js(val: JsValue) -> Result<Self, JsError> {
-        use wasm_bindgen::JsCast;
-
-        // Extract the callback before deserializing the rest
-        let on_progress = js_sys::Reflect::get(&val, &"onProgress".into())
-            .ok()
-            .filter(|v| v.is_function())
-            .map(|v| v.unchecked_into::<js_sys::Function>());
-
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Opts {
-            data_shards: Option<u8>,
-            parity_shards: Option<u8>,
-            max_inflight: Option<usize>,
-        }
-
-        let opts: Opts = serde_wasm_bindgen::from_value(val).map_err(to_js_err)?;
-        Ok(Self {
-            data_shards: opts.data_shards,
-            parity_shards: opts.parity_shards,
-            max_inflight: opts.max_inflight,
-            on_progress,
-        })
-    }
+fn shard_progress_callback(cb: js_sys::Function) -> sia_storage::ShardProgressCallback {
+    std::sync::Arc::new(move |p: sia_storage::ShardProgress| {
+        let progress: ShardProgress = p.into();
+        let js_val = serde_wasm_bindgen::to_value(&progress).unwrap_or(JsValue::UNDEFINED);
+        let _ = cb.call1(&JsValue::NULL, &js_val);
+    })
 }
 
-impl From<UploadOptions> for sia_storage::UploadOptions {
-    fn from(opts: UploadOptions) -> Self {
-        let mut merged = sia_storage::UploadOptions::default();
-        if let Some(v) = opts.data_shards {
-            merged.data_shards = v;
-        }
-        if let Some(v) = opts.parity_shards {
-            merged.parity_shards = v;
-        }
-        if let Some(v) = opts.max_inflight {
-            merged.max_inflight = v;
-        }
-        merged.shard_uploaded = opts.on_progress.map(|cb| {
-            let total_shards = merged.data_shards as u64 + merged.parity_shards as u64;
-            let slab_size = total_shards * sia_core::rhp4::SECTOR_SIZE as u64;
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            tokio::task::spawn_local(async move {
-                let mut sectors: u64 = 0;
-                while rx.recv().await.is_some() {
-                    sectors += 1;
-                    let uploaded = sectors * sia_core::rhp4::SECTOR_SIZE as u64;
-                    let encoded = sectors.div_ceil(total_shards) * slab_size;
-                    let _ = cb.call2(
-                        &wasm_bindgen::JsValue::NULL,
-                        &wasm_bindgen::JsValue::from(uploaded as f64),
-                        &wasm_bindgen::JsValue::from(encoded as f64),
-                    );
-                }
-            });
-            tx
-        });
-        merged
-    }
+fn get_f64(obj: &js_sys::Object, key: &str) -> Option<f64> {
+    js_sys::Reflect::get(obj, &key.into())
+        .ok()
+        .and_then(|v| v.as_f64())
 }
 
-/// Options for downloading data.
-#[derive(serde::Deserialize, tsify::Tsify)]
-#[tsify(from_wasm_abi)]
-#[serde(rename_all = "camelCase")]
-pub struct DownloadOptions {
-    pub max_inflight: Option<usize>,
-    pub offset: Option<f64>,
-    pub length: Option<f64>,
+fn get_function(obj: &js_sys::Object, key: &str) -> Option<js_sys::Function> {
+    js_sys::Reflect::get(obj, &key.into())
+        .ok()
+        .and_then(|v| v.dyn_into::<js_sys::Function>().ok())
 }
 
-impl From<DownloadOptions> for sia_storage::DownloadOptions {
-    fn from(opts: DownloadOptions) -> Self {
-        let mut merged = sia_storage::DownloadOptions::default();
-        if let Some(v) = opts.max_inflight {
-            merged.max_inflight = v;
-        }
-        if let Some(v) = opts.offset {
-            merged.offset = v as u64;
-        }
-        if let Some(v) = opts.length {
-            merged.length = Some(v as u64);
-        }
-        merged
+pub(crate) fn upload_options_from_js(val: JsValue) -> sia_storage::UploadOptions {
+    let obj = js_sys::Object::from(val);
+    let mut options = sia_storage::UploadOptions::default();
+    if let Some(v) = get_f64(&obj, "dataShards") {
+        options.data_shards = v as u8;
     }
+    if let Some(v) = get_f64(&obj, "parityShards") {
+        options.parity_shards = v as u8;
+    }
+    if let Some(v) = get_f64(&obj, "maxInflight") {
+        options.max_inflight = v as usize;
+    }
+    if let Some(cb) = get_function(&obj, "onShardUploaded") {
+        options.shard_uploaded = Some(shard_progress_callback(cb));
+    }
+    options
+}
+
+#[wasm_bindgen(typescript_custom_section)]
+const _: &str = r#"
+export interface DownloadOptions {
+    maxInflight?: number;
+    offset?: number;
+    length?: number;
+    onShardDownloaded?: (progress: ShardProgress) => void;
+}
+"#;
+
+pub(crate) fn download_options_from_js(val: JsValue) -> sia_storage::DownloadOptions {
+    let obj = js_sys::Object::from(val);
+    let mut options = sia_storage::DownloadOptions::default();
+    if let Some(v) = get_f64(&obj, "maxInflight") {
+        options.max_inflight = v as usize;
+    }
+    if let Some(v) = get_f64(&obj, "offset") {
+        options.offset = v as u64;
+    }
+    if let Some(v) = get_f64(&obj, "length") {
+        options.length = Some(v as u64);
+    }
+    if let Some(cb) = get_function(&obj, "onShardDownloaded") {
+        options.shard_downloaded = Some(shard_progress_callback(cb));
+    }
+    options
 }
 
 /// Query parameters for filtering hosts.

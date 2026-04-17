@@ -84,7 +84,11 @@ async function main() {
   // Upload the data.
   console.log(`Uploading ${formatBytes(size)} of random data...`);
   const uploadStart = performance.now();
-  const obj = await sdk.upload(new PinnedObject(), new Blob([data]).stream(), {});
+  const obj = await sdk.upload(new PinnedObject(), new Blob([data]).stream(), {
+    onShardUploaded: (progress) => {
+      console.log(progress);
+    },
+  });
   const uploadMs = performance.now() - uploadStart;
 
   // Pin the object.
@@ -99,7 +103,11 @@ async function main() {
   let lastChunkTime = null;
 
   const downloadStart = performance.now();
-  const dlStream = sdk.download(obj, {});
+  const dlStream = sdk.download(obj, {
+    onShardDownloaded: (progress) => {
+      console.log(progress);
+    },
+  });
   for await (const chunk of dlStream) {
     const now = performance.now();
     if (ttfb === null) {
