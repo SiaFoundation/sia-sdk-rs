@@ -377,16 +377,6 @@ mod test {
         seed
     }
 
-    fn random_bytes(buf: &mut [u8]) {
-        getrandom::fill(buf).unwrap();
-    }
-
-    fn random_u64() -> u64 {
-        let mut bytes = [0u8; 8];
-        getrandom::fill(&mut bytes).unwrap();
-        u64::from_le_bytes(bytes)
-    }
-
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn test_refresh_task_periodic_and_abort() {

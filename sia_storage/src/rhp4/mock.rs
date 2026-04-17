@@ -41,6 +41,7 @@ impl Client {
     /// Sets an initial per-sector read delay. After each read, the per-sector
     /// delay is halved. Used to simulate out-of-order chunk completion.
     /// Sectors written after this is set will start with `delay`.
+    #[allow(dead_code)] // used in tests
     pub fn set_initial_read_delay(&self, delay: Duration) {
         *self.initial_read_delay.write().unwrap() = Some(delay);
     }
