@@ -227,6 +227,14 @@ export interface PinnedSlab {
     sectors: Sector[];
 }
 
+export interface App {
+    id: string
+    name: string
+    description: string
+    serviceUrl?: string
+    logoUrl?: string
+}
+
 export interface Account {
     accountKey: string;
     maxPinnedData: number;
@@ -234,14 +242,8 @@ export interface Account {
     pinnedData: number;
     pinnedSize: number;
     ready: boolean;
-    app: {
-        id: string;
-        name: string;
-        description: string;
-        serviceUrl?: string;
-        logoUrl?: string;
-    };
-    lastUsed: string;
+    app: App;
+    lastUsed: Date;
 }
 
 export interface Host {
