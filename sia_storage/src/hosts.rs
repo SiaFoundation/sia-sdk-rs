@@ -527,7 +527,6 @@ impl<T: Transport> Hosts<T> {
         write_timeout: Duration,
     ) -> Result<Hash256, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        let start = Instant::now();
         timeout(write_timeout, async {
             let (prices, _) = Self::fetch_prices(
                 self.transport.clone(),
@@ -538,17 +537,18 @@ impl<T: Transport> Hosts<T> {
                 false,
             )
             .await?;
-            self.transport
+            let start = Instant::now();
+            let root = self
+                .transport
                 .write_sector(&host, prices, account_key, sector)
                 .await
-                .map_err(RPCError::Rhp)
+                .map_err(RPCError::Rhp)?;
+            self.hosts.add_write_sample(host_key, start.elapsed());
+            Ok(root)
         })
         .await
         .inspect_err(|_| self.hosts.add_failure(host_key))?
         .inspect_err(|_| self.hosts.add_failure(host_key))
-        .inspect(|_| {
-            self.hosts.add_write_sample(host_key, start.elapsed());
-        })
     }
 
     pub async fn read_sector(
@@ -561,7 +561,6 @@ impl<T: Transport> Hosts<T> {
         read_timeout: Duration,
     ) -> Result<bytes::Bytes, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        let start = Instant::now();
         timeout(read_timeout, async {
             let (prices, _) = Self::fetch_prices(
                 self.transport.clone(),
@@ -572,17 +571,18 @@ impl<T: Transport> Hosts<T> {
                 false,
             )
             .await?;
-            self.transport
+            let start = Instant::now();
+            let data = self
+                .transport
                 .read_sector(&host, prices, account_key, root, offset, length)
                 .await
-                .map_err(RPCError::Rhp)
+                .map_err(RPCError::Rhp)?;
+            self.hosts.add_read_sample(host_key, start.elapsed());
+            Ok(data)
         })
         .await
         .inspect_err(|_| self.hosts.add_failure(host_key))?
         .inspect_err(|_| self.hosts.add_failure(host_key))
-        .inspect(|_| {
-            self.hosts.add_read_sample(host_key, start.elapsed());
-        })
     }
 }
 

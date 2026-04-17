@@ -1287,7 +1287,7 @@ mod tests {
                 &ephemeral_key,
                 &AppMetadata {
                     id: app_id,
-                    name: "name".into(),
+                    name: "name",
                     description: "description",
                     service_url: "https://service.com",
                     logo_url: Some("https://logo.com"),
@@ -1693,7 +1693,7 @@ mod tests {
                 .objects(
                     &app_key,
                     Some(ObjectsCursor {
-                        after: object.updated_at.into(),
+                        after: object.updated_at,
                         id: object.id(),
                     }),
                     Some(1)
@@ -1765,7 +1765,7 @@ mod tests {
                     length: 512,
                 },
             ],
-            encrypted_metadata: b"hello world!".to_vec().into(),
+            encrypted_metadata: b"hello world!".to_vec(),
             created_at: DateTime::<FixedOffset>::parse_from_rfc3339(
                 "2025-09-09T16:10:46.898399-07:00",
             )
