@@ -9,6 +9,7 @@ use std::num::ParseIntError;
 use std::sync::{Arc, RwLock};
 use thiserror::{self, Error};
 use tokio::net::{TcpStream, lookup_host};
+use tokio::sync::OnceCell;
 
 use crate::rhp4::HostEndpoint;
 use crate::time::Duration;
@@ -48,9 +49,11 @@ pub enum ConnectError {
     NoEndpoint,
 }
 
+type ConnCell = Arc<OnceCell<Arc<Mux>>>;
+
 #[derive(Clone)]
 pub struct Client {
-    open_conns: Arc<RwLock<HashMap<PublicKey, Arc<Mux>>>>,
+    open_conns: Arc<RwLock<HashMap<PublicKey, ConnCell>>>,
 }
 
 impl Default for Client {
@@ -64,11 +67,6 @@ impl Client {
         Self {
             open_conns: Arc::new(RwLock::new(HashMap::new())),
         }
-    }
-
-    fn existing_conn(&self, host: &PublicKey) -> Option<Arc<Mux>> {
-        let cache = self.open_conns.read().unwrap();
-        cache.get(host).cloned()
     }
 
     async fn new_conn(&self, host: &HostEndpoint) -> Result<Mux, ConnectError> {
@@ -113,26 +111,25 @@ impl Client {
     }
 
     async fn host_stream(&self, host: &HostEndpoint) -> Result<Stream, ConnectError> {
-        let conn = match self.existing_conn(&host.public_key) {
-            Some(conn) => {
-                debug!("reusing existing siamux connection to {}", host.public_key);
-                conn
-            }
-            None => {
-                let new_conn = timeout(Duration::from_secs(5), self.new_conn(host))
+        let cell = self
+            .open_conns
+            .write()
+            .unwrap()
+            .entry(host.public_key)
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone();
+        let conn = cell
+            .get_or_try_init(|| async {
+                let mux = timeout(Duration::from_secs(5), self.new_conn(host))
                     .await
                     .inspect_err(|e| {
                         debug!("siamux connection to {} timed out: {e}", host.public_key);
                     })??;
-                let new_conn = Arc::new(new_conn);
-                self.open_conns
-                    .write()
-                    .unwrap()
-                    .insert(host.public_key, new_conn.clone());
                 debug!("created new siamux connection to {}", host.public_key);
-                new_conn
-            }
-        };
+                Ok::<_, ConnectError>(Arc::new(mux))
+            })
+            .await?
+            .clone();
 
         let stream = conn.dial_stream().inspect_err(|_| {
             self.open_conns.write().unwrap().remove(&host.public_key);

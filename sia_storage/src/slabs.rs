@@ -549,10 +549,11 @@ mod test {
             },
         ];
         let meta = b"hello, world!".to_vec();
-
-        let mut obj = Object::default();
-        obj.slabs = slabs.clone();
-        obj.metadata = meta.clone();
+        let obj = Object{
+            slabs: slabs.clone(),
+            metadata: meta.clone(),
+            ..Default::default()
+        };
 
         let seed: [u8; 32] = random_bytes_32();
         let private_key = AppKey::import(seed);
