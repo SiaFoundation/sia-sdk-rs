@@ -8,11 +8,11 @@ use thiserror::Error;
 use tokio::io::AsyncRead;
 use url::Url;
 
-use crate::time::Duration;
 use crate::app_client::{self, SlabPinParams};
 use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
 use crate::task::AbortOnDropHandle;
+use crate::time::Duration;
 use crate::upload::Uploader;
 use crate::{
     Account, AppKey, BuilderError, Download, DownloadError, DownloadOptions, Host, HostQuery,
@@ -382,12 +382,12 @@ mod test {
     async fn test_refresh_task_periodic_and_abort() {
         use std::sync::Arc;
 
+        use crate::time::Duration;
         use httptest::http::{Response, StatusCode};
         use httptest::matchers::*;
         use httptest::{Expectation, Server};
         use sia_core::signing::PrivateKey;
         use sia_core::types::v2::NetAddress;
-        use crate::time::Duration;
 
         use crate::hosts::Hosts;
         use crate::{AppKey, Host};
