@@ -221,7 +221,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                         Ok((index, data, progress)) => {
                             shards[index] = Some(data);
                             recovered_shards += 1;
-                            if let Some(callback) = &shard_downloaded {
+                            if recovered_shards <= min_shards && let Some(callback) = &shard_downloaded {
                                 callback(progress);
                             }
                             if recovered_shards >= min_shards {

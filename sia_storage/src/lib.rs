@@ -1247,15 +1247,16 @@ mod test {
             assert_eq!(data, recovered_data);
 
             let download_progress = download_progress.lock().unwrap();
-            let expected_pairs = min_shards * num_slabs;
-            assert_eq!(download_progress.len(), expected_pairs,
-                "download: expected {} unique slab shards, got {}",
-                expected_pairs, download_progress.len());
+            let chunks_per_slab = SLAB_SIZE as usize / (1 << 18);
+            let expected_total = chunks_per_slab * min_shards * num_slabs;
+            let actual_total: usize = download_progress.values().sum();
+            assert_eq!(actual_total, expected_total,
+                "download: expected {} total callbacks, got {}",
+                expected_total, actual_total);
 
-            let expected_count = 160;
-            for ((slab_idx, shard_idx), count) in download_progress.iter() {
-                assert_eq!(*count, expected_count, "shard ({}, {}) was downloaded {} times, expected {}", slab_idx, shard_idx, count, expected_count);
+            for ((slab_idx, shard_idx), _) in download_progress.iter() {
                 assert!(*shard_idx < total_shards, "invalid shard index {} in callback", shard_idx);
+                assert!(*slab_idx < num_slabs, "invalid slab index {} in callback", slab_idx);
             }
         }).await }
         }
