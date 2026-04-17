@@ -499,7 +499,9 @@ mod test {
     use sia_core::rhp4::SECTOR_SIZE;
     use sia_core::signing::PrivateKey;
     use sia_core::types::v2::NetAddress;
+    use std::collections::HashMap;
     use std::io::Cursor;
+    use std::sync::Mutex;
     use tokio::io::copy;
 
     use crate::time::Duration;
@@ -1201,13 +1203,15 @@ mod test {
             random_bytes(&mut data);
             let data = data.freeze();
 
-            // upload with progress callback
-            let upload_progress: Arc<std::sync::Mutex<Vec<ShardProgress>>> =
-                Arc::new(std::sync::Mutex::new(Vec::new()));
+            let upload_progress: Arc<Mutex<HashMap<(usize, usize), ShardProgress>>> = Arc::new(Mutex::new(HashMap::new()));
             let upload_progress_clone = upload_progress.clone();
             let upload_opts = UploadOptions::default()
                 .on_shard_uploaded(move |p: ShardProgress| {
-                    upload_progress_clone.lock().unwrap().push(p);
+                    if upload_progress_clone.lock().unwrap().contains_key(&(p.slab_index, p.shard_index)) {
+                        panic!("duplicate upload callback for slab {}, shard {}", p.slab_index, p.shard_index);
+                    }
+                    assert_eq!(p.shard_size, SECTOR_SIZE);
+                    upload_progress_clone.lock().unwrap().insert((p.slab_index, p.shard_index), p);
                 });
 
             let uploader = Uploader::new(hosts.clone(), app_key.clone());
@@ -1217,37 +1221,24 @@ mod test {
                 .unwrap();
             assert_eq!(obj.slabs().len(), num_slabs);
 
+            let upload_progress = upload_progress.lock().unwrap();
             // verify upload callbacks: exactly one per (slab_index, shard_index)
-            {
-                let events = upload_progress.lock().unwrap();
-                let expected = total_shards * num_slabs;
-                assert_eq!(events.len(), expected,
-                    "upload: expected {expected} callbacks, got {}", events.len());
-
-                let mut counts: std::collections::HashMap<(usize, usize), usize> =
-                    std::collections::HashMap::new();
-                for event in events.iter() {
-                    assert_eq!(event.shard_size, SECTOR_SIZE);
-                    *counts.entry((event.slab_index, event.shard_index)).or_default() += 1;
+            assert_eq!(upload_progress.len(), total_shards * num_slabs,
+                "upload: expected {} callbacks, got {}",
+                total_shards * num_slabs, upload_progress.len());
+            for i in 0..num_slabs {
+                for j in 0..total_shards {
+                    assert!(upload_progress.contains_key(&(i, j)),
+                        "missing upload callback for slab {}, shard {}", i, j);
                 }
-                for slab_idx in 0..num_slabs {
-                    for shard_idx in 0..total_shards {
-                        assert_eq!(*counts.get(&(slab_idx, shard_idx)).unwrap_or(&0), 1,
-                            "upload slab {slab_idx} shard {shard_idx}: expected 1 callback");
-                    }
-                }
-                // verify no phantom (slab, shard) pairs beyond expected ranges
-                assert_eq!(counts.len(), num_slabs * total_shards,
-                    "upload: unexpected (slab, shard) pairs");
             }
 
-            // download with progress callback
-            let download_progress: Arc<std::sync::Mutex<Vec<ShardProgress>>> =
-                Arc::new(std::sync::Mutex::new(Vec::new()));
+            let download_progress: Arc<Mutex<HashMap<(usize, usize), usize>>> =
+                Arc::new(Mutex::new(HashMap::new()));
             let download_progress_clone = download_progress.clone();
             let download_opts = DownloadOptions::default()
                 .on_shard_downloaded(move |p: ShardProgress| {
-                    download_progress_clone.lock().unwrap().push(p);
+                    *download_progress_clone.lock().unwrap().entry((p.slab_index, p.shard_index)).or_default() += 1;
                 });
 
             let mut recovered_data = Vec::with_capacity(data_size);
@@ -1255,29 +1246,16 @@ mod test {
             copy(&mut download, &mut recovered_data).await.unwrap();
             assert_eq!(data, recovered_data);
 
-            // verify download callbacks: min_shards per chunk per slab
-            {
-                let events = download_progress.lock().unwrap();
-                let chunks_per_slab = (SLAB_SIZE as usize).div_ceil(1 << 18);
-                let expected = chunks_per_slab * min_shards * num_slabs;
-                assert_eq!(events.len(), expected,
-                    "download: expected {expected} callbacks, got {}", events.len());
-
-                let mut per_slab: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-                for event in events.iter() {
-                    assert!(event.shard_size > 0 && event.shard_size <= SECTOR_SIZE);
-                    assert!(event.shard_index < total_shards);
-                    *per_slab.entry(event.slab_index).or_default() += 1;
-                }
-                for slab_idx in 0..num_slabs {
-                    assert_eq!(*per_slab.get(&slab_idx).unwrap_or(&0),
-                        chunks_per_slab * min_shards,
-                        "download slab {slab_idx}: expected {} callbacks",
-                        chunks_per_slab * min_shards);
-                }
-                // no phantom slab indices
-                assert_eq!(per_slab.len(), num_slabs,
-                    "download: unexpected slab indices: {:?}", per_slab.keys().collect::<Vec<_>>());
+            let download_progress = download_progress.lock().unwrap();
+            let expected_pairs = min_shards * num_slabs;
+            assert_eq!(download_progress.len(), expected_pairs,
+                "download: expected {} unique slab shards, got {}",
+                expected_pairs, download_progress.len());
+            
+            let expected_count = 160;
+            for ((slab_idx, shard_idx), count) in download_progress.iter() {
+                assert_eq!(*count, expected_count, "shard ({}, {}) was downloaded {} times, expected {}", slab_idx, shard_idx, count, expected_count);
+                assert!(*shard_idx < total_shards, "invalid shard index {} in callback", shard_idx);
             }
         }).await }
         }
