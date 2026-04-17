@@ -211,12 +211,15 @@ impl Client {
     /// turns out to be stale, the RPC method will call [`evict`] and the
     /// next call will establish a fresh connection.
     async fn connection(&self, host: &HostEndpoint) -> Result<Rc<Connection>, Error> {
-        let cell = self
-            .pool
-            .borrow_mut()
-            .entry(host.public_key)
-            .or_insert_with(|| Rc::new(OnceCell::new()))
-            .clone();
+        let cell = if let Some(cell) = self.pool.borrow().get(&host.public_key) {
+            cell.clone()
+        } else {
+            self.pool
+                .borrow_mut()
+                .entry(host.public_key)
+                .or_insert_with(|| Rc::new(OnceCell::new()))
+                .clone()
+        };
         let conn = cell
             .get_or_try_init(|| async {
                 // Gate concurrent dials to stay under Chrome's pending-connection cap.

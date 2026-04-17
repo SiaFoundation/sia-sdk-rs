@@ -111,13 +111,16 @@ impl Client {
     }
 
     async fn host_stream(&self, host: &HostEndpoint) -> Result<Stream, ConnectError> {
-        let cell = self
-            .open_conns
-            .write()
-            .unwrap()
-            .entry(host.public_key)
-            .or_insert_with(|| Arc::new(OnceCell::new()))
-            .clone();
+        let cell = if let Some(cell) = self.open_conns.read().unwrap().get(&host.public_key) {
+            cell.clone()
+        } else {
+            self.open_conns
+                .write()
+                .unwrap()
+                .entry(host.public_key)
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
+        };
         let conn = cell
             .get_or_try_init(|| async {
                 let mux = timeout(Duration::from_secs(5), self.new_conn(host))
