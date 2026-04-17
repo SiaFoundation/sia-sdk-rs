@@ -21,7 +21,7 @@ pub use logging::*;
 
 /// Metadata about an application connecting to the indexer.
 #[napi(object)]
-pub struct AppMeta {
+pub struct AppMetadata {
     pub id: Buffer,
     pub name: String,
     pub description: String,
@@ -317,7 +317,7 @@ pub struct ShardProgress {
     pub shard_size: u32,
     pub shard_index: u32,
     pub slab_index: u32,
-    pub elapsed: f64,
+    pub elapsed_ms: f64,
 }
 
 /// A Send-safe wrapper around a JS callback that converts it into a
@@ -350,7 +350,7 @@ impl SendableCallback<ShardProgress> {
                     shard_size: p.shard_size as u32,
                     shard_index: p.shard_index as u32,
                     slab_index: p.slab_index as u32,
-                    elapsed: p.elapsed.as_millis() as f64,
+                    elapsed_ms: p.elapsed.as_millis() as f64,
                 },
                 ThreadsafeFunctionCallMode::NonBlocking,
             );

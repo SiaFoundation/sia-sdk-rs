@@ -44,7 +44,8 @@ impl Sdk {
         let a = run_local(async move { sdk.account().await })
             .await
             .map_err(to_js_err)?;
-        types::to_js(&a)
+        let wrapped: types::Account = a.into();
+        types::to_js(&wrapped)
     }
 
     /// Returns a list of usable hosts, optionally filtered by a HostQuery.

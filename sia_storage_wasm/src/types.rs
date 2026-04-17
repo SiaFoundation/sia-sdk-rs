@@ -14,7 +14,7 @@ pub struct ShardProgress {
     pub shard_index: usize,
     pub slab_index: usize,
     /// Elapsed time in milliseconds since the start of the shard upload or download.
-    pub elapsed: f64,
+    pub elapsed_ms: f64,
 }
 
 impl From<sia_storage::ShardProgress> for ShardProgress {
@@ -24,7 +24,63 @@ impl From<sia_storage::ShardProgress> for ShardProgress {
             shard_size: p.shard_size,
             shard_index: p.shard_index,
             slab_index: p.slab_index,
-            elapsed: p.elapsed.as_millis() as f64,
+            elapsed_ms: p.elapsed.as_millis() as f64,
+        }
+    }
+}
+
+/// Application info registered with the indexer.
+#[derive(serde::Serialize, tsify::Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct App {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub logo_url: Option<String>,
+    pub service_url: Option<String>,
+}
+
+impl From<sia_storage::App> for App {
+    fn from(a: sia_storage::App) -> Self {
+        Self {
+            id: a.id.to_string(),
+            name: a.name,
+            description: a.description,
+            logo_url: a.logo_url,
+            service_url: a.service_url,
+        }
+    }
+}
+
+/// Information about the user's account on the indexer.
+#[derive(serde::Serialize, tsify::Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    pub account_key: String,
+    pub max_pinned_data: u64,
+    pub remaining_storage: u64,
+    pub pinned_data: u64,
+    pub pinned_size: u64,
+    pub ready: bool,
+    pub app: App,
+    #[tsify(type = "Date")]
+    #[serde(with = "serde_wasm_bindgen::preserve")]
+    pub last_used: js_sys::Date,
+}
+
+impl From<sia_storage::Account> for Account {
+    fn from(a: sia_storage::Account) -> Self {
+        Self {
+            account_key: a.account_key.to_string(),
+            max_pinned_data: a.max_pinned_data,
+            remaining_storage: a.remaining_storage,
+            pinned_data: a.pinned_data,
+            pinned_size: a.pinned_size,
+            ready: a.ready,
+            app: a.app.into(),
+            last_used: js_sys::Date::new(&JsValue::from(a.last_used.timestamp_millis() as f64)),
         }
     }
 }
@@ -225,25 +281,6 @@ export interface PinnedSlab {
     encryptionKey: string;
     minShards: number;
     sectors: Sector[];
-}
-
-export interface App {
-    id: string
-    name: string
-    description: string
-    serviceUrl?: string
-    logoUrl?: string
-}
-
-export interface Account {
-    accountKey: string;
-    maxPinnedData: number;
-    remainingStorage: number;
-    pinnedData: number;
-    pinnedSize: number;
-    ready: boolean;
-    app: App;
-    lastUsed: Date;
 }
 
 export interface Host {

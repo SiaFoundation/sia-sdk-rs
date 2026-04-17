@@ -5,7 +5,7 @@ use napi_derive::napi;
 use sia_core::signing::Signature;
 use sia_storage::Hash256;
 
-use crate::{AppMeta, Sdk};
+use crate::{AppMetadata, Sdk};
 
 /// An AppKey is used to sign requests to the indexer.
 ///
@@ -119,7 +119,7 @@ impl Builder {
 impl Builder {
     /// Creates a new SDK builder with the provided indexer URL.
     #[napi(constructor)]
-    pub fn new(indexer_url: String, app_meta: AppMeta) -> Result<Self> {
+    pub fn new(indexer_url: String, app_meta: AppMetadata) -> Result<Self> {
         if app_meta.id.len() != 32 {
             return Err(Error::from_reason("app ID must be 32 bytes"));
         }
