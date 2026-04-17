@@ -1251,7 +1251,7 @@ mod test {
             assert_eq!(download_progress.len(), expected_pairs,
                 "download: expected {} unique slab shards, got {}",
                 expected_pairs, download_progress.len());
-            
+
             let expected_count = 160;
             for ((slab_idx, shard_idx), count) in download_progress.iter() {
                 assert_eq!(*count, expected_count, "shard ({}, {}) was downloaded {} times, expected {}", slab_idx, shard_idx, count, expected_count);
