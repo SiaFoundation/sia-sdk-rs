@@ -222,12 +222,7 @@ mod test {
         EncryptionKey::from(key)
     }
 
-    fn encrypt_shards(
-        key: &EncryptionKey,
-        shard_start: u8,
-        offset: usize,
-        shards: &mut Vec<Vec<u8>>,
-    ) {
+    fn encrypt_shards(key: &EncryptionKey, shard_start: u8, offset: usize, shards: &mut [Vec<u8>]) {
         shards.iter_mut().enumerate().for_each(|(i, shard)| {
             encrypt_shard(key, shard_start + i as u8, offset, shard);
         });

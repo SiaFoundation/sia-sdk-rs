@@ -24,6 +24,7 @@ use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
 use tokio::io::{AsyncRead, ReadBuf};
+use tokio::sync::{OnceCell, Semaphore};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -42,6 +43,11 @@ extern "C" {
 
 /// The WebTransport URL path for the RHP4 protocol.
 const RHP4_PATH: &str = "/sia/rhp/v4";
+
+/// Maximum concurrent in-flight dials. Chrome caps pending HTTP/3
+/// connections; gating dials here prevents the browser from rejecting or
+/// stalling when many hosts are contacted at once.
+const MAX_PENDING_CONNS: usize = 64;
 
 // --- Connection ---
 
@@ -179,9 +185,12 @@ impl AsyncRead for Stream {
 
 // --- Client with connection pooling ---
 
+type ConnCell = Rc<OnceCell<Rc<Connection>>>;
+
 #[derive(Clone)]
 pub struct Client {
-    pool: Rc<RefCell<HashMap<PublicKey, Rc<Connection>>>>,
+    pool: Rc<RefCell<HashMap<PublicKey, ConnCell>>>,
+    dial_sema: Rc<Semaphore>,
 }
 
 impl Default for Client {
@@ -194,6 +203,7 @@ impl Client {
     pub fn new() -> Self {
         Client {
             pool: Rc::new(RefCell::new(HashMap::new())),
+            dial_sema: Rc::new(Semaphore::new(MAX_PENDING_CONNS)),
         }
     }
 
@@ -201,35 +211,49 @@ impl Client {
     /// turns out to be stale, the RPC method will call [`evict`] and the
     /// next call will establish a fresh connection.
     async fn connection(&self, host: &HostEndpoint) -> Result<Rc<Connection>, Error> {
-        if let Some(conn) = self.pool.borrow().get(&host.public_key).cloned() {
-            return Ok(conn);
-        }
+        let cell = if let Some(cell) = self.pool.borrow().get(&host.public_key) {
+            cell.clone()
+        } else {
+            self.pool
+                .borrow_mut()
+                .entry(host.public_key)
+                .or_insert_with(|| Rc::new(OnceCell::new()))
+                .clone()
+        };
+        let conn = cell
+            .get_or_try_init(|| async {
+                // Gate concurrent dials to stay under Chrome's pending-connection cap.
+                let _permit = self
+                    .dial_sema
+                    .acquire()
+                    .await
+                    .map_err(|e| Error::Transport(format!("dial semaphore closed: {e}")))?;
 
-        // Connect to first available QUIC address
-        let mut last_err = None;
-        for addr in &host.addresses {
-            if addr.protocol != Protocol::QUIC {
-                continue;
-            }
-            match connect(&addr.address).await {
-                Ok(conn) => {
-                    let conn = Rc::new(conn);
-                    self.pool.borrow_mut().insert(host.public_key, conn.clone());
-                    return Ok(conn);
+                // Connect to first available QUIC address
+                let mut last_err = None;
+                for addr in &host.addresses {
+                    if addr.protocol != Protocol::QUIC {
+                        continue;
+                    }
+                    match connect(&addr.address).await {
+                        Ok(conn) => return Ok(Rc::new(conn)),
+                        Err(e) => {
+                            debug!("[WT] connect to {} failed: {e}", addr.address);
+                            last_err = Some(e);
+                        }
+                    }
                 }
-                Err(e) => {
-                    debug!("[WT] connect to {} failed: {e}", addr.address);
-                    last_err = Some(e);
-                }
-            }
-        }
 
-        Err(last_err.unwrap_or_else(|| {
-            Error::Transport(format!(
-                "no QUIC/WebTransport address for host {}",
-                host.public_key
-            ))
-        }))
+                Err(last_err.unwrap_or_else(|| {
+                    Error::Transport(format!(
+                        "no QUIC/WebTransport address for host {}",
+                        host.public_key
+                    ))
+                }))
+            })
+            .await?
+            .clone();
+        Ok(conn)
     }
 
     fn evict(&self, host_key: &PublicKey) {
