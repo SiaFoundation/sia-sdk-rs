@@ -527,28 +527,27 @@ impl<T: Transport> Hosts<T> {
         write_timeout: Duration,
     ) -> Result<Hash256, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        let (prices, _) = Self::fetch_prices(
-            self.transport.clone(),
-            &self.price_cache,
-            &self.hosts,
-            &host,
-            Duration::from_secs(1),
-            false,
-        )
-        .await?;
-        let start = Instant::now();
-        timeout(
-            write_timeout,
-            self.transport
-                .write_sector(&host, prices, account_key, sector),
-        )
-        .await
-        .inspect_err(|_| self.hosts.add_failure(host_key))?
-        .inspect_err(|_| self.hosts.add_failure(host_key))
-        .inspect(|_| {
+        timeout(write_timeout, async {
+            let (prices, _) = Self::fetch_prices(
+                self.transport.clone(),
+                &self.price_cache,
+                &self.hosts,
+                &host,
+                write_timeout,
+                false,
+            )
+            .await?;
+            let start = Instant::now();
+            let root = self
+                .transport
+                .write_sector(&host, prices, account_key, sector)
+                .await
+                .inspect_err(|_| self.hosts.add_failure(host_key))
+                .map_err(RPCError::Rhp)?;
             self.hosts.add_write_sample(host_key, start.elapsed());
+            Ok(root)
         })
-        .map_err(RPCError::Rhp)
+        .await?
     }
 
     pub async fn read_sector(
@@ -561,28 +560,27 @@ impl<T: Transport> Hosts<T> {
         read_timeout: Duration,
     ) -> Result<bytes::Bytes, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        let (prices, _) = Self::fetch_prices(
-            self.transport.clone(),
-            &self.price_cache,
-            &self.hosts,
-            &host,
-            Duration::from_secs(1),
-            false,
-        )
-        .await?;
-        let start = Instant::now();
-        timeout(
-            read_timeout,
-            self.transport
-                .read_sector(&host, prices, account_key, root, offset, length),
-        )
-        .await
-        .inspect_err(|_| self.hosts.add_failure(host_key))?
-        .inspect_err(|_| self.hosts.add_failure(host_key))
-        .inspect(|_| {
+        timeout(read_timeout, async {
+            let (prices, _) = Self::fetch_prices(
+                self.transport.clone(),
+                &self.price_cache,
+                &self.hosts,
+                &host,
+                read_timeout,
+                false,
+            )
+            .await?;
+            let start = Instant::now();
+            let data = self
+                .transport
+                .read_sector(&host, prices, account_key, root, offset, length)
+                .await
+                .inspect_err(|_| self.hosts.add_failure(host_key))
+                .map_err(RPCError::Rhp)?;
             self.hosts.add_read_sample(host_key, start.elapsed());
+            Ok(data)
         })
-        .map_err(RPCError::Rhp)
+        .await?
     }
 }
 

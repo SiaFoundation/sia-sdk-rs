@@ -142,9 +142,8 @@ impl Transport for Client {
         // per-sector decreasing delay (used to simulate out-of-order chunk completion)
         let read_delay = {
             let mut delays = self.read_delays.write().unwrap();
-            delays.get(&root).copied().map(|delay| {
+            delays.get(&root).copied().inspect(|&delay| {
                 delays.insert(root, delay / 2);
-                delay
             })
         };
         if let Some(delay) = read_delay {
