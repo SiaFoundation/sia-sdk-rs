@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use log::{debug, warn};
@@ -9,6 +8,7 @@ use thiserror::Error;
 use tokio::io::AsyncRead;
 use url::Url;
 
+use crate::time::Duration;
 use crate::app_client::{self, SlabPinParams};
 use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
@@ -387,7 +387,7 @@ mod test {
         use httptest::{Expectation, Server};
         use sia_core::signing::PrivateKey;
         use sia_core::types::v2::NetAddress;
-        use std::time::Duration;
+        use crate::time::Duration;
 
         use crate::hosts::Hosts;
         use crate::{AppKey, Host};

@@ -3,13 +3,12 @@ use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Poll, ready};
-use std::time::Instant;
 
 use crate::encryption::{Chacha20Cipher, EncryptionKey, encrypt_recovered_shards};
 use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::{Hosts, RPCError};
 use crate::rhp4::{Client, Transport};
-use crate::time::{Duration, Elapsed, sleep};
+use crate::time::{Duration, Elapsed, Instant, sleep};
 use crate::{AppKey, DownloadOptions, Object, Sector, ShardProgress, ShardProgressCallback, Slab};
 use bytes::{Buf, Bytes, BytesMut};
 use chacha20::cipher::StreamCipher;
