@@ -45,7 +45,7 @@ pub trait ProgressCallback: Send + Sync {
     fn progress(&self, progress: ShardProgress);
 }
 
-/// Information about a successfully uploaded shard.
+/// Information about a successfully uploaded or downloaded shard.
 #[derive(uniffi::Record)]
 pub struct ShardProgress {
     pub host_key: String,
@@ -773,6 +773,7 @@ pub struct DownloadOptions {
     pub length: Option<u64>,
 
     /// Optional callback to report download progress.
+    #[uniffi(default = None)]
     pub shard_downloaded: Option<Arc<dyn ProgressCallback>>,
 }
 

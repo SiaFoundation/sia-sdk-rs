@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
+use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::{PublicKey, Signature};
 use sia_core::types::{self, Hash256, HexParseError};
 use std::str::FromStr;
@@ -665,7 +666,7 @@ impl Sdk {
         let length = Arc::new(AtomicU64::new(0));
         let closed = Arc::new(AtomicBool::new(false));
         let (action_tx, mut action_rx) = mpsc::channel(10);
-        let slab_size = sia_storage::encoded_size(1, options.data_shards, options.parity_shards);
+        let slab_size = SECTOR_SIZE as u64 * options.data_shards as u64;
         let task_length = length.clone();
         let upload_task = spawn(async move {
             let mut packed_upload = sdk.upload_packed(options);

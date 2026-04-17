@@ -344,7 +344,8 @@ impl<const N: usize> Iterator for ChunkIter<N> {
         if self.remaining == 0 {
             return None;
         }
-        let slab = &self.slabs[self.slab_idx];
+        let slab_index = self.slab_idx;
+        let slab = &self.slabs[slab_index];
         let slab_offset = slab.offset as u64 + self.offset;
         let slab_length = (slab.length as u64 - self.offset)
             .min(self.remaining)
@@ -362,7 +363,7 @@ impl<const N: usize> Iterator for ChunkIter<N> {
         chunk.length = slab_length as u32;
         Some(ChunkSlab {
             slab: chunk,
-            index: self.slab_idx,
+            index: slab_index,
         })
     }
 }
@@ -544,7 +545,7 @@ mod test {
     use crate::compat::run_local;
     use crate::hosts::Hosts;
     use crate::upload::Uploader;
-    use crate::{Host, UploadOptions};
+    use crate::{Host, ShardProgress, UploadOptions};
 
     cross_target_tests! {
         async fn test_out_of_order_download() { run_local(async {
@@ -670,5 +671,95 @@ mod test {
                 );
             }
         }).await }
+
+        async fn test_slab_recovery_progress_callback() { run_local(async {
+            let upload_options = UploadOptions::default();
+            let min_shards = upload_options.data_shards as usize;
+            let total_shards = min_shards + upload_options.parity_shards as usize;
+            let slab_size = min_shards * SECTOR_SIZE;
+            let num_slabs = 3;
+
+            let transport = Client::new();
+            let hosts = Hosts::new(transport.clone());
+            hosts.update(
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&rand::random()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
+            // upload enough data for multiple slabs
+            let data_size = slab_size * num_slabs;
+            let mut data = BytesMut::zeroed(data_size);
+            rand::rng().fill_bytes(&mut data);
+            let data = data.freeze();
+            let app_key = Arc::new(AppKey::import(rand::random()));
+
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+            let obj = uploader
+                .upload(Object::default(), Cursor::new(data.clone()), upload_options)
+                .await
+                .unwrap();
+            assert_eq!(obj.slabs().len(), num_slabs);
+
+            // download with progress callback
+            let progress: Arc<std::sync::Mutex<Vec<ShardProgress>>> =
+                Arc::new(std::sync::Mutex::new(Vec::new()));
+            let progress_clone = progress.clone();
+            let opts = DownloadOptions::default()
+                .on_shard_downloaded(move |p: ShardProgress| {
+                    progress_clone.lock().unwrap().push(p);
+                });
+
+            let mut recovered_data = Vec::with_capacity(data_size);
+            let mut download = Download::new(&obj, hosts.clone(), app_key.clone(), opts).unwrap();
+            tokio::io::copy(&mut download, &mut recovered_data)
+                .await
+                .unwrap();
+            assert_eq!(data, recovered_data);
+
+            let events = progress.lock().unwrap();
+            // each slab is split into CHUNK_SIZE (256 KiB) chunks for download.
+            // each chunk recovers min_shards shards independently.
+            let chunks_per_slab = slab_size.div_ceil(CHUNK_SIZE);
+            let expected_total = chunks_per_slab * min_shards * num_slabs;
+            assert_eq!(
+                events.len(),
+                expected_total,
+                "expected {expected_total} progress callbacks ({chunks_per_slab} chunks × {min_shards} shards × {num_slabs} slabs), got {}",
+                events.len()
+            );
+
+            // count callbacks per slab, verify shard metadata
+            let mut per_slab: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+            for event in events.iter() {
+                assert!(event.shard_size > 0 && event.shard_size <= SECTOR_SIZE,
+                    "shard_size {} out of range", event.shard_size);
+                assert!(
+                    event.shard_index < total_shards,
+                    "shard_index {} out of range for total_shards {}",
+                    event.shard_index,
+                    total_shards
+                );
+                *per_slab.entry(event.slab_index).or_default() += 1;
+            }
+            // every slab should have at least one callback
+            for slab_idx in 0..num_slabs {
+                assert!(
+                    per_slab.contains_key(&slab_idx),
+                    "slab {slab_idx} had no progress callbacks"
+                );
+            }
+        }).await }
+
     }
 }

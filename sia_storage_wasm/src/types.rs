@@ -13,7 +13,7 @@ pub struct ShardProgress {
     pub shard_size: usize,
     pub shard_index: usize,
     pub slab_index: usize,
-    /// Elapsed time in milliseconds since the start of the upload or download.
+    /// Elapsed time in milliseconds since the start of the shard upload or download.
     pub elapsed: f64,
 }
 

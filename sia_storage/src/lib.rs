@@ -1172,5 +1172,113 @@ mod test {
                 _ => panic!(),
             }
         }).await }
+
+        async fn test_progress_callbacks() { run_local(async {
+            let min_shards: usize = 10;
+            let total_shards: usize = 30;
+            let num_slabs = 3;
+
+            let app_key = Arc::new(AppKey::import(random_seed()));
+            let hosts = Hosts::new(Client::new());
+            hosts.update(
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
+            let data_size = SLAB_SIZE as usize * num_slabs;
+            let mut data = BytesMut::zeroed(data_size);
+            random_bytes(&mut data);
+            let data = data.freeze();
+
+            // upload with progress callback
+            let upload_progress: Arc<std::sync::Mutex<Vec<ShardProgress>>> =
+                Arc::new(std::sync::Mutex::new(Vec::new()));
+            let upload_progress_clone = upload_progress.clone();
+            let upload_opts = UploadOptions::default()
+                .on_shard_uploaded(move |p: ShardProgress| {
+                    upload_progress_clone.lock().unwrap().push(p);
+                });
+
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+            let obj = uploader
+                .upload(Object::default(), Cursor::new(data.clone()), upload_opts)
+                .await
+                .unwrap();
+            assert_eq!(obj.slabs().len(), num_slabs);
+
+            // verify upload callbacks: exactly one per (slab_index, shard_index)
+            {
+                let events = upload_progress.lock().unwrap();
+                let expected = total_shards * num_slabs;
+                assert_eq!(events.len(), expected,
+                    "upload: expected {expected} callbacks, got {}", events.len());
+
+                let mut counts: std::collections::HashMap<(usize, usize), usize> =
+                    std::collections::HashMap::new();
+                for event in events.iter() {
+                    assert_eq!(event.shard_size, SECTOR_SIZE);
+                    *counts.entry((event.slab_index, event.shard_index)).or_default() += 1;
+                }
+                for slab_idx in 0..num_slabs {
+                    for shard_idx in 0..total_shards {
+                        assert_eq!(*counts.get(&(slab_idx, shard_idx)).unwrap_or(&0), 1,
+                            "upload slab {slab_idx} shard {shard_idx}: expected 1 callback");
+                    }
+                }
+                // verify no phantom (slab, shard) pairs beyond expected ranges
+                assert_eq!(counts.len(), num_slabs * total_shards,
+                    "upload: unexpected (slab, shard) pairs");
+            }
+
+            // download with progress callback
+            let download_progress: Arc<std::sync::Mutex<Vec<ShardProgress>>> =
+                Arc::new(std::sync::Mutex::new(Vec::new()));
+            let download_progress_clone = download_progress.clone();
+            let download_opts = DownloadOptions::default()
+                .on_shard_downloaded(move |p: ShardProgress| {
+                    download_progress_clone.lock().unwrap().push(p);
+                });
+
+            let mut recovered_data = Vec::with_capacity(data_size);
+            let mut download = Download::new(&obj, hosts.clone(), app_key.clone(), download_opts).unwrap();
+            copy(&mut download, &mut recovered_data).await.unwrap();
+            assert_eq!(data, recovered_data);
+
+            // verify download callbacks: min_shards per chunk per slab
+            {
+                let events = download_progress.lock().unwrap();
+                let chunks_per_slab = (SLAB_SIZE as usize).div_ceil(1 << 18);
+                let expected = chunks_per_slab * min_shards * num_slabs;
+                assert_eq!(events.len(), expected,
+                    "download: expected {expected} callbacks, got {}", events.len());
+
+                let mut per_slab: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+                for event in events.iter() {
+                    assert!(event.shard_size > 0 && event.shard_size <= SECTOR_SIZE);
+                    assert!(event.shard_index < total_shards);
+                    *per_slab.entry(event.slab_index).or_default() += 1;
+                }
+                for slab_idx in 0..num_slabs {
+                    assert_eq!(*per_slab.get(&slab_idx).unwrap_or(&0),
+                        chunks_per_slab * min_shards,
+                        "download slab {slab_idx}: expected {} callbacks",
+                        chunks_per_slab * min_shards);
+                }
+                // no phantom slab indices
+                assert_eq!(per_slab.len(), num_slabs,
+                    "download: unexpected slab indices: {:?}", per_slab.keys().collect::<Vec<_>>());
+            }
+        }).await }
         }
 }

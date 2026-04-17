@@ -174,7 +174,7 @@ impl Sdk {
     /// re-pin and update any references to the old ID.
     ///
     /// ```js
-    /// const obj = await sdk.upload(file.stream(), new PinnedObject());
+    /// const obj = await sdk.upload(new PinnedObject(), file.stream());
     /// await sdk.pinObject(obj);
     /// ```
     pub async fn upload(
@@ -206,8 +206,7 @@ impl Sdk {
     }
 
     /// Generates a signed share URL for an object. Anyone with the URL can
-    /// download and decrypt the object until `valid_until_ms` (milliseconds
-    /// since epoch, i.e. `Date.getTime()`).
+    /// download and decrypt the object until `validUntil`.
     #[wasm_bindgen(js_name = "shareObject")]
     pub fn share_object(
         &self,
