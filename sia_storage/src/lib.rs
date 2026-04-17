@@ -16,7 +16,7 @@
 //! user's encryption keys -- if it changes, previously stored data becomes
 //! inaccessible. Generate it once (e.g. with a random hash) and never change it.
 //!
-//! Use [Builder] to connect to an indexer and obtain an [SDK] instance. There are
+//! Use [Builder] to connect to an indexer and obtain an [Sdk] instance. There are
 //! two paths:
 //!
 //! - **First time**: Call [Builder::request_connection] to start the approval flow,
@@ -25,7 +25,7 @@
 //!   user's recovery phrase.
 //! - **Returning**: Call [Builder::connected] with a previously exported [AppKey].
 //!
-//! Once you have an [SDK], use it to upload, download, and manage objects:
+//! Once you have an [Sdk], use it to upload, download, and manage objects:
 //!
 //! ```ignore
 //! // Upload
@@ -40,7 +40,7 @@
 //! # Key management
 //!
 //! The [AppKey] grants full access to a user's data. After connecting, retrieve it
-//! with [SDK::app_key], then persist it using [AppKey::export] and restore it with
+//! with [Sdk::app_key], then persist it using [AppKey::export] and restore it with
 //! [AppKey::import] so users don't need to re-approve on every launch.
 
 #[macro_use]
@@ -194,7 +194,7 @@ impl AppKey {
     }
 }
 
-/// A cursor for paginating through object events returned by [SDK::object_events].
+/// A cursor for paginating through object events returned by [Sdk::object_events].
 pub struct ObjectsCursor {
     /// Only return events after this timestamp.
     pub after: DateTime<Utc>,
@@ -222,7 +222,7 @@ impl Serialize for GeoLocation {
     }
 }
 
-/// Parameters for filtering hosts returned by [SDK::hosts].
+/// Parameters for filtering hosts returned by [Sdk::hosts].
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct HostQuery {
     /// Sort hosts by proximity to this location.

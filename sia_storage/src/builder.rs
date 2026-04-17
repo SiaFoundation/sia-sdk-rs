@@ -97,7 +97,7 @@ impl Builder<DisconnectedState> {
     }
 
     /// Attempts to connect using the provided app key.
-    /// If the app key is valid, returns Some([SDK]), otherwise returns None.
+    /// If the app key is valid, returns Some([Sdk]), otherwise returns None.
     ///
     /// If you receive None, call [Builder::request_connection] to request a new connection.
     ///
