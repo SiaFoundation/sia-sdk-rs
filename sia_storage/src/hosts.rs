@@ -542,13 +542,12 @@ impl<T: Transport> Hosts<T> {
                 .transport
                 .write_sector(&host, prices, account_key, sector)
                 .await
+                .inspect_err(|_| self.hosts.add_failure(host_key))
                 .map_err(RPCError::Rhp)?;
             self.hosts.add_write_sample(host_key, start.elapsed());
             Ok(root)
         })
-        .await
-        .inspect_err(|_| self.hosts.add_failure(host_key))?
-        .inspect_err(|_| self.hosts.add_failure(host_key))
+        .await?
     }
 
     pub async fn read_sector(
@@ -576,13 +575,12 @@ impl<T: Transport> Hosts<T> {
                 .transport
                 .read_sector(&host, prices, account_key, root, offset, length)
                 .await
+                .inspect_err(|_| self.hosts.add_failure(host_key))
                 .map_err(RPCError::Rhp)?;
             self.hosts.add_read_sample(host_key, start.elapsed());
             Ok(data)
         })
-        .await
-        .inspect_err(|_| self.hosts.add_failure(host_key))?
-        .inspect_err(|_| self.hosts.add_failure(host_key))
+        .await?
     }
 }
 
