@@ -12,7 +12,7 @@ permissions:
 jobs:
   release:
     if: github.head_ref == 'release' && github.event.pull_request.merged == true
-    runs-on: tenki-standard-autoscale
+    runs-on: tenki-standard-medium-4c-8g
     steps:
       - uses: actions/checkout@v5
         with:

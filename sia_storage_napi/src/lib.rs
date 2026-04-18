@@ -21,7 +21,7 @@ pub use logging::*;
 
 /// Metadata about an application connecting to the indexer.
 #[napi(object)]
-pub struct AppMeta {
+pub struct AppMetadata {
     pub id: Buffer,
     pub name: String,
     pub description: String,
@@ -310,20 +310,132 @@ impl From<sia_storage::Account> for Account {
     }
 }
 
-/// Upload options.
+/// Progress information about a successfully uploaded or downloaded shard.
 #[napi(object)]
+pub struct ShardProgress {
+    pub host_key: String,
+    pub shard_size: u32,
+    pub shard_index: u32,
+    pub slab_index: u32,
+    pub elapsed_ms: f64,
+}
+
+/// A Send-safe wrapper around a JS callback that converts it into a
+/// `ThreadsafeFunction` during napi parameter extraction.
+pub struct SendableCallback<T: ToNapiValue + 'static> {
+    pub(crate) inner: ThreadsafeFunction<T, (), T, napi::Status, false, true>,
+}
+
+impl<T: ToNapiValue + 'static> FromNapiValue for SendableCallback<T> {
+    unsafe fn from_napi_value(
+        env: napi::sys::napi_env,
+        value: napi::sys::napi_value,
+    ) -> Result<Self> {
+        let func = unsafe { Function::<'static, T, ()>::from_napi_value(env, value)? };
+        let callback = func
+            .build_threadsafe_function()
+            .weak::<true>()
+            .build()
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(Self { inner: callback })
+    }
+}
+
+impl SendableCallback<ShardProgress> {
+    fn into_shard_callback(self) -> sia_storage::ShardProgressCallback {
+        Arc::new(move |p: sia_storage::ShardProgress| {
+            self.inner.call(
+                ShardProgress {
+                    host_key: p.host_key.to_string(),
+                    shard_size: p.shard_size as u32,
+                    shard_index: p.shard_index as u32,
+                    slab_index: p.slab_index as u32,
+                    elapsed_ms: p.elapsed.as_millis() as f64,
+                },
+                ThreadsafeFunctionCallMode::NonBlocking,
+            );
+        })
+    }
+}
+
+/// Upload options.
+#[napi(object, object_to_js = false)]
+#[derive(Default)]
 pub struct UploadOptions {
-    pub max_inflight: Option<u8>,
+    pub max_inflight: Option<u32>,
     pub data_shards: Option<u8>,
     pub parity_shards: Option<u8>,
+    #[napi(ts_type = "(progress: ShardProgress) => void")]
+    pub on_shard_uploaded: Option<SendableCallback<ShardProgress>>,
+}
+
+impl From<UploadOptions> for sia_storage::UploadOptions {
+    fn from(val: UploadOptions) -> Self {
+        let mut options = sia_storage::UploadOptions::default();
+        options.data_shards = val.data_shards.unwrap_or(options.data_shards);
+        options.parity_shards = val.parity_shards.unwrap_or(options.parity_shards);
+        options.max_inflight = val
+            .max_inflight
+            .map(|v| v as usize)
+            .unwrap_or(options.max_inflight);
+        options.shard_uploaded = val.on_shard_uploaded.map(|cb| cb.into_shard_callback());
+        options
+    }
+}
+
+/// A Send-safe wrapper around `UploadOptions` that converts the JS callback
+/// into a `ThreadsafeFunction` during napi parameter extraction.
+pub struct SendableUploadOptions(pub(crate) sia_storage::UploadOptions);
+
+impl FromNapiValue for SendableUploadOptions {
+    unsafe fn from_napi_value(
+        env: napi::sys::napi_env,
+        value: napi::sys::napi_value,
+    ) -> Result<Self> {
+        let opts = unsafe { UploadOptions::from_napi_value(env, value)? };
+        Ok(Self(opts.into()))
+    }
 }
 
 /// Download options.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct DownloadOptions {
     pub max_inflight: Option<u8>,
     pub offset: Option<BigInt>,
     pub length: Option<BigInt>,
+    #[napi(ts_type = "(progress: ShardProgress) => void")]
+    pub on_shard_downloaded: Option<SendableCallback<ShardProgress>>,
+}
+
+impl TryFrom<DownloadOptions> for sia_storage::DownloadOptions {
+    type Error = napi::Error;
+
+    fn try_from(val: DownloadOptions) -> Result<Self> {
+        let mut options = sia_storage::DownloadOptions::default();
+        if let Some(max_inflight) = val.max_inflight {
+            options.max_inflight = max_inflight as usize;
+        }
+        if let Some(offset) = val.offset {
+            let (signed, offset, lossless) = offset.get_u64();
+            if signed {
+                return Err(Error::from_reason("offset must be non-negative"));
+            } else if !lossless {
+                return Err(Error::from_reason("offset too large"));
+            }
+            options.offset = offset;
+        }
+        if let Some(length) = val.length {
+            let (signed, length, lossless) = length.get_u64();
+            if signed {
+                return Err(Error::from_reason("length must be non-negative"));
+            } else if !lossless {
+                return Err(Error::from_reason("length too large"));
+            }
+            options.length = Some(length);
+        }
+        options.shard_downloaded = val.on_shard_downloaded.map(|cb| cb.into_shard_callback());
+        Ok(options)
+    }
 }
 
 /// An object pinned to an indexer.
@@ -427,33 +539,6 @@ impl PinnedObject {
     pub fn updated_at(&self) -> DateTime<Utc> {
         *self.inner.lock().unwrap().updated_at()
     }
-}
-
-/// Wires an optional JS progress callback into a `shard_uploaded` channel.
-/// Reports `(uploaded_bytes, encoded_size)` matching the FFI crate's
-/// `UploadProgressCallback::progress` signature.
-fn setup_progress_channel(
-    callback: Option<ThreadsafeFunction<(u64, u64)>>,
-    data_shards: u8,
-    parity_shards: u8,
-) -> Option<mpsc::UnboundedSender<()>> {
-    let callback = callback?;
-    let total_shards = data_shards as u64 + parity_shards as u64;
-    let slab_size = total_shards * SECTOR_SIZE as u64;
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        let mut sectors: u64 = 0;
-        while rx.recv().await.is_some() {
-            sectors += 1;
-            let size = sectors * SECTOR_SIZE as u64;
-            let slabs_size = sectors.div_ceil(total_shards) * slab_size;
-            callback.call(
-                Ok((size, slabs_size)),
-                ThreadsafeFunctionCallMode::NonBlocking,
-            );
-        }
-    });
-    Some(tx)
 }
 
 enum PackedUploadAction {
@@ -561,7 +646,7 @@ impl PackedUpload {
 
 #[napi]
 pub struct Sdk {
-    pub(crate) inner: sia_storage::SDK,
+    pub(crate) inner: sia_storage::Sdk,
 }
 
 #[napi]
@@ -574,32 +659,17 @@ impl Sdk {
 
     /// Creates a new packed upload for efficiently uploading multiple small
     /// objects together. Returns a `PackedUpload` handle.
-    #[napi(
-        ts_args_type = "options: UploadOptions, progressFn?: (uploaded: number, encodedSize: number) => void"
-    )]
-    pub async fn upload_packed(
-        &self,
-        options: UploadOptions,
-        progress_fn: Option<ThreadsafeFunction<(u64, u64)>>,
-    ) -> PackedUpload {
+    #[napi(ts_args_type = "options?: UploadOptions")]
+    pub fn upload_packed(&self, options: Option<SendableUploadOptions>) -> PackedUpload {
+        let options: sia_storage::UploadOptions = options.map(|o| o.0).unwrap_or_default();
         let sdk = self.inner.clone();
-        let data_shards = options.data_shards.unwrap_or(10);
-        let parity_shards = options.parity_shards.unwrap_or(20);
-        let max_inflight = options.max_inflight.unwrap_or(10);
-        let slab_size = data_shards as u64 * SECTOR_SIZE as u64;
         let length = Arc::new(AtomicU64::new(0));
         let closed = Arc::new(AtomicBool::new(false));
         let (action_tx, mut action_rx) = mpsc::channel(10);
-
+        let slab_size = SECTOR_SIZE as u64 * options.data_shards as u64;
         let task_length = length.clone();
-        let upload_task = tokio::spawn(async move {
-            let progress_tx = setup_progress_channel(progress_fn, data_shards, parity_shards);
-            let mut packed_upload = sdk.upload_packed(sia_storage::UploadOptions {
-                max_inflight: max_inflight as usize,
-                data_shards,
-                parity_shards,
-                shard_uploaded: progress_tx,
-            });
+        let upload_task = spawn(async move {
+            let mut packed_upload = sdk.upload_packed(options);
 
             while let Some(action) = action_rx.recv().await {
                 match action {
@@ -637,33 +707,19 @@ impl Sdk {
     /// pass the object returned from the earlier call. Appending data changes
     /// an object's ID. It must be re-pinned afterward and any references to
     /// the previous ID must be updated.
-    #[napi(
-        ts_args_type = "object: PinnedObject, stream: ReadableStream, options: UploadOptions, progressFn?: (uploaded: number, encodedSize: number) => void"
-    )]
+    #[napi(ts_args_type = "object: PinnedObject, stream: ReadableStream, options?: UploadOptions")]
     pub async fn upload(
         &self,
         object: &PinnedObject,
         stream: SendableReader,
-        options: UploadOptions,
-        progress_fn: Option<ThreadsafeFunction<(u64, u64)>>,
+        options: Option<SendableUploadOptions>,
     ) -> Result<PinnedObject> {
+        let options = options.map(|o| o.0).unwrap_or_default();
         let inner = object.inner.lock().unwrap().clone();
-        let data_shards = options.data_shards.unwrap_or(10);
-        let parity_shards = options.parity_shards.unwrap_or(20);
-        let max_inflight = options.max_inflight.unwrap_or(10);
-        let progress_tx = setup_progress_channel(progress_fn, data_shards, parity_shards);
         let obj = self
             .inner
-            .upload(
-                inner,
-                stream.0,
-                sia_storage::UploadOptions {
-                    max_inflight: max_inflight as usize,
-                    data_shards,
-                    parity_shards,
-                    shard_uploaded: progress_tx,
-                },
-            )
+            .clone()
+            .upload(inner, stream.0, options)
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
         Ok(PinnedObject {
@@ -678,32 +734,13 @@ impl Sdk {
         &self,
         env: Env,
         object: &PinnedObject,
-        options: DownloadOptions,
+        options: Option<DownloadOptions>,
     ) -> Result<ReadableStream<'_, Buffer>> {
         let object = object.object();
-
-        let mut download_opts = sia_storage::DownloadOptions::default();
-        if let Some(max_inflight) = options.max_inflight {
-            download_opts.max_inflight = max_inflight as usize;
-        }
-        if let Some(offset) = options.offset {
-            let (signed, offset, lossless) = offset.get_u64();
-            if signed {
-                return Err(Error::from_reason("offset must be non-negative"));
-            } else if !lossless {
-                return Err(Error::from_reason("offset too large"));
-            }
-            download_opts.offset = offset;
-        }
-        if let Some(length) = options.length {
-            let (signed, length, lossless) = length.get_u64();
-            if signed {
-                return Err(Error::from_reason("length must be non-negative"));
-            } else if !lossless {
-                return Err(Error::from_reason("length too large"));
-            }
-            download_opts.length = Some(length);
-        }
+        let download_opts: sia_storage::DownloadOptions = options
+            .map(|o| o.try_into())
+            .transpose()?
+            .unwrap_or_default();
 
         let stream = within_runtime_if_available(|| {
             let reader = self

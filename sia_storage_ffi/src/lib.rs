@@ -41,8 +41,18 @@ where
 }
 
 #[uniffi::export(with_foreign)]
-pub trait UploadProgressCallback: Send + Sync {
-    fn progress(&self, uploaded: u64, encoded_size: u64);
+pub trait ProgressCallback: Send + Sync {
+    fn progress(&self, progress: ShardProgress);
+}
+
+/// Information about a successfully uploaded or downloaded shard.
+#[derive(uniffi::Record)]
+pub struct ShardProgress {
+    pub host_key: String,
+    pub shard_size: u64,
+    pub shard_index: u32,
+    pub slab_index: u32,
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Error, uniffi::Error)]
@@ -712,38 +722,94 @@ impl Download {
 /// Provides options for an upload operation.
 #[derive(uniffi::Record)]
 pub struct UploadOptions {
-    #[uniffi(default = 10)]
-    pub max_inflight: u8,
-    #[uniffi(default = 10)]
-    pub data_shards: u8,
-    #[uniffi(default = 20)]
-    pub parity_shards: u8,
+    #[uniffi(default = None)]
+    pub max_inflight: Option<u32>,
+
+    #[uniffi(default = None)]
+    pub data_shards: Option<u8>,
+
+    #[uniffi(default = None)]
+    pub parity_shards: Option<u8>,
 
     /// Optional callback to report upload progress.
-    /// The callback will be called with the number of bytes uploaded
-    /// and the total encoded size of the upload.
     #[uniffi(default = None)]
-    pub progress_callback: Option<Arc<dyn UploadProgressCallback>>,
+    pub shard_uploaded: Option<Arc<dyn ProgressCallback>>,
+}
+
+impl From<UploadOptions> for sia_storage::UploadOptions {
+    fn from(val: UploadOptions) -> Self {
+        let mut options = sia_storage::UploadOptions::default();
+        options.max_inflight = val
+            .max_inflight
+            .map(|v| v as usize)
+            .unwrap_or(options.max_inflight);
+        options.data_shards = val.data_shards.unwrap_or(options.data_shards);
+        options.parity_shards = val.parity_shards.unwrap_or(options.parity_shards);
+        options.shard_uploaded =
+            val.shard_uploaded
+                .map(|callback| -> sia_storage::ShardProgressCallback {
+                    Arc::new(move |p: sia_storage::ShardProgress| {
+                        callback.progress(ShardProgress {
+                            host_key: p.host_key.to_string(),
+                            shard_size: p.shard_size as u64,
+                            shard_index: p.shard_index as u32,
+                            slab_index: p.slab_index as u32,
+                            elapsed_ms: p.elapsed.as_millis() as u64,
+                        });
+                    })
+                });
+        options
+    }
 }
 
 /// Provides options for a download operation.
 #[derive(uniffi::Record)]
 pub struct DownloadOptions {
-    #[uniffi(default = 10)]
-    pub max_inflight: u8,
-    #[uniffi(default = 0)]
-    pub offset: u64,
+    #[uniffi(default = None)]
+    pub max_inflight: Option<u8>,
+    #[uniffi(default = None)]
+    pub offset: Option<u64>,
     #[uniffi(default = None)]
     pub length: Option<u64>,
+
+    /// Optional callback to report download progress.
+    #[uniffi(default = None)]
+    pub shard_downloaded: Option<Arc<dyn ProgressCallback>>,
+}
+
+impl From<DownloadOptions> for sia_storage::DownloadOptions {
+    fn from(val: DownloadOptions) -> Self {
+        let mut options = sia_storage::DownloadOptions::default();
+        options.max_inflight = val
+            .max_inflight
+            .map(|v| v as usize)
+            .unwrap_or(options.max_inflight);
+        options.offset = val.offset.unwrap_or(options.offset);
+        options.length = val.length;
+        options.shard_downloaded =
+            val.shard_downloaded
+                .map(|callback| -> sia_storage::ShardProgressCallback {
+                    Arc::new(move |p: sia_storage::ShardProgress| {
+                        callback.progress(ShardProgress {
+                            host_key: p.host_key.to_string(),
+                            shard_size: p.shard_size as u64,
+                            shard_index: p.shard_index as u32,
+                            slab_index: p.slab_index as u32,
+                            elapsed_ms: p.elapsed.as_millis() as u64,
+                        });
+                    })
+                });
+        options
+    }
 }
 
 #[derive(uniffi::Object)]
-pub struct SDK {
-    inner: sia_storage::SDK,
+pub struct Sdk {
+    inner: sia_storage::Sdk,
 }
 
 #[uniffi::export]
-impl SDK {
+impl Sdk {
     /// Returns the application key used by the SDK.
     ///
     /// This should be kept secret and secure. Applications
@@ -764,36 +830,14 @@ impl SDK {
     pub async fn upload_packed(&self, options: UploadOptions) -> PackedUpload {
         let sdk = self.inner.clone();
         let (action_tx, mut action_rx) = mpsc::channel(10);
-        let slab_size = options.data_shards as usize * SECTOR_SIZE;
+        let options: sia_storage::UploadOptions = options.into();
+        let slab_size = options.data_shards as u64 * SECTOR_SIZE as u64;
         let length = Arc::new(AtomicU64::new(0));
         let closed = Arc::new(AtomicBool::new(false));
 
         let task_length = length.clone();
         let upload_task = spawn(async move {
-            let progress_tx = if let Some(callback) = options.progress_callback {
-                let total_shards = options.data_shards as u64 + options.parity_shards as u64;
-                let slab_size = total_shards * SECTOR_SIZE as u64;
-                let (tx, mut rx) = mpsc::unbounded_channel();
-                tokio::spawn(async move {
-                    let mut sectors: u64 = 0;
-                    while rx.recv().await.is_some() {
-                        sectors += 1;
-                        let size = sectors * SECTOR_SIZE as u64;
-                        let slabs_size = sectors.div_ceil(total_shards) * slab_size;
-                        callback.progress(size, slabs_size);
-                    }
-                });
-                Some(tx)
-            } else {
-                None
-            };
-            let mut packed_upload = sdk.upload_packed(sia_storage::UploadOptions {
-                max_inflight: options.max_inflight as usize,
-                data_shards: options.data_shards,
-                parity_shards: options.parity_shards,
-                shard_uploaded: progress_tx,
-            });
-
+            let mut packed_upload = sdk.upload_packed(options);
             while let Some(action) = action_rx.recv().await {
                 match action {
                     PackedUploadAction::Add(reader, add_tx) => {
@@ -818,7 +862,7 @@ impl SDK {
         PackedUpload {
             upload_task,
             tx: action_tx,
-            slab_size: slab_size as u64,
+            slab_size,
             length,
             closed,
         }
@@ -849,35 +893,7 @@ impl SDK {
         let obj = object.object();
         spawn(async move {
             let r = FFIReader::new(r);
-            let progress_tx = if let Some(callback) = options.progress_callback {
-                let total_shards = options.data_shards as u64 + options.parity_shards as u64;
-                let slab_size = total_shards * SECTOR_SIZE as u64;
-                let (tx, mut rx) = mpsc::unbounded_channel();
-                tokio::spawn(async move {
-                    let mut sectors: u64 = 0;
-                    while rx.recv().await.is_some() {
-                        sectors += 1;
-                        let size = sectors * SECTOR_SIZE as u64;
-                        let slabs_size = sectors.div_ceil(total_shards) * slab_size;
-                        callback.progress(size, slabs_size);
-                    }
-                });
-                Some(tx)
-            } else {
-                None
-            };
-            let obj = sdk
-                .upload(
-                    obj,
-                    r,
-                    sia_storage::UploadOptions {
-                        max_inflight: options.max_inflight as usize,
-                        data_shards: options.data_shards,
-                        parity_shards: options.parity_shards,
-                        shard_uploaded: progress_tx,
-                    },
-                )
-                .await?;
+            let obj = sdk.upload(obj, r, options.into()).await?;
             Ok(Arc::new(PinnedObject {
                 inner: Arc::new(Mutex::new(obj)),
             }))
@@ -895,14 +911,7 @@ impl SDK {
         // Enter the runtime so Download::new's spawned recovery tasks have a
         // reactor in scope.
         let _guard = RUNTIME.handle().enter();
-        let reader = self.inner.download(
-            &object.object(),
-            sia_storage::DownloadOptions {
-                offset: options.offset,
-                length: options.length,
-                max_inflight: options.max_inflight as usize,
-            },
-        )?;
+        let reader = self.inner.download(&object.object(), options.into())?;
         Ok(Download {
             inner: Arc::new(tokio::sync::Mutex::new(Some(reader))),
             cancel: tokio_util::sync::CancellationToken::new(),

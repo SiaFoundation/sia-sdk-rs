@@ -74,7 +74,7 @@ pub fn init() {
 /// set_log_level("debug"); // verbose — shows RPC calls, slab progress, etc.
 /// set_log_level("error"); // quiet — only fatal errors
 /// ```
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "setLogLevel")]
 pub fn set_log_level(level: &str) {
     let filter = match level {
         "trace" => log::LevelFilter::Trace,
@@ -87,19 +87,19 @@ pub fn set_log_level(level: &str) {
 }
 
 /// Generates a new BIP-39 12-word recovery phrase.
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "generateRecoveryPhrase")]
 pub fn generate_recovery_phrase() -> String {
     sia_storage::generate_recovery_phrase()
 }
 
 /// Validates a BIP-39 recovery phrase.
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "validateRecoveryPhrase")]
 pub fn validate_recovery_phrase(phrase: &str) -> Result<(), JsError> {
     sia_storage::validate_recovery_phrase(phrase).map_err(to_js_err)
 }
 
 /// Calculates the encoded size of data after erasure coding.
-#[wasm_bindgen]
-pub fn calculate_encoded_size(data_size: f64, data_shards: u8, parity_shards: u8) -> f64 {
+#[wasm_bindgen(js_name = "encodedSize")]
+pub fn encoded_size(data_size: f64, data_shards: u8, parity_shards: u8) -> f64 {
     sia_storage::encoded_size(data_size as u64, data_shards, parity_shards) as f64
 }

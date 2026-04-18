@@ -16,7 +16,7 @@
 //! user's encryption keys -- if it changes, previously stored data becomes
 //! inaccessible. Generate it once (e.g. with a random hash) and never change it.
 //!
-//! Use [Builder] to connect to an indexer and obtain an [SDK] instance. There are
+//! Use [Builder] to connect to an indexer and obtain an [Sdk] instance. There are
 //! two paths:
 //!
 //! - **First time**: Call [Builder::request_connection] to start the approval flow,
@@ -25,7 +25,7 @@
 //!   user's recovery phrase.
 //! - **Returning**: Call [Builder::connected] with a previously exported [AppKey].
 //!
-//! Once you have an [SDK], use it to upload, download, and manage objects:
+//! Once you have an [Sdk], use it to upload, download, and manage objects:
 //!
 //! ```ignore
 //! // Upload
@@ -40,13 +40,14 @@
 //! # Key management
 //!
 //! The [AppKey] grants full access to a user's data. After connecting, retrieve it
-//! with [SDK::app_key], then persist it using [AppKey::export] and restore it with
+//! with [Sdk::app_key], then persist it using [AppKey::export] and restore it with
 //! [AppKey::import] so users don't need to re-approve on every launch.
 
 #[macro_use]
 mod compat;
 
 pub(crate) use compat::{task, time};
+use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::PrivateKey;
 
 mod app_client;
@@ -57,26 +58,23 @@ mod erasure_coding;
 mod hosts;
 mod object_encryption;
 mod rhp4;
+mod sdk;
 mod slabs;
 mod upload;
 
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 
+pub use sdk::{Error, Sdk};
+
 use std::sync::Arc;
 
-use log::{debug, warn};
 use serde::Serialize;
-use thiserror::Error;
-use tokio::io::AsyncRead;
 
-use crate::app_client::SlabPinParams;
 pub use crate::hosts::Host;
 use crate::hosts::Hosts;
-use crate::rhp4::{Client, HostEndpoint};
-use crate::task::AbortOnDropHandle;
+
 use crate::time::Duration;
-use crate::upload::Uploader;
 pub use chrono::{DateTime, Utc};
 pub use reqwest::{IntoUrl, Url};
 #[doc(hidden)]
@@ -90,11 +88,11 @@ pub use app_client::Error as AppApiError;
 pub use builder::{
     ApprovedState, Builder, BuilderError, DisconnectedState, RequestingApprovalState,
 };
-pub use download::{Download, DownloadError, DownloadOptions};
+pub use download::{Download, DownloadError};
 pub use encryption::EncryptionKey;
 pub use hosts::{QueueError, RPCError};
 pub use slabs::{Object, ObjectEvent, PinnedSlab, SealedObject, SealedObjectError, Sector, Slab};
-pub use upload::{PackedUpload, UploadError, UploadOptions};
+pub use upload::{PackedUpload, UploadError};
 
 /// A unique identifier for an indexer application. It should be constant for an application.
 pub type AppID = Hash256;
@@ -196,7 +194,7 @@ impl AppKey {
     }
 }
 
-/// A cursor for paginating through object events returned by [SDK::object_events].
+/// A cursor for paginating through object events returned by [Sdk::object_events].
 pub struct ObjectsCursor {
     /// Only return events after this timestamp.
     pub after: DateTime<Utc>,
@@ -224,7 +222,7 @@ impl Serialize for GeoLocation {
     }
 }
 
-/// Parameters for filtering hosts returned by [SDK::hosts].
+/// Parameters for filtering hosts returned by [Sdk::hosts].
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct HostQuery {
     /// Sort hosts by proximity to this location.
@@ -285,350 +283,188 @@ pub struct Account {
     pub last_used: DateTime<Utc>,
 }
 
-/// Errors that can occur when using the SDK.
-#[derive(Error, Debug)]
-pub enum Error {
-    /// An error from the indexer API.
-    #[error("app error: {0}")]
-    App(String),
+#[cfg(not(target_arch = "wasm32"))]
+pub type ShardProgressCallback = Arc<dyn Fn(ShardProgress) + Send + Sync + 'static>;
 
-    /// An error during upload.
-    #[error("upload error: {0}")]
-    Upload(#[from] UploadError),
+#[cfg(target_arch = "wasm32")]
+pub type ShardProgressCallback = Arc<dyn Fn(ShardProgress) + 'static>;
 
-    /// An error during download.
-    #[error("download error: {0}")]
-    Download(#[from] DownloadError),
-
-    /// A TLS connection error.
-    #[error("TLS error: {0}")]
-    Tls(String),
-
-    /// An error opening or sealing an object.
-    #[error("sealed object: {0}")]
-    SealedObject(#[from] SealedObjectError),
+/// Information about a successfully uploaded or downloaded shard, used for progress reporting.
+pub struct ShardProgress {
+    pub host_key: PublicKey,
+    pub shard_size: usize,
+    pub shard_index: usize,
+    pub slab_index: usize,
+    pub elapsed: Duration,
 }
 
-/// The main interface with interacting with the Sia storage network. It provides methods for uploading and downloading objects, as well as managing hosts and account information.
-#[derive(Clone)]
-pub struct SDK {
-    app_key: Arc<AppKey>,
-    api_client: app_client::Client,
-    hosts: Hosts<Client>,
-    uploader: Uploader<Client>,
-    _refresh_task: Arc<AbortOnDropHandle<()>>,
+/// Options for configuring a download.
+pub struct DownloadOptions {
+    /// Maximum number of concurrent chunk downloads. Defaults to 80.
+    pub max_inflight: usize,
+    /// Byte offset to start downloading from.
+    pub offset: u64,
+    /// Number of bytes to download. If `None`, downloads the entire object.
+    pub length: Option<u64>,
+
+    pub shard_downloaded: Option<ShardProgressCallback>,
 }
 
-impl SDK {
-    async fn refresh_hosts(
-        app_key: &AppKey,
-        api_client: &app_client::Client,
-        hosts: &Hosts<Client>,
-    ) -> Result<(), app_client::Error> {
-        const PAGE_SIZE: usize = 100;
-        let mut all_hosts = Vec::new();
-        for i in (0..).step_by(PAGE_SIZE) {
-            let page = api_client
-                .hosts(
-                    &app_key.0,
-                    HostQuery {
-                        offset: Some(i),
-                        limit: Some(PAGE_SIZE as u64),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            let done = page.len() < PAGE_SIZE;
-            all_hosts.extend(page);
-            if done {
-                break;
-            }
+impl DownloadOptions {
+    /// Configures a callback to receive progress updates for each downloaded shard.
+    #[cfg(target_arch = "wasm32")]
+    pub fn on_shard_downloaded<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(ShardProgress) + 'static,
+    {
+        self.shard_downloaded = Some(Arc::new(callback));
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn on_shard_downloaded<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(ShardProgress) + Send + Sync + 'static,
+    {
+        self.shard_downloaded = Some(Arc::new(callback));
+        self
+    }
+}
+
+impl Default for DownloadOptions {
+    fn default() -> Self {
+        Self {
+            max_inflight: 80, // ~20 MiB in memory
+            offset: 0,
+            length: None,
+            shard_downloaded: None,
+        }
+    }
+}
+
+/// Options for configuring an upload.
+pub struct UploadOptions {
+    /// The number of data shards per slab. Defaults to 10.
+    pub data_shards: u8,
+    /// The number of parity shards per slab. Defaults to 20.
+    pub parity_shards: u8,
+    /// The maximum number of concurrent shard uploads. Defaults to 15.
+    pub max_inflight: usize,
+
+    /// Optional callback to receive progress updates for each uploaded shard.
+    pub shard_uploaded: Option<ShardProgressCallback>,
+}
+
+impl UploadOptions {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn on_shard_uploaded<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(ShardProgress) + Send + Sync + 'static,
+    {
+        self.shard_uploaded = Some(Arc::new(callback));
+        self
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn on_shard_uploaded<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(ShardProgress) + 'static,
+    {
+        self.shard_uploaded = Some(Arc::new(callback));
+        self
+    }
+}
+
+impl UploadOptions {
+    /// Returns the optimal data size per slab in bytes.
+    pub fn optimal_data_size(&self) -> u64 {
+        SECTOR_SIZE as u64 * self.data_shards as u64
+    }
+
+    /// Returns the total slab size including parity shards in bytes.
+    pub fn slab_size(&self) -> u64 {
+        SECTOR_SIZE as u64 * (self.data_shards as u64 + self.parity_shards as u64)
+    }
+
+    /// Validates the upload options and erasure coding parameters to ensure
+    /// sufficient durability.
+    ///
+    /// This checks that the redundancy ratio is between 1.5x and 4x and that
+    /// the probability of recovering the original data meets a minimum threshold
+    /// of 99.99%.
+    pub fn validate(&self) -> Result<(), UploadError> {
+        const MIN_REDUNDANCY: f64 = 1.5;
+        const MAX_REDUNDANCY: f64 = 4.0;
+        const RECOVERY_PROBABILITY: f64 = 0.75;
+        const MIN_RECOVERY_PROBABILITY: f64 = 99.99;
+        const MAX_TOTAL_SHARDS: u16 = 256;
+
+        if self.max_inflight == 0 {
+            return Err(UploadError::InvalidOptions(
+                "max_inflight must be greater than 0".into(),
+            ));
         }
 
-        let good_for_upload: Vec<_> = all_hosts
-            .iter()
-            .filter(|h| h.good_for_upload)
-            .map(|h| HostEndpoint {
-                public_key: h.public_key,
-                addresses: h.addresses.clone(),
-            })
-            .collect();
+        let data_shards = self.data_shards as u16;
+        let parity_shards = self.parity_shards as u16;
+        let total_shards = data_shards + parity_shards;
 
-        debug!(
-            "Refreshed hosts: total {}, good for upload {}",
-            all_hosts.len(),
-            good_for_upload.len()
-        );
-        hosts.update(all_hosts, true);
-        let hosts = hosts.clone();
-        maybe_spawn!(async move {
-            hosts.warm_connections(good_for_upload).await;
-        });
+        if data_shards == 0 {
+            return Err(UploadError::InvalidOptions(
+                "data shards cannot be zero".into(),
+            ));
+        } else if parity_shards == 0 {
+            return Err(UploadError::InvalidOptions(
+                "parity shards cannot be zero".into(),
+            ));
+        } else if total_shards > MAX_TOTAL_SHARDS {
+            return Err(UploadError::InvalidOptions(format!(
+                "total shards {total_shards} exceeds maximum of {MAX_TOTAL_SHARDS}"
+            )));
+        }
+
+        let redundancy = total_shards as f64 / data_shards as f64;
+        if redundancy < MIN_REDUNDANCY {
+            return Err(UploadError::InvalidOptions(format!(
+                "redundancy of {redundancy:.2} is too low"
+            )));
+        } else if redundancy > MAX_REDUNDANCY {
+            return Err(UploadError::InvalidOptions(format!(
+                "redundancy of {redundancy:.2} is too high"
+            )));
+        }
+
+        // Calculate recovery probability using the binomial CDF.
+        // P(X >= data_shards) where X ~ Binomial(total_shards, RECOVERY_PROBABILITY)
+        let q = 1.0 - RECOVERY_PROBABILITY;
+        let mut term = q.powi(total_shards as i32);
+        for i in 0..data_shards {
+            term *= (total_shards - i) as f64 / (i + 1) as f64 * (RECOVERY_PROBABILITY / q);
+        }
+        let mut sum = term;
+        for i in data_shards..total_shards {
+            term *= (total_shards - i) as f64 / (i + 1) as f64 * (RECOVERY_PROBABILITY / q);
+            sum += term;
+        }
+        let prob = sum * 100.0;
+        if prob < MIN_RECOVERY_PROBABILITY {
+            return Err(UploadError::InvalidOptions(format!(
+                "not enough redundancy {data_shards}-of-{total_shards}: recovery probability {:.2}% is below minimum threshold of {MIN_RECOVERY_PROBABILITY:.2}%",
+                (prob * 100.0).floor() / 100.0
+            )));
+        }
         Ok(())
     }
+}
 
-    /// Creates a new SDK instance.
-    async fn new(
-        api_client: app_client::Client,
-        app_key: Arc<AppKey>,
-    ) -> Result<Self, BuilderError> {
-        let hosts = Hosts::new(Client::new());
-        Self::refresh_hosts(&app_key, &api_client, &hosts).await?;
-        let uploader = Uploader::new(hosts.clone(), app_key.clone());
-        let refresh_task = Self::spawn_refresh_task(
-            app_key.clone(),
-            api_client.clone(),
-            hosts.clone(),
-            Duration::from_secs(10 * 60),
-        );
-        Ok(Self {
-            app_key,
-            api_client,
-            hosts,
-            uploader,
-            _refresh_task: Arc::new(refresh_task),
-        })
-    }
-
-    /// Spawns a background task that refreshes the host list at the given interval.
-    fn spawn_refresh_task(
-        app_key: Arc<AppKey>,
-        api_client: app_client::Client,
-        hosts: Hosts<Client>,
-        interval: Duration,
-    ) -> AbortOnDropHandle<()> {
-        AbortOnDropHandle::new(maybe_spawn!(async move {
-            loop {
-                crate::time::sleep(interval).await;
-                if let Err(err) = Self::refresh_hosts(&app_key, &api_client, &hosts).await {
-                    warn!("failed to refresh hosts: {err}");
-                }
-            }
-        }))
-    }
-
-    /// Returns the application key used by the SDK.
-    ///
-    /// This should be kept secret and secure. Applications
-    /// should store it safely.
-    pub fn app_key(&self) -> &AppKey {
-        &self.app_key
-    }
-
-    /// Reads until EOF and uploads all slabs. The data will be erasure coded,
-    /// encrypted, and uploaded.
-    ///
-    /// Pass [Object::default] for new uploads. To resume a previous upload,
-    /// pass the object returned from the earlier call. Appending data changes
-    /// an object's ID. It must be re-pinned afterward and any references to
-    /// the previous ID must be updated.
-    ///
-    /// # Arguments
-    /// * `object` - The object to upload into. Use `Object::default()` for new uploads.
-    /// * `r` - The reader to read the data from. It will be read until EOF.
-    /// * `options` - The [UploadOptions] to use for the upload.
-    ///
-    /// # Returns
-    /// The object containing the metadata needed to download. The caller must
-    /// pin the object to the indexer after uploading.
-    pub async fn upload<R: AsyncRead + Unpin + 'static>(
-        &self,
-        object: Object,
-        reader: R,
-        options: UploadOptions,
-    ) -> Result<Object, UploadError> {
-        self.uploader.upload(object, reader, options).await
-    }
-
-    /// Creates a new packed upload. This allows multiple objects to be packed together
-    /// for more efficient uploads. The returned `PackedUpload` can be used to add objects to the upload, and then finalized to get the resulting objects.
-    ///
-    /// # Arguments
-    /// * `options` - The [UploadOptions] to use for the upload.
-    ///
-    /// # Returns
-    /// A [PackedUpload] that can be used to add objects and finalize the upload.
-    pub fn upload_packed(&self, options: UploadOptions) -> PackedUpload {
-        self.uploader.upload_packed(options)
-    }
-
-    /// Returns a [Download] handle that streams the object's data. The handle
-    /// implements [tokio::io::AsyncRead] — pipe it into any writer with
-    /// [tokio::io::copy] or read chunks directly. In-flight chunk recovery is
-    /// cancelled when the handle is dropped.
-    pub fn download(
-        &self,
-        object: &Object,
-        options: DownloadOptions,
-    ) -> Result<Download, DownloadError> {
-        Download::new(object, self.hosts.clone(), self.app_key.clone(), options)
-    }
-
-    /// Retrieves a list of hosts from the indexer matching the provided query
-    /// that can be used for uploading and downloading data.
-    ///
-    /// # Arguments
-    /// * `query` - Filtering criteria to select hosts.
-    pub async fn hosts(&self, query: HostQuery) -> Result<Vec<Host>, Error> {
-        self.api_client
-            .hosts(&self.app_key.0, query)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))
-    }
-
-    /// Retrieves account information from the indexer.
-    pub async fn account(&self) -> Result<Account, Error> {
-        self.api_client
-            .account(&self.app_key.0)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))
-    }
-
-    /// Retrieves an object from the indexer by its key.
-    ///
-    /// # Arguments
-    /// * `key` - The key of the object to retrieve.
-    pub async fn object(&self, key: &Hash256) -> Result<Object, Error> {
-        let sealed = self
-            .api_client
-            .object(&self.app_key.0, key)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
-
-        let obj = sealed.open(self.app_key.as_ref())?;
-        Ok(obj)
-    }
-
-    /// Retrieves a list of object events from the indexer. This
-    /// can be used to synchronize local state with the indexer.
-    ///
-    /// # Arguments
-    /// * `cursor` - An optional cursor to continue from a previous call.
-    /// * `limit` - An optional limit on the number of events to retrieve.
-    pub async fn object_events(
-        &self,
-        cursor: Option<ObjectsCursor>,
-        limit: Option<usize>,
-    ) -> Result<Vec<ObjectEvent>, Error> {
-        let events = self
-            .api_client
-            .objects(&self.app_key.0, cursor, limit)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
-
-        let objs = events
-            .into_iter()
-            .map(|event| {
-                let object = match event.object {
-                    Some(sealed) => Some(sealed.open(self.app_key.as_ref())?),
-                    None => None,
-                };
-                Ok(ObjectEvent {
-                    id: event.id,
-                    deleted: event.deleted,
-                    updated_at: event.updated_at,
-                    object,
-                })
-            })
-            .collect::<Result<_, Error>>()?;
-
-        Ok(objs)
-    }
-
-    /// Prunes unused slabs from the indexer. This helps to free up
-    /// storage space by removing slabs that are no longer
-    /// referenced by objects.
-    pub async fn prune_slabs(&self) -> Result<(), Error> {
-        self.api_client
-            .prune_slabs(&self.app_key.0)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
-        Ok(())
-    }
-
-    /// Updates the metadata of an object in the indexer. The object
-    /// must already be pinned to the indexer.
-    ///
-    /// # Arguments
-    /// * `object` - The object to update.
-    pub async fn update_object_metadata(&self, object: &Object) -> Result<(), Error> {
-        let sealed = object.seal(self.app_key.as_ref());
-        self.api_client
-            .pin_object(&self.app_key.0, &sealed)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
-        Ok(())
-    }
-
-    /// Deletes the object with the given id.
-    ///
-    /// # Arguments
-    /// * `id` - The id of the object to delete.
-    pub async fn delete_object(&self, id: &Hash256) -> Result<(), Error> {
-        self.api_client
-            .delete_object(&self.app_key.0, id)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))
-    }
-
-    /// Generates a shared URL for the given object that is valid until the specified time.
-    ///
-    /// This object should be considered public even if the URL is kept secret,
-    /// as anyone with the URL can access the object until the expiration time.
-    ///
-    /// # Arguments
-    /// * `object` - The object to share.
-    /// * `valid_until` - The time until which the shared URL is valid.
-    pub fn share_object(&self, object: &Object, valid_until: DateTime<Utc>) -> Result<Url, Error> {
-        self.api_client
-            .shared_object_url(&self.app_key.0, object, valid_until)
-            .map_err(|e| Error::App(format!("{e:?}")))
-    }
-
-    /// Retrieves a shared object from the given share URL.
-    ///
-    /// # Arguments
-    /// * `share_url` - The URL of the shared object.
-    pub async fn shared_object<U: IntoUrl>(&self, share_url: U) -> Result<Object, Error> {
-        let share_url = share_url
-            .into_url()
-            .map_err(|e| Error::App(format!("{e:?}")))?;
-        self.api_client
-            .shared_object(share_url)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))
-    }
-
-    /// Pins an object to the indexer
-    pub async fn pin_object(&self, object: &Object) -> Result<(), Error> {
-        let slabs = object
-            .slabs()
-            .iter()
-            .map(|s| SlabPinParams {
-                encryption_key: s.encryption_key.clone(),
-                min_shards: s.min_shards,
-                sectors: s.sectors.clone(),
-            })
-            .collect();
-
-        self.api_client
-            .pin_slabs(&self.app_key.0, slabs)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
-
-        self.api_client
-            .pin_object(&self.app_key.0, &object.seal(self.app_key.as_ref()))
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
-        Ok(())
-    }
-
-    /// Retrieves a pinned slab from the indexer by its id.
-    pub async fn slab(&self, id: &Hash256) -> Result<PinnedSlab, Error> {
-        self.api_client
-            .slab(&self.app_key.0, id)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))
+impl Default for UploadOptions {
+    fn default() -> Self {
+        Self {
+            data_shards: 10,
+            parity_shards: 20,
+            max_inflight: 15,
+            shard_uploaded: None,
+        }
     }
 }
 
@@ -657,11 +493,15 @@ mod test {
     use crate::compat::run_local;
     use crate::download::Download;
     use crate::hosts::QueueError;
+    use crate::rhp4::Client;
+    use crate::upload::Uploader;
     use bytes::{Bytes, BytesMut};
     use sia_core::rhp4::SECTOR_SIZE;
     use sia_core::signing::PrivateKey;
     use sia_core::types::v2::NetAddress;
+    use std::collections::HashMap;
     use std::io::Cursor;
+    use std::sync::Mutex;
     use tokio::io::copy;
 
     use crate::time::Duration;
@@ -1334,107 +1174,90 @@ mod test {
                 _ => panic!(),
             }
         }).await }
-        }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    #[tokio::test]
-    async fn test_refresh_task_periodic_and_abort() {
-        use httptest::http::{Response, StatusCode};
-        use httptest::matchers::*;
-        use httptest::{Expectation, Server};
+        async fn test_progress_callbacks() { run_local(async {
+            let min_shards: usize = 10;
+            let total_shards: usize = 30;
+            let num_slabs = 3;
 
-        const INTERVAL: Duration = Duration::from_millis(200);
-        const WAIT: Duration = Duration::from_millis(500);
-
-        // API returns hosts with good_for_upload=false so warm_connections is a no-op
-        let hosts: Vec<Host> = (0..3)
-            .map(|_| Host {
-                public_key: PrivateKey::from_seed(&random_seed()).public_key(),
-                addresses: vec![NetAddress {
-                    protocol: sia_core::types::v2::Protocol::QUIC,
-                    address: "localhost:1234".to_string(),
-                }],
-                country_code: "US".to_string(),
-                latitude: 0.0,
-                longitude: 0.0,
-                good_for_upload: false,
-            })
-            .collect();
-        let server = Server::run();
-        server.expect(
-            Expectation::matching(request::method_path("GET", "/hosts"))
-                .times(..)
-                .respond_with(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .body(serde_json::to_string(&hosts).unwrap())
-                        .unwrap(),
-                ),
-        );
-
-        let app_key = Arc::new(AppKey::import(random_seed()));
-        let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();
-        let hosts = Hosts::new(crate::rhp4::Client::new());
-
-        // helper: seed one good-for-upload host so available_for_upload() == 1
-        let add_upload_host = |hosts: &Hosts<crate::rhp4::Client>| {
+            let app_key = Arc::new(AppKey::import(random_seed()));
+            let hosts = Hosts::new(Client::new());
             hosts.update(
-                vec![Host {
-                    public_key: PrivateKey::from_seed(&random_seed()).public_key(),
-                    addresses: vec![],
-                    country_code: String::new(),
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    good_for_upload: true,
-                }],
-                false,
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
             );
-        };
+            let data_size = SLAB_SIZE as usize * num_slabs;
+            let mut data = BytesMut::zeroed(data_size);
+            random_bytes(&mut data);
+            let data = data.freeze();
 
-        // verify initial refresh replaces hosts
-        add_upload_host(&hosts);
-        assert_eq!(hosts.available_for_upload(), 1);
-        SDK::refresh_hosts(&app_key, &client, &hosts).await.unwrap();
-        assert_eq!(
-            hosts.available_for_upload(),
-            0,
-            "initial refresh should clear upload hosts"
-        );
+            let upload_progress: Arc<Mutex<HashMap<(usize, usize), ShardProgress>>> = Arc::new(Mutex::new(HashMap::new()));
+            let upload_progress_clone = upload_progress.clone();
+            let upload_opts = UploadOptions::default()
+                .on_shard_uploaded(move |p: ShardProgress| {
+                    if upload_progress_clone.lock().unwrap().contains_key(&(p.slab_index, p.shard_index)) {
+                        panic!("duplicate upload callback for slab {}, shard {}", p.slab_index, p.shard_index);
+                    }
+                    assert_eq!(p.shard_size, SECTOR_SIZE);
+                    upload_progress_clone.lock().unwrap().insert((p.slab_index, p.shard_index), p);
+                });
 
-        // spawn the periodic refresh task with a short interval
-        add_upload_host(&hosts);
-        assert_eq!(hosts.available_for_upload(), 1);
-        let handle =
-            SDK::spawn_refresh_task(app_key.clone(), client.clone(), hosts.clone(), INTERVAL);
+            let uploader = Uploader::new(hosts.clone(), app_key.clone());
+            let obj = uploader
+                .upload(Object::default(), Cursor::new(data.clone()), upload_opts)
+                .await
+                .unwrap();
+            assert_eq!(obj.slabs().len(), num_slabs);
 
-        // wait for periodic refresh to run
-        tokio::time::sleep(WAIT).await;
-        assert_eq!(
-            hosts.available_for_upload(),
-            0,
-            "periodic refresh should have run"
-        );
+            let upload_progress = upload_progress.lock().unwrap();
+            // verify upload callbacks: exactly one per (slab_index, shard_index)
+            assert_eq!(upload_progress.len(), total_shards * num_slabs,
+                "upload: expected {} callbacks, got {}",
+                total_shards * num_slabs, upload_progress.len());
+            for i in 0..num_slabs {
+                for j in 0..total_shards {
+                    assert!(upload_progress.contains_key(&(i, j)),
+                        "missing upload callback for slab {}, shard {}", i, j);
+                }
+            }
 
-        // verify it refreshes again
-        add_upload_host(&hosts);
-        tokio::time::sleep(WAIT).await;
-        assert_eq!(
-            hosts.available_for_upload(),
-            0,
-            "second periodic refresh should have run"
-        );
+            let download_progress: Arc<Mutex<HashMap<(usize, usize), usize>>> =
+                Arc::new(Mutex::new(HashMap::new()));
+            let download_progress_clone = download_progress.clone();
+            let download_opts = DownloadOptions::default()
+                .on_shard_downloaded(move |p: ShardProgress| {
+                    *download_progress_clone.lock().unwrap().entry((p.slab_index, p.shard_index)).or_default() += 1;
+                });
 
-        // drop handle to abort the task
-        drop(handle);
-        add_upload_host(&hosts);
-        assert_eq!(hosts.available_for_upload(), 1);
+            let mut recovered_data = Vec::with_capacity(data_size);
+            let mut download = Download::new(&obj, hosts.clone(), app_key.clone(), download_opts).unwrap();
+            copy(&mut download, &mut recovered_data).await.unwrap();
+            assert_eq!(data, recovered_data);
 
-        // wait past the interval - should NOT refresh (task aborted)
-        tokio::time::sleep(WAIT).await;
-        assert_eq!(
-            hosts.available_for_upload(),
-            1,
-            "refresh task should be aborted"
-        );
-    }
+            let download_progress = download_progress.lock().unwrap();
+            let chunks_per_slab = SLAB_SIZE as usize / (1 << 18);
+            let expected_total = chunks_per_slab * min_shards * num_slabs;
+            let actual_total: usize = download_progress.values().sum();
+            assert_eq!(actual_total, expected_total,
+                "download: expected {} total callbacks, got {}",
+                expected_total, actual_total);
+
+            for ((slab_idx, shard_idx), _) in download_progress.iter() {
+                assert!(*shard_idx < total_shards, "invalid shard index {} in callback", shard_idx);
+                assert!(*slab_idx < num_slabs, "invalid slab index {} in callback", slab_idx);
+            }
+        }).await }
+        }
 }
