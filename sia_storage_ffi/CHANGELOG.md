@@ -1,3 +1,23 @@
+## 0.7.0 (2026-04-18)
+
+### Breaking Changes
+
+- Replaced upload/download progress channels with more detailed callbacks.
+
+#### Download returns an AsyncRead
+
+`SDK::download` now returns a `Download` handle implementing `AsyncRead`
+instead of taking a writer. Callers pull data with `tokio::io::copy` or any
+other `AsyncRead` consumer.
+
+The `sia_storage_ffi` `SDK::download` now returns a `Download` object with
+`read()` and `close()` methods instead of taking a foreign `Writer`. The
+`Writer` foreign trait has been removed.
+
+### Fixes
+
+- Removed hardcoded 1s timeout for RPC settings when writing and reading sectors
+
 ## 0.6.1 (2026-04-06)
 
 ### Features

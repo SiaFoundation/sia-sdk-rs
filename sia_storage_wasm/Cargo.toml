@@ -1,6 +1,6 @@
 [package]
 name = "sia_storage_wasm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 repository = "https://github.com/SiaFoundation/sia-sdk-rs"
 license = "MIT"
@@ -12,7 +12,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-sia_storage = { version = "0.6.0", path = "../sia_storage" }
+sia_storage = { version = "0.7.0", path = "../sia_storage" }
 sia_core = { version = "0.3.0", path = "../sia_core" }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
