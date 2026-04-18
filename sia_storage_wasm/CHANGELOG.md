@@ -1,8 +1,8 @@
-## 0.6.0 (2026-04-18)
+## 0.2.0 (2026-04-18)
 
 ### Breaking Changes
 
-- Initialize nodejs bindings
+- init sia_storage_wasm crate
 - Replaced upload/download progress channels with more detailed callbacks.
 
 ### Fixes
