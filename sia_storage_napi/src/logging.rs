@@ -33,8 +33,8 @@ impl log::Log for ForwardLogger {
 /// Sets a logging callback to receive log messages from the SDK.
 ///
 /// The callback receives formatted log messages as strings.
-/// `level` should be one of: "error", "warn", "info", "debug", "trace".
-#[napi]
+/// `level` should be one of: "off", "error", "warn", "info", "debug", "trace".
+#[napi(ts_args_type = "callback: (message: string) => void, level: \"off\" | \"error\" | \"warn\" | \"info\" | \"debug\" | \"trace\"")]
 pub fn set_logger(callback: LogFn, level: String) {
     LOGGER_SET.call_once(|| {
         log::set_logger(&FORWARDER).unwrap();
