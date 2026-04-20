@@ -1,3 +1,5 @@
+use std::mem;
+
 use bytes::{Bytes, BytesMut};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use sia_core::rhp4::{SECTOR_SIZE, SEGMENT_SIZE};
@@ -24,6 +26,10 @@ impl ErasureCoder {
         Ok(ErasureCoder {
             encoder: ReedSolomon::new(data_shards, parity_shards)?,
         })
+    }
+
+    pub fn data_shards(&self) -> usize {
+        self.encoder.data_shard_count()
     }
 
     /// encodes the shards using reed solomon erasure coding,
@@ -71,37 +77,99 @@ impl ErasureCoder {
         }
         Ok(())
     }
+}
 
-    pub async fn read_slab_shards<R: AsyncRead + Unpin>(
-        r: &mut R,
-        data_shards: usize,
-        shards: &mut [BytesMut],
-    ) -> Result<usize> {
-        // limit total read size to the size of the slab's data shards
-        let mut r = r.take(data_shards as u64 * SECTOR_SIZE as u64);
-        let mut data_size = 0;
-        for off in (0..SECTOR_SIZE).step_by(SEGMENT_SIZE) {
-            let start = off;
-            let end = off + SEGMENT_SIZE;
-            for shard in &mut shards[..data_shards].iter_mut() {
-                let segment = &mut shard[start..end];
-                let mut bytes_read = 0;
-                while bytes_read < SEGMENT_SIZE {
-                    // note: read_exact + UnexpectedEoF is not used due to the documentation
-                    // saying "the contents of buf are unspecified." when UnexpectedEoF is
-                    // returned. It's *most likely* fine to rely on the contents being
-                    // a partial read, but better to not make the assumption for every
-                    // possible implementation of the Read trait.
-                    let n = r.read(&mut segment[bytes_read..]).await?;
-                    if n == 0 {
-                        return Ok(data_size);
-                    }
-                    bytes_read += n;
-                    data_size += n;
-                }
-            }
+/// A streaming reader that interleaves incoming bytes across a slab's data
+/// shards as they become available. Yields a [ReadSlab] whenever a full slab
+/// has been accumulated; call [SlabReader::finish] to recover any trailing
+/// partial slab.
+pub(crate) struct SlabReader {
+    data_shards: usize,
+    shards: Vec<BytesMut>,
+    length: usize,
+}
+
+pub(crate) struct ReadSlab {
+    pub length: usize,
+    pub shards: Vec<BytesMut>,
+}
+
+impl SlabReader {
+    pub(crate) fn new(data_shards: usize, parity_shards: usize) -> Self {
+        let total_shards = data_shards + parity_shards;
+        Self {
+            data_shards,
+            shards: vec![BytesMut::zeroed(SECTOR_SIZE); total_shards],
+            length: 0,
         }
-        Ok(data_size)
+    }
+
+    pub fn length(&self) -> usize {
+        self.length
+    }
+
+    pub fn slab_size(&self) -> usize {
+        self.data_shards * SECTOR_SIZE
+    }
+
+    /// Finalizes the slab reader, returning any remaining data as a slab.
+    pub(crate) fn finish(mut self) -> Option<ReadSlab> {
+        if self.length == 0 {
+            return None;
+        }
+        let length = self.length;
+        let shards = mem::take(&mut self.shards);
+        Some(ReadSlab { length, shards })
+    }
+
+    /// Reads data from the reader until reaching the optimal slab size or EOF,
+    /// whichever comes first. This should be called in a loop until EOF is
+    /// reached.
+    ///
+    /// If the optimal slab size is reached, the completed slab is returned.
+    /// Any remaining data should be retrieved using [finish](Self::finish).
+    pub(crate) async fn read_slab<R: AsyncRead + Unpin>(
+        &mut self,
+        r: &mut R,
+    ) -> io::Result<(usize, Option<ReadSlab>)> {
+        let remaining = self.slab_size() - self.length;
+        if remaining == 0 {
+            return Ok((0, None));
+        }
+        let mut r = r.take(remaining as u64);
+        let mut total_read = 0;
+        loop {
+            if self.length == self.slab_size() {
+                break;
+            }
+
+            // calculate current position in the interleaved layout
+            let stripe_size = SEGMENT_SIZE * self.data_shards;
+            let shard_index = (self.length % stripe_size) / SEGMENT_SIZE;
+            let byte_in_seg = self.length % SEGMENT_SIZE;
+            let seg_start = (self.length / stripe_size) * SEGMENT_SIZE;
+
+            let segment =
+                &mut self.shards[shard_index][seg_start + byte_in_seg..seg_start + SEGMENT_SIZE];
+            let n = r.read(segment).await?;
+            if n == 0 {
+                break;
+            }
+            self.length += n;
+            total_read += n;
+        }
+        let slab = if self.length == self.slab_size() {
+            let length = mem::take(&mut self.length);
+            let total_shards = self.shards.len();
+            let shards = mem::replace(
+                &mut self.shards,
+                vec![BytesMut::zeroed(SECTOR_SIZE); total_shards],
+            );
+            Some(ReadSlab { length, shards })
+        } else {
+            None
+        };
+        Ok((total_read, slab))
     }
 }
 
@@ -156,38 +224,43 @@ mod tests {
     async fn test_striped_read() {
         const DATA_SHARDS: usize = 3;
         const PARITY_SHARDS: usize = 2;
+        const SLAB_SIZE: usize = SECTOR_SIZE * DATA_SHARDS;
 
         let test_cases = vec![
             // (data size, expected size)
-            (100, 100),                                                 // under
-            (SECTOR_SIZE * DATA_SHARDS, SECTOR_SIZE * DATA_SHARDS),     // exact
-            (2 * SECTOR_SIZE * DATA_SHARDS, SECTOR_SIZE * DATA_SHARDS), // over
+            (100, 100),               // under
+            (SLAB_SIZE, SLAB_SIZE),   // exact
+            (2 * SLAB_SIZE, SLAB_SIZE), // over
         ];
 
         for (data_size, expected_size) in test_cases {
             let mut data = vec![0u8; data_size];
             getrandom::fill(&mut data).unwrap();
 
-            let mut shards = vec![BytesMut::zeroed(SECTOR_SIZE); DATA_SHARDS + PARITY_SHARDS];
-            let size = ErasureCoder::read_slab_shards(
-                &mut Cursor::new(data.clone()),
-                DATA_SHARDS,
-                &mut shards,
-            )
-            .await
-            .unwrap();
+            let mut reader = SlabReader::new(DATA_SHARDS, PARITY_SHARDS);
+            let (n, slab) = reader
+                .read_slab(&mut Cursor::new(data.clone()))
+                .await
+                .unwrap();
+            assert_eq!(n, expected_size, "data size {data_size} read mismatch");
 
-            assert_eq!(
-                size as usize, expected_size,
-                "data size {data_size} mismatch"
-            );
+            let (size, shards) = if data_size >= SLAB_SIZE {
+                let slab = slab.expect("expected full slab");
+                (slab.length, slab.shards)
+            } else {
+                assert!(slab.is_none(), "data size {data_size} should not fill a slab");
+                let slab = reader.finish().unwrap();
+                (slab.length, slab.shards)
+            };
+
+            assert_eq!(size, expected_size, "data size {data_size} mismatch");
             assert_eq!(
                 shards.len(),
                 DATA_SHARDS + PARITY_SHARDS,
                 "data size {data_size} shard count mismatch"
             );
 
-            for (i, data) in data[..size as usize].chunks(64).enumerate() {
+            for (i, data) in data[..size].chunks(64).enumerate() {
                 let mut chunk = [0u8; SEGMENT_SIZE];
                 chunk[..data.len()].copy_from_slice(data); // pad it out with zeros
                 let index = i % DATA_SHARDS;
@@ -214,15 +287,17 @@ mod tests {
         data[3 * SECTOR_SIZE..].fill(4);
         let data = data.freeze();
 
-        let mut shards = vec![BytesMut::zeroed(SECTOR_SIZE); DATA_SHARDS + PARITY_SHARDS];
-        let size = ErasureCoder::read_slab_shards(
-            &mut Cursor::new(data.clone()),
-            DATA_SHARDS,
-            &mut shards,
-        )
-        .await
-        .unwrap();
-        assert_eq!(size as usize, data.len());
+        let mut reader = SlabReader::new(DATA_SHARDS, PARITY_SHARDS);
+        let (n, slab) = reader
+            .read_slab(&mut Cursor::new(data.clone()))
+            .await
+            .unwrap();
+        assert_eq!(n, data.len());
+        assert!(slab.is_none()); // 3.5 shards doesn't fill a 4-shard slab
+        let slab = reader.finish().unwrap();
+        let size = slab.length;
+        let mut shards = slab.shards;
+        assert_eq!(size, data.len());
 
         // we expect 5 shards and the last one is an empty parity shard
         assert_eq!(shards.len(), 5);

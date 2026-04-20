@@ -10,7 +10,8 @@
   },
   "scripts": {
     "build": "napi build --release --esm --platform -o examples",
-    "test": "node examples/test.mjs"
+    "test": "node examples/test.mjs",
+    "benchmark": "node examples/benchmark.mjs"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3"

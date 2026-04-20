@@ -494,7 +494,7 @@ mod test {
     use crate::download::Download;
     use crate::hosts::QueueError;
     use crate::rhp4::Client;
-    use crate::upload::Uploader;
+    use crate::upload::{PackedUpload, upload_object};
     use bytes::{Bytes, BytesMut};
     use sia_core::rhp4::SECTOR_SIZE;
     use sia_core::signing::PrivateKey;
@@ -546,13 +546,9 @@ mod test {
                     .collect(),
                 true,
             );
-
-            let uploader = Uploader::new(hosts.clone(), app_key.clone());
-
-
             let input: Bytes = Bytes::from("Hello, world!");
 
-            let mut packed_upload = uploader.upload_packed(UploadOptions::default());
+            let mut packed_upload = PackedUpload::new(hosts.clone(), app_key.clone(), UploadOptions::default()).unwrap();
             assert_eq!(packed_upload.remaining(), SLAB_SIZE);
 
             packed_upload
@@ -633,17 +629,13 @@ mod test {
                     .collect(),
                 true,
             );
-
-            let uploader = Uploader::new(hosts.clone(), app_key.clone());
-
-
             let small_input = Bytes::from("Hello, world!");
 
             let mut large_input = BytesMut::zeroed(SLAB_SIZE as usize + 18); // 1 full slab + 18 bytes
             random_bytes(&mut large_input);
             let large_input = large_input.freeze();
 
-            let mut packed_upload = uploader.upload_packed(UploadOptions::default());
+            let mut packed_upload = PackedUpload::new(hosts.clone(), app_key.clone(), UploadOptions::default()).unwrap();
             packed_upload
                 .add(Cursor::new(small_input.clone()))
                 .await
@@ -721,15 +713,11 @@ mod test {
                     .collect(),
                 true,
             );
-
-            let uploader = Uploader::new(hosts.clone(), app_key.clone());
-
-
             let mut exact_input = BytesMut::zeroed(SLAB_SIZE as usize); // 1 full slab
             random_bytes(&mut exact_input);
             let exact_input = exact_input.freeze();
 
-            let mut packed_upload = uploader.upload_packed(UploadOptions::default());
+            let mut packed_upload = PackedUpload::new(hosts.clone(), app_key.clone(), UploadOptions::default()).unwrap();
             packed_upload
                 .add(Cursor::new(exact_input.clone()))
                 .await
@@ -760,6 +748,70 @@ mod test {
             assert_eq!(output.freeze(), exact_input);
         }).await }
 
+    async fn test_upload_download_packed_empty() { run_local(async {
+            let app_key = Arc::new(AppKey::import(random_seed()));
+            let hosts = Hosts::new(Client::new());
+            hosts.update(
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
+            let non_empty: Bytes = Bytes::from("hello");
+
+            let mut packed_upload =
+                PackedUpload::new(hosts.clone(), app_key.clone(), UploadOptions::default())
+                    .unwrap();
+            // empty at head, between, and tail; interleaved with a non-empty.
+            packed_upload
+                .add(Cursor::new(Bytes::new()))
+                .await
+                .expect("add empty 1 to complete");
+            packed_upload
+                .add(Cursor::new(non_empty.clone()))
+                .await
+                .expect("add non-empty to complete");
+            packed_upload
+                .add(Cursor::new(Bytes::new()))
+                .await
+                .expect("add empty 2 to complete");
+
+            let objects = packed_upload.finalize().await.expect("upload to finish");
+            assert_eq!(objects.len(), 3);
+
+            // empty objects have zero slabs and zero size
+            assert_eq!(objects[0].slabs().len(), 0);
+            assert_eq!(objects[0].size(), 0);
+            assert_eq!(objects[2].slabs().len(), 0);
+            assert_eq!(objects[2].size(), 0);
+
+            // the non-empty object should round-trip normally
+            assert_eq!(objects[1].slabs().len(), 1);
+            assert_eq!(objects[1].size(), non_empty.len() as u64);
+            let mut output = BytesMut::zeroed(non_empty.len());
+            let mut download = Download::new(
+                &objects[1],
+                hosts.clone(),
+                app_key.clone(),
+                DownloadOptions::default(),
+            )
+            .unwrap();
+            copy(&mut download, &mut Cursor::new(&mut output[..]))
+                .await
+                .expect("download to complete");
+            assert_eq!(output.freeze(), non_empty);
+        }).await }
+
     async fn test_upload_download() { run_local(async {
         let app_key = Arc::new(AppKey::import(random_seed()));
         let hosts = Hosts::new(Client::new());
@@ -779,12 +831,9 @@ mod test {
                 .collect(),
             true,
         );
-
-        let uploader = Uploader::new(hosts.clone(), app_key.clone());
         let input: Bytes = Bytes::from("Hello, world!");
 
-        let object = uploader
-            .upload(Object::default(), Cursor::new(input.clone()), UploadOptions::default())
+        let object = upload_object(hosts.clone(), app_key.clone(), Object::default(), Cursor::new(input.clone()), UploadOptions::default())
             .await
             .expect("upload to complete");
 
@@ -833,23 +882,18 @@ mod test {
                     .collect(),
                 true,
             );
-
-            let uploader = Uploader::new(hosts.clone(), app_key.clone());
-
             let part1 = Bytes::from("Hello, ");
             let part2 = Bytes::from("world!");
             let expected = Bytes::from("Hello, world!");
 
             // first upload
-            let object = uploader
-                .upload(Object::default(), Cursor::new(part1.clone()), UploadOptions::default())
+            let object = upload_object(hosts.clone(), app_key.clone(), Object::default(), Cursor::new(part1.clone()), UploadOptions::default())
                 .await
                 .expect("first upload to complete");
             assert_eq!(object.size(), part1.len() as u64);
 
             // resume with second part
-            let object = uploader
-                .upload(object, Cursor::new(part2.clone()), UploadOptions::default())
+            let object = upload_object(hosts.clone(), app_key.clone(), object, Cursor::new(part2.clone()), UploadOptions::default())
                 .await
                 .expect("second upload to complete");
             assert_eq!(object.size(), expected.len() as u64);
@@ -893,10 +937,6 @@ mod test {
                     .collect(),
                 true,
             );
-
-            let uploader = Uploader::new(hosts.clone(), app_key.clone());
-
-
             // Use default 10 data shards, so slab_size = 10 * SECTOR_SIZE
             let slab_size = 10 * SECTOR_SIZE as u64;
             let data_size = slab_size * 3; // 3 slabs
@@ -905,8 +945,7 @@ mod test {
             random_bytes(&mut data);
             let data = data.freeze();
 
-            let object = uploader
-                .upload(Object::default(), Cursor::new(data.clone()), UploadOptions::default())
+            let object = upload_object(hosts.clone(), app_key.clone(), Object::default(), Cursor::new(data.clone()), UploadOptions::default())
                 .await
                 .expect("upload to complete");
 
@@ -992,14 +1031,9 @@ mod test {
                     .collect(),
                 true,
             );
-
-            let uploader = Uploader::new(hosts.clone(), app_key.clone());
-
-
             let input: Bytes = Bytes::from("Hello, world!");
 
-            let object = uploader
-                .upload(Object::default(), Cursor::new(input.clone()), UploadOptions::default())
+            let object = upload_object(hosts.clone(), app_key.clone(), Object::default(), Cursor::new(input.clone()), UploadOptions::default())
                 .await
                 .expect("upload to complete");
 
@@ -1027,12 +1061,9 @@ mod test {
     async fn test_upload_no_hosts() { run_local(async {
             let app_key = Arc::new(AppKey::import(random_seed()));
             let hosts = Hosts::new(Client::new());
-            let uploader = Uploader::new(hosts.clone(), app_key.clone());
-
             let input: Bytes = Bytes::from("Hello, world!");
 
-            let err = uploader
-                .upload(Object::default(), Cursor::new(input.clone()), UploadOptions::default())
+            let err = upload_object(hosts.clone(), app_key.clone(), Object::default(), Cursor::new(input.clone()), UploadOptions::default())
                 .await
                 .expect_err("upload to fail");
 
@@ -1078,13 +1109,9 @@ mod test {
                 host_keys.iter().take(1).copied(),
                 Duration::from_secs(2),
             );
-
-            let uploader = Uploader::new(hosts.clone(), app_key.clone());
-
             let input: Bytes = Bytes::from("Hello, world!");
 
-            let object = uploader
-                .upload(Object::default(), Cursor::new(input.clone()), UploadOptions::default())
+            let object = upload_object(hosts.clone(), app_key.clone(), Object::default(), Cursor::new(input.clone()), UploadOptions::default())
                 .await
                 .expect("upload should succeed with 1 slow host");
 
@@ -1122,13 +1149,9 @@ mod test {
 
             // Make all hosts slow
             mock_transport.set_slow_hosts(host_keys.iter().take(30).copied(), Duration::from_secs(2));
-
-            let uploader = Uploader::new(hosts.clone(), app_key.clone());
-
             let input: Bytes = Bytes::from("Hello, world!");
 
-            let _ = uploader
-                .upload(Object::default(), Cursor::new(input.clone()), UploadOptions::default())
+            let _ = upload_object(hosts.clone(), app_key.clone(), Object::default(), Cursor::new(input.clone()), UploadOptions::default())
                 .await
                 .expect("upload to succeed");
         }).await }
@@ -1159,13 +1182,9 @@ mod test {
                     .collect(),
                 true,
             );
-
-            let uploader = Uploader::new(hosts.clone(), app_key.clone());
-
             let input: Bytes = Bytes::from("Hello, world!");
 
-            let err = uploader
-                .upload(Object::default(), Cursor::new(input.clone()), UploadOptions::default())
+            let err = upload_object(hosts.clone(), app_key.clone(), Object::default(), Cursor::new(input.clone()), UploadOptions::default())
                 .await
                 .expect_err("upload to fail");
 
@@ -1213,10 +1232,7 @@ mod test {
                     assert_eq!(p.shard_size, SECTOR_SIZE);
                     upload_progress_clone.lock().unwrap().insert((p.slab_index, p.shard_index), p);
                 });
-
-            let uploader = Uploader::new(hosts.clone(), app_key.clone());
-            let obj = uploader
-                .upload(Object::default(), Cursor::new(data.clone()), upload_opts)
+            let obj = upload_object(hosts.clone(), app_key.clone(), Object::default(), Cursor::new(data.clone()), upload_opts)
                 .await
                 .unwrap();
             assert_eq!(obj.slabs().len(), num_slabs);

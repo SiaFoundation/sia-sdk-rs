@@ -203,7 +203,9 @@ impl Sdk {
     #[wasm_bindgen(js_name = "uploadPacked")]
     pub fn upload_packed(&self, options: Option<JsValue>) -> Result<PackedUpload, JsError> {
         let opts = options.map(upload_options_from_js).unwrap_or_default();
-        Ok(PackedUpload::new(self.inner.upload_packed(opts)))
+        Ok(PackedUpload::new(
+            self.inner.upload_packed(opts).map_err(to_js_err)?,
+        ))
     }
 
     /// Generates a signed share URL for an object. Anyone with the URL can

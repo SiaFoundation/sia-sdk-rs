@@ -1,13 +1,23 @@
 use std::cell::Cell;
-use std::sync::Arc;
-use tokio::sync::{Mutex, Notify};
-use tokio_util::compat::FuturesAsyncReadCompatExt;
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt};
+use wasm_streams::readable::IntoAsyncRead;
 
 use sia_storage::PackedUpload as CorePackedUpload;
 use wasm_bindgen::prelude::*;
 
 use crate::helpers::to_js_err;
 use crate::object::PinnedObject;
+
+type PackedReader = Compat<IntoAsyncRead<'static>>;
+
+enum PackedUploadAction {
+    Add(
+        PackedReader,
+        oneshot::Sender<Result<u64, sia_storage::UploadError>>,
+    ),
+    Finalize(oneshot::Sender<Result<Vec<sia_storage::Object>, sia_storage::UploadError>>),
+}
 
 /// A packed upload handle for efficiently uploading multiple objects
 /// together. Objects are packed into shared slabs to avoid wasting storage.
@@ -21,20 +31,39 @@ use crate::object::PinnedObject;
 /// ```
 #[wasm_bindgen]
 pub struct PackedUpload {
-    inner: Arc<Mutex<Option<CorePackedUpload>>>,
-    cancelled: Arc<Notify>,
+    upload_task: tokio::task::JoinHandle<()>,
+    tx: mpsc::Sender<PackedUploadAction>,
     slab_size: f64,
     length: Cell<f64>,
+    closed: Cell<bool>,
 }
 
 impl PackedUpload {
     pub(crate) fn new(inner: CorePackedUpload) -> Self {
         let slab_size = inner.slab_size() as f64;
+        let (action_tx, mut action_rx) = mpsc::channel(10);
+        let upload_task = tokio::task::spawn_local(async move {
+            let mut packed_upload = inner;
+            while let Some(action) = action_rx.recv().await {
+                match action {
+                    PackedUploadAction::Add(reader, add_tx) => {
+                        let res = packed_upload.add(reader).await;
+                        let _ = add_tx.send(res);
+                    }
+                    PackedUploadAction::Finalize(finalize_tx) => {
+                        let result = packed_upload.finalize().await;
+                        let _ = finalize_tx.send(result);
+                        return;
+                    }
+                }
+            }
+        });
         Self {
-            inner: Arc::new(Mutex::new(Some(inner))),
-            cancelled: Arc::new(Notify::new()),
+            upload_task,
+            tx: action_tx,
             slab_size,
             length: Cell::new(0.0),
+            closed: Cell::new(false),
         }
     }
 }
@@ -81,54 +110,52 @@ impl PackedUpload {
     /// await packed.add(blob.stream());
     /// ```
     pub async fn add(&self, stream: web_sys::ReadableStream) -> Result<f64, JsError> {
+        if self.closed.get() {
+            return Err(JsError::new("upload already finalized"));
+        }
         let reader = wasm_streams::ReadableStream::from_raw(stream)
             .into_async_read()
             .compat();
-        let inner = self.inner.clone();
-        let cancelled = self.cancelled.clone();
-        let (size, length) = crate::run_local(async move {
-            let mut guard = tokio::select! {
-                _ = cancelled.notified() => {
-                    return Err(JsError::new("upload cancelled"));
-                }
-                guard = inner.lock() => guard,
-            };
-            let packed = guard
-                .as_mut()
-                .ok_or_else(|| JsError::new("upload already finalized"))?;
-            let size = tokio::select! {
-                _ = cancelled.notified() => {
-                    guard.take();
-                    return Err(JsError::new("upload cancelled"));
-                }
-                result = packed.add(reader) => result.map_err(to_js_err)?,
-            };
-            let length = packed.length() as f64;
-            Ok((size as f64, length))
-        })
-        .await?;
-        self.length.set(length);
+        let (add_tx, add_rx) = oneshot::channel();
+        self.tx
+            .send(PackedUploadAction::Add(reader, add_tx))
+            .await
+            .map_err(|_| JsError::new("upload closed"))?;
+        let size = add_rx
+            .await
+            .map_err(|_| JsError::new("upload closed"))?
+            .map_err(to_js_err)?;
+        let size = size as f64;
+        self.length.set(self.length.get() + size);
         Ok(size)
     }
 
     /// Finalizes the packed upload and returns the resulting objects.
     /// Each object must be pinned separately with `sdk.pinObject()`.
     pub async fn finalize(self) -> Result<Vec<PinnedObject>, JsError> {
-        let inner = self.inner.clone();
-        let objects = crate::run_local(async move {
-            let packed = inner
-                .lock()
-                .await
-                .take()
-                .ok_or_else(|| JsError::new("upload already finalized"))?;
-            packed.finalize().await.map_err(to_js_err)
-        })
-        .await?;
+        if self.closed.replace(true) {
+            return Err(JsError::new("upload already finalized"));
+        }
+        let (finalize_tx, finalize_rx) = oneshot::channel();
+        self.tx
+            .send(PackedUploadAction::Finalize(finalize_tx))
+            .await
+            .map_err(|_| JsError::new("upload closed"))?;
+        let objects = finalize_rx
+            .await
+            .map_err(|_| JsError::new("upload closed"))?
+            .map_err(to_js_err)?;
         Ok(objects.into_iter().map(PinnedObject).collect())
     }
 
-    /// Cancels the packed upload. Immediately interrupts any in-flight `add`.
+    /// Cancels the packed upload. Immediately interrupts any in-flight `add`
+    /// and aborts all pending slab uploads.
     pub fn cancel(&self) {
-        self.cancelled.notify_waiters();
+        if self.closed.replace(true) {
+            return;
+        }
+        // Aborting the task drops the owned PackedUpload, which aborts every
+        // pending slab task via AbortOnDropHandle inside the core upload.
+        self.upload_task.abort();
     }
 }
