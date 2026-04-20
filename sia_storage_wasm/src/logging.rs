@@ -39,7 +39,9 @@ extern "C" {
     #[wasm_bindgen(typescript_type = "(message: string) => void")]
     pub type LogCallback;
 
-    #[wasm_bindgen(typescript_type = "\"off\" | \"error\" | \"warn\" | \"info\" | \"debug\" | \"trace\"")]
+    #[wasm_bindgen(
+        typescript_type = "\"off\" | \"error\" | \"warn\" | \"info\" | \"debug\" | \"trace\""
+    )]
     pub type LogLevel;
 }
 
