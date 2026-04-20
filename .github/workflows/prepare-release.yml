@@ -21,8 +21,11 @@ jobs:
       - name: Setup Knope
         uses: knope-dev/action@8055388a38df33f0603050415ac3d8175d6b566f
       - name: Prepare Release
+        id: prepare
         run: knope prepare-release --verbose
+        continue-on-error: true
       - name: Create Pull Request
+        if: steps.prepare.outcome == 'success'
         uses: peter-evans/create-pull-request@v7
         with:
           delete-branch: true
