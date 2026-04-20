@@ -12,6 +12,7 @@ use std::time::SystemTime;
 use thiserror::Error;
 use tokio::runtime::{self, Runtime};
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
 mod logging;
@@ -679,7 +680,7 @@ impl PackedUpload {
 #[derive(uniffi::Object)]
 pub struct Download {
     inner: Arc<tokio::sync::Mutex<Option<sia_storage::Download>>>,
-    cancel: tokio_util::sync::CancellationToken,
+    cancel: CancellationToken,
 }
 
 #[uniffi::export]
@@ -827,17 +828,18 @@ impl Sdk {
     ///
     /// # Returns
     /// A [PackedUpload] that can be used to add objects and finalize the upload.
-    pub async fn upload_packed(&self, options: UploadOptions) -> PackedUpload {
-        let sdk = self.inner.clone();
-        let (action_tx, mut action_rx) = mpsc::channel(10);
+    pub async fn upload_packed(&self, options: UploadOptions) -> Result<PackedUpload, UploadError> {
         let options: sia_storage::UploadOptions = options.into();
         let slab_size = options.data_shards as u64 * SECTOR_SIZE as u64;
+        let mut packed_upload = self
+            .inner
+            .upload_packed(options)
+            .map_err(UploadError::from)?;
+        let (action_tx, mut action_rx) = mpsc::channel(10);
         let length = Arc::new(AtomicU64::new(0));
         let closed = Arc::new(AtomicBool::new(false));
-
         let task_length = length.clone();
         let upload_task = spawn(async move {
-            let mut packed_upload = sdk.upload_packed(options);
             while let Some(action) = action_rx.recv().await {
                 match action {
                     PackedUploadAction::Add(reader, add_tx) => {
@@ -858,14 +860,13 @@ impl Sdk {
                 }
             }
         });
-
-        PackedUpload {
+        Ok(PackedUpload {
             upload_task,
             tx: action_tx,
             slab_size,
             length,
             closed,
-        }
+        })
     }
 
     /// Uploads data to the Sia network.
@@ -914,7 +915,7 @@ impl Sdk {
         let reader = self.inner.download(&object.object(), options.into())?;
         Ok(Download {
             inner: Arc::new(tokio::sync::Mutex::new(Some(reader))),
-            cancel: tokio_util::sync::CancellationToken::new(),
+            cancel: CancellationToken::new(),
         })
     }
 

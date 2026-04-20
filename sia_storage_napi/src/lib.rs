@@ -660,24 +660,22 @@ impl Sdk {
     /// Creates a new packed upload for efficiently uploading multiple small
     /// objects together. Returns a `PackedUpload` handle.
     #[napi(ts_args_type = "options?: UploadOptions")]
-    pub fn upload_packed(&self, options: Option<SendableUploadOptions>) -> PackedUpload {
+    pub fn upload_packed(&self, options: Option<SendableUploadOptions>) -> Result<PackedUpload> {
         let options: sia_storage::UploadOptions = options.map(|o| o.0).unwrap_or_default();
-        let sdk = self.inner.clone();
+        let slab_size = SECTOR_SIZE as u64 * options.data_shards as u64;
+        let mut packed_upload = self
+            .inner
+            .upload_packed(options)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let (action_tx, mut action_rx) = mpsc::channel(10);
         let length = Arc::new(AtomicU64::new(0));
         let closed = Arc::new(AtomicBool::new(false));
-        let (action_tx, mut action_rx) = mpsc::channel(10);
-        let slab_size = SECTOR_SIZE as u64 * options.data_shards as u64;
         let task_length = length.clone();
-        let upload_task = spawn(async move {
-            let mut packed_upload = sdk.upload_packed(options);
-
+        let upload_task = tokio::spawn(async move {
             while let Some(action) = action_rx.recv().await {
                 match action {
                     PackedUploadAction::Add(reader, add_tx) => {
-                        let res = packed_upload
-                            .add(reader)
-                            .await
-                            .map_err(sia_storage::UploadError::from);
+                        let res = packed_upload.add(reader).await;
                         if let Ok(size) = res {
                             task_length.fetch_add(size, Ordering::AcqRel);
                         }
@@ -691,14 +689,13 @@ impl Sdk {
                 }
             }
         });
-
-        PackedUpload {
+        Ok(PackedUpload {
             upload_task,
             tx: action_tx,
             slab_size,
             length,
             closed,
-        }
+        })
     }
 
     /// Uploads data to the Sia network.

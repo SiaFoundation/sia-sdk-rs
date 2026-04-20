@@ -13,11 +13,10 @@ use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
 use crate::task::AbortOnDropHandle;
 use crate::time::Duration;
-use crate::upload::Uploader;
+use crate::upload::{PackedUpload, upload_object};
 use crate::{
     Account, AppKey, BuilderError, Download, DownloadError, DownloadOptions, Host, HostQuery,
-    Object, ObjectEvent, ObjectsCursor, PackedUpload, PinnedSlab, SealedObjectError, UploadError,
-    UploadOptions,
+    Object, ObjectEvent, ObjectsCursor, PinnedSlab, SealedObjectError, UploadError, UploadOptions,
 };
 
 /// Errors that can occur when using the SDK.
@@ -50,7 +49,6 @@ pub struct Sdk {
     app_key: Arc<AppKey>,
     api_client: app_client::Client,
     hosts: Hosts<Client>,
-    uploader: Uploader<Client>,
     _refresh_task: Arc<AbortOnDropHandle<()>>,
 }
 
@@ -109,7 +107,6 @@ impl Sdk {
     ) -> Result<Self, BuilderError> {
         let hosts = Hosts::new(Client::new());
         Self::refresh_hosts(&app_key, &api_client, &hosts).await?;
-        let uploader = Uploader::new(hosts.clone(), app_key.clone());
         let refresh_task = Self::spawn_refresh_task(
             app_key.clone(),
             api_client.clone(),
@@ -120,7 +117,6 @@ impl Sdk {
             app_key,
             api_client,
             hosts,
-            uploader,
             _refresh_task: Arc::new(refresh_task),
         })
     }
@@ -172,7 +168,14 @@ impl Sdk {
         reader: R,
         options: UploadOptions,
     ) -> Result<Object, UploadError> {
-        self.uploader.upload(object, reader, options).await
+        upload_object(
+            self.hosts.clone(),
+            self.app_key.clone(),
+            object,
+            reader,
+            options,
+        )
+        .await
     }
 
     /// Creates a new packed upload. This allows multiple objects to be packed together
@@ -183,8 +186,8 @@ impl Sdk {
     ///
     /// # Returns
     /// A [PackedUpload] that can be used to add objects and finalize the upload.
-    pub fn upload_packed(&self, options: UploadOptions) -> PackedUpload {
-        self.uploader.upload_packed(options)
+    pub fn upload_packed(&self, options: UploadOptions) -> Result<PackedUpload, UploadError> {
+        PackedUpload::new(self.hosts.clone(), self.app_key.clone(), options)
     }
 
     /// Returns a [Download] handle that streams the object's data. The handle

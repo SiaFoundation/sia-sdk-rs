@@ -543,7 +543,7 @@ mod test {
 
     use crate::compat::run_local;
     use crate::hosts::Hosts;
-    use crate::upload::Uploader;
+    use crate::upload::{upload_object, upload_slabs};
     use crate::{Host, ShardProgress, UploadOptions};
 
     cross_target_tests! {
@@ -578,11 +578,15 @@ mod test {
             // chunk completion during download
             transport.set_initial_read_delay(Duration::from_millis(500));
 
-            let uploader = Uploader::new(hosts.clone(), app_key.clone());
-            let obj = uploader
-                .upload(Object::default(), Cursor::new(data.clone()), UploadOptions::default())
-                .await
-                .unwrap();
+            let obj = upload_object(
+                hosts.clone(),
+                app_key.clone(),
+                Object::default(),
+                Cursor::new(data.clone()),
+                UploadOptions::default(),
+            )
+            .await
+            .unwrap();
 
             let mut recovered_data = Vec::with_capacity(slab_size);
             let mut download = Download::new(
@@ -626,7 +630,7 @@ mod test {
             let data = data.freeze();
             let app_key = Arc::new(AppKey::import(rand::random()));
 
-            let slabs = Uploader::upload_slabs(
+            let slabs = upload_slabs(
                 hosts.clone(),
                 app_key.clone(),
                 Cursor::new(data.clone()),
@@ -703,11 +707,15 @@ mod test {
             let data = data.freeze();
             let app_key = Arc::new(AppKey::import(rand::random()));
 
-            let uploader = Uploader::new(hosts.clone(), app_key.clone());
-            let obj = uploader
-                .upload(Object::default(), Cursor::new(data.clone()), upload_options)
-                .await
-                .unwrap();
+            let obj = upload_object(
+                hosts.clone(),
+                app_key.clone(),
+                Object::default(),
+                Cursor::new(data.clone()),
+                upload_options,
+            )
+            .await
+            .unwrap();
             assert_eq!(obj.slabs().len(), num_slabs);
 
             // download with progress callback
