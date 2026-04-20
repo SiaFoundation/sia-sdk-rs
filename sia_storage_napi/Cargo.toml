@@ -16,7 +16,7 @@ futures-core = "0.3.32"
 log = "0.4.29"
 chrono = { version = "0.4", features = ["serde"] }
 napi = { version = "3.8.5", features = ["async", "napi8", "chrono_date", "web_stream"] }
-napi-derive = "3.5.4"
+napi-derive = { version = "3.5.4", features = ["type-def"] }
 rand = "0.10.0"
 sia_core = { version = "0.3.0", path = "../sia_core" }
 sia_storage = { version = "0.7.0", path = "../sia_storage" }

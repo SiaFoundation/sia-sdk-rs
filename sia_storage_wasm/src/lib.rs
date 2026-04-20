@@ -1,6 +1,7 @@
 mod app_key;
 mod builder;
 mod helpers;
+mod logging;
 mod object;
 mod packed;
 mod sdk;
@@ -35,13 +36,12 @@ where
     rx.await.expect("run_local task was dropped")
 }
 
-/// Set up panic hook, logger, and tokio runtime for browser use.
-/// Defaults to Info level. Call `set_log_level("debug")` for verbose output.
+/// Set up panic hook and tokio runtime for browser use.
+///
+/// Call `setLogger` to receive log messages.
 #[wasm_bindgen(start)]
 pub fn init() {
     console_error_panic_hook::set_once();
-    console_log::init_with_level(log::Level::Trace).ok();
-    log::set_max_level(log::LevelFilter::Info);
 
     // Create a single-threaded tokio runtime + LocalSet. The runtime
     // context is entered so tokio primitives work. The LocalSet runs
@@ -62,28 +62,6 @@ pub fn init() {
     // Run the LocalSet forever on the browser event loop so spawned
     // tasks are actually polled.
     wasm_bindgen_futures::spawn_local(local_set.run_until(std::future::pending::<()>()));
-}
-
-/// Sets the global log level filter at runtime.
-///
-/// Accepts `"debug"`, `"info"`, `"warn"`, or `"error"`. Unrecognized
-/// values default to `"info"`. The change takes effect immediately for
-/// all subsequent `log::debug!()` / `log::info!()` / etc. calls.
-///
-/// ```js
-/// set_log_level("debug"); // verbose — shows RPC calls, slab progress, etc.
-/// set_log_level("error"); // quiet — only fatal errors
-/// ```
-#[wasm_bindgen(js_name = "setLogLevel")]
-pub fn set_log_level(level: &str) {
-    let filter = match level {
-        "trace" => log::LevelFilter::Trace,
-        "debug" => log::LevelFilter::Debug,
-        "warn" => log::LevelFilter::Warn,
-        "error" => log::LevelFilter::Error,
-        _ => log::LevelFilter::Info,
-    };
-    log::set_max_level(filter);
 }
 
 /// Generates a new BIP-39 12-word recovery phrase.
