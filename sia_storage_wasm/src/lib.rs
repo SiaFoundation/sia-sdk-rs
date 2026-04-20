@@ -38,7 +38,7 @@ where
 
 /// Set up panic hook and tokio runtime for browser use.
 ///
-/// Call [`setLogger`](crate::logging::set_logger) to receive log messages.
+/// Call `setLogger` to receive log messages.
 #[wasm_bindgen(start)]
 pub fn init() {
     console_error_panic_hook::set_once();
