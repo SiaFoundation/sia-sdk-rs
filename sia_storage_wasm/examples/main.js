@@ -1,6 +1,6 @@
 import init, {
   Builder,
-  setLogLevel,
+  setLogger,
   generateRecoveryPhrase,
   PinnedObject,
 } from './pkg/sia_storage_wasm.js';
@@ -45,7 +45,7 @@ function askUser(label) {
 
 async function main() {
   await init();
-  setLogLevel('info');
+  setLogger((msg) => console.log(msg), 'info');
 
   // -- builder flow --
   const builder = new Builder(INDEXER_URL, {
