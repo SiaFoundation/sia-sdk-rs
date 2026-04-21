@@ -11,6 +11,7 @@ use crate::helpers::to_js_err;
 use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
 use crate::run_local;
+use crate::stream_reader::js_stream_reader;
 use crate::types::{
     self, HostQuery, ObjectEvent, ObjectsCursor, download_options_from_js, ms_to_chrono,
     upload_options_from_js,
@@ -187,9 +188,7 @@ impl Sdk {
         let sdk = self.inner.clone();
         let opts = options.map(upload_options_from_js).unwrap_or_default();
         let obj = object.0;
-        let reader = wasm_streams::ReadableStream::from_raw(source)
-            .into_async_read()
-            .compat();
+        let reader = js_stream_reader(source).compat();
         let result = run_local(async move { sdk.upload(obj, reader, opts).await })
             .await
             .map_err(to_js_err)?;

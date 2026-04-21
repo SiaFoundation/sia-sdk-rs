@@ -2817,6 +2817,7 @@ version = "0.2.0"
 dependencies = [
  "chrono",
  "console_error_panic_hook",
+ "futures-util",
  "hex",
  "js-sys",
  "log",
