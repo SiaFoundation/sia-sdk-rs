@@ -676,7 +676,7 @@ impl PackedUpload {
 
 /// A download handle. Call [Download::read] repeatedly to receive chunks of
 /// decoded data. An empty Vec signals end of stream. All in-flight work is
-/// cancelled when the handle is dropped or [Download::close] is called.
+/// cancelled when the handle is dropped or [Download::cancel] is called.
 #[derive(uniffi::Object)]
 pub struct Download {
     inner: Arc<tokio::sync::Mutex<Option<sia_storage::Download>>>,
@@ -710,7 +710,7 @@ impl Download {
     /// Cancels the download and aborts any in-flight chunk recovery tasks.
     /// Interrupts an in-flight [Download::read] immediately. Subsequent reads
     /// return [DownloadError::Cancelled].
-    pub async fn close(&self) {
+    pub async fn cancel(&self) {
         self.cancel.cancel();
         let inner = self.inner.clone();
         let _ = spawn(async move {
