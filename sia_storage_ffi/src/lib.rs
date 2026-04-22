@@ -1,5 +1,6 @@
 uniffi::setup_scaffolding!();
 
+use log::debug;
 use sia_core::encoding;
 use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::{PublicKey, Signature};
@@ -840,6 +841,10 @@ impl Sdk {
         let closed = Arc::new(AtomicBool::new(false));
         let task_length = length.clone();
         let upload_task = spawn(async move {
+            debug!(
+                "packed upload task started with slab size {} bytes",
+                slab_size
+            );
             while let Some(action) = action_rx.recv().await {
                 match action {
                     PackedUploadAction::Add(reader, add_tx) => {
@@ -850,15 +855,27 @@ impl Sdk {
                         if let Ok(size) = res {
                             task_length.fetch_add(size, Ordering::AcqRel);
                         }
+                        debug!(
+                            "added object of size {} bytes, total length is now {} bytes across {} slabs",
+                            res.as_ref().map(|s| *s).unwrap_or(0),
+                            task_length.load(Ordering::Acquire),
+                            task_length.load(Ordering::Acquire).div_ceil(slab_size)
+                        );
                         let _ = add_tx.send(res);
                     }
                     PackedUploadAction::Finalize(finalize_tx) => {
+                        debug!(
+                            "finalizing packed upload with length {} bytes across {} slabs",
+                            task_length.load(Ordering::Acquire),
+                            task_length.load(Ordering::Acquire).div_ceil(slab_size)
+                        );
                         let result = packed_upload.finalize().await.map_err(|e| e.into());
                         let _ = finalize_tx.send(result);
                         return;
                     }
                 }
             }
+            debug!("packed upload task ending because all senders have been dropped");
         });
         Ok(PackedUpload {
             upload_task,
