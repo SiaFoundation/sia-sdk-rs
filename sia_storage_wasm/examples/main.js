@@ -2,6 +2,7 @@ import init, {
   Builder,
   generateRecoveryPhrase,
   PinnedObject,
+  setLogger,
 } from './pkg/sia_storage_wasm.js';
 
 const INDEXER_URL = 'https://sia.storage';
@@ -44,6 +45,7 @@ function askUser(label) {
 
 async function main() {
   await init();
+  setLogger((msg) => log('[wasm]', msg), 'debug');
 
   // -- builder flow --
   const builder = new Builder(INDEXER_URL, {

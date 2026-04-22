@@ -7,7 +7,7 @@ use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
 use thiserror::Error;
 
-use crate::time::Elapsed;
+use crate::time::{Duration, Elapsed};
 
 #[cfg(not(any(test, feature = "mock", target_arch = "wasm32")))]
 mod siamux;
@@ -59,18 +59,23 @@ pub(crate) struct HostEndpoint {
 }
 
 /// Trait defining the operations that can be performed on a host.
+///
+/// Each RPC returns the on-wire duration of the RPC alongside its result. The
+/// duration measures only the time spent exchanging request/response bytes —
+/// it excludes connection setup and stream opening. Callers can feed it into
+/// host performance tracking without contamination from pool-miss costs.
 pub(crate) trait Transport: Clone + Unpin + MaybeSendSync + 'static {
     fn host_prices(
         &self,
         host: &HostEndpoint,
-    ) -> impl Future<Output = Result<HostPrices, Error>> + MaybeSendSync;
+    ) -> impl Future<Output = Result<(HostPrices, Duration), Error>> + MaybeSendSync;
     fn write_sector(
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
         account_key: &PrivateKey,
         sector: Bytes,
-    ) -> impl Future<Output = Result<Hash256, Error>> + MaybeSendSync;
+    ) -> impl Future<Output = Result<(Hash256, Duration), Error>> + MaybeSendSync;
     fn read_sector(
         &self,
         host: &HostEndpoint,
@@ -79,7 +84,7 @@ pub(crate) trait Transport: Clone + Unpin + MaybeSendSync + 'static {
         root: Hash256,
         offset: usize,
         length: usize,
-    ) -> impl Future<Output = Result<Bytes, Error>> + MaybeSendSync;
+    ) -> impl Future<Output = Result<(Bytes, Duration), Error>> + MaybeSendSync;
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) trait MaybeSendSync: Send + Sync {}

@@ -36,11 +36,9 @@ struct SectorUploadResult {
     elapsed: Duration,
 }
 
-impl ShardUpload {
-    fn upload_timeout(attempts: usize) -> Duration {
-        Duration::from_secs((10 + (5 * attempts as u64)).min(120))
-    }
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(90);
 
+impl ShardUpload {
     fn spawn_write(
         &self,
         tasks: &mut JoinSet<Result<SectorUploadResult, UploadError>>,
@@ -78,15 +76,10 @@ impl ShardUpload {
         });
     }
 
-    async fn upload_shard(
-        self,
-        initial_host: (PublicKey, usize),
-    ) -> Result<SectorUploadResult, UploadError> {
-        let (host_key, attempts) = initial_host;
-        let write_timeout = Self::upload_timeout(attempts);
+    async fn upload_shard(self, host_key: PublicKey) -> Result<SectorUploadResult, UploadError> {
         let permit = self.semaphore.clone().acquire_owned().await?;
         let mut tasks = JoinSet::new();
-        self.spawn_write(&mut tasks, host_key, write_timeout, permit);
+        self.spawn_write(&mut tasks, host_key, UPLOAD_TIMEOUT, permit);
         loop {
             let active = tasks.len();
             tokio::select! {
@@ -105,23 +98,21 @@ impl ShardUpload {
                         }
                         Err(_) => {
                             if tasks.is_empty() {
-                                let (host_key, attempts) = self.hosts.pop_front()?;
-                                let write_timeout = Self::upload_timeout(attempts);
+                                let host_key = self.hosts.pop_front()?;
                                 let permit = self.semaphore.clone().acquire_owned().await?;
-                                self.spawn_write(&mut tasks, host_key, write_timeout, permit);
+                                self.spawn_write(&mut tasks, host_key, UPLOAD_TIMEOUT, permit);
                             }
                         }
                     }
                 },
                 _ = sleep(Duration::from_secs(active.max(1) as u64)) => {
                     if let Ok(racer) = self.semaphore.clone().try_acquire_owned()
-                        && let Ok((host_key, attempts)) = self.hosts.pop_front() {
+                        && let Ok(host_key) = self.hosts.pop_front() {
                             debug!(
                                 "slab {} shard {} racing slow host",
                                 self.slab_index, self.shard_index
                             );
-                            let write_timeout = Self::upload_timeout(attempts);
-                            self.spawn_write(&mut tasks, host_key, write_timeout, racer);
+                            self.spawn_write(&mut tasks, host_key, UPLOAD_TIMEOUT, racer);
                         }
                 }
             }

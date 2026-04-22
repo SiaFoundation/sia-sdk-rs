@@ -1,4 +1,4 @@
-use crate::time::{Elapsed, timeout};
+use crate::time::{Elapsed, Instant, timeout};
 
 use bytes::Bytes;
 use core::fmt::Debug;
@@ -123,7 +123,7 @@ impl Client {
         };
         let conn = cell
             .get_or_try_init(|| async {
-                let mux = timeout(Duration::from_secs(5), self.new_conn(host))
+                let mux = timeout(Duration::from_secs(10), self.new_conn(host))
                     .await
                     .inspect_err(|e| {
                         debug!("siamux connection to {} timed out: {e}", host.public_key);
@@ -142,16 +142,20 @@ impl Client {
 }
 
 impl Transport for Client {
-    async fn host_prices(&self, host: &HostEndpoint) -> Result<HostPrices, TransportError> {
+    async fn host_prices(
+        &self,
+        host: &HostEndpoint,
+    ) -> Result<(HostPrices, Duration), TransportError> {
         let mut stream = self
             .host_stream(host)
             .await
             .map_err(|e| TransportError::Transport(e.to_string()))?;
+        let start = Instant::now();
         let resp = RPCSettings::send_request(&mut stream)
             .await?
             .complete(&mut stream)
             .await?;
-        Ok(resp.settings.prices)
+        Ok((resp.settings.prices, start.elapsed()))
     }
 
     async fn write_sector(
@@ -160,17 +164,18 @@ impl Transport for Client {
         prices: HostPrices,
         account_key: &PrivateKey,
         data: Bytes,
-    ) -> Result<Hash256, TransportError> {
+    ) -> Result<(Hash256, Duration), TransportError> {
         let token = AccountToken::new(account_key, host.public_key);
         let mut stream = self
             .host_stream(host)
             .await
             .map_err(|e| TransportError::Transport(e.to_string()))?;
+        let start = Instant::now();
         let resp = RPCWriteSector::send_request(&mut stream, prices, token, data)
             .await?
             .complete(&mut stream)
             .await?;
-        Ok(resp.root)
+        Ok((resp.root, start.elapsed()))
     }
 
     async fn read_sector(
@@ -181,16 +186,17 @@ impl Transport for Client {
         root: Hash256,
         offset: usize,
         length: usize,
-    ) -> Result<Bytes, TransportError> {
+    ) -> Result<(Bytes, Duration), TransportError> {
         let token = AccountToken::new(account_key, host.public_key);
         let mut stream = self
             .host_stream(host)
             .await
             .map_err(|e| TransportError::Transport(e.to_string()))?;
+        let start = Instant::now();
         let resp = RPCReadSector::send_request(&mut stream, prices, token, root, offset, length)
             .await?
             .complete(&mut stream)
             .await?;
-        Ok(resp.data)
+        Ok((resp.data, start.elapsed()))
     }
 }
