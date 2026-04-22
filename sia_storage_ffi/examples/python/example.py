@@ -6,14 +6,13 @@ from os import urandom
 from random import randint
 from sys import stdin
 
-from indexd_ffi import (
+from sia_storage_ffi import (
     AppMeta,
     Builder,
     DownloadOptions,
     Logger,
     Reader,
     UploadOptions,
-    Writer,
     generate_recovery_phrase,
     set_logger,
     uniffi_set_event_loop,
@@ -46,18 +45,6 @@ class BytesReader(Reader):
         return self.buffer.read(self.chunk_size)
 
 
-class BytesWriter(Writer):
-    def __init__(self):
-        self.buffer = BytesIO()
-
-    async def write(self, data: bytes) -> None:
-        if len(data) > 0:
-            self.buffer.write(data)
-
-    def get_data(self) -> bytes:
-        return self.buffer.getvalue()
-
-
 set_logger(PrintLogger(), "debug")
 
 
@@ -65,18 +52,16 @@ async def main():
     uniffi_set_event_loop(asyncio.get_running_loop())  # type: ignore[arg-type]
     app_id = b"\x01" * 32
 
-    builder = Builder("https://sia.storage")
+    builder = Builder("https://sia.storage", AppMeta(
+        id=app_id,
+        name="python example",
+        description="an example app",
+        service_url="https://example.com",
+        logo_url=None,
+        callback_url=None,
+    ))
 
-    await builder.request_connection(
-        AppMeta(
-            id=app_id,
-            name="python example",
-            description="an example app",
-            service_url="https://example.com",
-            logo_url=None,
-            callback_url=None,
-        )
-    )
+    await builder.request_connection()
 
     print(f"Please approve connection {builder.response_url()}")
     await builder.wait_for_approval()
@@ -116,14 +101,16 @@ async def main():
     print(f"Upload finished {len(objects)} objects in {elapsed}")
 
     start = datetime.now(timezone.utc)
-    writer = BytesWriter()
     print(f"Downloading object {objects[-1].id()} {objects[-1].size()} bytes")
-    await sdk.download(writer, objects[-1], DownloadOptions())
-    if writer.get_data() != data:
+    reader = sdk.download(objects[-1], DownloadOptions())
+    read_data = b""
+    while (chunk := await reader.read()) != b"":
+        read_data += chunk
+    if read_data != data:
         print("Downloaded data does not match uploaded data")
     elapsed = datetime.now(timezone.utc) - start
     print(
-        f"Downloaded object {objects[-1].id()} with {len(writer.get_data())} bytes in {elapsed}"
+        f"Downloaded object {objects[-1].id()} with {len(read_data)} bytes in {elapsed}"
     )
 
 
