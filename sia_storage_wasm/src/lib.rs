@@ -6,6 +6,7 @@ mod object;
 mod packed;
 mod sdk;
 mod sealed;
+mod stream_reader;
 mod types;
 
 use wasm_bindgen::prelude::*;

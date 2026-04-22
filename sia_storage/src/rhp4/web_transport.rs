@@ -49,6 +49,17 @@ const RHP4_PATH: &str = "/sia/rhp/v4";
 /// stalling when many hosts are contacted at once.
 const MAX_PENDING_CONNS: usize = 64;
 
+fn js_err_message(e: &JsValue) -> String {
+    if let Some(err) = e.dyn_ref::<js_sys::Error>() {
+        let message: String = err.message().into();
+        if message.is_empty() {
+            return "JavaScript error with no message".to_string();
+        }
+        return message;
+    }
+    e.as_string().unwrap_or_else(|| format!("{e:?}"))
+}
+
 // --- Connection ---
 
 /// A WebTransport connection to a host. Supports opening multiple
@@ -68,7 +79,9 @@ impl Connection {
         let bidi: web_sys::WebTransportBidirectionalStream =
             JsFuture::from(self.transport.create_bidirectional_stream())
                 .await
-                .map_err(|e| Error::Transport(format!("createBidirectionalStream: {e:?}")))?
+                .map_err(|e| {
+                    Error::Transport(format!("createBidirectionalStream: {}", js_err_message(&e)))
+                })?
                 .unchecked_into();
         let reader = bidi
             .readable()
@@ -77,7 +90,7 @@ impl Connection {
         let writer = bidi
             .writable()
             .get_writer()
-            .map_err(|e| Error::Transport(format!("get_writer: {e:?}")))?;
+            .map_err(|e| Error::Transport(format!("get_writer: {}", js_err_message(&e))))?;
         Ok(Stream::new(reader, writer))
     }
 }
@@ -93,13 +106,34 @@ async fn connect(addr: &str) -> Result<Connection, Error> {
     debug!("[WT] connecting to {url}");
 
     let options = web_sys::WebTransportOptions::new();
-    let wt = web_sys::WebTransport::new_with_options(&url, &options)
-        .map_err(|e| Error::Transport(format!("WebTransport constructor: {e:?}")))?;
+    let wt = web_sys::WebTransport::new_with_options(&url, &options).map_err(|e| {
+        Error::Transport(format!("WebTransport constructor: {}", js_err_message(&e)))
+    })?;
 
     let conn = Connection { transport: wt };
+
+    // Attach a handler to `.closed` before awaiting ready — the session can
+    // fail during the handshake, and if the future here is dropped (or ready
+    // rejects after we've moved on), `Connection::drop` will call `close()`
+    // on a transport whose `.closed` Promise is about to reject with a
+    // `WebTransportError`. Without a handler attached, that rejection reaches
+    // the browser's global unhandled-rejection handler. Transport errors are
+    // already reported via individual read/write failures and pool eviction,
+    // so this handler just logs and swallows.
+    let closed = conn.transport.closed();
+    let log_url = url.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) = JsFuture::from(closed).await {
+            debug!(
+                "[WT] session closed with error: {log_url}: {}",
+                js_err_message(&e)
+            );
+        }
+    });
+
     JsFuture::from(conn.transport.ready())
         .await
-        .map_err(|e| Error::Transport(format!("WebTransport ready: {e:?}")))?;
+        .map_err(|e| Error::Transport(format!("WebTransport ready: {}", js_err_message(&e))))?;
 
     debug!("[WT] connected to {url}");
     Ok(conn)
@@ -135,7 +169,7 @@ impl Stream {
         array.copy_from(data);
         JsFuture::from(self.writer.write_with_chunk(&array))
             .await
-            .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+            .map_err(|e| std::io::Error::other(js_err_message(&e)))?;
         Ok(())
     }
 }
@@ -164,7 +198,7 @@ impl AsyncRead for Stream {
 
         let future = this.pending_read.as_mut().unwrap();
         let result = std::task::ready!(Pin::new(future).poll(cx))
-            .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+            .map_err(|e| std::io::Error::other(js_err_message(&e)))?;
         this.pending_read = None;
 
         let chunk: ReadableStreamReadResult = result.unchecked_into();

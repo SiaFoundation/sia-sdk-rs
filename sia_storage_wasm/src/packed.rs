@@ -1,15 +1,15 @@
 use std::cell::Cell;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt};
-use wasm_streams::readable::IntoAsyncRead;
 
 use sia_storage::PackedUpload as CorePackedUpload;
 use wasm_bindgen::prelude::*;
 
 use crate::helpers::to_js_err;
 use crate::object::PinnedObject;
+use crate::stream_reader::{JsStreamReader, js_stream_reader};
 
-type PackedReader = Compat<IntoAsyncRead<'static>>;
+type PackedReader = Compat<JsStreamReader>;
 
 enum PackedUploadAction {
     Add(
@@ -113,9 +113,7 @@ impl PackedUpload {
         if self.closed.get() {
             return Err(JsError::new("upload already finalized"));
         }
-        let reader = wasm_streams::ReadableStream::from_raw(stream)
-            .into_async_read()
-            .compat();
+        let reader = js_stream_reader(stream).compat();
         let (add_tx, add_rx) = oneshot::channel();
         self.tx
             .send(PackedUploadAction::Add(reader, add_tx))
