@@ -9,7 +9,7 @@ struct ForwardLogger;
 
 impl log::Log for ForwardLogger {
     fn enabled(&self, meta: &log::Metadata) -> bool {
-        for target in ["indexd", "app_client", "indexd_ffi"] {
+        for target in ["sia_storage", "app_client", "sia_storage_ffi"] {
             if meta.target().contains(target) {
                 return true;
             }
