@@ -8,7 +8,7 @@ use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::{Currency, Hash256};
 
 use super::{Error as RHP4Error, HostEndpoint, Transport};
-use crate::time::{Duration, sleep};
+use crate::time::{Duration, Instant, sleep};
 
 #[derive(Clone)]
 pub struct Client {
@@ -67,8 +67,9 @@ impl Client {
 }
 
 impl Transport for Client {
-    async fn host_prices(&self, _: &HostEndpoint) -> Result<HostPrices, RHP4Error> {
-        Ok(HostPrices {
+    async fn host_prices(&self, _: &HostEndpoint) -> Result<(HostPrices, Duration), RHP4Error> {
+        let start = Instant::now();
+        let prices = HostPrices {
             contract_price: Currency::zero(),
             collateral: Currency::zero(),
             ingress_price: Currency::zero(),
@@ -78,7 +79,8 @@ impl Transport for Client {
             tip_height: 1,
             signature: Signature::default(),
             valid_until: Utc::now() + chrono::Duration::days(1),
-        })
+        };
+        Ok((prices, start.elapsed()))
     }
 
     async fn write_sector(
@@ -87,10 +89,11 @@ impl Transport for Client {
         _: HostPrices,
         _: &PrivateKey,
         sector: Bytes,
-    ) -> Result<Hash256, RHP4Error> {
+    ) -> Result<(Hash256, Duration), RHP4Error> {
         if host.addresses.is_empty() {
             return Err(RHP4Error::Transport("host has no addresses".to_string()));
         }
+        let start = Instant::now();
         // Check if this host is configured as slow
         let slow_delay = {
             let slow_hosts = self.slow_hosts.read().unwrap();
@@ -112,7 +115,7 @@ impl Transport for Client {
         if let Some(delay) = *self.initial_read_delay.read().unwrap() {
             self.read_delays.write().unwrap().insert(sector_root, delay);
         }
-        Ok(sector_root)
+        Ok((sector_root, start.elapsed()))
     }
 
     async fn read_sector(
@@ -123,10 +126,11 @@ impl Transport for Client {
         root: Hash256,
         offset: usize,
         length: usize,
-    ) -> Result<Bytes, RHP4Error> {
+    ) -> Result<(Bytes, Duration), RHP4Error> {
         if host.addresses.is_empty() {
             return Err(RHP4Error::Transport("host has no addresses".to_string()));
         }
+        let start = Instant::now();
         // Check if this host is configured as slow
         let slow_delay = {
             let slow_hosts = self.slow_hosts.read().unwrap();
@@ -162,6 +166,6 @@ impl Transport for Client {
             Bytes::copy_from_slice(&sector[offset..offset + length])
         };
         sleep(Duration::from_nanos(sector.len() as u64 * 8 / 10)).await; // simulate network latency ~ 10Gbps
-        Ok(sector)
+        Ok((sector, start.elapsed()))
     }
 }

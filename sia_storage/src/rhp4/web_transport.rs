@@ -28,6 +28,8 @@ use tokio::sync::{OnceCell, Semaphore};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::time::{Duration, Instant, timeout};
+
 use super::{Error, HostEndpoint, Transport};
 
 #[wasm_bindgen]
@@ -48,6 +50,11 @@ const RHP4_PATH: &str = "/sia/rhp/v4";
 /// connections; gating dials here prevents the browser from rejecting or
 /// stalling when many hosts are contacted at once.
 const MAX_PENDING_CONNS: usize = 64;
+
+/// Timeout for opening a bidirectional stream on an established connection.
+/// Independent of the per-RPC timeout so a hung `create_bidirectional_stream`
+/// can't consume the caller's full RPC budget.
+const OPEN_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn js_err_message(e: &JsValue) -> String {
     if let Some(err) = e.dyn_ref::<js_sys::Error>() {
@@ -76,13 +83,16 @@ impl Drop for Connection {
 
 impl Connection {
     async fn open_stream(&self) -> Result<Stream, Error> {
-        let bidi: web_sys::WebTransportBidirectionalStream =
-            JsFuture::from(self.transport.create_bidirectional_stream())
-                .await
-                .map_err(|e| {
-                    Error::Transport(format!("createBidirectionalStream: {}", js_err_message(&e)))
-                })?
-                .unchecked_into();
+        let bidi: web_sys::WebTransportBidirectionalStream = timeout(
+            OPEN_STREAM_TIMEOUT,
+            JsFuture::from(self.transport.create_bidirectional_stream()),
+        )
+        .await
+        .map_err(|_| Error::Transport("createBidirectionalStream: timeout".into()))?
+        .map_err(|e| {
+            Error::Transport(format!("createBidirectionalStream: {}", js_err_message(&e)))
+        })?
+        .unchecked_into();
         let reader = bidi
             .readable()
             .get_reader()
@@ -310,15 +320,16 @@ impl Client {
 // returns large chunks from the network buffer, which Stream stores in
 // self.buf and serves to subsequent poll_read calls without further JS calls.
 impl Transport for Client {
-    async fn host_prices(&self, host: &HostEndpoint) -> Result<HostPrices, Error> {
+    async fn host_prices(&self, host: &HostEndpoint) -> Result<(HostPrices, Duration), Error> {
         let conn = self.connection(host).await?;
-        let result: Result<HostPrices, Error> = async {
+        let result: Result<(HostPrices, Duration), Error> = async {
             let mut stream = conn.open_stream().await?;
             let mut buf = Vec::new();
             let req = RPCSettings::send_request(&mut buf).await?;
+            let start = Instant::now();
             stream.write_all_async(&buf).await?;
             let resp = req.complete(&mut stream).await?;
-            Ok(resp.settings.prices)
+            Ok((resp.settings.prices, start.elapsed()))
         }
         .await;
         if let Err(e) = &result
@@ -335,16 +346,17 @@ impl Transport for Client {
         prices: HostPrices,
         account_key: &PrivateKey,
         data: Bytes,
-    ) -> Result<Hash256, Error> {
+    ) -> Result<(Hash256, Duration), Error> {
         let token = AccountToken::new(account_key, host.public_key);
         let conn = self.connection(host).await?;
-        let result: Result<Hash256, Error> = async {
+        let result: Result<(Hash256, Duration), Error> = async {
             let mut stream = conn.open_stream().await?;
             let mut buf = Vec::new();
             let req = RPCWriteSector::send_request(&mut buf, prices, token, data.clone()).await?;
+            let start = Instant::now();
             stream.write_all_async(&buf).await?;
             let resp = req.complete(&mut stream).await?;
-            Ok(resp.root)
+            Ok((resp.root, start.elapsed()))
         }
         .await;
         if let Err(e) = &result
@@ -363,17 +375,18 @@ impl Transport for Client {
         root: Hash256,
         offset: usize,
         length: usize,
-    ) -> Result<Bytes, Error> {
+    ) -> Result<(Bytes, Duration), Error> {
         let token = AccountToken::new(account_key, host.public_key);
         let conn = self.connection(host).await?;
-        let result: Result<Bytes, Error> = async {
+        let result: Result<(Bytes, Duration), Error> = async {
             let mut stream = conn.open_stream().await?;
             let mut buf = Vec::new();
             let req =
                 RPCReadSector::send_request(&mut buf, prices, token, root, offset, length).await?;
+            let start = Instant::now();
             stream.write_all_async(&buf).await?;
             let resp = req.complete(&mut stream).await?;
-            Ok(resp.data)
+            Ok((resp.data, start.elapsed()))
         }
         .await;
         if let Err(e) = &result

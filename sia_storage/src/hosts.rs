@@ -506,14 +506,11 @@ impl<T: Transport> Hosts<T> {
         {
             Ok((prices, false))
         } else {
-            let start = Instant::now();
-            let prices = timeout(fetch_timeout, transport.host_prices(host_endpoint))
+            let (prices, elapsed) = timeout(fetch_timeout, transport.host_prices(host_endpoint))
                 .await
                 .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))?
-                .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))
-                .inspect(|_| {
-                    hosts.add_settings_sample(host_endpoint.public_key, start.elapsed())
-                })?;
+                .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))?;
+            hosts.add_settings_sample(host_endpoint.public_key, elapsed);
             cache.set(host_endpoint.public_key, prices.clone());
             Ok((prices, true))
         }
@@ -537,14 +534,13 @@ impl<T: Transport> Hosts<T> {
                 false,
             )
             .await?;
-            let start = Instant::now();
-            let root = self
+            let (root, elapsed) = self
                 .transport
                 .write_sector(&host, prices, account_key, sector)
                 .await
                 .inspect_err(|_| self.hosts.add_failure(host_key))
                 .map_err(RPCError::Rhp)?;
-            self.hosts.add_write_sample(host_key, start.elapsed());
+            self.hosts.add_write_sample(host_key, elapsed);
             Ok(root)
         })
         .await?
@@ -570,14 +566,13 @@ impl<T: Transport> Hosts<T> {
                 false,
             )
             .await?;
-            let start = Instant::now();
-            let data = self
+            let (data, elapsed) = self
                 .transport
                 .read_sector(&host, prices, account_key, root, offset, length)
                 .await
                 .inspect_err(|_| self.hosts.add_failure(host_key))
                 .map_err(RPCError::Rhp)?;
-            self.hosts.add_read_sample(host_key, start.elapsed());
+            self.hosts.add_read_sample(host_key, elapsed);
             Ok(data)
         })
         .await?
@@ -599,7 +594,14 @@ pub enum QueueError {
     /// An internal mutex was poisoned.
     #[error("internal mutex error")]
     MutexError,
+    /// The host has been retried too many times.
+    #[error("host retry limit exceeded")]
+    MaxRetriesExceeded,
 }
+
+/// Maximum number of times a single host may be re-queued via
+/// [`HostQueue::retry`] before it is dropped.
+const MAX_RETRIES: usize = 3;
 
 #[derive(Debug)]
 struct HostQueueInner {
@@ -617,7 +619,7 @@ impl Iterator for HostQueue {
     type Item = PublicKey;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.pop_front().ok().map(|(host, _)| host)
+        self.pop_front().ok()
     }
 }
 
@@ -631,15 +633,12 @@ impl HostQueue {
         }
     }
 
-    pub fn pop_front(&self) -> Result<(PublicKey, usize), QueueError> {
+    pub fn pop_front(&self) -> Result<PublicKey, QueueError> {
         let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
-        let host_key = inner.hosts.pop_front().ok_or(QueueError::NoMoreHosts)?;
-
-        let attempts = inner.attempts.get(&host_key).cloned().unwrap_or(0);
-        Ok((host_key, attempts + 1))
+        inner.hosts.pop_front().ok_or(QueueError::NoMoreHosts)
     }
 
-    pub fn pop_n(&self, n: usize) -> Result<Vec<(PublicKey, usize)>, QueueError> {
+    pub fn pop_n(&self, n: usize) -> Result<Vec<PublicKey>, QueueError> {
         let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
         if inner.hosts.len() < n {
             return Err(QueueError::NoMoreHosts);
@@ -647,14 +646,17 @@ impl HostQueue {
         let mut result = Vec::with_capacity(n);
         for _ in 0..n {
             let host_key = inner.hosts.pop_front().ok_or(QueueError::NoMoreHosts)?;
-            let attempts = inner.attempts.get(&host_key).cloned().unwrap_or(0);
-            result.push((host_key, attempts + 1));
+            result.push(host_key);
         }
         Ok(result)
     }
 
     pub fn retry(&self, host: PublicKey) -> Result<(), QueueError> {
         let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
+        let attempts = inner.attempts.get(&host).copied().unwrap_or(0);
+        if attempts >= MAX_RETRIES {
+            return Err(QueueError::MaxRetriesExceeded);
+        }
         inner.hosts.push_back(host);
         inner
             .attempts
@@ -862,7 +864,7 @@ mod test {
         );
 
         let queue = hosts_manager.upload_queue();
-        let (first, _) = queue.pop_front().unwrap();
+        let first = queue.pop_front().unwrap();
         assert_eq!(first, hk2);
         assert!(
             queue.pop_front().is_err(),
@@ -879,18 +881,15 @@ mod test {
         // pop 3 hosts
         let popped = queue.pop_n(3).expect("should pop 3 hosts");
         assert_eq!(popped.len(), 3);
-        assert_eq!(popped[0].0, hosts[0]);
-        assert_eq!(popped[1].0, hosts[1]);
-        assert_eq!(popped[2].0, hosts[2]);
-
-        // all should have attempts = 1
-        assert!(popped.iter().all(|(_, attempts)| *attempts == 1));
+        assert_eq!(popped[0], hosts[0]);
+        assert_eq!(popped[1], hosts[1]);
+        assert_eq!(popped[2], hosts[2]);
 
         // pop remaining 2
         let popped = queue.pop_n(2).expect("should pop 2 hosts");
         assert_eq!(popped.len(), 2);
-        assert_eq!(popped[0].0, hosts[3]);
-        assert_eq!(popped[1].0, hosts[4]);
+        assert_eq!(popped[0], hosts[3]);
+        assert_eq!(popped[1], hosts[4]);
 
         // queue should be empty
         assert!(matches!(queue.pop_front(), Err(QueueError::NoMoreHosts)));
