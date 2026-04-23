@@ -1,3 +1,13 @@
+## 0.7.1 (2026-04-23)
+
+### Features
+
+- `upload_packed` now returns a `Result` and will error if invalid options are passed to it.
+
+### Fixes
+
+- Rename download close function
+
 ## 0.7.0 (2026-04-18)
 
 ### Breaking Changes

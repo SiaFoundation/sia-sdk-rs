@@ -1,3 +1,18 @@
+## 0.3.0 (2026-04-23)
+
+### Breaking Changes
+
+- setLogger now matches the NAPI callback.
+
+### Features
+
+- `upload_packed` now returns a `Result` and will error if invalid options are passed to it.
+
+### Fixes
+
+- Fix ReadableStream usage on Safari.
+- wasm: read struct params via js_sys::Reflect
+
 ## 0.2.0 (2026-04-18)
 
 ### Breaking Changes
