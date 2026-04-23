@@ -5,7 +5,7 @@ use sia_core::signing::Signature;
 use sia_storage::{self, Hash256};
 use thiserror::Error;
 
-use crate::{AppMeta, Sdk, spawn};
+use crate::{AppMetadata, Sdk, spawn};
 
 #[derive(Debug, Error, uniffi::Error)]
 #[uniffi(flat_error)]
@@ -197,7 +197,7 @@ impl Builder {
     /// to connect using an existing app key, or [Builder::request_connection]
     /// to request a new connection.
     #[uniffi::constructor]
-    pub fn new(indexer_url: String, app_meta: AppMeta) -> Result<Self, BuilderError> {
+    pub fn new(indexer_url: String, app_meta: AppMetadata) -> Result<Self, BuilderError> {
         if app_meta.id.len() != 32 {
             return Err(BuilderError::Custom("app ID must be 32 bytes".to_string()));
         }

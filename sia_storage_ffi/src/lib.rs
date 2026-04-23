@@ -1,18 +1,16 @@
 uniffi::setup_scaffolding!();
 
-use log::debug;
 use sia_core::encoding;
 use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::{PublicKey, Signature};
 use sia_core::types::{self, Hash256, HexParseError};
 use sia_storage::{SealedObjectError, Url};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 use thiserror::Error;
 use tokio::runtime::{self, Runtime};
-use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -121,7 +119,7 @@ pub enum DownloadError {
 
 /// Metadata about an application connecting to the indexer.
 #[derive(uniffi::Record)]
-pub struct AppMeta {
+pub struct AppMetadata {
     pub id: Vec<u8>,
     pub name: String,
     pub description: String,
@@ -578,21 +576,15 @@ impl From<sia_storage::Account> for Account {
     }
 }
 
-enum PackedUploadAction {
-    Add(Arc<dyn Reader>, oneshot::Sender<Result<u64, UploadError>>),
-    Finalize(oneshot::Sender<Result<Vec<sia_storage::Object>, UploadError>>),
-}
-
 /// A packed upload allows multiple objects to be uploaded together in a single upload. This can be more
 /// efficient than uploading each object separately if the size of the object is less than the minimum
 /// slab size.
 #[derive(uniffi::Object)]
 pub struct PackedUpload {
-    upload_task: AbortOnDropHandle<()>,
-    tx: mpsc::Sender<PackedUploadAction>,
-    slab_size: u64,
+    inner: Arc<tokio::sync::Mutex<Option<sia_storage::PackedUpload>>>,
+    cancel: CancellationToken,
+    optimal_data_size: u64,
     length: Arc<AtomicU64>,
-    closed: Arc<AtomicBool>,
 }
 
 #[uniffi::export]
@@ -604,9 +596,9 @@ impl PackedUpload {
     pub fn remaining(&self) -> u64 {
         let length = self.length.load(Ordering::Acquire);
         if length == 0 {
-            return self.slab_size;
+            return self.optimal_data_size;
         }
-        (self.slab_size - (length % self.slab_size)) % self.slab_size
+        (self.optimal_data_size - (length % self.optimal_data_size)) % self.optimal_data_size
     }
 
     /// Returns the number of bytes added so far.
@@ -616,35 +608,50 @@ impl PackedUpload {
 
     /// Returns the number of slabs in the upload.
     pub fn slabs(&self) -> u64 {
-        self.length.load(Ordering::Acquire).div_ceil(self.slab_size)
+        self.length
+            .load(Ordering::Acquire)
+            .div_ceil(self.optimal_data_size)
     }
 
     /// Adds a new object to the upload. The data will be read until EOF and packed into
     /// the upload. The resulting object will contain the metadata needed to download the object. The caller
     /// must call [finalize](Self::finalize) to get the resulting objects after all objects have been added.
     pub async fn add(&self, reader: Arc<dyn Reader>) -> Result<u64, UploadError> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.cancel.is_cancelled() {
             return Err(UploadError::Closed);
         }
-        let tx = self.tx.clone();
-
+        let inner = self.inner.clone();
+        let cancel = self.cancel.clone();
+        let length = self.length.clone();
         spawn(async move {
-            let (add_tx, add_rx) = oneshot::channel();
-            tx.send(PackedUploadAction::Add(reader, add_tx))
-                .await
-                .map_err(|_| UploadError::Closed)?;
-            add_rx.await.map_err(|_| UploadError::Closed)?
+            tokio::select! {
+                _ = cancel.cancelled() => Err(UploadError::Closed),
+                r = async {
+                    let mut guard = inner.lock().await;
+                    // take ownership so cancelled in-flight adds
+                    // will immediately drop.
+                    let mut pu = guard.take().ok_or(UploadError::Closed)?;
+                    let res = pu.add(FFIReader::new(reader)).await.map_err(UploadError::from);
+                    let total = pu.length();
+                    *guard = Some(pu);
+                    length.store(total, Ordering::Release);
+                    res
+                } => r,
+            }
         })
         .await?
     }
 
-    /// Cancels the upload. This will immediately cancel the upload and return.
-    pub async fn cancel(&self) -> Result<(), UploadError> {
-        if self.closed.swap(true, Ordering::AcqRel) {
-            return Err(UploadError::Closed);
+    /// Cancels the upload. This will immediately cancel any in-progress [add](Self::add) or [finalize](Self::finalize) operations and prevent
+    /// any new ones from starting. Any in-flight operations will return an error once cancelled.
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+        // If no add/finalize is holding the lock, drop pu here to abort any
+        // background slab uploads. If one is holding it, its select! will
+        // drop pu when it observes the cancel token.
+        if let Ok(mut guard) = self.inner.try_lock() {
+            guard.take();
         }
-        self.upload_task.abort();
-        Ok(())
     }
 
     /// Finalizes the upload and returns the resulting objects. This will wait for all readers
@@ -652,16 +659,20 @@ impl PackedUpload {
     ///
     /// The caller must pin the resulting objects to the indexer when ready.
     pub async fn finalize(&self) -> Result<Vec<Arc<PinnedObject>>, UploadError> {
-        if self.closed.swap(true, Ordering::AcqRel) {
+        if self.cancel.is_cancelled() {
             return Err(UploadError::Closed);
         }
-        let tx = self.tx.clone();
+        let inner = self.inner.clone();
+        let cancel = self.cancel.clone();
         let objects = spawn(async move {
-            let (finalize_tx, finalize_rx) = oneshot::channel();
-            tx.send(PackedUploadAction::Finalize(finalize_tx))
-                .await
-                .map_err(|_| UploadError::Closed)?;
-            finalize_rx.await.map_err(|_| UploadError::Closed)?
+            tokio::select! {
+                _ = cancel.cancelled() => Err(UploadError::Closed),
+                r = async {
+                    let mut guard = inner.lock().await;
+                    let pu = guard.take().ok_or(UploadError::Closed)?;
+                    pu.finalize().await.map_err(UploadError::from)
+                } => r,
+            }
         })
         .await??;
         Ok(objects
@@ -831,58 +842,16 @@ impl Sdk {
     /// A [PackedUpload] that can be used to add objects and finalize the upload.
     pub async fn upload_packed(&self, options: UploadOptions) -> Result<PackedUpload, UploadError> {
         let options: sia_storage::UploadOptions = options.into();
-        let slab_size = options.data_shards as u64 * SECTOR_SIZE as u64;
-        let mut packed_upload = self
+        let packed_upload = self
             .inner
             .upload_packed(options)
             .map_err(UploadError::from)?;
-        let (action_tx, mut action_rx) = mpsc::channel(10);
-        let length = Arc::new(AtomicU64::new(0));
-        let closed = Arc::new(AtomicBool::new(false));
-        let task_length = length.clone();
-        let upload_task = spawn(async move {
-            debug!(
-                "packed upload task started with slab size {} bytes",
-                slab_size
-            );
-            while let Some(action) = action_rx.recv().await {
-                match action {
-                    PackedUploadAction::Add(reader, add_tx) => {
-                        let res = packed_upload
-                            .add(FFIReader::new(reader))
-                            .await
-                            .map_err(UploadError::from);
-                        if let Ok(size) = res {
-                            task_length.fetch_add(size, Ordering::AcqRel);
-                        }
-                        debug!(
-                            "added object of size {} bytes, total length is now {} bytes across {} slabs",
-                            res.as_ref().map(|s| *s).unwrap_or(0),
-                            task_length.load(Ordering::Acquire),
-                            task_length.load(Ordering::Acquire).div_ceil(slab_size)
-                        );
-                        let _ = add_tx.send(res);
-                    }
-                    PackedUploadAction::Finalize(finalize_tx) => {
-                        debug!(
-                            "finalizing packed upload with length {} bytes across {} slabs",
-                            task_length.load(Ordering::Acquire),
-                            task_length.load(Ordering::Acquire).div_ceil(slab_size)
-                        );
-                        let result = packed_upload.finalize().await.map_err(|e| e.into());
-                        let _ = finalize_tx.send(result);
-                        return;
-                    }
-                }
-            }
-            debug!("packed upload task ending because all senders have been dropped");
-        });
+        let optimal_data_size = packed_upload.optimal_data_size() as u64;
         Ok(PackedUpload {
-            upload_task,
-            tx: action_tx,
-            slab_size,
-            length,
-            closed,
+            inner: Arc::new(tokio::sync::Mutex::new(Some(packed_upload))),
+            cancel: CancellationToken::new(),
+            optimal_data_size,
+            length: Arc::new(AtomicU64::new(0)),
         })
     }
 
