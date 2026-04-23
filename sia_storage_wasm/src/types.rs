@@ -85,10 +85,12 @@ impl From<sia_storage::Account> for Account {
     }
 }
 
-/// Application metadata deserialized from a plain JS object.
-#[derive(serde::Deserialize, tsify::Tsify)]
-#[tsify(from_wasm_abi)]
+/// TS interface for `Builder::new`'s `app` parameter. Field names must
+/// match the Reflect reads in `helpers::make_app_metadata`.
+// dead_code because it exists only for tsify.
+#[derive(serde::Serialize, tsify::Tsify)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct AppMetadata {
     pub app_id: String,
     pub name: String,
@@ -203,15 +205,15 @@ pub(crate) fn ms_to_chrono(ms: f64) -> Result<chrono::DateTime<chrono::Utc>, JsE
     chrono::DateTime::from_timestamp(secs, nanos).ok_or_else(|| JsError::new("invalid timestamp"))
 }
 
-/// A cursor for paginating through object events.
-#[derive(serde::Deserialize, tsify::Tsify)]
-#[tsify(from_wasm_abi)]
-#[serde(rename_all = "camelCase")]
+/// TS interface for `Sdk::objectEvents`'s `cursor` parameter. Field
+/// names must match the Reflect reads in `sdk.rs`.
+// dead_code because it exists only for tsify.
+#[derive(serde::Serialize, tsify::Tsify)]
+#[allow(dead_code)]
 pub struct ObjectsCursor {
     pub id: String,
     #[tsify(type = "Date")]
-    #[serde(with = "serde_wasm_bindgen::preserve")]
-    pub after: js_sys::Date,
+    pub after: f64,
 }
 
 /// An object event from the indexer.

@@ -1,9 +1,25 @@
+use js_sys::Reflect;
 use sia_core::types::Hash256;
 use sia_storage::AppMetadata;
 use wasm_bindgen::prelude::*;
 
 pub(crate) fn to_js_err(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
+}
+
+/// Read a required string field from a JS object.
+pub(crate) fn js_get_string(obj: &JsValue, key: &str) -> Result<String, JsError> {
+    let val = Reflect::get(obj, &JsValue::from_str(key))
+        .map_err(|e| JsError::new(&format!("read field `{key}`: {e:?}")))?;
+    val.as_string()
+        .ok_or_else(|| JsError::new(&format!("field `{key}` missing or not a string")))
+}
+
+/// Read an optional string field from a JS object.
+pub(crate) fn js_get_opt_string(obj: &JsValue, key: &str) -> Option<String> {
+    Reflect::get(obj, &JsValue::from_str(key))
+        .ok()
+        .and_then(|v| v.as_string())
 }
 
 /// Cached leaked strings for app metadata. Set once on first call;
@@ -27,21 +43,25 @@ thread_local! {
     static CACHED_META: std::cell::RefCell<Option<CachedMeta>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Constructs an [`AppMetadata`] from JS-provided strings.
+/// Constructs an [`AppMetadata`] from a JS object matching the
+/// `AppMetadata` TS interface declared in `types.rs`. Fields are read
+/// via `js_sys::Reflect` instead of `#[tsify(from_wasm_abi)]` because
+/// that path is broken for plain-JS-constructed inputs. Field names
+/// here must stay in sync with the TS interface.
 ///
 /// `AppMetadata` requires `&'static str` fields, but strings from JS are
 /// temporary. We use `Box::leak` to promote each string to `'static`
 /// references. The leaked strings are cached so this only happens once —
 /// subsequent calls with the same app ID reuse the cached references.
-pub(crate) fn make_app_metadata(
-    id_hex: &str,
-    name: &str,
-    description: &str,
-    service_url: &str,
-    logo_url: Option<String>,
-    callback_url: Option<String>,
-) -> Result<AppMetadata, JsError> {
-    let id_bytes = hex::decode(id_hex).map_err(to_js_err)?;
+pub(crate) fn make_app_metadata(app: &JsValue) -> Result<AppMetadata, JsError> {
+    let id_hex = js_get_string(app, "appId")?;
+    let name = js_get_string(app, "name")?;
+    let description = js_get_string(app, "description")?;
+    let service_url = js_get_string(app, "serviceUrl")?;
+    let logo_url = js_get_opt_string(app, "logoUrl");
+    let callback_url = js_get_opt_string(app, "callbackUrl");
+
+    let id_bytes = hex::decode(&id_hex).map_err(to_js_err)?;
     if id_bytes.len() != 32 {
         return Err(JsError::new("app ID must be 32 bytes (64 hex chars)"));
     }
