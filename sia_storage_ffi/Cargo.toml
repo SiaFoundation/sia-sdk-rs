@@ -1,6 +1,6 @@
 [package]
 name = "sia_storage_ffi"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 repository = "https://github.com/SiaFoundation/sia-sdk-rs"
 license = "MIT"
@@ -15,7 +15,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 async-trait = "0.1.89"
-sia_storage = { version = "0.7.0", path = "../sia_storage" }
+sia_storage = { version = "0.7.1", path = "../sia_storage" }
 log = "0.4.29"
 rand = "0.10.1"
 sia_core = { version = "0.3.1", path = "../sia_core" }
