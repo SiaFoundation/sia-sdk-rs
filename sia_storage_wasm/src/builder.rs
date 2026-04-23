@@ -9,7 +9,6 @@ use crate::app_key::AppKey;
 use crate::helpers::{make_app_metadata, to_js_err};
 use crate::run_local;
 use crate::sdk::Sdk;
-use crate::types::AppMetadata;
 
 enum BuilderState {
     Disconnected(StorageBuilder<DisconnectedState>),
@@ -27,15 +26,11 @@ pub struct Builder {
 #[wasm_bindgen]
 impl Builder {
     #[wasm_bindgen(constructor)]
-    pub fn new(indexer_url: &str, app: AppMetadata) -> Result<Builder, JsError> {
-        let meta = make_app_metadata(
-            &app.app_id,
-            &app.name,
-            &app.description,
-            &app.service_url,
-            app.logo_url,
-            app.callback_url,
-        )?;
+    pub fn new(
+        indexer_url: &str,
+        #[wasm_bindgen(unchecked_param_type = "AppMetadata")] app: JsValue,
+    ) -> Result<Builder, JsError> {
+        let meta = make_app_metadata(&app)?;
         let builder = StorageBuilder::new(indexer_url, meta).map_err(to_js_err)?;
         Ok(Builder {
             state: RefCell::new(Some(BuilderState::Disconnected(builder))),

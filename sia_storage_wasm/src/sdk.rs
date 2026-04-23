@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use js_sys::Reflect;
 use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
 use sia_storage::{self, HostQuery as StorageHostQuery, Sdk as StorageSdk};
@@ -13,8 +14,7 @@ use crate::packed::PackedUpload;
 use crate::run_local;
 use crate::stream_reader::js_stream_reader;
 use crate::types::{
-    self, HostQuery, ObjectEvent, ObjectsCursor, download_options_from_js, ms_to_chrono,
-    upload_options_from_js,
+    self, HostQuery, ObjectEvent, download_options_from_js, ms_to_chrono, upload_options_from_js,
 };
 
 /// The main Sia storage SDK. Provides methods for uploading, downloading,
@@ -85,16 +85,27 @@ impl Sdk {
     #[wasm_bindgen(js_name = "objectEvents")]
     pub async fn object_events(
         &self,
-        cursor: Option<ObjectsCursor>,
+        #[wasm_bindgen(unchecked_param_type = "ObjectsCursor | null | undefined")] cursor: JsValue,
         limit: u32,
     ) -> Result<Vec<ObjectEvent>, JsError> {
         let sdk = self.inner.clone();
-        let cursor = match cursor {
-            Some(c) => Some(sia_storage::ObjectsCursor {
-                id: Hash256::from_str(&c.id).map_err(to_js_err)?,
-                after: ms_to_chrono(c.after.get_time())?,
-            }),
-            None => None,
+        let cursor = if cursor.is_null() || cursor.is_undefined() {
+            None
+        } else {
+            let id_js = Reflect::get(&cursor, &JsValue::from_str("id"))
+                .map_err(|e| JsError::new(&format!("read cursor.id: {e:?}")))?;
+            let id = id_js
+                .as_string()
+                .ok_or_else(|| JsError::new("cursor.id must be a string"))?;
+            let after_js = Reflect::get(&cursor, &JsValue::from_str("after"))
+                .map_err(|e| JsError::new(&format!("read cursor.after: {e:?}")))?;
+            let after: js_sys::Date = after_js
+                .dyn_into()
+                .map_err(|_| JsError::new("cursor.after must be a Date"))?;
+            Some(sia_storage::ObjectsCursor {
+                id: Hash256::from_str(&id).map_err(to_js_err)?,
+                after: ms_to_chrono(after.get_time())?,
+            })
         };
         let events =
             run_local(async move { sdk.object_events(cursor, Some(limit as usize)).await })
