@@ -1,8 +1,7 @@
 <!--
   Build and run:
-    cd sia_storage_wasm
-    RUSTFLAGS="--cfg=web_sys_unstable_apis" wasm-pack build --target web --release --out-dir examples/pkg
-    python3 -m http.server 8080 --directory examples
+    (cd sia_storage_wasm && RUSTFLAGS="--cfg=web_sys_unstable_apis" wasm-pack build --target web --release --out-dir examples/pkg)
+    python3 -m http.server 8080 --directory sia_storage_wasm/examples
     open http://localhost:8080
 -->
 <!DOCTYPE html>

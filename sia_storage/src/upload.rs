@@ -318,6 +318,17 @@ impl Upload {
         Ok(())
     }
 
+    /// Returns the cumulative number of bytes that have landed in the pipeline
+    /// across all [read](Self::read) calls, including bytes from reads that
+    /// errored part-way. Callers can diff this across a call to recover a
+    /// partial count on error and treat the bytes as dead padding.
+    pub(crate) fn length(&self) -> u64 {
+        self.slab_buffer
+            .as_ref()
+            .map(|b| b.total_length())
+            .unwrap_or(0)
+    }
+
     /// Reads from the provided reader, buffering data into slabs and spawning
     /// slab-upload tasks as they fill. Returns the number of bytes read.
     pub(crate) async fn read<R: AsyncRead + Unpin>(
@@ -371,12 +382,14 @@ impl Upload {
     /// packed size. Adding objects larger than this will start a new slab.
     pub(crate) fn remaining(&self) -> usize {
         let slab_buffer = self.slab_buffer.as_ref().unwrap();
-        slab_buffer.slab_size().saturating_sub(slab_buffer.length())
+        slab_buffer
+            .optimal_data_size()
+            .saturating_sub(slab_buffer.length())
     }
 
     /// Returns the optimal size of each slab.
-    pub(crate) fn slab_size(&self) -> usize {
-        self.slab_buffer.as_ref().unwrap().slab_size()
+    pub(crate) fn optimal_data_size(&self) -> usize {
+        self.slab_buffer.as_ref().unwrap().optimal_data_size()
     }
 }
 
@@ -405,7 +418,6 @@ struct ObjectUpload {
 ///
 /// The caller must call [finalize](Self::finalize) to complete the upload.
 pub struct PackedUpload {
-    total_length: u64,
     upload: Upload,
     objects: Vec<ObjectUpload>,
 }
@@ -417,7 +429,6 @@ impl PackedUpload {
         options: UploadOptions,
     ) -> Result<Self, UploadError> {
         Ok(Self {
-            total_length: 0,
             upload: Upload::new(client, app_key, options)?,
             objects: Vec::new(),
         })
@@ -433,29 +444,33 @@ impl PackedUpload {
 
     /// Returns the cumulative length of all objects currently in the upload.
     pub fn length(&self) -> u64 {
-        self.total_length
+        self.upload.length()
     }
 
     /// Returns the optimal size of each slab.
-    pub fn slab_size(&self) -> u64 {
-        self.upload.slab_size() as u64
+    pub fn optimal_data_size(&self) -> usize {
+        self.upload.optimal_data_size()
     }
 
     /// Returns the number of slabs after the upload is finalized.
-    pub fn slabs(&self) -> u64 {
-        self.length().div_ceil(self.slab_size())
+    pub fn slabs(&self) -> usize {
+        self.length().div_ceil(self.optimal_data_size() as u64) as usize
     }
 
-    /// Adds a new object to the upload. The data will be read until EOF and packed into
-    /// the upload. The resulting object will contain the metadata needed to download the object. The caller
-    /// must call [finalize](Self::finalize) to get the resulting objects after all objects have been added.
+    /// Adds a new object to the upload. The data is read until EOF and packed into
+    /// the current slab. Returns the number of bytes consumed; call
+    /// [finalize](Self::finalize) once all objects have been added to get the
+    /// resulting objects.
+    ///
+    /// If the reader errors part-way, it's safe to continue calling
+    /// [add](Self::add); no object is registered for the failed call. Or call
+    /// [finalize](Self::finalize) to collect the objects added so far.
     pub async fn add<R: AsyncRead + Unpin>(&mut self, r: R) -> Result<u64, UploadError> {
         let object = Object::default();
 
-        let start = self.total_length;
+        let start = self.upload.length();
         let n = self.upload.read(&mut object.reader(r, 0)).await?;
-        self.total_length += n;
-        let end = self.total_length;
+        let end = self.upload.length();
         self.objects.push(ObjectUpload { start, end, object });
         Ok(n)
     }
@@ -465,7 +480,7 @@ impl PackedUpload {
     ///
     /// The caller must pin the resulting objects to the indexer when ready.
     pub async fn finalize(self) -> Result<Vec<Object>, UploadError> {
-        let slab_size = self.slab_size();
+        let optimal_data_size = self.optimal_data_size() as u64;
         let uploaded_slabs = self.upload.finish().await?;
         self.objects
             .into_iter()
@@ -476,20 +491,21 @@ impl PackedUpload {
                     return Ok(object);
                 }
                 let slabs = object.slabs_mut();
-                let slabs_start = (upload.start / slab_size) as usize;
-                let slabs_end = upload.end.div_ceil(slab_size) as usize;
+                let slabs_start = (upload.start / optimal_data_size) as usize;
+                let slabs_end = upload.end.div_ceil(optimal_data_size) as usize;
                 let n = slabs_end - slabs_start;
                 slabs.extend_from_slice(&uploaded_slabs[slabs_start..slabs_end]);
 
-                slabs[0].offset = (upload.start % slab_size) as u32;
+                slabs[0].offset = (upload.start % optimal_data_size) as u32;
                 if slabs.len() > 1 {
                     // if spanning multiple slabs, adjust first slab's length
-                    slabs[0].length = (slab_size - slabs[0].offset as u64) as u32;
+                    slabs[0].length = (optimal_data_size - slabs[0].offset as u64) as u32;
                 }
                 let last_slab_index = n - 1;
                 let last_slab_offset = slabs[last_slab_index].offset as u64;
-                slabs[last_slab_index].length =
-                    (upload.end - ((slabs_end as u64 - 1) * slab_size) - last_slab_offset) as u32;
+                slabs[last_slab_index].length = (upload.end
+                    - ((slabs_end as u64 - 1) * optimal_data_size)
+                    - last_slab_offset) as u32;
 
                 Ok(object)
             })

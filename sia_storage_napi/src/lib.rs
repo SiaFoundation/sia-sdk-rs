@@ -2,14 +2,13 @@ use chrono::{DateTime, Utc};
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
-use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::{PublicKey, Signature};
 use sia_core::types::{self, Hash256, HexParseError};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 mod builder;
 mod io;
@@ -541,26 +540,15 @@ impl PinnedObject {
     }
 }
 
-enum PackedUploadAction {
-    Add(
-        io::NapiStreamReader,
-        oneshot::Sender<std::result::Result<u64, sia_storage::UploadError>>,
-    ),
-    Finalize(
-        oneshot::Sender<std::result::Result<Vec<sia_storage::Object>, sia_storage::UploadError>>,
-    ),
-}
-
 /// A packed upload allows multiple objects to be uploaded together in a single
 /// upload. This can be more efficient than individual uploads for many small
 /// objects since they share slabs.
 #[napi]
 pub struct PackedUpload {
-    upload_task: tokio::task::JoinHandle<()>,
-    tx: mpsc::Sender<PackedUploadAction>,
-    slab_size: u64,
+    inner: Arc<tokio::sync::Mutex<Option<sia_storage::PackedUpload>>>,
+    cancel: CancellationToken,
+    optimal_data_size: u64,
     length: Arc<AtomicU64>,
-    closed: Arc<AtomicBool>,
 }
 
 #[napi]
@@ -571,9 +559,9 @@ impl PackedUpload {
     pub fn remaining(&self) -> BigInt {
         let length = self.length.load(Ordering::Acquire);
         let remaining = if length == 0 {
-            self.slab_size
+            self.optimal_data_size
         } else {
-            (self.slab_size - (length % self.slab_size)) % self.slab_size
+            (self.optimal_data_size - (length % self.optimal_data_size)) % self.optimal_data_size
         };
         BigInt::from(remaining)
     }
@@ -587,55 +575,84 @@ impl PackedUpload {
     /// Returns the number of slabs in the upload.
     #[napi]
     pub fn slabs(&self) -> BigInt {
-        BigInt::from(self.length.load(Ordering::Acquire).div_ceil(self.slab_size))
+        BigInt::from(
+            self.length
+                .load(Ordering::Acquire)
+                .div_ceil(self.optimal_data_size),
+        )
     }
 
-    /// Adds a new object to the upload. The data will be read until EOF and
-    /// packed into the upload. Call `finalize()` after all objects have been added.
+    /// Adds a new object to the upload. The data is read until EOF and packed into
+    /// the current slab. Returns the number of bytes consumed; call
+    /// [finalize](Self::finalize) once all objects have been added to get the
+    /// resulting objects.
+    ///
+    /// If the reader errors part-way, it's safe to continue calling
+    /// [add](Self::add); no object is registered for the failed call. Or call
+    /// [finalize](Self::finalize) to collect the objects added so far.
+    ///
+    /// ```js
+    /// const packed = sdk.uploadPacked();
+    /// await packed.add(file.stream());
+    /// await packed.add(blob.stream());
+    /// const objects = await packed.finalize();
+    /// ```
     #[napi(ts_args_type = "stream: ReadableStream")]
     pub async fn add(&self, stream: SendableReader) -> Result<BigInt> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(Error::from_reason("upload already closed"));
+        if self.cancel.is_cancelled() {
+            return Err(Error::from_reason("upload closed"));
         }
-        let (add_tx, add_rx) = oneshot::channel();
-        self.tx
-            .send(PackedUploadAction::Add(stream.0, add_tx))
-            .await
-            .map_err(|_| Error::from_reason("upload closed"))?;
-        let size = add_rx
-            .await
-            .map_err(|_| Error::from_reason("upload closed"))?
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let inner = self.inner.clone();
+        let cancel = self.cancel.clone();
+        let length = self.length.clone();
+        let result: Result<u64> = tokio::select! {
+            _ = cancel.cancelled() => Err(Error::from_reason("upload closed")),
+            r = async {
+                let mut guard = inner.lock().await;
+                // Take ownership so cancel's drop-cascade can abort in-flight
+                // slab uploads (they're held as AbortOnDropHandles inside pu).
+                let mut pu = guard.take().ok_or_else(|| Error::from_reason("upload closed"))?;
+                let res = pu.add(stream.0).await.map_err(|e| Error::from_reason(e.to_string()));
+                let total = pu.length();
+                *guard = Some(pu);
+                length.store(total, Ordering::Release);
+                res
+            } => r,
+        };
+        let size = result?;
         Ok(BigInt::from(size))
     }
 
     /// Cancels the upload.
     #[napi]
-    pub async fn cancel(&self) -> Result<()> {
-        if self.closed.swap(true, Ordering::AcqRel) {
-            return Err(Error::from_reason("upload already closed"));
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+        // If no add/finalize is holding the lock, drop pu here to abort any
+        // background slab uploads. If one is holding it, its select! will
+        // drop pu when it observes the cancel token.
+        if let Ok(mut guard) = self.inner.try_lock() {
+            guard.take();
         }
-        self.upload_task.abort();
-        Ok(())
     }
 
     /// Finalizes the upload and returns the resulting objects. Each object
     /// must be pinned separately with `sdk.pinObject()`.
     #[napi]
     pub async fn finalize(&self) -> Result<Vec<PinnedObject>> {
-        if self.closed.swap(true, Ordering::AcqRel) {
-            return Err(Error::from_reason("upload already closed"));
+        if self.cancel.is_cancelled() {
+            return Err(Error::from_reason("upload closed"));
         }
-        let (finalize_tx, finalize_rx) = oneshot::channel();
-        self.tx
-            .send(PackedUploadAction::Finalize(finalize_tx))
-            .await
-            .map_err(|_| Error::from_reason("upload closed"))?;
-        let objects = finalize_rx
-            .await
-            .map_err(|_| Error::from_reason("upload closed"))?
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-        Ok(objects
+        let inner = self.inner.clone();
+        let cancel = self.cancel.clone();
+        let objects: Result<Vec<sia_storage::Object>> = tokio::select! {
+            _ = cancel.cancelled() => Err(Error::from_reason("upload closed")),
+            r = async {
+                let mut guard = inner.lock().await;
+                let pu = guard.take().ok_or_else(|| Error::from_reason("upload closed"))?;
+                pu.finalize().await.map_err(|e| Error::from_reason(e.to_string()))
+            } => r,
+        };
+        Ok(objects?
             .into_iter()
             .map(|o| PinnedObject {
                 inner: Mutex::new(o),
@@ -662,39 +679,16 @@ impl Sdk {
     #[napi(ts_args_type = "options?: UploadOptions")]
     pub fn upload_packed(&self, options: Option<SendableUploadOptions>) -> Result<PackedUpload> {
         let options: sia_storage::UploadOptions = options.map(|o| o.0).unwrap_or_default();
-        let slab_size = SECTOR_SIZE as u64 * options.data_shards as u64;
-        let mut packed_upload = self
+        let optimal_data_size = options.optimal_data_size() as u64;
+        let packed_upload = self
             .inner
             .upload_packed(options)
             .map_err(|e| Error::from_reason(e.to_string()))?;
-        let (action_tx, mut action_rx) = mpsc::channel(10);
-        let length = Arc::new(AtomicU64::new(0));
-        let closed = Arc::new(AtomicBool::new(false));
-        let task_length = length.clone();
-        let upload_task = tokio::spawn(async move {
-            while let Some(action) = action_rx.recv().await {
-                match action {
-                    PackedUploadAction::Add(reader, add_tx) => {
-                        let res = packed_upload.add(reader).await;
-                        if let Ok(size) = res {
-                            task_length.fetch_add(size, Ordering::AcqRel);
-                        }
-                        let _ = add_tx.send(res);
-                    }
-                    PackedUploadAction::Finalize(finalize_tx) => {
-                        let result = packed_upload.finalize().await;
-                        let _ = finalize_tx.send(result);
-                        return;
-                    }
-                }
-            }
-        });
         Ok(PackedUpload {
-            upload_task,
-            tx: action_tx,
-            slab_size,
-            length,
-            closed,
+            inner: Arc::new(tokio::sync::Mutex::new(Some(packed_upload))),
+            cancel: CancellationToken::new(),
+            optimal_data_size,
+            length: Arc::new(AtomicU64::new(0)),
         })
     }
 
