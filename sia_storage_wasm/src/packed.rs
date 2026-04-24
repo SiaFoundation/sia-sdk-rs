@@ -75,12 +75,20 @@ impl PackedUpload {
         self.optimal_data_size
     }
 
-    /// Adds an object to the packed upload. Returns the number of bytes written.
+    /// Adds a new object to the upload. The data is read until EOF and packed into
+    /// the current slab. Returns the number of bytes consumed; call
+    /// [finalize](Self::finalize) once all objects have been added to get the
+    /// resulting objects.
+    ///
+    /// If the reader errors part-way, it's safe to continue calling
+    /// [add](Self::add); no object is registered for the failed call. Or call
+    /// [finalize](Self::finalize) to collect the objects added so far.
     ///
     /// ```js
     /// const packed = sdk.uploadPacked();
     /// await packed.add(file.stream());
     /// await packed.add(blob.stream());
+    /// const objects = await packed.finalize();
     /// ```
     pub async fn add(&self, stream: web_sys::ReadableStream) -> Result<f64, JsError> {
         if self.cancel.is_cancelled() {

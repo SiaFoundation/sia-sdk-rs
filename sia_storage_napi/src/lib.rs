@@ -582,8 +582,21 @@ impl PackedUpload {
         )
     }
 
-    /// Adds a new object to the upload. The data will be read until EOF and
-    /// packed into the upload. Call `finalize()` after all objects have been added.
+    /// Adds a new object to the upload. The data is read until EOF and packed into
+    /// the current slab. Returns the number of bytes consumed; call
+    /// [finalize](Self::finalize) once all objects have been added to get the
+    /// resulting objects.
+    ///
+    /// If the reader errors part-way, it's safe to continue calling
+    /// [add](Self::add); no object is registered for the failed call. Or call
+    /// [finalize](Self::finalize) to collect the objects added so far.
+    ///
+    /// ```js
+    /// const packed = sdk.uploadPacked();
+    /// await packed.add(file.stream());
+    /// await packed.add(blob.stream());
+    /// const objects = await packed.finalize();
+    /// ```
     #[napi(ts_args_type = "stream: ReadableStream")]
     pub async fn add(&self, stream: SendableReader) -> Result<BigInt> {
         if self.cancel.is_cancelled() {

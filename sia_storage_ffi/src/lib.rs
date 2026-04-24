@@ -613,9 +613,14 @@ impl PackedUpload {
             .div_ceil(self.optimal_data_size)
     }
 
-    /// Adds a new object to the upload. The data will be read until EOF and packed into
-    /// the upload. The resulting object will contain the metadata needed to download the object. The caller
-    /// must call [finalize](Self::finalize) to get the resulting objects after all objects have been added.
+    /// Adds a new object to the upload. The data is read until EOF and packed into
+    /// the current slab. Returns the number of bytes consumed; call
+    /// [finalize](Self::finalize) once all objects have been added to get the
+    /// resulting objects.
+    ///
+    /// If the reader errors part-way, it's safe to continue calling
+    /// [add](Self::add); no object is registered for the failed call. Or call
+    /// [finalize](Self::finalize) to collect the objects added so far.
     pub async fn add(&self, reader: Arc<dyn Reader>) -> Result<u64, UploadError> {
         if self.cancel.is_cancelled() {
             return Err(UploadError::Closed);
