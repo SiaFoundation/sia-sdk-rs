@@ -21,7 +21,7 @@ rand = "0.10.0"
 sia_core = { version = "0.3.0", path = "../sia_core" }
 sia_storage = { version = "0.8.0", path = "../sia_storage" }
 thiserror = "2.0.18"
-tokio = { version = "1.52.0", features = ["rt-multi-thread", "sync"] }
+tokio = { version = "1.52.1", features = ["rt-multi-thread", "sync"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }
 

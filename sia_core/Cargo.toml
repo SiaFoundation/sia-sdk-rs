@@ -27,7 +27,7 @@ num-traits = "0.2.19"
 rayon = "1.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 sia_core_derive = { version = "0.1.0", path = "../sia_core_derive" }
 thiserror = "2.0.18"
 uint = "0.10.0"
@@ -35,14 +35,14 @@ zeroize = { version = "1.8.1", features = ["zeroize_derive"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = "1.12.0"
-tokio = { version = "1.52.0", features = ["macros", "rt", "sync", "io-util", "time"] }
+tokio = { version = "1.52.1", features = ["macros", "rt", "sync", "io-util", "time"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1.52.0", features = ["macros", "rt", "sync", "io-util"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
-tokio = { version = "1.50.0", features = [
+tokio = { version = "1.52.1", features = [
     "macros",
     "rt-multi-thread",
     "sync",

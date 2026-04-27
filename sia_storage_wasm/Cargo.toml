@@ -29,4 +29,4 @@ tokio-util = { version = "0.7", features = ["compat"] }
 console_error_panic_hook = "0.1"
 log = "0.4"
 serde = "1.0.228"
-tsify = { version = "0.4", features = ["js"] }
+tsify = { version = "0.5", features = ["js"] }
