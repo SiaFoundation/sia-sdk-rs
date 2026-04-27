@@ -549,7 +549,7 @@ mod test {
     cross_target_tests! {
         async fn test_out_of_order_download() { run_local(async {
             let upload_options = UploadOptions::default();
-            let slab_size = upload_options.data_shards as usize * SECTOR_SIZE;
+            let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
             let transport = Client::new();
             let hosts = Hosts::new(transport.clone());
@@ -569,7 +569,7 @@ mod test {
                     .collect(),
                 true,
             );
-            let mut data = BytesMut::zeroed(slab_size);
+            let mut data = BytesMut::zeroed(optimal_data_size);
             rand::rng().fill_bytes(&mut data);
             let data = data.freeze();
             let app_key = Arc::new(AppKey::import(rand::random()));
@@ -588,7 +588,7 @@ mod test {
             .await
             .unwrap();
 
-            let mut recovered_data = Vec::with_capacity(slab_size);
+            let mut recovered_data = Vec::with_capacity(optimal_data_size);
             let mut download = Download::new(
                 &obj,
                 hosts.clone(),
@@ -605,7 +605,7 @@ mod test {
 
         async fn test_slab_recovery() { run_local(async {
             let upload_options = UploadOptions::default();
-            let slab_size = upload_options.data_shards as usize * SECTOR_SIZE;
+            let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
             let transport = Client::new();
             let hosts = Hosts::new(transport.clone());
@@ -625,7 +625,7 @@ mod test {
                     .collect(),
                 true,
             );
-            let mut data = BytesMut::zeroed(slab_size);
+            let mut data = BytesMut::zeroed(optimal_data_size);
             rand::rng().fill_bytes(&mut data);
             let data = data.freeze();
             let app_key = Arc::new(AppKey::import(rand::random()));
@@ -640,15 +640,15 @@ mod test {
             .unwrap();
 
             let test_cases: Vec<(&str, usize, usize)> = vec![
-                ("full slab", 0, slab_size),
-                ("first half", 0, slab_size / 2),
-                ("second half", slab_size / 2, slab_size / 2),
+                ("full slab", 0, optimal_data_size),
+                ("first half", 0, optimal_data_size / 2),
+                ("second half", optimal_data_size / 2, optimal_data_size / 2),
                 ("first 30 bytes", 0, 30),
-                ("middle 30 bytes", slab_size / 2 - 15, 30),
-                ("last 30 bytes", slab_size - 30, 30),
+                ("middle 30 bytes", optimal_data_size / 2 - 15, 30),
+                ("last 30 bytes", optimal_data_size - 30, 30),
                 ("first 4KiB", 0, 4096),
-                ("middle 4KiB", slab_size / 2 - 2048, 4096),
-                ("last 4KiB", slab_size - 4096, 4096),
+                ("middle 4KiB", optimal_data_size / 2 - 2048, 4096),
+                ("last 4KiB", optimal_data_size - 4096, 4096),
             ];
 
             for (name, offset, length) in test_cases {
@@ -679,7 +679,7 @@ mod test {
             let upload_options = UploadOptions::default();
             let min_shards = upload_options.data_shards as usize;
             let total_shards = min_shards + upload_options.parity_shards as usize;
-            let slab_size = min_shards * SECTOR_SIZE;
+            let optimal_data_size = upload_options.optimal_data_size();
             let num_slabs = 3;
 
             let transport = Client::new();
@@ -701,7 +701,7 @@ mod test {
                 true,
             );
             // upload enough data for multiple slabs
-            let data_size = slab_size * num_slabs;
+            let data_size = optimal_data_size * num_slabs;
             let mut data = BytesMut::zeroed(data_size);
             rand::rng().fill_bytes(&mut data);
             let data = data.freeze();
@@ -737,7 +737,7 @@ mod test {
             let events = progress.lock().unwrap();
             // each slab is split into CHUNK_SIZE (256 KiB) chunks for download.
             // each chunk recovers min_shards shards independently.
-            let chunks_per_slab = slab_size.div_ceil(CHUNK_SIZE);
+            let chunks_per_slab = optimal_data_size.div_ceil(CHUNK_SIZE);
             let expected_total = chunks_per_slab * min_shards * num_slabs;
             assert_eq!(
                 events.len(),

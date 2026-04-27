@@ -7,7 +7,7 @@ from random import randint
 from sys import stdin
 
 from sia_storage_ffi import (
-    AppMeta,
+    AppMetadata,
     Builder,
     DownloadOptions,
     Logger,
@@ -52,7 +52,7 @@ async def main():
     uniffi_set_event_loop(asyncio.get_running_loop())  # type: ignore[arg-type]
     app_id = b"\x01" * 32
 
-    builder = Builder("https://sia.storage", AppMeta(
+    builder = Builder("https://sia.storage", AppMetadata(
         id=app_id,
         name="python example",
         description="an example app",

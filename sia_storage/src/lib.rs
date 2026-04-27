@@ -377,13 +377,13 @@ impl UploadOptions {
 
 impl UploadOptions {
     /// Returns the optimal data size per slab in bytes.
-    pub fn optimal_data_size(&self) -> u64 {
-        SECTOR_SIZE as u64 * self.data_shards as u64
+    pub fn optimal_data_size(&self) -> usize {
+        SECTOR_SIZE * self.data_shards as usize
     }
 
     /// Returns the total slab size including parity shards in bytes.
-    pub fn slab_size(&self) -> u64 {
-        SECTOR_SIZE as u64 * (self.data_shards as u64 + self.parity_shards as u64)
+    pub fn slab_size(&self) -> usize {
+        SECTOR_SIZE * (self.data_shards as usize + self.parity_shards as usize)
     }
 
     /// Validates the upload options and erasure coding parameters to ensure
@@ -508,7 +508,7 @@ mod test {
 
     use super::*;
 
-    const SLAB_SIZE: u64 = SECTOR_SIZE as u64 * 10; // 10 sectors per slab
+    const OPTIMAL_DATA_SIZE: u64 = SECTOR_SIZE as u64 * 10; // 10 sectors per slab
 
     fn random_seed() -> [u8; 32] {
         let mut seed = [0u8; 32];
@@ -549,7 +549,7 @@ mod test {
             let input: Bytes = Bytes::from("Hello, world!");
 
             let mut packed_upload = PackedUpload::new(hosts.clone(), app_key.clone(), UploadOptions::default()).unwrap();
-            assert_eq!(packed_upload.remaining(), SLAB_SIZE);
+            assert_eq!(packed_upload.remaining(), OPTIMAL_DATA_SIZE);
 
             packed_upload
                 .add(Cursor::new(input.clone()))
@@ -562,7 +562,7 @@ mod test {
 
             assert_eq!(
                 packed_upload.remaining(),
-                SLAB_SIZE - (input.len() * 2) as u64
+                OPTIMAL_DATA_SIZE - (input.len() * 2) as u64
             );
 
             let objects = packed_upload.finalize().await.expect("upload to finish");
@@ -631,7 +631,7 @@ mod test {
             );
             let small_input = Bytes::from("Hello, world!");
 
-            let mut large_input = BytesMut::zeroed(SLAB_SIZE as usize + 18); // 1 full slab + 18 bytes
+            let mut large_input = BytesMut::zeroed(OPTIMAL_DATA_SIZE as usize + 18); // 1 full slab + 18 bytes
             random_bytes(&mut large_input);
             let large_input = large_input.freeze();
 
@@ -658,10 +658,10 @@ mod test {
             assert_eq!(objects[0].slabs()[0].length, 13);
 
             // obj 1 should be the large input. The first slab starts at offset 13 so
-            // its length must be SLAB_SIZE - 13. The second slab has the remaining bytes.
-            assert_eq!(objects[1].size(), SLAB_SIZE + 18);
+            // its length must be OPTIMAL_DATA_SIZE - 13. The second slab has the remaining bytes.
+            assert_eq!(objects[1].size(), OPTIMAL_DATA_SIZE + 18);
             assert_eq!(objects[1].slabs()[0].offset, 13);
-            assert_eq!(objects[1].slabs()[0].length, (SLAB_SIZE - 13) as u32);
+            assert_eq!(objects[1].slabs()[0].length, (OPTIMAL_DATA_SIZE - 13) as u32);
             assert_eq!(objects[1].slabs()[1].offset, 0);
             assert_eq!(objects[1].slabs()[1].length, 18 + 13);
 
@@ -713,7 +713,7 @@ mod test {
                     .collect(),
                 true,
             );
-            let mut exact_input = BytesMut::zeroed(SLAB_SIZE as usize); // 1 full slab
+            let mut exact_input = BytesMut::zeroed(OPTIMAL_DATA_SIZE as usize); // 1 full slab
             random_bytes(&mut exact_input);
             let exact_input = exact_input.freeze();
 
@@ -729,9 +729,9 @@ mod test {
             // The first object should have 1 slab, since it fits exactly
             assert_eq!(objects[0].slabs().len(), 1);
             // the first slab of obj[0] should be the full length. the second slab should be the remaining 18 bytes.
-            assert_eq!(objects[0].size(), SLAB_SIZE);
+            assert_eq!(objects[0].size(), OPTIMAL_DATA_SIZE);
             assert_eq!(objects[0].slabs()[0].offset, 0);
-            assert_eq!(objects[0].slabs()[0].length, SLAB_SIZE as u32);
+            assert_eq!(objects[0].slabs()[0].length, OPTIMAL_DATA_SIZE as u32);
 
             let mut output = BytesMut::zeroed(objects[0].size() as usize);
             let mut download = Download::new(
@@ -810,6 +810,93 @@ mod test {
                 .await
                 .expect("download to complete");
             assert_eq!(output.freeze(), non_empty);
+        }).await }
+
+    async fn test_upload_packed_add_error_is_recoverable() { run_local(async {
+            let app_key = Arc::new(AppKey::import(random_seed()));
+            let hosts = Hosts::new(Client::new());
+            hosts.update(
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
+
+            // reader that delivers `data` then errors on the next poll.
+            struct ErrAfter {
+                data: Vec<u8>,
+                pos: usize,
+            }
+            impl tokio::io::AsyncRead for ErrAfter {
+                fn poll_read(
+                    mut self: std::pin::Pin<&mut Self>,
+                    _cx: &mut std::task::Context<'_>,
+                    buf: &mut tokio::io::ReadBuf<'_>,
+                ) -> std::task::Poll<std::io::Result<()>> {
+                    if self.pos >= self.data.len() {
+                        return std::task::Poll::Ready(Err(std::io::Error::other("boom")));
+                    }
+                    let n = (self.data.len() - self.pos).min(buf.remaining());
+                    buf.put_slice(&self.data[self.pos..self.pos + n]);
+                    self.pos += n;
+                    std::task::Poll::Ready(Ok(()))
+                }
+            }
+
+            let partial: Vec<u8> = (0..100u8).collect();
+            let good: Bytes = Bytes::from_static(b"recoverable object data after the hole");
+
+            let mut packed_upload = PackedUpload::new(
+                hosts.clone(),
+                app_key.clone(),
+                UploadOptions::default(),
+            )
+            .unwrap();
+            packed_upload
+                .add(ErrAfter { data: partial.clone(), pos: 0 })
+                .await
+                .expect_err("erroring reader should fail the add");
+
+            // errored add left `partial.len()` bytes as dead padding in the slab;
+            // the packer stays usable and subsequent adds stay aligned.
+            assert_eq!(packed_upload.length(), partial.len() as u64);
+
+            packed_upload
+                .add(Cursor::new(good.clone()))
+                .await
+                .expect("subsequent add after errored add must succeed");
+
+            let objects = packed_upload.finalize().await.expect("finalize");
+            // only the successful add registered an object
+            assert_eq!(objects.len(), 1);
+            assert_eq!(objects[0].size(), good.len() as u64);
+            // the good object's bytes start *after* the padding from the errored add
+            assert_eq!(objects[0].slabs().len(), 1);
+            assert_eq!(objects[0].slabs()[0].offset, partial.len() as u32);
+            assert_eq!(objects[0].slabs()[0].length, good.len() as u32);
+
+            let mut output = BytesMut::zeroed(good.len());
+            let mut download = Download::new(
+                &objects[0],
+                hosts.clone(),
+                app_key.clone(),
+                DownloadOptions::default(),
+            )
+            .unwrap();
+            copy(&mut download, &mut Cursor::new(&mut output[..]))
+                .await
+                .expect("download to complete");
+            assert_eq!(output.freeze(), good);
         }).await }
 
     async fn test_upload_download() { run_local(async {
@@ -937,9 +1024,9 @@ mod test {
                     .collect(),
                 true,
             );
-            // Use default 10 data shards, so slab_size = 10 * SECTOR_SIZE
-            let slab_size = 10 * SECTOR_SIZE as u64;
-            let data_size = slab_size * 3; // 3 slabs
+            // Use default 10 data shards, so optimal_data_size = 10 * SECTOR_SIZE
+            let optimal_data_size = 10 * SECTOR_SIZE as u64;
+            let data_size = optimal_data_size * 3; // 3 slabs
 
             let mut data = BytesMut::zeroed(data_size as usize);
             random_bytes(&mut data);
@@ -958,7 +1045,7 @@ mod test {
                 (SEGMENT_SIZE, SEGMENT_SIZE),                         // one leaf
                 (SEGMENT_SIZE + 1, SEGMENT_SIZE / 2),                 // within a leaf
                 (SEGMENT_SIZE + SEGMENT_SIZE / 2, SEGMENT_SIZE),      // across leaves
-                (slab_size / 2, 2 * slab_size),                       // across slabs
+                (optimal_data_size / 2, 2 * optimal_data_size),       // across slabs
                 (data_size - SECTOR_SIZE as u64, SECTOR_SIZE as u64), // last sector
                 (data_size - SEGMENT_SIZE, SEGMENT_SIZE),             // last leaf
                 (data_size - 100, 200),                               // past end
@@ -1217,7 +1304,7 @@ mod test {
                     .collect(),
                 true,
             );
-            let data_size = SLAB_SIZE as usize * num_slabs;
+            let data_size = OPTIMAL_DATA_SIZE as usize * num_slabs;
             let mut data = BytesMut::zeroed(data_size);
             random_bytes(&mut data);
             let data = data.freeze();
@@ -1263,7 +1350,7 @@ mod test {
             assert_eq!(data, recovered_data);
 
             let download_progress = download_progress.lock().unwrap();
-            let chunks_per_slab = SLAB_SIZE as usize / (1 << 18);
+            let chunks_per_slab = OPTIMAL_DATA_SIZE as usize / (1 << 18);
             let expected_total = chunks_per_slab * min_shards * num_slabs;
             let actual_total: usize = download_progress.values().sum();
             assert_eq!(actual_total, expected_total,

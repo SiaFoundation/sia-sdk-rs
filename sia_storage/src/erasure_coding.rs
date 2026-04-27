@@ -87,6 +87,7 @@ pub(crate) struct SlabReader {
     data_shards: usize,
     shards: Vec<BytesMut>,
     length: usize,
+    total_length: u64,
 }
 
 pub(crate) struct ReadSlab {
@@ -101,6 +102,7 @@ impl SlabReader {
             data_shards,
             shards: vec![BytesMut::zeroed(SECTOR_SIZE); total_shards],
             length: 0,
+            total_length: 0,
         }
     }
 
@@ -108,7 +110,16 @@ impl SlabReader {
         self.length
     }
 
-    pub fn slab_size(&self) -> usize {
+    /// Cumulative bytes that have landed in the pipeline across all
+    /// `read_slab` calls, including bytes from reads that errored part-way.
+    /// Unlike [length](Self::length), this never resets when a slab is
+    /// finalized.
+    pub fn total_length(&self) -> u64 {
+        self.total_length
+    }
+
+    /// The optimal slab size for streaming reads
+    pub fn optimal_data_size(&self) -> usize {
         self.data_shards * SECTOR_SIZE
     }
 
@@ -132,14 +143,14 @@ impl SlabReader {
         &mut self,
         r: &mut R,
     ) -> io::Result<(usize, Option<ReadSlab>)> {
-        let remaining = self.slab_size() - self.length;
+        let remaining = self.optimal_data_size() - self.length;
         if remaining == 0 {
             return Ok((0, None));
         }
         let mut r = r.take(remaining as u64);
         let mut total_read = 0;
         loop {
-            if self.length == self.slab_size() {
+            if self.length == self.optimal_data_size() {
                 break;
             }
 
@@ -156,9 +167,10 @@ impl SlabReader {
                 break;
             }
             self.length += n;
+            self.total_length += n as u64;
             total_read += n;
         }
-        let slab = if self.length == self.slab_size() {
+        let slab = if self.length == self.optimal_data_size() {
             let length = mem::take(&mut self.length);
             let total_shards = self.shards.len();
             let shards = mem::replace(
