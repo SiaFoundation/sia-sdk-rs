@@ -2731,7 +2731,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64",
  "blake2",
@@ -2776,7 +2776,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_ffi"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "log",
@@ -2793,7 +2793,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_napi"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_wasm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "console_error_panic_hook",
