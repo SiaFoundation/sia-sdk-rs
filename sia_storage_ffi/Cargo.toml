@@ -20,7 +20,7 @@ log = "0.4.29"
 rand = "0.10.1"
 sia_core = { version = "0.3.1", path = "../sia_core" }
 thiserror = "2.0.18"
-tokio = { version = "1.52.0", features = ["rt-multi-thread", "sync"] }
+tokio = { version = "1.52.2", features = ["rt-multi-thread", "sync"] }
 tokio-util = "0.7.18"
 uniffi = { version = "0.31.0", features = ["cli", "tokio"] } # be careful updating as it may break uniffi-react-native-bindgen
 zeroize = "1.8.1"
@@ -28,7 +28,7 @@ zeroize = "1.8.1"
 
 [build-dependencies]
 uniffi = { version = "0.31.0", features = ["build"] }
-tokio = { version = "1.52.0", features = ["rt-multi-thread", "sync", "io-util"] }
+tokio = { version = "1.52.2", features = ["rt-multi-thread", "sync", "io-util"] }
 
 [[bin]]
 name = "uniffi-bindgen"
