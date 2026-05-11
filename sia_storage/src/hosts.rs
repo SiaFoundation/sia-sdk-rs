@@ -176,7 +176,8 @@ impl HostMetric {
 }
 
 // Computes throughput in bytes/sec, returning None when elapsed is zero so that
-// the sample is skipped instead of producing a division by zero panic.
+// the sample is skipped instead of producing an invalid/infinite throughput
+// value that would skew the moving average.
 fn bytes_per_sec(bytes: u64, elapsed: Duration) -> Option<u64> {
     if elapsed.is_zero() {
         return None;
