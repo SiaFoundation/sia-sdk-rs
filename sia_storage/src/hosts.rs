@@ -39,17 +39,20 @@ pub struct Host {
 }
 
 #[derive(Debug, Default, Clone)]
-struct RPCAverage(Option<f64>); // exponential moving average of throughput in bps
+struct RPCAverage(Option<f64>); // exponential moving average of throughput in bytes/sec
 
 impl RPCAverage {
     const ALPHA: f64 = 0.2;
-    fn add_sample(&mut self, throughput: u64) {
+    // Default throughput in bytes/sec if no samples; equivalent to 1 Gbps.
+    const DEFAULT_BYTES_PER_SEC: u64 = 125_000_000;
+
+    fn add_sample(&mut self, bytes_per_sec: u64) {
         match self.0 {
             Some(avg) => {
-                self.0 = Some(Self::ALPHA * (throughput as f64) + (1.0 - Self::ALPHA) * avg);
+                self.0 = Some(Self::ALPHA * (bytes_per_sec as f64) + (1.0 - Self::ALPHA) * avg);
             }
             None => {
-                self.0 = Some(throughput as f64);
+                self.0 = Some(bytes_per_sec as f64);
             }
         }
     }
@@ -57,7 +60,7 @@ impl RPCAverage {
     fn avg(&self) -> u64 {
         match self.0 {
             Some(avg) => avg as u64,
-            None => 125000000, // default to 1 Gbps if no samples
+            None => Self::DEFAULT_BYTES_PER_SEC,
         }
     }
 }
@@ -143,7 +146,6 @@ impl Ord for FailureRate {
 
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 struct HostMetric {
-    rpc_settings_avg: RPCAverage,
     rpc_write_avg: RPCAverage,
     rpc_read_avg: RPCAverage,
     failure_rate: FailureRate,
@@ -151,14 +153,16 @@ struct HostMetric {
 
 impl HostMetric {
     fn add_write_sample(&mut self, bytes: u64, elapsed: Duration) {
-        self.rpc_write_avg
-            .add_sample((bytes as f64 / elapsed.as_secs_f64()) as u64);
+        if let Some(bps) = bytes_per_sec(bytes, elapsed) {
+            self.rpc_write_avg.add_sample(bps);
+        }
         self.failure_rate.add_sample(true);
     }
 
     fn add_read_sample(&mut self, bytes: u64, elapsed: Duration) {
-        self.rpc_read_avg
-            .add_sample((bytes as f64 / elapsed.as_secs_f64()) as u64);
+        if let Some(bps) = bytes_per_sec(bytes, elapsed) {
+            self.rpc_read_avg.add_sample(bps);
+        }
         self.failure_rate.add_sample(true);
     }
 
@@ -171,24 +175,31 @@ impl HostMetric {
     }
 }
 
+// Computes throughput in bytes/sec, returning None when elapsed is zero so that
+// the sample is skipped instead of producing a division by zero panic.
+fn bytes_per_sec(bytes: u64, elapsed: Duration) -> Option<u64> {
+    if elapsed.is_zero() {
+        return None;
+    }
+    Some((bytes as f64 / elapsed.as_secs_f64()) as u64)
+}
+
 impl Ord for HostMetric {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match other.failure_rate.cmp(&self.failure_rate) {
             // lower failure rate is higher priority
             std::cmp::Ordering::Equal => {
-                // use average of read, write, and settings RPC times as tiebreaker
-                let avg_self = (self
+                // use average of read and write throughput as tiebreaker
+                let avg_self = self
                     .rpc_write_avg
                     .avg()
-                    .saturating_add(self.rpc_read_avg.avg()))
-                .saturating_add(self.rpc_settings_avg.avg())
-                    / 3;
-                let avg_other = (other
+                    .saturating_add(self.rpc_read_avg.avg())
+                    / 2;
+                let avg_other = other
                     .rpc_write_avg
                     .avg()
-                    .saturating_add(other.rpc_read_avg.avg()))
-                .saturating_add(other.rpc_settings_avg.avg())
-                    / 3;
+                    .saturating_add(other.rpc_read_avg.avg())
+                    / 2;
                 avg_self.cmp(&avg_other) // higher average throughput is higher priority
             }
             ord => ord,
