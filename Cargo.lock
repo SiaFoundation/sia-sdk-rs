@@ -2644,6 +2644,16 @@ version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d00ac383b0f9d0751f30db77b7c0d0c4d05c3c0ed7aa290183400c4f54da6219"
 dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "sia_reed_solomon"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f7f0c1cd801fa1de4ef6a4cf41efb1cac784426c7e55bfec1507d1c823af4dc"
+dependencies = [
+ "cfg-if",
  "rayon",
  "thiserror",
 ]
@@ -2680,7 +2690,8 @@ dependencies = [
  "serde_with",
  "sia_core",
  "sia_mux",
- "sia_reed_solomon",
+ "sia_reed_solomon 0.1.0",
+ "sia_reed_solomon 0.2.0",
  "thiserror",
  "tokio",
  "tokio-util",

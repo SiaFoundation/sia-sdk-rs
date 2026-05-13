@@ -8,10 +8,10 @@ Replaced `reed-solomon-erasure` with `sia_reed_solomon`. Encoded parity bytes
 are compatible with existing `indexd` slabs.
 
 120 MiB upload against the mock cluster
-(`cargo bench -p sia_storage --features mock`):
+(`cargo bench -p sia_storage --all-features`):
 
 | | Before | After | Δ |
 |---|---|---|---|
-| `upload/90 inflight` | ~285 MiB/s | **469 MiB/s** | **+67%** |
-| `upload/10 inflight` | ~175 MiB/s | **457 MiB/s** | **+161%** |
-| `upload/default`     | ~184 MiB/s | **471 MiB/s** | **+155%** |
+| `upload/90 inflight` | ~285 MiB/s | **611 MiB/s** | **+114%** |
+| `upload/10 inflight` | ~175 MiB/s | **595 MiB/s** | **+240%** |
+| `upload/default`     | ~184 MiB/s | **609 MiB/s** | **+231%** |
