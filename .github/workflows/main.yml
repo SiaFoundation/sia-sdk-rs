@@ -10,7 +10,32 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: tenki-standard-medium-4c-8g
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Setup Environment
+        run: |
+          rustup update stable
+          rustup toolchain install nightly
+          rustup target add wasm32-unknown-unknown
+          rustup component add rustfmt --toolchain nightly
+      - name: Rustfmt
+        run: cargo +nightly fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+      - name: Clippy (wasm)
+        run: cargo clippy --target wasm32-unknown-unknown --lib --package sia_core --package sia_storage --package sia_storage_wasm --no-default-features -- -D warnings
+      - name: Check all features
+        run: cargo check --all-features --workspace
+      - name: Build docs
+        run: cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
   test:
+    name: Test (native)
     runs-on: tenki-standard-medium-4c-8g
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -20,35 +45,19 @@ jobs:
           go-version: 'stable'
       - name: Build Go interop helper
         run: cd sia_mux/testutil/go-interop && go build -o interop .
-      - name: Setup Environment
-        run: |
-          rustup update stable
-          rustup toolchain install nightly
-          rustup target add wasm32-unknown-unknown
-          rustup component add rustfmt --toolchain nightly
-      - name: Install wasm-pack
-        shell: bash
-        run: curl https://wasm-bindgen.github.io/wasm-pack/installer/init.sh -sSf | bash
-      - name: Clippy (wasm)
-        run: cargo clippy --target wasm32-unknown-unknown --lib --package sia_core --package sia_storage --package sia_storage_wasm --no-default-features -- -D warnings
-        env:
-          RUSTFLAGS: '--cfg=web_sys_unstable_apis'
-      - name: Rustfmt
-        run: cargo +nightly fmt --all -- --check
-      - name: Clippy
-        run: |
-          cargo clippy -- -D warnings
-          cargo check --all-features --workspace
-      - name: Build docs
-        run: cargo doc --all-features --no-deps
-        env:
-          RUSTDOCFLAGS: "-D warnings"
+      - name: Setup Rust
+        run: rustup update stable
       - name: Build benches
         run: cargo build --benches --features=mock
-      - name: Test (native)
+      - name: Test
         run: cargo test --all-features
 
-  test-wasm-chrome:
+  test-wasm:
+    name: Test WASM (${{ matrix.browser }})
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chrome, firefox]
     runs-on: tenki-standard-medium-4c-8g
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -56,32 +65,9 @@ jobs:
         run: |
           rustup update stable
           rustup target add wasm32-unknown-unknown
-      - name: Install wasm-pack
-        shell: bash
-        run: curl https://wasm-bindgen.github.io/wasm-pack/installer/init.sh -sSf | bash
-      - name: Test (wasm - sia_storage - chrome)
+          cargo install wasm-pack
+      - name: Test (wasm - sia_storage)
         # --lib skips compiling the native-only benchmark example
-        run: cd sia_storage && wasm-pack test --release --headless --chrome -- --lib
+        run: cd sia_storage && wasm-pack test --release --headless --${{ matrix.browser }} -- --lib
         env:
-          RUSTFLAGS: '--cfg=web_sys_unstable_apis'
-          WASM_BINDGEN_TEST_TIMEOUT: '300'
-
-  test-wasm-firefox:
-    runs-on: tenki-standard-medium-4c-8g
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-      - name: Setup Environment
-        run: |
-          rustup update stable
-          rustup target add wasm32-unknown-unknown
-      - name: Install wasm-pack
-        shell: bash
-        run: curl https://wasm-bindgen.github.io/wasm-pack/installer/init.sh -sSf | bash
-      - name: Install geckodriver
-        run: curl -sL https://github.com/mozilla/geckodriver/releases/download/v0.36.0/geckodriver-v0.36.0-linux64.tar.gz | tar xz -C /usr/local/bin
-      - name: Test (wasm - sia_storage - firefox)
-        # --lib skips compiling the native-only benchmark example
-        run: cd sia_storage && wasm-pack test --release --headless --firefox -- --lib
-        env:
-          RUSTFLAGS: '--cfg=web_sys_unstable_apis'
           WASM_BINDGEN_TEST_TIMEOUT: '300'

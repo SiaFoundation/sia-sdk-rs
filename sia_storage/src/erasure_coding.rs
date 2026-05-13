@@ -1,15 +1,15 @@
 use std::mem;
 
-use bytes::{Bytes, BytesMut};
-use reed_solomon_erasure::galois_8::ReedSolomon;
+use bytes::Bytes;
 use sia_core::rhp4::{SECTOR_SIZE, SEGMENT_SIZE};
+use sia_reed_solomon::ReedSolomon;
 use thiserror::Error;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("ReedSolomon error: {0}")]
-    ReedSolomon(#[from] reed_solomon_erasure::Error),
+    ReedSolomon(#[from] sia_reed_solomon::Error),
 
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
@@ -29,18 +29,18 @@ impl ErasureCoder {
     }
 
     pub fn data_shards(&self) -> usize {
-        self.encoder.data_shard_count()
+        self.encoder.data_shards()
     }
 
     /// encodes the shards using reed solomon erasure coding,
     /// computing the parity shards and overwriting their values.
-    pub fn encode_shards(&self, shards: &mut [BytesMut]) -> Result<()> {
+    pub fn encode_shards(&self, shards: &mut [Vec<u8>]) -> Result<()> {
         self.encoder.encode(shards)?;
         Ok(())
     }
 
     /// reconstructs the missing datashards from the available ones.
-    pub fn reconstruct_data_shards(&self, shards: &mut [Option<BytesMut>]) -> Result<()> {
+    pub fn reconstruct_data_shards(&self, shards: &mut [Option<Vec<u8>>]) -> Result<()> {
         self.encoder.reconstruct_data(shards)?;
         Ok(())
     }
@@ -85,14 +85,14 @@ impl ErasureCoder {
 /// partial slab.
 pub(crate) struct SlabReader {
     data_shards: usize,
-    shards: Vec<BytesMut>,
+    shards: Vec<Vec<u8>>,
     length: usize,
     total_length: u64,
 }
 
 pub(crate) struct ReadSlab {
     pub length: usize,
-    pub shards: Vec<BytesMut>,
+    pub shards: Vec<Vec<u8>>,
 }
 
 impl SlabReader {
@@ -100,7 +100,7 @@ impl SlabReader {
         let total_shards = data_shards + parity_shards;
         Self {
             data_shards,
-            shards: vec![BytesMut::zeroed(SECTOR_SIZE); total_shards],
+            shards: vec![vec![0u8; SECTOR_SIZE]; total_shards],
             length: 0,
             total_length: 0,
         }
@@ -173,10 +173,7 @@ impl SlabReader {
         let slab = if self.length == self.optimal_data_size() {
             let length = mem::take(&mut self.length);
             let total_shards = self.shards.len();
-            let shards = mem::replace(
-                &mut self.shards,
-                vec![BytesMut::zeroed(SECTOR_SIZE); total_shards],
-            );
+            let shards = mem::replace(&mut self.shards, vec![vec![0u8; SECTOR_SIZE]; total_shards]);
             Some(ReadSlab { length, shards })
         } else {
             None
@@ -191,10 +188,8 @@ mod tests {
 
     use super::*;
 
-    fn init_shard(i: u8) -> BytesMut {
-        let mut buf = BytesMut::with_capacity(SECTOR_SIZE);
-        buf.resize(SECTOR_SIZE, i);
-        buf
+    fn init_shard(i: u8) -> Vec<u8> {
+        vec![i; SECTOR_SIZE]
     }
 
     cross_target_tests! {
@@ -203,7 +198,7 @@ mod tests {
         let parity_shards = 3;
         let coder = ErasureCoder::new(data_shards, parity_shards).unwrap();
 
-        let mut shards: Vec<BytesMut> = [
+        let mut shards: Vec<Vec<u8>> = [
             init_shard(1),
             init_shard(2),
             init_shard(0),
@@ -214,7 +209,7 @@ mod tests {
 
         coder.encode_shards(&mut shards).unwrap();
 
-        let expected_shards: Vec<BytesMut> = vec![
+        let expected_shards: Vec<Vec<u8>> = vec![
             init_shard(1),
             init_shard(2),
             init_shard(7),  // parity shard 1
@@ -225,10 +220,10 @@ mod tests {
 
         // reconstruct data shards
         for i in 0..data_shards {
-            let mut shards: Vec<Option<BytesMut>> = shards.iter().cloned().map(Some).collect();
+            let mut shards: Vec<Option<Vec<u8>>> = shards.iter().cloned().map(Some).collect();
             shards[i] = None;
             coder.reconstruct_data_shards(&mut shards).unwrap();
-            let shards: Vec<BytesMut> = shards.into_iter().map(|s| s.unwrap()).collect();
+            let shards: Vec<Vec<u8>> = shards.into_iter().map(|s| s.unwrap()).collect();
             assert_eq!(shards, expected_shards);
         }
     }
@@ -292,12 +287,12 @@ mod tests {
         const PARITY_SHARDS: usize = 1;
         let coder = ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).unwrap();
 
-        let mut data = BytesMut::zeroed(SECTOR_SIZE * 7 / 2); // 3.5 shards of data
+        let mut data = vec![0u8; SECTOR_SIZE * 7 / 2]; // 3.5 shards of data
         data[..SECTOR_SIZE].fill(1);
         data[SECTOR_SIZE..2 * SECTOR_SIZE].fill(2);
         data[2 * SECTOR_SIZE..3 * SECTOR_SIZE].fill(3);
         data[3 * SECTOR_SIZE..].fill(4);
-        let data = data.freeze();
+        let data = Bytes::from(data);
 
         let mut reader = SlabReader::new(DATA_SHARDS, PARITY_SHARDS);
         let (n, slab) = reader
@@ -314,7 +309,7 @@ mod tests {
         // we expect 5 shards and the last one is an empty parity shard
         assert_eq!(shards.len(), 5);
         assert_eq!(size as usize, SECTOR_SIZE * 7 / 2);
-        assert_eq!(shards[4], BytesMut::zeroed(SECTOR_SIZE)); // parity shard should be empty
+        assert_eq!(shards[4], vec![0u8; SECTOR_SIZE]); // parity shard should be empty
 
         for shard in &shards[..4] {
             // every shard should be of SECTOR_SIZE
@@ -348,10 +343,10 @@ mod tests {
         // encoding the read shards should succeed without errors and cause the
         // parity shard to be filled
         coder.encode_shards(&mut shards).unwrap();
-        assert_ne!(shards[4], BytesMut::zeroed(SECTOR_SIZE));
+        assert_ne!(shards[4], vec![0u8; SECTOR_SIZE]);
 
         // joining the shards back together should result in the original data
-        let shards: Vec<Bytes> = shards.iter().cloned().map(|s| s.freeze()).collect();
+        let shards: Vec<Bytes> = shards.into_iter().map(Bytes::from).collect();
         let mut joined_data = Vec::new();
         ErasureCoder::write_data_shards(&mut joined_data, &shards[..DATA_SHARDS], 0, data.len())
             .await
@@ -381,6 +376,101 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(joined_data, data[data.len() / 2..]);
+    }
+
+    async fn test_erasure_code_golden() {
+        use sia_core::blake2::{Blake2b256, Digest};
+        use sia_core::hash_256;
+        use sia_core::types::Hash256;
+
+        // Golden hashes generated by a 10-of-30 RS slab with klauspost/reedsolomon in Go.
+        // The data shards are generated using a simple xorshift64 PRNG since Go and Rust
+        // do not share a PRNG that would guarantee parity.
+        const EXPECTED_SHARD_HASHES: [Hash256; 30] = [
+            // data shards
+            hash_256!("5f9133b3f31ca9e40e029fd0b0fc31127803ba39bbc6393da17f201c2b320bc0"),
+            hash_256!("873f9a6c0bfb4063b3125f034b0adbafec4c6a3cf4855381640612d3bdb52c52"),
+            hash_256!("addeec9b79e16ef8b73faa44acdd8bce937baf4261e0a2960fad431378163c9a"),
+            hash_256!("99c7af0efa1aee38039171a95550735f7ba85f2cc53b5d211177a4714261067f"),
+            hash_256!("7c6619b96e1518270e8a6098558d92c6f599500a4c4a07c2b1c378f1c28f81d2"),
+            hash_256!("e4a27ad70588b5fe9b1eab2c3e90b2400f9b835870314d5462af677fa0194b65"),
+            hash_256!("28fde42094bb60c92aef3f4c1b76ef3b41407b4f32980d1487bacd3439fc1c38"),
+            hash_256!("49a89238c935b6dbfae3081785ce008b1e6c5b17e64e87e6a977146956708e95"),
+            hash_256!("fe4604077368a0da69257ad0f6d4a81c1d2ecb95100b320f837c190aee42197a"),
+            hash_256!("80bed93006c4e0a4f2aca7ee2da737271d6df50b117c1ba4012ad06381b45a84"),
+            // parity shards
+            hash_256!("d0820641e4a40d01aa61812561717a45681e0d9d990daff41971e0e4bbb9596f"),
+            hash_256!("c93ede3459a43f28a73d6b54618891d218fe2a6fff72e8a2e11ddcc8f3c03ce3"),
+            hash_256!("240cb1f10fb2539f287af32dab1271b37896dd72ce63e9df4dc528abe65a260c"),
+            hash_256!("85315fa52dcc04496815bc6d988a0b2caa7a872957739fd2e1aac5189e756fcf"),
+            hash_256!("7c5c6545793751788dd8e401d46b0567cb34bc2ee31097e1ec2108c6e01511a6"),
+            hash_256!("24bfd4acab06d4976f08219b6fb5dc872b1382f39961f23b5d09065d137f423f"),
+            hash_256!("fd3140df262ab81f99f1f5a4ee83a2d06f2f361b538a4949b651ad2bc24e7be5"),
+            hash_256!("46cab3709634583d2fe357d62f8a30c4797ea26696ecfb7957b3bb5168787cfc"),
+            hash_256!("babf9e26da954f409e2fb8834fddf2c075daa8789c62c03a2cc649296b3ad0ee"),
+            hash_256!("08cd570feba44f78705f0b3fd5fc973bcd62beb16567c700a3671a316af6a71b"),
+            hash_256!("a56df2e4f7be6626861da81b83e812315870ff89d0854cf290a2e42ccb64358f"),
+            hash_256!("5264c29cfd9fe9c63cdefed4ca20c790ed30c9ff2bfd9c167bf5205d797f9f00"),
+            hash_256!("9f1c15a3a5514581eb0e20b3811b92fcf4f59cdbd986ea2677d40f65e728aa33"),
+            hash_256!("aaaa12e1c177e5e52012068462b83e9a0ce2c6d74d089cbdf4b370186ac386ad"),
+            hash_256!("99f837946ab86c68b451693685041b88aa66ff1330ff2d0c54c87e87cec5640b"),
+            hash_256!("7fc2ffab8e8c85898b2d6a225b85771cd8ceeea61306710f14f07c94076e267c"),
+            hash_256!("9ff3bfbd1f282f9ef3705715321a687cfe7f1f8d623ef153e1ebbdb9ad4493db"),
+            hash_256!("a922d41284f8c6c8c0d764fcd0df2f5313e84abd594787e94a097ceded6dd912"),
+            hash_256!("4b8f9c5558cd26029a120b30b8429a28f17869c283402c0dd8e8c390fb7639c7"),
+            hash_256!("1bdc7fdb4c601c503bf12a833a12a0a41ed717db7ee1c99ce3176ba8afeb2684"),
+        ];
+        const DATA_SHARDS: usize = 10;
+        const PARITY_SHARDS: usize = 20;
+
+        fn fill_shard(buf: &mut [u8], seed: u64) {
+            let mut state = seed;
+            for chunk in buf.chunks_exact_mut(8) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                chunk.copy_from_slice(&state.to_le_bytes());
+            }
+        }
+
+        let mut shards: Vec<Vec<u8>> = (0..DATA_SHARDS + PARITY_SHARDS)
+            .map(|_| vec![0u8; SECTOR_SIZE])
+            .collect();
+        for (i, shard) in shards[..DATA_SHARDS].iter_mut().enumerate() {
+            fill_shard(shard, i as u64 + 1);
+        }
+
+        let coder = ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).unwrap();
+        coder.encode_shards(&mut shards).unwrap();
+
+        for (i, shard) in shards.iter().enumerate() {
+            let got: Hash256 = Blake2b256::new().chain_update(shard).finalize().into();
+            assert_eq!(got, EXPECTED_SHARD_HASHES[i], "shard {i} hash mismatch");
+        }
+
+        let check_reconstruct = |dropped: &[usize], label: &str| {
+            let mut opt: Vec<Option<Vec<u8>>> = shards.iter().cloned().map(Some).collect();
+            for &i in dropped {
+                opt[i] = None;
+            }
+            coder.reconstruct_data_shards(&mut opt).unwrap();
+            for i in 0..DATA_SHARDS {
+                let shard = opt[i].as_ref().expect("data shard reconstructed");
+                let got: Hash256 = Blake2b256::new().chain_update(shard).finalize().into();
+                assert_eq!(got, EXPECTED_SHARD_HASHES[i], "{label}: shard {i} mismatch");
+            }
+        };
+
+        // each data shard dropped individually
+        for drop in 0..DATA_SHARDS {
+            check_reconstruct(&[drop], &format!("drop_{drop}"));
+        }
+        // every data shard missing, rebuild from parity alone
+        let all_data: Vec<usize> = (0..DATA_SHARDS).collect();
+        check_reconstruct(&all_data, "all_data");
+        // minimum remaining: drop 20 shards (all data + half of parity), leaving DATA_SHARDS parity shards
+        let min_remaining: Vec<usize> = (0..PARITY_SHARDS).collect();
+        check_reconstruct(&min_remaining, "min_remaining");
     }
     }
 }

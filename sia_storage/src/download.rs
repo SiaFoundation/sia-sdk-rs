@@ -10,7 +10,7 @@ use crate::hosts::{Hosts, RPCError};
 use crate::rhp4::{Client, Transport};
 use crate::time::{Duration, Elapsed, Instant, sleep};
 use crate::{AppKey, DownloadOptions, Object, Sector, ShardProgress, ShardProgressCallback, Slab};
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 use chacha20::cipher::StreamCipher;
 use sia_core::rhp4::SEGMENT_SIZE;
 use thiserror::Error;
@@ -77,7 +77,7 @@ struct AwaitingRecovery {
 
 struct ShardsRecovered {
     shard_offset: usize,
-    shards: Vec<Option<BytesMut>>,
+    shards: Vec<Option<Vec<u8>>>,
 }
 
 struct SlabDecoded {
@@ -150,7 +150,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
         slab_index: usize,
         sector_offset: usize,
         sector_length: usize,
-    ) -> Result<(usize, BytesMut, ShardProgress), DownloadError> {
+    ) -> Result<(usize, Vec<u8>, ShardProgress), DownloadError> {
         let start = Instant::now();
         let data = client
             .read_sector(
@@ -164,9 +164,11 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
             )
             .await?;
         let elapsed = start.elapsed();
+        // Bytes -> Vec<u8> is zero-copy when the Bytes is uniquely owned
+        // (true here — no other refs to the response yet).
         Ok((
             task.shard_index,
-            data.try_into_mut().unwrap(),
+            Vec::from(data),
             ShardProgress {
                 host_key: task.sector.host_key,
                 shard_size: sector_length,
@@ -274,7 +276,7 @@ impl<T: Transport> SlabRecovery<ShardsRecovered, T> {
         let data_shards = shards
             .into_iter()
             .take(self.min_shards as usize)
-            .map(|s| s.unwrap().freeze()) // safe because the data shards were just reconstructed
+            .map(|s| Bytes::from(s.unwrap())) // safe: data shards were just reconstructed
             .collect();
         Ok(SlabRecovery {
             client: self.client,
