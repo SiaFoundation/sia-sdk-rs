@@ -1,15 +1,15 @@
 use std::mem;
 
-use bytes::{Bytes, BytesMut};
-use reed_solomon_erasure::galois_8::ReedSolomon;
+use bytes::Bytes;
 use sia_core::rhp4::{SECTOR_SIZE, SEGMENT_SIZE};
+use sia_reed_solomon::ReedSolomon;
 use thiserror::Error;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("ReedSolomon error: {0}")]
-    ReedSolomon(#[from] reed_solomon_erasure::Error),
+    ReedSolomon(#[from] sia_reed_solomon::Error),
 
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
@@ -29,18 +29,18 @@ impl ErasureCoder {
     }
 
     pub fn data_shards(&self) -> usize {
-        self.encoder.data_shard_count()
+        self.encoder.data_shards()
     }
 
     /// encodes the shards using reed solomon erasure coding,
     /// computing the parity shards and overwriting their values.
-    pub fn encode_shards(&self, shards: &mut [BytesMut]) -> Result<()> {
+    pub fn encode_shards(&self, shards: &mut [Vec<u8>]) -> Result<()> {
         self.encoder.encode(shards)?;
         Ok(())
     }
 
     /// reconstructs the missing datashards from the available ones.
-    pub fn reconstruct_data_shards(&self, shards: &mut [Option<BytesMut>]) -> Result<()> {
+    pub fn reconstruct_data_shards(&self, shards: &mut [Option<Vec<u8>>]) -> Result<()> {
         self.encoder.reconstruct_data(shards)?;
         Ok(())
     }
@@ -85,14 +85,14 @@ impl ErasureCoder {
 /// partial slab.
 pub(crate) struct SlabReader {
     data_shards: usize,
-    shards: Vec<BytesMut>,
+    shards: Vec<Vec<u8>>,
     length: usize,
     total_length: u64,
 }
 
 pub(crate) struct ReadSlab {
     pub length: usize,
-    pub shards: Vec<BytesMut>,
+    pub shards: Vec<Vec<u8>>,
 }
 
 impl SlabReader {
@@ -100,7 +100,7 @@ impl SlabReader {
         let total_shards = data_shards + parity_shards;
         Self {
             data_shards,
-            shards: vec![BytesMut::zeroed(SECTOR_SIZE); total_shards],
+            shards: vec![vec![0u8; SECTOR_SIZE]; total_shards],
             length: 0,
             total_length: 0,
         }
@@ -173,10 +173,7 @@ impl SlabReader {
         let slab = if self.length == self.optimal_data_size() {
             let length = mem::take(&mut self.length);
             let total_shards = self.shards.len();
-            let shards = mem::replace(
-                &mut self.shards,
-                vec![BytesMut::zeroed(SECTOR_SIZE); total_shards],
-            );
+            let shards = mem::replace(&mut self.shards, vec![vec![0u8; SECTOR_SIZE]; total_shards]);
             Some(ReadSlab { length, shards })
         } else {
             None
@@ -191,10 +188,8 @@ mod tests {
 
     use super::*;
 
-    fn init_shard(i: u8) -> BytesMut {
-        let mut buf = BytesMut::with_capacity(SECTOR_SIZE);
-        buf.resize(SECTOR_SIZE, i);
-        buf
+    fn init_shard(i: u8) -> Vec<u8> {
+        vec![i; SECTOR_SIZE]
     }
 
     cross_target_tests! {
@@ -203,7 +198,7 @@ mod tests {
         let parity_shards = 3;
         let coder = ErasureCoder::new(data_shards, parity_shards).unwrap();
 
-        let mut shards: Vec<BytesMut> = [
+        let mut shards: Vec<Vec<u8>> = [
             init_shard(1),
             init_shard(2),
             init_shard(0),
@@ -214,7 +209,7 @@ mod tests {
 
         coder.encode_shards(&mut shards).unwrap();
 
-        let expected_shards: Vec<BytesMut> = vec![
+        let expected_shards: Vec<Vec<u8>> = vec![
             init_shard(1),
             init_shard(2),
             init_shard(7),  // parity shard 1
@@ -225,10 +220,10 @@ mod tests {
 
         // reconstruct data shards
         for i in 0..data_shards {
-            let mut shards: Vec<Option<BytesMut>> = shards.iter().cloned().map(Some).collect();
+            let mut shards: Vec<Option<Vec<u8>>> = shards.iter().cloned().map(Some).collect();
             shards[i] = None;
             coder.reconstruct_data_shards(&mut shards).unwrap();
-            let shards: Vec<BytesMut> = shards.into_iter().map(|s| s.unwrap()).collect();
+            let shards: Vec<Vec<u8>> = shards.into_iter().map(|s| s.unwrap()).collect();
             assert_eq!(shards, expected_shards);
         }
     }
@@ -292,12 +287,12 @@ mod tests {
         const PARITY_SHARDS: usize = 1;
         let coder = ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).unwrap();
 
-        let mut data = BytesMut::zeroed(SECTOR_SIZE * 7 / 2); // 3.5 shards of data
+        let mut data = vec![0u8; SECTOR_SIZE * 7 / 2]; // 3.5 shards of data
         data[..SECTOR_SIZE].fill(1);
         data[SECTOR_SIZE..2 * SECTOR_SIZE].fill(2);
         data[2 * SECTOR_SIZE..3 * SECTOR_SIZE].fill(3);
         data[3 * SECTOR_SIZE..].fill(4);
-        let data = data.freeze();
+        let data = Bytes::from(data);
 
         let mut reader = SlabReader::new(DATA_SHARDS, PARITY_SHARDS);
         let (n, slab) = reader
@@ -314,7 +309,7 @@ mod tests {
         // we expect 5 shards and the last one is an empty parity shard
         assert_eq!(shards.len(), 5);
         assert_eq!(size as usize, SECTOR_SIZE * 7 / 2);
-        assert_eq!(shards[4], BytesMut::zeroed(SECTOR_SIZE)); // parity shard should be empty
+        assert_eq!(shards[4], vec![0u8; SECTOR_SIZE]); // parity shard should be empty
 
         for shard in &shards[..4] {
             // every shard should be of SECTOR_SIZE
@@ -348,10 +343,10 @@ mod tests {
         // encoding the read shards should succeed without errors and cause the
         // parity shard to be filled
         coder.encode_shards(&mut shards).unwrap();
-        assert_ne!(shards[4], BytesMut::zeroed(SECTOR_SIZE));
+        assert_ne!(shards[4], vec![0u8; SECTOR_SIZE]);
 
         // joining the shards back together should result in the original data
-        let shards: Vec<Bytes> = shards.iter().cloned().map(|s| s.freeze()).collect();
+        let shards: Vec<Bytes> = shards.into_iter().map(Bytes::from).collect();
         let mut joined_data = Vec::new();
         ErasureCoder::write_data_shards(&mut joined_data, &shards[..DATA_SHARDS], 0, data.len())
             .await
