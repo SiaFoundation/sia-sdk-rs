@@ -334,7 +334,7 @@ impl DownloadOptions {
 impl Default for DownloadOptions {
     fn default() -> Self {
         Self {
-            max_inflight: 80, // ~20 MiB in memory
+            max_inflight: 270, // ~20 MiB in memory
             offset: 0,
             length: None,
             shard_downloaded: None,
@@ -462,7 +462,7 @@ impl Default for UploadOptions {
         Self {
             data_shards: 10,
             parity_shards: 20,
-            max_inflight: 15,
+            max_inflight: 90,
             shard_uploaded: None,
         }
     }
