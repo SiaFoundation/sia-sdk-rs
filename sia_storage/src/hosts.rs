@@ -1,16 +1,15 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use chrono::Utc;
 use log::debug;
-use priority_queue::PriorityQueue;
 use serde::{Deserialize, Serialize};
 use sia_core::rhp4::HostPrices;
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
-use std::sync::Mutex;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -43,8 +42,6 @@ struct RPCAverage(Option<f64>); // exponential moving average of throughput in b
 
 impl RPCAverage {
     const ALPHA: f64 = 0.2;
-    // Default throughput in bytes/sec if no samples; equivalent to 1 Gbps.
-    const DEFAULT_BYTES_PER_SEC: u64 = 125_000_000;
 
     fn add_sample(&mut self, bytes_per_sec: u64) {
         match self.0 {
@@ -57,17 +54,19 @@ impl RPCAverage {
         }
     }
 
-    fn avg(&self) -> u64 {
-        match self.0 {
-            Some(avg) => avg as u64,
-            None => Self::DEFAULT_BYTES_PER_SEC,
-        }
+    /// Returns the current average in bytes/sec, or `None` if no samples have
+    /// been recorded yet. Callers decide how to treat unsampled hosts.
+    fn avg(&self) -> Option<f64> {
+        self.0
     }
 }
 
 impl Display for RPCAverage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.avg(), f)
+        match self.avg() {
+            Some(v) => Display::fmt(&v, f),
+            None => f.write_str("unsampled"),
+        }
     }
 }
 
@@ -78,18 +77,6 @@ impl PartialEq for RPCAverage {
 }
 
 impl Eq for RPCAverage {}
-
-impl Ord for RPCAverage {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.avg().cmp(&other.avg())
-    }
-}
-
-impl PartialOrd for RPCAverage {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
 
 #[derive(Debug, Default, Clone)]
 struct FailureRate(Option<f64>); // exponential moving average of failure rate
@@ -144,7 +131,7 @@ impl Ord for FailureRate {
     }
 }
 
-#[derive(Debug, Default, Clone, Eq, PartialEq)]
+#[derive(Debug, Default, Clone)]
 struct HostMetric {
     rpc_write_avg: RPCAverage,
     rpc_read_avg: RPCAverage,
@@ -173,6 +160,17 @@ impl HostMetric {
     fn add_failure(&mut self) {
         self.failure_rate.add_sample(false);
     }
+
+    /// Combined read + write throughput average. `None` only when neither side
+    /// has been sampled. Used by [`HostScore`] for the discovery preference
+    /// (unsampled outranks sampled).
+    fn combined_throughput(&self) -> Option<f64> {
+        match (self.rpc_write_avg.avg(), self.rpc_read_avg.avg()) {
+            (None, None) => None,
+            (Some(w), Some(r)) => Some((w + r) / 2.0),
+            (Some(v), None) | (None, Some(v)) => Some(v),
+        }
+    }
 }
 
 // Computes throughput in bytes/sec, returning None when elapsed is zero so that
@@ -185,30 +183,67 @@ fn bytes_per_sec(bytes: u64, elapsed: Duration) -> Option<u64> {
     Some((bytes as f64 / elapsed.as_secs_f64()) as u64)
 }
 
-impl Ord for HostMetric {
+/// Score for picking the next upload host. Higher is better.
+///
+/// Sort order:
+/// 1. Lower `failure_rate` wins.
+/// 2. Unsampled hosts (no throughput data) outrank sampled ones — this is
+///    the "discovery" preference so every available host eventually gets
+///    tried at least once.
+/// 3. Among sampled hosts, higher `throughput / (inflight + 1)` wins —
+///    the expected per-shard throughput if you added one more shard. That
+///    penalizes already-busy hosts proportionally to load, so a saturated
+///    fast host can lose to an idle slower one, while a genuinely much
+///    faster host still wins even when serving a few shards.
+#[derive(Debug, Clone, Copy)]
+struct HostScore {
+    failure_rate: i64,
+    throughput: Option<f64>,
+    inflight: usize,
+}
+
+impl HostScore {
+    fn new(metric: &HostMetric, inflight: usize) -> Self {
+        Self {
+            failure_rate: metric.failure_rate.rate(),
+            throughput: metric.combined_throughput(),
+            inflight,
+        }
+    }
+
+    fn weighted_throughput(&self) -> Option<f64> {
+        self.throughput.map(|t| t / (self.inflight as f64 + 1.0))
+    }
+}
+
+impl PartialEq for HostScore {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for HostScore {}
+
+impl Ord for HostScore {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Lower failure_rate is better (so invert here for max-comparison).
         match other.failure_rate.cmp(&self.failure_rate) {
-            // lower failure rate is higher priority
-            std::cmp::Ordering::Equal => {
-                // use average of read and write throughput as tiebreaker
-                let avg_self = self
-                    .rpc_write_avg
-                    .avg()
-                    .saturating_add(self.rpc_read_avg.avg())
-                    / 2;
-                let avg_other = other
-                    .rpc_write_avg
-                    .avg()
-                    .saturating_add(other.rpc_read_avg.avg())
-                    / 2;
-                avg_self.cmp(&avg_other) // higher average throughput is higher priority
-            }
+            std::cmp::Ordering::Equal => match (self.throughput, other.throughput) {
+                (None, None) => std::cmp::Ordering::Equal,
+                // discovery: unsampled outranks sampled
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (Some(_), Some(_)) => self
+                    .weighted_throughput()
+                    .unwrap()
+                    .total_cmp(&other.weighted_throughput().unwrap()),
+            },
             ord => ord,
         }
     }
 }
 
-impl PartialOrd for HostMetric {
+impl PartialOrd for HostScore {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -218,18 +253,27 @@ impl PartialOrd for HostMetric {
 struct HostInfo {
     addresses: Vec<NetAddress>,
     good_for_upload: bool,
+    /// Number of upload RPCs currently in flight to this host. Updated by
+    /// an [`InflightGuard`] in `Hosts::write_sector`; read by the host
+    /// scorer in `next_upload_host`.
+    inflight_uploads: Arc<AtomicUsize>,
+    /// Number of download RPCs currently in flight to this host. Updated
+    /// by an [`InflightGuard`] in `Hosts::read_sector`; read by
+    /// `prioritize` so concurrent slab downloads disperse across hosts
+    /// instead of all piling onto the same top-N.
+    inflight_downloads: Arc<AtomicUsize>,
 }
 
 #[derive(Debug)]
 struct HostList {
     hosts: RwLock<HashMap<PublicKey, HostInfo>>,
-    preferred_hosts: RwLock<PriorityQueue<PublicKey, HostMetric>>,
+    metrics: RwLock<HashMap<PublicKey, HostMetric>>,
 }
 
 impl HostList {
     fn new() -> Self {
         Self {
-            preferred_hosts: RwLock::new(PriorityQueue::new()),
+            metrics: RwLock::new(HashMap::new()),
             hosts: RwLock::new(HashMap::new()),
         }
     }
@@ -239,42 +283,67 @@ impl HostList {
         hosts.get(host_key).map(|h| h.addresses.clone())
     }
 
-    /// Sorts a list of hosts according to their priority in the client's
-    /// preferred hosts queue. The function `f` is used to extract the
-    /// public key from each item.
-    fn prioritize<H, F>(&self, hosts: &mut [H], f: F)
+    /// Sorts a list of items by their host's download score (descending).
+    /// Score is `throughput / (inflight_downloads + 1)`, lower failure_rate
+    /// wins first, and unsampled hosts get discovery priority. Used by the
+    /// download path so concurrent slab downloads spread initial picks
+    /// across less-busy hosts.
+    fn prioritize<H, F>(&self, items: &mut [H], f: F)
     where
         F: Fn(&H) -> &PublicKey,
     {
-        let preferred_hosts = self.preferred_hosts.read().unwrap();
-        hosts.sort_by(|a, b| {
-            preferred_hosts
-                .get_priority(f(b))
-                .cmp(&preferred_hosts.get_priority(f(a)))
-        });
+        let metrics = self.metrics.read().unwrap();
+        let host_info = self.hosts.read().unwrap();
+        let score_for = |k: &PublicKey| -> Option<HostScore> {
+            let metric = metrics.get(k)?;
+            let inflight = host_info
+                .get(k)
+                .map(|h| h.inflight_downloads.load(Ordering::Relaxed))
+                .unwrap_or(0);
+            Some(HostScore::new(metric, inflight))
+        };
+        // Use `sort_by_cached_key` so each item's score is computed exactly
+        // once. The inflight counter is an atomic that other tasks mutate
+        // concurrently — recomputing during the sort would let the same
+        // host's score change between comparisons, violating total order
+        // and crashing the sort.
+        items.sort_by_cached_key(|b| std::cmp::Reverse(score_for(f(b))));
     }
 
     /// Adds new hosts to the list if they don't already exist.
     ///
     /// If `clear` is true, existing hosts not in the new list are removed, but
-    /// their metrics are retained in case they reappear later.
+    /// their metrics and inflight counters are retained in case they reappear later.
     fn update(&self, new_hosts: Vec<Host>, clear: bool) {
         let mut hosts = self.hosts.write().unwrap();
-        if clear {
-            hosts.clear();
-        }
-        let mut priority = self.preferred_hosts.write().unwrap();
+        // Preserve inflight counters across `clear=true` updates so guards
+        // currently outstanding still decrement the right counter.
+        let old = if clear {
+            std::mem::take(&mut *hosts)
+        } else {
+            HashMap::new()
+        };
+        let mut metrics = self.metrics.write().unwrap();
         for host in new_hosts {
+            let existing = hosts
+                .get(&host.public_key)
+                .or_else(|| old.get(&host.public_key));
+            let inflight_uploads = existing
+                .map(|h| h.inflight_uploads.clone())
+                .unwrap_or_else(|| Arc::new(AtomicUsize::new(0)));
+            let inflight_downloads = existing
+                .map(|h| h.inflight_downloads.clone())
+                .unwrap_or_else(|| Arc::new(AtomicUsize::new(0)));
             hosts.insert(
                 host.public_key,
                 HostInfo {
                     addresses: host.addresses,
                     good_for_upload: host.good_for_upload,
+                    inflight_uploads,
+                    inflight_downloads,
                 },
             );
-            if !priority.contains(&host.public_key) {
-                priority.push(host.public_key, HostMetric::default());
-            }
+            metrics.entry(host.public_key).or_default();
         }
     }
 
@@ -288,58 +357,105 @@ impl HostList {
             .count()
     }
 
-    /// Creates a queue of hosts that are good to upload to for sequential
-    /// access sorted by priority.
-    fn upload_queue(&self) -> HostQueue {
-        let mut available_hosts = self
+    /// Returns the upload host with the best score for handling another
+    /// shard, excluding any in `exclude`. The score is
+    /// `throughput / (inflight + 1)` and lower `failure_rate` wins first.
+    /// Returns `None` if no eligible host is available.
+    fn next_upload_host(&self, exclude: &HashSet<PublicKey>) -> Option<PublicKey> {
+        let hosts = self.hosts.read().unwrap();
+        let metrics = self.metrics.read().unwrap();
+        let mut best: Option<(PublicKey, HostScore)> = None;
+        for (hk, info) in hosts.iter() {
+            if !info.good_for_upload || exclude.contains(hk) {
+                continue;
+            }
+            let Some(metric) = metrics.get(hk) else {
+                continue;
+            };
+            let inflight = info.inflight_uploads.load(Ordering::Relaxed);
+            let score = HostScore::new(metric, inflight);
+            match &best {
+                None => best = Some((*hk, score)),
+                Some((_, current)) if score > *current => best = Some((*hk, score)),
+                _ => {}
+            }
+        }
+        best.map(|(hk, _)| hk)
+    }
+
+    /// Begins tracking an in-flight upload to the host. Returns a guard that
+    /// increments the host's `inflight_uploads` counter immediately and
+    /// decrements it on drop. Returns `None` if the host is unknown.
+    fn track_inflight_upload(&self, host_key: &PublicKey) -> Option<InflightGuard> {
+        let counter = self
             .hosts
             .read()
             .unwrap()
-            .iter()
-            .filter_map(|(hk, h)| h.good_for_upload.then_some(*hk))
-            .collect::<Vec<_>>();
-
-        self.prioritize(&mut available_hosts, |hk| hk);
-        HostQueue::new(available_hosts)
+            .get(host_key)?
+            .inflight_uploads
+            .clone();
+        Some(InflightGuard::new(counter))
     }
 
-    /// Adds a failure for the given host, updating its metrics and priority.
+    /// Download analogue of [`Self::track_inflight_upload`].
+    fn track_inflight_download(&self, host_key: &PublicKey) -> Option<InflightGuard> {
+        let counter = self
+            .hosts
+            .read()
+            .unwrap()
+            .get(host_key)?
+            .inflight_downloads
+            .clone();
+        Some(InflightGuard::new(counter))
+    }
+
+    /// Mutates the per-host metric in place. Used by the sample/failure
+    /// recording helpers below.
+    fn with_metric<F>(&self, host_key: &PublicKey, f: F)
+    where
+        F: FnOnce(&mut HostMetric),
+    {
+        if let Some(metric) = self.metrics.write().unwrap().get_mut(host_key) {
+            f(metric);
+        }
+    }
+
+    /// Adds a failure for the given host, updating its metrics.
     fn add_failure(&self, host_key: PublicKey) {
-        self.preferred_hosts
-            .write()
-            .unwrap()
-            .change_priority_by(&host_key, |metric| {
-                metric.add_failure();
-            });
+        self.with_metric(&host_key, |m| m.add_failure());
     }
 
-    /// Adds a read sample for the given host, updating its metrics and priority.
+    /// Adds a read sample for the given host, updating its metrics.
     fn add_read_sample(&self, host_key: PublicKey, bytes: u64, elapsed: Duration) {
-        self.preferred_hosts
-            .write()
-            .unwrap()
-            .change_priority_by(&host_key, |metric| {
-                metric.add_read_sample(bytes, elapsed);
-            });
+        self.with_metric(&host_key, |m| m.add_read_sample(bytes, elapsed));
     }
 
-    /// Adds a write sample for the given host, updating its metrics and priority.
+    /// Adds a write sample for the given host, updating its metrics.
     fn add_write_sample(&self, host_key: PublicKey, bytes: u64, elapsed: Duration) {
-        self.preferred_hosts
-            .write()
-            .unwrap()
-            .change_priority_by(&host_key, |metric| {
-                metric.add_write_sample(bytes, elapsed);
-            });
+        self.with_metric(&host_key, |m| m.add_write_sample(bytes, elapsed));
     }
 
     fn add_settings_sample(&self, host_key: PublicKey, elapsed: Duration) {
-        self.preferred_hosts
-            .write()
-            .unwrap()
-            .change_priority_by(&host_key, |metric| {
-                metric.add_settings_sample(elapsed);
-            });
+        self.with_metric(&host_key, |m| m.add_settings_sample(elapsed));
+    }
+}
+
+/// RAII guard that increments an `AtomicUsize` on construction and
+/// decrements it on drop. Used to track per-host inflight uploads so the
+/// host scorer reflects current load and is balanced even on early returns
+/// or async cancellations.
+struct InflightGuard(Arc<AtomicUsize>);
+
+impl InflightGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self(counter)
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -442,10 +558,13 @@ impl<T: Transport> Hosts<T> {
         self.hosts.available_for_upload()
     }
 
-    /// Creates a queue of hosts that are good to upload to for sequential
-    /// access sorted by priority.
-    pub fn upload_queue(&self) -> HostQueue {
-        self.hosts.upload_queue()
+    /// Picks the best host for the next shard upload, excluding any in
+    /// `exclude`. The scorer favors the host with the highest
+    /// `throughput / (inflight + 1)` — i.e. best expected per-shard
+    /// throughput if you added one more shard. Returns `None` if no
+    /// eligible host is available.
+    pub fn next_upload_host(&self, exclude: &HashSet<PublicKey>) -> Option<PublicKey> {
+        self.hosts.next_upload_host(exclude)
     }
 
     /// Adds a failure for the given host, updating its metrics and priority.
@@ -536,6 +655,7 @@ impl<T: Transport> Hosts<T> {
         write_timeout: Duration,
     ) -> Result<Hash256, RPCError> {
         let host = self.host_endpoint(host_key)?;
+        let _inflight = self.hosts.track_inflight_upload(&host_key);
         timeout(write_timeout, async {
             let (prices, _) = Self::fetch_prices(
                 self.transport.clone(),
@@ -570,6 +690,7 @@ impl<T: Transport> Hosts<T> {
     ) -> Result<bytes::Bytes, RPCError> {
         let host = self.host_endpoint(host_key)?;
         let bytes = length as u64;
+        let _inflight = self.hosts.track_inflight_download(&host_key);
         timeout(read_timeout, async {
             let (prices, _) = Self::fetch_prices(
                 self.transport.clone(),
@@ -611,74 +732,6 @@ pub enum QueueError {
     /// The host has been retried too many times.
     #[error("host retry limit exceeded")]
     MaxRetriesExceeded,
-}
-
-/// Maximum number of times a single host may be re-queued via
-/// [`HostQueue::retry`] before it is dropped.
-const MAX_RETRIES: usize = 3;
-
-#[derive(Debug)]
-struct HostQueueInner {
-    hosts: VecDeque<PublicKey>,
-    attempts: HashMap<PublicKey, usize>,
-}
-
-/// A thread-safe queue of host public keys.
-#[derive(Debug, Clone)]
-pub(crate) struct HostQueue {
-    inner: Arc<Mutex<HostQueueInner>>,
-}
-
-impl Iterator for HostQueue {
-    type Item = PublicKey;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.pop_front().ok()
-    }
-}
-
-impl HostQueue {
-    pub(crate) fn new(hosts: Vec<PublicKey>) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(HostQueueInner {
-                hosts: VecDeque::from(hosts),
-                attempts: HashMap::new(),
-            })),
-        }
-    }
-
-    pub fn pop_front(&self) -> Result<PublicKey, QueueError> {
-        let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
-        inner.hosts.pop_front().ok_or(QueueError::NoMoreHosts)
-    }
-
-    pub fn pop_n(&self, n: usize) -> Result<Vec<PublicKey>, QueueError> {
-        let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
-        if inner.hosts.len() < n {
-            return Err(QueueError::NoMoreHosts);
-        }
-        let mut result = Vec::with_capacity(n);
-        for _ in 0..n {
-            let host_key = inner.hosts.pop_front().ok_or(QueueError::NoMoreHosts)?;
-            result.push(host_key);
-        }
-        Ok(result)
-    }
-
-    pub fn retry(&self, host: PublicKey) -> Result<(), QueueError> {
-        let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
-        let attempts = inner.attempts.get(&host).copied().unwrap_or(0);
-        if attempts >= MAX_RETRIES {
-            return Err(QueueError::MaxRetriesExceeded);
-        }
-        inner.hosts.push_back(host);
-        inner
-            .attempts
-            .entry(host)
-            .and_modify(|e| *e += 1)
-            .or_insert(1);
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -729,29 +782,23 @@ mod test {
         let mut avg = RPCAverage::default();
         assert_eq!(
             avg.avg(),
-            125000000,
-            "default average should be 1 Gbps before any samples"
+            None,
+            "unsampled average should be None (no 1 Gbps default)"
         );
 
         avg.add_sample(100);
-        assert_eq!(avg.avg(), 100, "initial average should be first sample");
+        assert_eq!(avg.avg(), Some(100.0), "initial average should be first sample");
 
         avg.add_sample(200);
-        assert!(avg.avg() > 100, "average should increase after higher sample");
+        assert!(avg.avg() > Some(100.0), "average should increase after higher sample");
 
         avg.add_sample(50);
-        assert!(avg.avg() < 200, "average should decrease after lower sample");
-
-        let mut avg2 = RPCAverage::default();
-        avg2.add_sample(150);
-        assert_eq!(
-            avg.cmp(&avg2),
-            std::cmp::Ordering::Less,
-            "lower average should be lesser"
-        );
+        assert!(avg.avg() < Some(200.0), "average should decrease after lower sample");
     }
 
     async fn test_host_metric_ordering() {
+        // Sorting a list of HostMetric by HostScore (inflight=0) should
+        // descend by failure_rate then by throughput.
         let mut hosts = vec![
             HostMetric::default(),
             HostMetric::default(),
@@ -766,8 +813,8 @@ mod test {
         for _ in 0..5 {
             hosts[1].failure_rate.add_sample(true);
         }
-        hosts.sort();
-
+        // Sort by HostScore ascending; reverse to get desc.
+        hosts.sort_by(|a, b| HostScore::new(a, 0).cmp(&HostScore::new(b, 0)));
         let rates = hosts
             .into_iter()
             .rev()
@@ -786,58 +833,62 @@ mod test {
         hosts[0].rpc_write_avg.add_sample(100);
         hosts[1].rpc_write_avg.add_sample(1000);
         hosts[2].rpc_write_avg.add_sample(500);
-        hosts.sort();
-
+        hosts.sort_by(|a, b| HostScore::new(a, 0).cmp(&HostScore::new(b, 0)));
         let rates = hosts
             .into_iter()
             .rev()
-            .map(|h| h.rpc_write_avg)
-            .collect::<Vec<RPCAverage>>();
+            .map(|h| h.rpc_write_avg.avg())
+            .collect::<Vec<Option<f64>>>();
         assert!(
             rates.is_sorted_by(|a, b| a >= b),
             "hosts should be sorted by rpc write avg desc"
         );
     }
 
-    async fn test_host_priority_queue() {
-        let mut pq = PriorityQueue::<PublicKey, HostMetric>::new();
-        let mut hosts = vec![];
-        for _ in 0..5 {
-            let pk = random_pubkey();
-            pq.push(pk, HostMetric::default());
-            hosts.push(pk);
-        }
+    async fn test_host_ranking() {
+        // End-to-end host ranking via HostScore at the metric layer.
+        // All-unsampled, all-equal: HostScore::new with inflight=0 is the
+        // pure-quality ranking and ties for hosts with no samples.
+        let unsampled_a = HostScore::new(&HostMetric::default(), 0);
+        let unsampled_b = HostScore::new(&HostMetric::default(), 0);
+        assert_eq!(unsampled_a.cmp(&unsampled_b), std::cmp::Ordering::Equal);
 
-        // initially, the order is the same as insertion
-        assert_eq!(pq.peek().unwrap().0, &hosts[0]);
+        // Sample one host: unsampled now outranks it (discovery preference).
+        let sampled_slow = {
+            let mut m = HostMetric::default();
+            m.add_write_sample(100, Duration::from_secs(1));
+            m
+        };
+        let sampled_slow_score = HostScore::new(&sampled_slow, 0);
+        assert!(
+            unsampled_a > sampled_slow_score,
+            "unsampled should outrank sampled (discovery)",
+        );
 
-        // fourth host gets a sample with throughput below the 1Gbps default,
-        // dropping its priority below the other hosts
-        pq.change_priority_by(&hosts[3], |metric| {
-            metric.add_write_sample(100, Duration::from_secs(1));
-        });
-        assert_ne!(pq.peek().unwrap().0, &hosts[3]);
+        // Among sampled, faster wins.
+        let sampled_fast = {
+            let mut m = HostMetric::default();
+            m.add_read_sample(1000, Duration::from_secs(1));
+            m
+        };
+        let sampled_fast_score = HostScore::new(&sampled_fast, 0);
+        assert!(sampled_fast_score > sampled_slow_score);
 
-        // add a faster sample to second host, should have higher priority than fourth
-        pq.change_priority_by(&hosts[1], |metric| {
-            metric.add_read_sample(200, Duration::from_secs(1));
-        });
-        assert!(pq.get_priority(&hosts[1]).unwrap() > pq.get_priority(&hosts[3]).unwrap());
-
-        // add a failure to the second host, should lower its priority below fourth
-        pq.change_priority_by(&hosts[1], |metric| {
-            metric.add_failure();
-        });
-        assert!(pq.get_priority(&hosts[1]).unwrap() < pq.get_priority(&hosts[3]).unwrap());
+        // Failure trumps throughput.
+        let failing_fast = {
+            let mut m = sampled_fast.clone();
+            m.add_failure();
+            m
+        };
+        let failing_fast_score = HostScore::new(&failing_fast, 0);
+        assert!(failing_fast_score < sampled_slow_score);
     }
 
-    async fn test_upload_queue() {
+    async fn test_next_upload_host() {
         let hosts_manager = Hosts::new(Client::new());
-
         let hk1 = random_pubkey();
         let hk2 = random_pubkey();
         let hk3 = random_pubkey();
-
         hosts_manager.update(
             vec![
                 Host {
@@ -846,7 +897,106 @@ mod test {
                     country_code: String::new(),
                     latitude: 0.0,
                     longitude: 0.0,
-                    good_for_upload: false,
+                    good_for_upload: true,
+                },
+                Host {
+                    public_key: hk2,
+                    addresses: vec![],
+                    country_code: String::new(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: false, // not upload-eligible
+                },
+                Host {
+                    public_key: hk3,
+                    addresses: vec![],
+                    country_code: String::new(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                },
+            ],
+            true,
+        );
+
+        // With no samples and no inflight, both hk1 and hk3 are eligible
+        // and have equal score; result is deterministic-enough — we just
+        // assert it returns one of them, and that hk2 (not good_for_upload)
+        // is never picked.
+        let mut exclude = HashSet::new();
+        let first = hosts_manager.next_upload_host(&exclude).unwrap();
+        assert!(first == hk1 || first == hk3);
+        assert_ne!(first, hk2);
+
+        // Excluding the first picks the other upload-eligible host.
+        exclude.insert(first);
+        let second = hosts_manager.next_upload_host(&exclude).unwrap();
+        assert!(second == hk1 || second == hk3);
+        assert_ne!(second, first);
+        assert_ne!(second, hk2);
+
+        // Excluding both leaves nothing.
+        exclude.insert(second);
+        assert!(hosts_manager.next_upload_host(&exclude).is_none());
+    }
+
+    async fn test_host_score_orders_by_weighted_throughput() {
+        // Same metric but different inflight: the less-loaded host wins.
+        let metric = {
+            let mut m = HostMetric::default();
+            m.add_write_sample(1_000_000, Duration::from_secs(1));
+            m
+        };
+        let busy = HostScore::new(&metric, 4);
+        let idle = HostScore::new(&metric, 0);
+        assert!(idle > busy, "less-loaded host should outrank busy host");
+
+        // A 10x faster host beats an idle slow host even when it has some load.
+        let fast_metric = {
+            let mut m = HostMetric::default();
+            m.add_write_sample(10_000_000, Duration::from_secs(1));
+            m
+        };
+        let fast_busy = HostScore::new(&fast_metric, 4);
+        let slow_idle = HostScore::new(&metric, 0);
+        assert!(
+            fast_busy > slow_idle,
+            "fast-but-busy should beat slow-and-idle when fast is >Nx faster",
+        );
+
+        // Failure rate trumps throughput.
+        let failing = {
+            let mut m = fast_metric.clone();
+            for _ in 0..5 {
+                m.add_failure();
+            }
+            m
+        };
+        let failing_score = HostScore::new(&failing, 0);
+        let healthy_score = HostScore::new(&metric, 0);
+        assert!(
+            healthy_score > failing_score,
+            "healthy host should outrank a failing fast host",
+        );
+    }
+
+    async fn test_prioritize_uses_download_inflight() {
+        // Two hosts with identical throughput samples; bumping one host's
+        // download inflight counter should push it down in the sorted
+        // order. Mirrors the upload-side `next_upload_host` behavior so
+        // concurrent slab downloads spread across less-busy hosts.
+        let hosts_manager = Hosts::new(Client::new());
+        let hk1 = random_pubkey();
+        let hk2 = random_pubkey();
+        hosts_manager.update(
+            vec![
+                Host {
+                    public_key: hk1,
+                    addresses: vec![],
+                    country_code: String::new(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
                 },
                 Host {
                     public_key: hk2,
@@ -856,78 +1006,43 @@ mod test {
                     longitude: 0.0,
                     good_for_upload: true,
                 },
-                Host {
-                    public_key: hk3,
-                    addresses: vec![],
-                    country_code: String::new(),
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    good_for_upload: false,
-                },
             ],
             true,
         );
+        // Sample both with the same throughput so the inflight counter is
+        // the only differentiator.
+        hosts_manager
+            .hosts
+            .add_read_sample(hk1, 1_000_000, Duration::from_secs(1));
+        hosts_manager
+            .hosts
+            .add_read_sample(hk2, 1_000_000, Duration::from_secs(1));
 
-        let queue = hosts_manager.upload_queue();
-        let first = queue.pop_front().unwrap();
-        assert_eq!(first, hk2);
-        assert!(
-            queue.pop_front().is_err(),
-            "queue should only have one host"
+        // With both idle, sort order is arbitrary among ties — assert the
+        // ranking switches when we add inflight to one of them.
+        let mut items = vec![hk1, hk2];
+        hosts_manager.hosts.prioritize(&mut items, |k| k);
+        let initial_first = items[0];
+        let initial_second = items[1];
+
+        // Bump inflight on whichever host happened to be first by holding
+        // three live guards on it.
+        let _guards: Vec<_> = (0..3)
+            .map(|_| {
+                hosts_manager
+                    .hosts
+                    .track_inflight_download(&initial_first)
+                    .unwrap()
+            })
+            .collect();
+
+        let mut items = vec![hk1, hk2];
+        hosts_manager.hosts.prioritize(&mut items, |k| k);
+        assert_eq!(
+            items[0], initial_second,
+            "host with higher download inflight should sort second",
         );
-    }
-
-    async fn test_host_queue_pop_n() {
-        let hosts: Vec<_> = (0..5)
-            .map(|_| random_pubkey())
-            .collect();
-        let queue = HostQueue::new(hosts.clone());
-
-        // pop 3 hosts
-        let popped = queue.pop_n(3).expect("should pop 3 hosts");
-        assert_eq!(popped.len(), 3);
-        assert_eq!(popped[0], hosts[0]);
-        assert_eq!(popped[1], hosts[1]);
-        assert_eq!(popped[2], hosts[2]);
-
-        // pop remaining 2
-        let popped = queue.pop_n(2).expect("should pop 2 hosts");
-        assert_eq!(popped.len(), 2);
-        assert_eq!(popped[0], hosts[3]);
-        assert_eq!(popped[1], hosts[4]);
-
-        // queue should be empty
-        assert!(matches!(queue.pop_front(), Err(QueueError::NoMoreHosts)));
-    }
-
-    async fn test_host_queue_pop_n_not_enough_hosts() {
-        let hosts: Vec<_> = (0..3)
-            .map(|_| random_pubkey())
-            .collect();
-        let queue = HostQueue::new(hosts.clone());
-
-        // try to pop more than available
-        let result = queue.pop_n(5);
-        assert!(matches!(result, Err(QueueError::NoMoreHosts)));
-
-        // queue should be unchanged - can still pop all 3
-        let popped = queue.pop_n(3).expect("should pop 3");
-        assert_eq!(popped.len(), 3);
-    }
-
-    async fn test_host_queue_pop_n_zero() {
-        let hosts: Vec<_> = (0..3)
-            .map(|_| random_pubkey())
-            .collect();
-        let queue = HostQueue::new(hosts);
-
-        // pop 0 hosts should succeed with empty vec
-        let popped = queue.pop_n(0).expect("should succeed");
-        assert!(popped.is_empty());
-
-        // queue should be unchanged - can still pop 3
-        let popped = queue.pop_n(3).expect("should pop 3");
-        assert_eq!(popped.len(), 3);
+        assert_eq!(items[1], initial_first);
     }
     }
 }

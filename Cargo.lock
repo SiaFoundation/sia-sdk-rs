@@ -2027,17 +2027,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "priority-queue"
-version = "2.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93980406f12d9f8140ed5abe7155acb10bb1e69ea55c88960b9c2f117445ef96"
-dependencies = [
- "equivalent",
- "indexmap 2.12.0",
- "serde",
-]
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2681,7 +2670,6 @@ dependencies = [
  "instant",
  "js-sys",
  "log",
- "priority-queue",
  "rand 0.10.1",
  "rayon",
  "reqwest",

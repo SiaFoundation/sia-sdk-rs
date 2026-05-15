@@ -24,7 +24,6 @@ blake2b_simd = "1.0.4"
 url = { version = "2.5.8", features = ["serde"] }
 log = "0.4.29"
 bytes = "1.11.1"
-priority-queue = "2.7.0"
 serde_with = { version = "3.18.0", features = ["base64"] }
 hex = "0.4.3"
 chacha20poly1305 = "0.10.1"
