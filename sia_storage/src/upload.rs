@@ -1,10 +1,10 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
-use crate::hosts::{HostQueue, QueueError, RPCError};
+use crate::hosts::{QueueError, RPCError};
 use crate::rhp4::Client;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Elapsed, Instant, sleep};
@@ -23,11 +23,12 @@ use tokio::task::JoinSet;
 struct ShardUpload {
     semaphore: Arc<Semaphore>,
     client: Hosts<Client>,
-    hosts: HostQueue,
     account_key: Arc<AppKey>,
     data: Bytes,
     slab_index: usize,
     shard_index: usize,
+    // Tracks hosts already used by any shard in this slab.
+    used_hosts: Arc<Mutex<HashSet<PublicKey>>>,
 }
 
 struct SectorUploadResult {
@@ -47,7 +48,6 @@ impl ShardUpload {
         permit: OwnedSemaphorePermit,
     ) {
         let client = self.client.clone();
-        let hosts = self.hosts.clone();
         let account_key = self.account_key.clone();
         let data = self.data.clone();
         let slab_index = self.slab_index;
@@ -61,7 +61,6 @@ impl ShardUpload {
                         "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {:?} {e}",
                         now.elapsed()
                     );
-                    let _ = hosts.retry(host_key);
                 })?;
             let elapsed = now.elapsed();
             debug!(
@@ -76,10 +75,22 @@ impl ShardUpload {
         });
     }
 
-    async fn upload_shard(self, host_key: PublicKey) -> Result<SectorUploadResult, UploadError> {
+    /// Atomically pick the next-best host for this shard and reserve it
+    /// against the slab's `slab_used` set so no other shard in the slab
+    /// picks the same host. Returns `None` only when no eligible host
+    /// remains.
+    fn pick_next_host(&self) -> Option<PublicKey> {
+        let mut used = self.used_hosts.lock().unwrap();
+        let next = self.client.next_upload_host(&used)?;
+        used.insert(next);
+        Some(next)
+    }
+
+    async fn upload_shard(self) -> Result<SectorUploadResult, UploadError> {
         let permit = self.semaphore.clone().acquire_owned().await?;
+        let initial = self.pick_next_host().ok_or(QueueError::NoMoreHosts)?;
         let mut tasks = JoinSet::new();
-        self.spawn_write(&mut tasks, host_key, UPLOAD_TIMEOUT, permit);
+        self.spawn_write(&mut tasks, initial, UPLOAD_TIMEOUT, permit);
         loop {
             let active = tasks.len();
             tokio::select! {
@@ -87,32 +98,37 @@ impl ShardUpload {
                 Some(res) = tasks.join_next() => {
                     match res? {
                         Ok(result) => {
-                            if result.sector.host_key != host_key {
+                            if result.sector.host_key != initial {
                                 debug!(
                                     "slab {} shard {} penalizing original host {}",
-                                    self.slab_index, self.shard_index, host_key
+                                    self.slab_index, self.shard_index, initial
                                 );
-                                self.client.add_failure(host_key)
+                                self.client.add_failure(initial)
                             }
                             return Ok(result);
                         }
                         Err(_) => {
+                            // write_sector already incremented failure_rate
+                            // on its error path, dropping the host's score.
+                            // Pick the next best host not already used by
+                            // any shard in this slab.
                             if tasks.is_empty() {
-                                let host_key = self.hosts.pop_front()?;
+                                let next = self.pick_next_host()
+                                    .ok_or(QueueError::NoMoreHosts)?;
                                 let permit = self.semaphore.clone().acquire_owned().await?;
-                                self.spawn_write(&mut tasks, host_key, UPLOAD_TIMEOUT, permit);
+                                self.spawn_write(&mut tasks, next, UPLOAD_TIMEOUT, permit);
                             }
                         }
                     }
                 },
                 _ = sleep(Duration::from_secs(active.max(1) as u64)) => {
                     if let Ok(racer) = self.semaphore.clone().try_acquire_owned()
-                        && let Ok(host_key) = self.hosts.pop_front() {
+                        && let Some(next) = self.pick_next_host() {
                             debug!(
-                                "slab {} shard {} racing slow host",
+                                "slab {} shard {} racing slow host with {next}",
                                 self.slab_index, self.shard_index
                             );
-                            self.spawn_write(&mut tasks, host_key, UPLOAD_TIMEOUT, racer);
+                            self.spawn_write(&mut tasks, next, UPLOAD_TIMEOUT, racer);
                         }
                 }
             }
@@ -262,20 +278,28 @@ impl Upload {
                 Ok::<_, UploadError>(shards)
             })?;
 
-            let hosts = client.upload_queue();
-            let initial_hosts = hosts.pop_n(total_shards)?;
+            // No pre-assignment of hosts: each shard picks its host
+            // just-in-time via `Hosts::next_upload_host`, which scores by
+            // `throughput / (inflight + 1)`. This disperses load across
+            // hosts naturally — multiple slabs running in parallel won't
+            // all pile onto the same top-N hosts, because by the time
+            // slab N+1's shards pick, slab N's chosen hosts have higher
+            // inflight and lower score.
+            //
+            // `used_hosts` enforces that every shard within this slab lands
+            // on a distinct host (the indexer rejects duplicate sectors
+            // because they break redundancy). Every host any shard picks
+            // — initial, retry, or racer — is added to the set.
+            let used_hosts: Arc<Mutex<HashSet<PublicKey>>> =
+                Arc::new(Mutex::new(HashSet::with_capacity(total_shards)));
             let owned_slab_key = Arc::new(slab_key.clone());
             let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> = JoinSet::new();
-            for (shard_index, (mut shard, initial_host)) in shards
-                .into_iter()
-                .zip(initial_hosts.into_iter())
-                .enumerate()
-            {
+            for (shard_index, mut shard) in shards.into_iter().enumerate() {
                 let owned_slab_key = owned_slab_key.clone();
                 let shard_client = client.clone();
-                let shard_hosts = hosts.clone();
                 let shard_account_key = app_key.clone();
                 let shard_sema_inner = shard_sema.clone();
+                let used_hosts = used_hosts.clone();
                 join_set_spawn!(shard_tasks, async move {
                     let shard = maybe_spawn_blocking!({
                         encrypt_shard(&owned_slab_key, shard_index as u8, 0, &mut shard);
@@ -284,13 +308,13 @@ impl Upload {
                     let shard_upload = ShardUpload {
                         semaphore: shard_sema_inner,
                         client: shard_client,
-                        hosts: shard_hosts,
                         account_key: shard_account_key,
                         data: Bytes::from(shard),
                         slab_index,
                         shard_index,
+                        used_hosts,
                     };
-                    shard_upload.upload_shard(initial_host).await
+                    shard_upload.upload_shard().await
                 });
             }
 
