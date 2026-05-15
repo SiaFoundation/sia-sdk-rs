@@ -43,8 +43,6 @@ struct RPCAverage(Option<f64>); // exponential moving average of throughput in b
 
 impl RPCAverage {
     const ALPHA: f64 = 0.2;
-    // Default throughput in bytes/sec if no samples; equivalent to 1 Gbps.
-    const DEFAULT_BYTES_PER_SEC: u64 = 125_000_000;
 
     fn add_sample(&mut self, bytes_per_sec: u64) {
         match self.0 {
@@ -57,17 +55,17 @@ impl RPCAverage {
         }
     }
 
-    fn avg(&self) -> u64 {
-        match self.0 {
-            Some(avg) => avg as u64,
-            None => Self::DEFAULT_BYTES_PER_SEC,
-        }
+    fn avg(&self) -> Option<u64> {
+        self.0.map(|v| v as u64)
     }
 }
 
 impl Display for RPCAverage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.avg(), f)
+        match self.avg() {
+            Some(v) => Display::fmt(&v, f),
+            None => f.write_str("unsampled"),
+        }
     }
 }
 
@@ -81,13 +79,81 @@ impl Eq for RPCAverage {}
 
 impl Ord for RPCAverage {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.avg().cmp(&other.avg())
+        // Treat unsampled as the lowest throughput so that sampled hosts —
+        // even slow ones — win the tiebreaker over untested hosts. This stops
+        // priority churning toward unknown hosts under load.
+        self.avg().unwrap_or(0).cmp(&other.avg().unwrap_or(0))
     }
 }
 
 impl PartialOrd for RPCAverage {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+/// Per-host aggregate-throughput tracker. Designed for parallel uploads where
+/// dividing per-RPC bytes by per-RPC elapsed would penalize a host simply for
+/// being used concurrently. Instead it credits bytes against the wall-clock
+/// time during which the host was active (at least one inflight RPC), so 4
+/// parallel uploads of 1.25 MB each finishing within 1 second produce a single
+/// sample of 5 MB / 1s = 40 Mbps rather than four samples of 10 Mbps.
+///
+/// Bytes accumulate across an "active period" (host has inflight > 0). A
+/// sample is emitted when the period ends (inflight returns to 0), or when
+/// the period has been active for at least [`SAMPLE_ROTATION_PERIOD`] so
+/// long-running busy hosts still get periodic EMA updates.
+#[derive(Debug, Default)]
+struct HostThroughput {
+    inflight: usize,
+    active_since: Option<Instant>,
+    pending_bytes: u64,
+}
+
+impl HostThroughput {
+    /// Maximum length of a sampling sub-period before forcing emission, so
+    /// hosts that stay continuously busy keep updating the EMA.
+    const SAMPLE_ROTATION_PERIOD: Duration = Duration::from_secs(2);
+
+    fn started(&mut self) {
+        if self.inflight == 0 {
+            self.active_since = Some(Instant::now());
+            self.pending_bytes = 0;
+        }
+        self.inflight += 1;
+    }
+
+    /// Records that an RPC finished. Pass `bytes` transferred on success or
+    /// 0 on failure. Returns `Some((bytes, period))` when a throughput sample
+    /// should be fed to the host's EMA.
+    fn completed(&mut self, bytes: u64) -> Option<(u64, Duration)> {
+        if self.inflight == 0 {
+            return None; // unbalanced completed() call — ignore
+        }
+        self.pending_bytes = self.pending_bytes.saturating_add(bytes);
+        self.inflight -= 1;
+
+        let active_start = self.active_since?;
+        let now = Instant::now();
+        let period = now.duration_since(active_start);
+
+        if self.inflight == 0 {
+            // Period ending — emit the accumulated sample.
+            self.active_since = None;
+            if period.is_zero() {
+                self.pending_bytes = 0;
+                return None;
+            }
+            return Some((std::mem::take(&mut self.pending_bytes), period));
+        }
+
+        if period >= Self::SAMPLE_ROTATION_PERIOD {
+            // Steady-state rotation so the EMA keeps updating.
+            self.active_since = Some(now);
+            return Some((std::mem::take(&mut self.pending_bytes), period));
+        }
+
+        None
     }
 }
 
@@ -152,22 +218,20 @@ struct HostMetric {
 }
 
 impl HostMetric {
-    fn add_write_sample(&mut self, bytes: u64, elapsed: Duration) {
-        if let Some(bps) = bytes_per_sec(bytes, elapsed) {
-            self.rpc_write_avg.add_sample(bps);
-        }
-        self.failure_rate.add_sample(true);
+    /// Feeds a host-level aggregate-throughput sample (bytes/sec) to the
+    /// write EMA. The caller computes this from a [`HostThroughput`] sample;
+    /// it is no longer derived per-RPC.
+    fn add_write_sample(&mut self, bytes_per_sec: u64) {
+        self.rpc_write_avg.add_sample(bytes_per_sec);
     }
 
-    fn add_read_sample(&mut self, bytes: u64, elapsed: Duration) {
-        if let Some(bps) = bytes_per_sec(bytes, elapsed) {
-            self.rpc_read_avg.add_sample(bps);
-        }
-        self.failure_rate.add_sample(true);
+    /// Read-side analogue of [`Self::add_write_sample`].
+    fn add_read_sample(&mut self, bytes_per_sec: u64) {
+        self.rpc_read_avg.add_sample(bytes_per_sec);
     }
 
-    fn add_settings_sample(&mut self, elapsed: Duration) {
-        self.add_read_sample(270, elapsed); // serialized settings response is ~270 bytes
+    fn record_success(&mut self) {
+        self.failure_rate.add_sample(true);
     }
 
     fn add_failure(&mut self) {
@@ -185,23 +249,34 @@ fn bytes_per_sec(bytes: u64, elapsed: Duration) -> Option<u64> {
     Some((bytes as f64 / elapsed.as_secs_f64()) as u64)
 }
 
+impl HostMetric {
+    /// Combined throughput average for the throughput tiebreaker. Returns
+    /// `None` only if both directions are unsampled, so a host that's been
+    /// measured in either direction still ranks by its known throughput.
+    fn combined_throughput(&self) -> Option<u64> {
+        match (self.rpc_write_avg.avg(), self.rpc_read_avg.avg()) {
+            (None, None) => None,
+            (Some(w), Some(r)) => Some(w.saturating_add(r) / 2),
+            (Some(v), None) | (None, Some(v)) => Some(v),
+        }
+    }
+}
+
 impl Ord for HostMetric {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match other.failure_rate.cmp(&self.failure_rate) {
             // lower failure rate is higher priority
             std::cmp::Ordering::Equal => {
-                // use average of read and write throughput as tiebreaker
-                let avg_self = self
-                    .rpc_write_avg
-                    .avg()
-                    .saturating_add(self.rpc_read_avg.avg())
-                    / 2;
-                let avg_other = other
-                    .rpc_write_avg
-                    .avg()
-                    .saturating_add(other.rpc_read_avg.avg())
-                    / 2;
-                avg_self.cmp(&avg_other) // higher average throughput is higher priority
+                // Throughput tiebreaker, with a discovery preference: a host
+                // that has never been sampled outranks any sampled host so
+                // we eventually try every available host. Once a host has
+                // at least one sample, it ranks by aggregate throughput.
+                match (self.combined_throughput(), other.combined_throughput()) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (Some(a), Some(b)) => a.cmp(&b),
+                }
             }
             ord => ord,
         }
@@ -218,6 +293,8 @@ impl PartialOrd for HostMetric {
 struct HostInfo {
     addresses: Vec<NetAddress>,
     good_for_upload: bool,
+    upload_throughput: Arc<Mutex<HostThroughput>>,
+    download_throughput: Arc<Mutex<HostThroughput>>,
 }
 
 #[derive(Debug)]
@@ -257,19 +334,39 @@ impl HostList {
     /// Adds new hosts to the list if they don't already exist.
     ///
     /// If `clear` is true, existing hosts not in the new list are removed, but
-    /// their metrics are retained in case they reappear later.
+    /// their metrics and throughput trackers are retained in case they reappear later.
     fn update(&self, new_hosts: Vec<Host>, clear: bool) {
         let mut hosts = self.hosts.write().unwrap();
-        if clear {
-            hosts.clear();
-        }
+        // When clearing, hold onto the existing entries so we can reuse their
+        // throughput trackers for any host that's re-added in the same call —
+        // matches the existing "retain metrics across clears" behavior.
+        let old = if clear {
+            std::mem::take(&mut *hosts)
+        } else {
+            HashMap::new()
+        };
         let mut priority = self.preferred_hosts.write().unwrap();
         for host in new_hosts {
+            let (upload_throughput, download_throughput) = match hosts
+                .get(&host.public_key)
+                .or_else(|| old.get(&host.public_key))
+            {
+                Some(existing) => (
+                    existing.upload_throughput.clone(),
+                    existing.download_throughput.clone(),
+                ),
+                None => (
+                    Arc::new(Mutex::new(HostThroughput::default())),
+                    Arc::new(Mutex::new(HostThroughput::default())),
+                ),
+            };
             hosts.insert(
                 host.public_key,
                 HostInfo {
                     addresses: host.addresses,
                     good_for_upload: host.good_for_upload,
+                    upload_throughput,
+                    download_throughput,
                 },
             );
             if !priority.contains(&host.public_key) {
@@ -313,33 +410,118 @@ impl HostList {
             });
     }
 
-    /// Adds a read sample for the given host, updating its metrics and priority.
-    fn add_read_sample(&self, host_key: PublicKey, bytes: u64, elapsed: Duration) {
+    /// Marks a successful RPC for the given host without contributing a
+    /// throughput sample (e.g. for settings/price fetches where the payload
+    /// is too small to be a useful throughput signal).
+    fn record_success(&self, host_key: PublicKey) {
         self.preferred_hosts
             .write()
             .unwrap()
             .change_priority_by(&host_key, |metric| {
-                metric.add_read_sample(bytes, elapsed);
+                metric.record_success();
             });
     }
 
-    /// Adds a write sample for the given host, updating its metrics and priority.
-    fn add_write_sample(&self, host_key: PublicKey, bytes: u64, elapsed: Duration) {
-        self.preferred_hosts
-            .write()
+    fn upload_throughput(&self, host_key: &PublicKey) -> Option<Arc<Mutex<HostThroughput>>> {
+        self.hosts
+            .read()
             .unwrap()
-            .change_priority_by(&host_key, |metric| {
-                metric.add_write_sample(bytes, elapsed);
-            });
+            .get(host_key)
+            .map(|h| h.upload_throughput.clone())
     }
 
-    fn add_settings_sample(&self, host_key: PublicKey, elapsed: Duration) {
-        self.preferred_hosts
-            .write()
+    fn download_throughput(&self, host_key: &PublicKey) -> Option<Arc<Mutex<HostThroughput>>> {
+        self.hosts
+            .read()
             .unwrap()
-            .change_priority_by(&host_key, |metric| {
-                metric.add_settings_sample(elapsed);
-            });
+            .get(host_key)
+            .map(|h| h.download_throughput.clone())
+    }
+
+    /// Drains any pending throughput sample from the host's upload tracker
+    /// and feeds it to the priority queue. Called after the inflight counter
+    /// is updated on RPC completion.
+    fn drain_upload_sample(&self, host_key: PublicKey, sample: Option<(u64, Duration)>) {
+        if let Some((bytes, period)) = sample
+            && let Some(bps) = bytes_per_sec(bytes, period)
+        {
+            self.preferred_hosts
+                .write()
+                .unwrap()
+                .change_priority_by(&host_key, |metric| {
+                    metric.add_write_sample(bps);
+                });
+        }
+    }
+
+    fn drain_download_sample(&self, host_key: PublicKey, sample: Option<(u64, Duration)>) {
+        if let Some((bytes, period)) = sample
+            && let Some(bps) = bytes_per_sec(bytes, period)
+        {
+            self.preferred_hosts
+                .write()
+                .unwrap()
+                .change_priority_by(&host_key, |metric| {
+                    metric.add_read_sample(bps);
+                });
+        }
+    }
+}
+
+/// RAII guard for an in-flight upload to a host. Increments the host's
+/// upload inflight counter on creation and decrements it on drop. Call
+/// [`Self::record_success`] with the bytes transferred to mark a successful
+/// upload; dropping without it leaves bytes uncredited and is the right
+/// thing to do for a failed RPC (the caller separately calls `add_failure`
+/// on `Hosts` to update the failure rate).
+pub(crate) struct UploadGuard {
+    host_list: Arc<HostList>,
+    host_key: PublicKey,
+    tracker: Arc<Mutex<HostThroughput>>,
+    bytes: u64,
+    success: bool,
+}
+
+impl UploadGuard {
+    pub fn record_success(&mut self, bytes: u64) {
+        self.bytes = bytes;
+        self.success = true;
+    }
+}
+
+impl Drop for UploadGuard {
+    fn drop(&mut self) {
+        let sample = self.tracker.lock().unwrap().completed(self.bytes);
+        self.host_list.drain_upload_sample(self.host_key, sample);
+        if self.success {
+            self.host_list.record_success(self.host_key);
+        }
+    }
+}
+
+/// Download-side analogue of [`UploadGuard`].
+pub(crate) struct DownloadGuard {
+    host_list: Arc<HostList>,
+    host_key: PublicKey,
+    tracker: Arc<Mutex<HostThroughput>>,
+    bytes: u64,
+    success: bool,
+}
+
+impl DownloadGuard {
+    pub fn record_success(&mut self, bytes: u64) {
+        self.bytes = bytes;
+        self.success = true;
+    }
+}
+
+impl Drop for DownloadGuard {
+    fn drop(&mut self) {
+        let sample = self.tracker.lock().unwrap().completed(self.bytes);
+        self.host_list.drain_download_sample(self.host_key, sample);
+        if self.success {
+            self.host_list.record_success(self.host_key);
+        }
     }
 }
 
@@ -518,14 +700,44 @@ impl<T: Transport> Hosts<T> {
         {
             Ok((prices, false))
         } else {
-            let (prices, elapsed) = timeout(fetch_timeout, transport.host_prices(host_endpoint))
+            let (prices, _elapsed) = timeout(fetch_timeout, transport.host_prices(host_endpoint))
                 .await
                 .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))?
                 .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))?;
-            hosts.add_settings_sample(host_endpoint.public_key, elapsed);
+            // Settings/prices payloads are too small (~270 bytes) to be a
+            // useful throughput signal under the aggregate-throughput model,
+            // so just credit the success against the failure-rate EMA.
+            hosts.record_success(host_endpoint.public_key);
             cache.set(host_endpoint.public_key, prices.clone());
             Ok((prices, true))
         }
+    }
+
+    /// Begins tracking an in-flight upload to `host_key`. Returns a guard
+    /// whose Drop balances the inflight counter and emits a throughput
+    /// sample if appropriate. Returns `None` if the host is unknown.
+    fn upload_started(&self, host_key: PublicKey) -> Option<UploadGuard> {
+        let tracker = self.hosts.upload_throughput(&host_key)?;
+        tracker.lock().unwrap().started();
+        Some(UploadGuard {
+            host_list: self.hosts.clone(),
+            host_key,
+            tracker,
+            bytes: 0,
+            success: false,
+        })
+    }
+
+    fn download_started(&self, host_key: PublicKey) -> Option<DownloadGuard> {
+        let tracker = self.hosts.download_throughput(&host_key)?;
+        tracker.lock().unwrap().started();
+        Some(DownloadGuard {
+            host_list: self.hosts.clone(),
+            host_key,
+            tracker,
+            bytes: 0,
+            success: false,
+        })
     }
 
     pub async fn write_sector(
@@ -547,14 +759,25 @@ impl<T: Transport> Hosts<T> {
             )
             .await?;
             let bytes = sector.len() as u64;
-            let (root, elapsed) = self
+            let mut guard = self.upload_started(host_key);
+            match self
                 .transport
                 .write_sector(&host, prices, account_key, sector)
                 .await
-                .inspect_err(|_| self.hosts.add_failure(host_key))
-                .map_err(RPCError::Rhp)?;
-            self.hosts.add_write_sample(host_key, bytes, elapsed);
-            Ok(root)
+            {
+                Ok((root, _elapsed)) => {
+                    if let Some(g) = guard.as_mut() {
+                        g.record_success(bytes);
+                    }
+                    Ok(root)
+                }
+                Err(e) => {
+                    // guard drops with bytes=0 / success=false, balancing
+                    // inflight without crediting bytes to the throughput EMA.
+                    self.hosts.add_failure(host_key);
+                    Err(RPCError::Rhp(e))
+                }
+            }
         })
         .await?
     }
@@ -569,7 +792,6 @@ impl<T: Transport> Hosts<T> {
         read_timeout: Duration,
     ) -> Result<bytes::Bytes, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        let bytes = length as u64;
         timeout(read_timeout, async {
             let (prices, _) = Self::fetch_prices(
                 self.transport.clone(),
@@ -580,14 +802,23 @@ impl<T: Transport> Hosts<T> {
                 false,
             )
             .await?;
-            let (data, elapsed) = self
+            let mut guard = self.download_started(host_key);
+            match self
                 .transport
                 .read_sector(&host, prices, account_key, root, offset, length)
                 .await
-                .inspect_err(|_| self.hosts.add_failure(host_key))
-                .map_err(RPCError::Rhp)?;
-            self.hosts.add_read_sample(host_key, bytes, elapsed);
-            Ok(data)
+            {
+                Ok((data, _elapsed)) => {
+                    if let Some(g) = guard.as_mut() {
+                        g.record_success(data.len() as u64);
+                    }
+                    Ok(data)
+                }
+                Err(e) => {
+                    self.hosts.add_failure(host_key);
+                    Err(RPCError::Rhp(e))
+                }
+            }
         })
         .await?
     }
@@ -729,18 +960,25 @@ mod test {
         let mut avg = RPCAverage::default();
         assert_eq!(
             avg.avg(),
-            125000000,
-            "default average should be 1 Gbps before any samples"
+            None,
+            "default average should be None before any samples"
         );
 
         avg.add_sample(100);
-        assert_eq!(avg.avg(), 100, "initial average should be first sample");
+        assert_eq!(avg.avg(), Some(100), "initial average should be first sample");
 
         avg.add_sample(200);
-        assert!(avg.avg() > 100, "average should increase after higher sample");
+        assert!(avg.avg() > Some(100), "average should increase after higher sample");
 
         avg.add_sample(50);
-        assert!(avg.avg() < 200, "average should decrease after lower sample");
+        assert!(avg.avg() < Some(200), "average should decrease after lower sample");
+
+        // Unsampled is treated as 0 in cmp, so any sampled avg ranks above it.
+        let unsampled = RPCAverage::default();
+        assert!(
+            avg > unsampled,
+            "sampled avg should rank above unsampled"
+        );
 
         let mut avg2 = RPCAverage::default();
         avg2.add_sample(150);
@@ -808,27 +1046,99 @@ mod test {
             hosts.push(pk);
         }
 
-        // initially, the order is the same as insertion
+        // initially, the order is the same as insertion (all metrics equal)
         assert_eq!(pq.peek().unwrap().0, &hosts[0]);
 
-        // fourth host gets a sample with throughput below the 1Gbps default,
-        // dropping its priority below the other hosts
+        // Fourth host gets a sample. Unsampled hosts get discovery priority
+        // and outrank any sampled host, so host[3] drops below the others.
         pq.change_priority_by(&hosts[3], |metric| {
-            metric.add_write_sample(100, Duration::from_secs(1));
+            metric.add_write_sample(100);
         });
         assert_ne!(pq.peek().unwrap().0, &hosts[3]);
 
-        // add a faster sample to second host, should have higher priority than fourth
+        // Sample host[1] as well. Both are sampled now; faster one ranks
+        // above slower one.
         pq.change_priority_by(&hosts[1], |metric| {
-            metric.add_read_sample(200, Duration::from_secs(1));
+            metric.add_read_sample(1000);
         });
         assert!(pq.get_priority(&hosts[1]).unwrap() > pq.get_priority(&hosts[3]).unwrap());
 
-        // add a failure to the second host, should lower its priority below fourth
+        // Unsampled hosts still beat both sampled hosts via discovery prio.
+        assert!(pq.get_priority(&hosts[0]).unwrap() > pq.get_priority(&hosts[1]).unwrap());
+
+        // Failure trumps throughput AND discovery, so host[1] now drops
+        // below host[3] and below unsampled hosts.
         pq.change_priority_by(&hosts[1], |metric| {
             metric.add_failure();
         });
         assert!(pq.get_priority(&hosts[1]).unwrap() < pq.get_priority(&hosts[3]).unwrap());
+        assert!(pq.get_priority(&hosts[1]).unwrap() < pq.get_priority(&hosts[0]).unwrap());
+    }
+
+    async fn test_host_throughput_aggregate() {
+        // 4 streams overlap for ~50ms with 1.25 MB each. The single
+        // end-of-period sample should credit all 5 MB against the wall-clock
+        // period (not divide by stream count), matching the user's
+        // 4-streams × 10 Mbps → 40 Mbps expectation.
+        let mut t = HostThroughput::default();
+        for _ in 0..4 {
+            t.started();
+        }
+        crate::time::sleep(Duration::from_millis(50)).await;
+
+        // First three completions are mid-period — no sample emitted.
+        assert!(t.completed(1_250_000).is_none());
+        assert!(t.completed(1_250_000).is_none());
+        assert!(t.completed(1_250_000).is_none());
+        // Final completion takes inflight to 0 and emits the period sample.
+        let (bytes, period) = t.completed(1_250_000).expect("final completion should emit a sample");
+        assert_eq!(bytes, 5_000_000, "all overlapping bytes counted toward the period");
+        assert!(period >= Duration::from_millis(50));
+
+        // Tracker is reset for the next period.
+        assert_eq!(t.inflight, 0);
+        assert_eq!(t.pending_bytes, 0);
+        assert!(t.active_since.is_none());
+    }
+
+    async fn test_host_throughput_brief_overlap_no_inflate() {
+        // A long upload with a brief burst at the end shouldn't see its
+        // throughput inflated by the few-ms overlap. Bytes attributed
+        // against the full active period, not just the overlap.
+        let mut t = HostThroughput::default();
+        t.started();
+        crate::time::sleep(Duration::from_millis(100)).await;
+        // Burst: 3 more start, all complete with tiny payloads.
+        t.started();
+        t.started();
+        t.started();
+        assert!(t.completed(100).is_none());
+        assert!(t.completed(100).is_none());
+        assert!(t.completed(100).is_none());
+        // Long upload completes alone.
+        let (bytes, period) = t.completed(1_000_000).expect("final completion should emit");
+        assert_eq!(bytes, 1_000_300);
+        assert!(period >= Duration::from_millis(100));
+        let bps = bytes_per_sec(bytes, period).unwrap();
+        // Even on an aggressively fast machine the bps reflects the full
+        // active period rather than just the tail-end overlap window.
+        assert!(bps < 50_000_000, "tail overlap inflated rate to {bps} bps");
+    }
+
+    async fn test_host_throughput_solo_upload() {
+        let mut t = HostThroughput::default();
+        t.started();
+        crate::time::sleep(Duration::from_millis(50)).await;
+        let (bytes, period) = t.completed(500_000).expect("solo completion emits");
+        assert_eq!(bytes, 500_000);
+        assert!(period >= Duration::from_millis(50));
+    }
+
+    async fn test_host_throughput_unbalanced_completed_is_safe() {
+        let mut t = HostThroughput::default();
+        // Completed without started — should be a no-op, not a panic.
+        assert!(t.completed(100).is_none());
+        assert_eq!(t.inflight, 0);
     }
 
     async fn test_upload_queue() {
