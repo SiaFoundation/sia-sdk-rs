@@ -69,3 +69,12 @@ jobs:
         run: cd sia_storage && wasm-pack test --release --headless --${{ matrix.browser }} -- --lib
         env:
           WASM_BINDGEN_TEST_TIMEOUT: '300'
+
+  # Single required check for branch protection. Skipped (and therefore
+  # non-passing) whenever any upstream job fails.
+  success:
+    name: success
+    needs: [lint, test, test-wasm]
+    runs-on: tenki-standard-medium-4c-8g
+    steps:
+      - run: echo success
