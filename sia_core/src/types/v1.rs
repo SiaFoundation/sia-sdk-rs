@@ -473,30 +473,30 @@ impl Transaction {
         state.finalize().into()
     }
 
-    fn derive_child_id<T: From<blake2b_simd::Hash>>(&self, prefix: &Specifier, i: usize) -> T {
+    fn derive_child_id<T: From<blake2b_simd::Hash>>(&self, prefix: &Specifier, i: u64) -> T {
         let mut state = Params::new().hash_length(32).to_state();
         state.update(prefix.as_ref());
         self.encode_no_sigs(&mut state).unwrap();
-        state.update(&(i as u64).to_le_bytes());
+        state.update(&i.to_le_bytes());
         state.finalize().into()
     }
 
     /// siacoin_output_id returns the SiacoinOutputID for the i-th siacoin output of the transaction
-    pub fn siacoin_output_id(&self, i: usize) -> SiacoinOutputID {
+    pub fn siacoin_output_id(&self, i: u64) -> SiacoinOutputID {
         const SIACOIN_OUTPUT_ID_PREFIX: Specifier = specifier!("siacoin output");
 
         self.derive_child_id(&SIACOIN_OUTPUT_ID_PREFIX, i)
     }
 
     /// siafund_output_id returns the SiafundOutputID for the i-th siafund output of the transaction
-    pub fn siafund_output_id(&self, i: usize) -> SiafundOutputID {
+    pub fn siafund_output_id(&self, i: u64) -> SiafundOutputID {
         const SIAFUND_OUTPUT_ID_PREFIX: Specifier = specifier!("siafund output");
 
         self.derive_child_id(&SIAFUND_OUTPUT_ID_PREFIX, i)
     }
 
     /// file_contract_id returns the FileContractID for the i-th file contract of the transaction
-    pub fn file_contract_id(&self, i: usize) -> FileContractID {
+    pub fn file_contract_id(&self, i: u64) -> FileContractID {
         const FILE_CONTRACT_ID_PREFIX: Specifier = specifier!("file contract");
 
         self.derive_child_id(&FILE_CONTRACT_ID_PREFIX, i)

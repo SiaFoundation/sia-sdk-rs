@@ -45,6 +45,9 @@ rand = "0.10.1"
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
 
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
 [[bench]]
 name = "merkle_root"
 harness = false
