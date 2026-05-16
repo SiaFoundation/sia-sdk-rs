@@ -40,8 +40,10 @@ tokio = { version = "1.52.0", features = ["macros", "rt", "sync", "io-util", "ti
 tokio = { version = "1.52.0", features = ["macros", "rt", "sync", "io-util"] }
 
 [dev-dependencies]
-criterion = { version = "0.8", features = ["async_tokio"] }
 rand = "0.10.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = { version = "0.8", features = ["async_tokio"] }
 
 [[bench]]
 name = "merkle_root"
