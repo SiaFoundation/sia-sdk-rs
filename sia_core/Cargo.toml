@@ -41,12 +41,6 @@ tokio = { version = "1.52.0", features = ["macros", "rt", "sync", "io-util"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio"] }
-tokio = { version = "1.50.0", features = [
-    "macros",
-    "rt-multi-thread",
-    "sync",
-    "io-util",
-] }
 rand = "0.10.1"
 
 [[bench]]
