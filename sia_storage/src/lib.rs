@@ -1324,15 +1324,17 @@ mod test {
                 .unwrap();
             assert_eq!(obj.slabs().len(), num_slabs);
 
-            let upload_progress = upload_progress.lock().unwrap();
-            // verify upload callbacks: exactly one per (slab_index, shard_index)
-            assert_eq!(upload_progress.len(), total_shards * num_slabs,
-                "upload: expected {} callbacks, got {}",
-                total_shards * num_slabs, upload_progress.len());
-            for i in 0..num_slabs {
-                for j in 0..total_shards {
-                    assert!(upload_progress.contains_key(&(i, j)),
-                        "missing upload callback for slab {}, shard {}", i, j);
+            {
+                let upload_progress = upload_progress.lock().unwrap();
+                // verify upload callbacks: exactly one per (slab_index, shard_index)
+                assert_eq!(upload_progress.len(), total_shards * num_slabs,
+                    "upload: expected {} callbacks, got {}",
+                    total_shards * num_slabs, upload_progress.len());
+                for i in 0..num_slabs {
+                    for j in 0..total_shards {
+                        assert!(upload_progress.contains_key(&(i, j)),
+                            "missing upload callback for slab {}, shard {}", i, j);
+                    }
                 }
             }
 

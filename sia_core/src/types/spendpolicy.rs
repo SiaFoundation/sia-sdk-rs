@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn test_policy_encoding() {
-        let test_cases = vec![
+        let test_cases = [
             (
                 SpendPolicy::above(100),
                 "{\"type\":\"above\",\"policy\":100}",

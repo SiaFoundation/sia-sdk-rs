@@ -308,7 +308,7 @@ mod tests {
 
         // we expect 5 shards and the last one is an empty parity shard
         assert_eq!(shards.len(), 5);
-        assert_eq!(size as usize, SECTOR_SIZE * 7 / 2);
+        assert_eq!(size, SECTOR_SIZE * 7 / 2);
         assert_eq!(shards[4], vec![0u8; SECTOR_SIZE]); // parity shard should be empty
 
         for shard in &shards[..4] {

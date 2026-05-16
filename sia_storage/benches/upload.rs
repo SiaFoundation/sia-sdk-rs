@@ -177,7 +177,7 @@ fn upload_benchmark(c: &mut Criterion) {
                         .download(&object, DownloadOptions::default())
                         .unwrap();
                     let mut buf = [0u8; 1];
-                    reader.read(&mut buf).await.expect("read to succeed");
+                    reader.read_exact(&mut buf).await.expect("read to succeed");
                     total += start.elapsed();
                 }
                 total
@@ -203,7 +203,7 @@ fn upload_benchmark(c: &mut Criterion) {
                         )
                         .unwrap();
                     let mut buf = [0u8; 1];
-                    reader.read(&mut buf).await.expect("read to succeed");
+                    reader.read_exact(&mut buf).await.expect("read to succeed");
                     total += start.elapsed();
                 }
                 total

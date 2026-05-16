@@ -24,18 +24,16 @@ jobs:
       - name: Rustfmt
         run: cargo +nightly fmt --all -- --check
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets --all-features --workspace -- -D warnings
       - name: Clippy (wasm)
-        run: cargo clippy --target wasm32-unknown-unknown --lib --package sia_core --package sia_storage --package sia_storage_wasm --no-default-features -- -D warnings
-      - name: Check all features
-        run: cargo check --all-features --workspace
+        run: cargo clippy --target wasm32-unknown-unknown --lib --tests --package sia_core --package sia_storage --package sia_storage_wasm --no-default-features -- -D warnings
       - name: Build docs
         run: cargo doc --all-features --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
 
   test:
-    name: Test (native)
+    name: Test native
     runs-on: tenki-standard-medium-4c-8g
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
