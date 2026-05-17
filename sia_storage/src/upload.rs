@@ -286,7 +286,7 @@ impl Upload {
                         client: shard_client,
                         hosts: shard_hosts,
                         account_key: shard_account_key,
-                        data: shard.freeze(),
+                        data: Bytes::from(shard),
                         slab_index,
                         shard_index,
                     };
