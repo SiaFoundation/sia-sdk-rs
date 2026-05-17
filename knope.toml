@@ -7,6 +7,7 @@ versioned_files = [
     { path = "sia_storage/Cargo.toml", dependency = "sia_core" },
     { path = "sia_storage_ffi/Cargo.toml", dependency = "sia_core" },
     { path = "sia_storage_napi/Cargo.toml", dependency = "sia_core" },
+    { path = "sia_storage_wasm/Cargo.toml", dependency = "sia_core" },
     { path = "Cargo.lock", dependency = "sia_core" }
 ]
 changelog = "sia_core/CHANGELOG.md"
