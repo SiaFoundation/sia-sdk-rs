@@ -1,6 +1,6 @@
 [package]
 name = "sia_storage"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 repository = "https://github.com/SiaFoundation/sia-sdk-rs"
 license = "MIT"
@@ -18,7 +18,7 @@ bench = false
 serde = "1.0.228"
 serde_json = "1.0.149"
 thiserror = "2.0.18"
-sia_core = { path = "../sia_core", version = "0.3.1" }
+sia_core = { path = "../sia_core", version = "0.4.0" }
 rand = "0.10.1"
 blake2b_simd = "1.0.4"
 url = { version = "2.5.8", features = ["serde"] }
