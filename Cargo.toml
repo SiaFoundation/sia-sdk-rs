@@ -5,8 +5,9 @@ members = ["sia_core", "sia_core_derive", "sia_storage", "sia_storage_ffi", "sia
 # CPU-intensive operations (erasure coding, hashing, encryption) are
 # ~100x slower without optimizations. Some tests will be extremely
 # slow without this.
-[profile.dev.package.sia_core]
+[profile.dev]
 opt-level = 3
 
-[profile.dev.package.sia_storage]
-opt-level = 3
+[profile.release]
+lto = "thin"
+codegen-units = 1
