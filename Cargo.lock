@@ -2681,6 +2681,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sia_core",
+ "sia_core_derive",
  "sia_mux",
  "sia_reed_solomon",
  "thiserror",

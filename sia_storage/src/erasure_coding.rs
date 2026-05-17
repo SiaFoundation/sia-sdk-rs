@@ -192,8 +192,11 @@ mod tests {
         vec![i; SECTOR_SIZE]
     }
 
-    cross_target_tests! {
-    async fn test_encode_shards() {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
+    #[sia_core_derive::cross_target_test]
+    fn test_encode_shards() {
         let data_shards = 2;
         let parity_shards = 3;
         let coder = ErasureCoder::new(data_shards, parity_shards).unwrap();
@@ -228,6 +231,7 @@ mod tests {
         }
     }
 
+    #[sia_core_derive::cross_target_test]
     async fn test_striped_read() {
         const DATA_SHARDS: usize = 3;
         const PARITY_SHARDS: usize = 2;
@@ -235,8 +239,8 @@ mod tests {
 
         let test_cases = vec![
             // (data size, expected size)
-            (100, 100),               // under
-            (SLAB_SIZE, SLAB_SIZE),   // exact
+            (100, 100),                 // under
+            (SLAB_SIZE, SLAB_SIZE),     // exact
             (2 * SLAB_SIZE, SLAB_SIZE), // over
         ];
 
@@ -255,7 +259,10 @@ mod tests {
                 let slab = slab.expect("expected full slab");
                 (slab.length, slab.shards)
             } else {
-                assert!(slab.is_none(), "data size {data_size} should not fill a slab");
+                assert!(
+                    slab.is_none(),
+                    "data size {data_size} should not fill a slab"
+                );
                 let slab = reader.finish().unwrap();
                 (slab.length, slab.shards)
             };
@@ -282,6 +289,7 @@ mod tests {
         }
     }
 
+    #[sia_core_derive::cross_target_test]
     async fn test_striped_read_write() {
         const DATA_SHARDS: usize = 4;
         const PARITY_SHARDS: usize = 1;
@@ -378,7 +386,8 @@ mod tests {
         assert_eq!(joined_data, data[data.len() / 2..]);
     }
 
-    async fn test_erasure_code_golden() {
+    #[sia_core_derive::cross_target_test]
+    fn test_erasure_code_golden() {
         use sia_core::blake2::{Blake2b256, Digest};
         use sia_core::hash_256;
         use sia_core::types::Hash256;
@@ -471,6 +480,5 @@ mod tests {
         // minimum remaining: drop 20 shards (all data + half of parity), leaving DATA_SHARDS parity shards
         let min_remaining: Vec<usize> = (0..PARITY_SHARDS).collect();
         check_reconstruct(&min_remaining, "min_remaining");
-    }
     }
 }

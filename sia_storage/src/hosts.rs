@@ -694,8 +694,11 @@ mod test {
         PrivateKey::from_seed(&seed).public_key()
     }
 
-    cross_target_tests! {
-    async fn test_failure_rate() {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
+    #[sia_core_derive::cross_target_test]
+    fn test_failure_rate() {
         let mut fr = FailureRate::default();
         assert_eq!(fr.rate(), 0, "initial failure rate should be 0%");
         fr.add_sample(false);
@@ -725,7 +728,8 @@ mod test {
         );
     }
 
-    async fn test_rpc_average() {
+    #[sia_core_derive::cross_target_test]
+    fn test_rpc_average() {
         let mut avg = RPCAverage::default();
         assert_eq!(
             avg.avg(),
@@ -737,10 +741,16 @@ mod test {
         assert_eq!(avg.avg(), 100, "initial average should be first sample");
 
         avg.add_sample(200);
-        assert!(avg.avg() > 100, "average should increase after higher sample");
+        assert!(
+            avg.avg() > 100,
+            "average should increase after higher sample"
+        );
 
         avg.add_sample(50);
-        assert!(avg.avg() < 200, "average should decrease after lower sample");
+        assert!(
+            avg.avg() < 200,
+            "average should decrease after lower sample"
+        );
 
         let mut avg2 = RPCAverage::default();
         avg2.add_sample(150);
@@ -751,7 +761,8 @@ mod test {
         );
     }
 
-    async fn test_host_metric_ordering() {
+    #[sia_core_derive::cross_target_test]
+    fn test_host_metric_ordering() {
         let mut hosts = vec![
             HostMetric::default(),
             HostMetric::default(),
@@ -799,7 +810,8 @@ mod test {
         );
     }
 
-    async fn test_host_priority_queue() {
+    #[sia_core_derive::cross_target_test]
+    fn test_host_priority_queue() {
         let mut pq = PriorityQueue::<PublicKey, HostMetric>::new();
         let mut hosts = vec![];
         for _ in 0..5 {
@@ -831,7 +843,8 @@ mod test {
         assert!(pq.get_priority(&hosts[1]).unwrap() < pq.get_priority(&hosts[3]).unwrap());
     }
 
-    async fn test_upload_queue() {
+    #[sia_core_derive::cross_target_test]
+    fn test_upload_queue() {
         let hosts_manager = Hosts::new(Client::new());
 
         let hk1 = random_pubkey();
@@ -877,10 +890,9 @@ mod test {
         );
     }
 
-    async fn test_host_queue_pop_n() {
-        let hosts: Vec<_> = (0..5)
-            .map(|_| random_pubkey())
-            .collect();
+    #[sia_core_derive::cross_target_test]
+    fn test_host_queue_pop_n() {
+        let hosts: Vec<_> = (0..5).map(|_| random_pubkey()).collect();
         let queue = HostQueue::new(hosts.clone());
 
         // pop 3 hosts
@@ -900,10 +912,9 @@ mod test {
         assert!(matches!(queue.pop_front(), Err(QueueError::NoMoreHosts)));
     }
 
-    async fn test_host_queue_pop_n_not_enough_hosts() {
-        let hosts: Vec<_> = (0..3)
-            .map(|_| random_pubkey())
-            .collect();
+    #[sia_core_derive::cross_target_test]
+    fn test_host_queue_pop_n_not_enough_hosts() {
+        let hosts: Vec<_> = (0..3).map(|_| random_pubkey()).collect();
         let queue = HostQueue::new(hosts.clone());
 
         // try to pop more than available
@@ -915,10 +926,9 @@ mod test {
         assert_eq!(popped.len(), 3);
     }
 
-    async fn test_host_queue_pop_n_zero() {
-        let hosts: Vec<_> = (0..3)
-            .map(|_| random_pubkey())
-            .collect();
+    #[sia_core_derive::cross_target_test]
+    fn test_host_queue_pop_n_zero() {
+        let hosts: Vec<_> = (0..3).map(|_| random_pubkey()).collect();
         let queue = HostQueue::new(hosts);
 
         // pop 0 hosts should succeed with empty vec
@@ -928,6 +938,5 @@ mod test {
         // queue should be unchanged - can still pop 3
         let popped = queue.pop_n(3).expect("should pop 3");
         assert_eq!(popped.len(), 3);
-    }
     }
 }

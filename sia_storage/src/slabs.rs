@@ -431,8 +431,11 @@ mod test {
         buf
     }
 
-    cross_target_tests! {
-    async fn test_object_id() {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
+    #[sia_core_derive::cross_target_test]
+    fn test_object_id() {
         let slabs = vec![Slab {
             encryption_key: [0u8; 32].into(),
             min_shards: 1,
@@ -453,7 +456,8 @@ mod test {
 
     /// Tests ObjectID of a SealedObject
     /// Port of objects_test.go:TestObjectID
-    async fn test_sealed_object_id_golden() {
+    #[sia_core_derive::cross_target_test]
+    fn test_sealed_object_id_golden() {
         let mut encryption_key = [0u8; 32];
         encryption_key[..3].copy_from_slice(&[4, 5, 6]);
         let mut sector_root = [0u8; 32];
@@ -492,7 +496,8 @@ mod test {
     }
 
     /// tests Slab.digest against a reference digest
-    async fn test_slab_digest() {
+    #[sia_core_derive::cross_target_test]
+    fn test_slab_digest() {
         let s = Slab {
             min_shards: 1,
             encryption_key: [
@@ -531,7 +536,8 @@ mod test {
         )
     }
 
-    async fn test_object_roundtrip() {
+    #[sia_core_derive::cross_target_test]
+    fn test_object_roundtrip() {
         let slabs = vec![
             Slab {
                 encryption_key: random_bytes_32().into(),
@@ -549,7 +555,7 @@ mod test {
             },
         ];
         let meta = b"hello, world!".to_vec();
-        let obj = Object{
+        let obj = Object {
             slabs: slabs.clone(),
             metadata: meta.clone(),
             ..Default::default()
@@ -567,7 +573,8 @@ mod test {
 
     /// tests that the SealedObject struct is compatible with the Go implementation
     /// by deserializing a reference object
-    async fn test_sealed_object_golden() {
+    #[sia_core_derive::cross_target_test]
+    fn test_sealed_object_golden() {
         let mut seed = [0u8; 32];
         hex::decode_to_slice(
             "9593edfd90ef2da9973af3bca88afdf54b6e7ff66ff6c749505734b9cf6b8aec",
@@ -593,6 +600,5 @@ mod test {
         assert_eq!(opened.data_key, expected_object_key);
         assert_eq!(opened.slabs.len(), 2);
         assert_eq!(opened.metadata, expected_metadata);
-    }
     }
 }
