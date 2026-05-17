@@ -15,10 +15,10 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 async-trait = "0.1.89"
-sia_storage = { version = "0.8.0", path = "../sia_storage" }
+sia_storage = { version = "0.9.0", path = "../sia_storage" }
 log = "0.4.29"
 rand = "0.10.1"
-sia_core = { version = "0.3.1", path = "../sia_core" }
+sia_core = { version = "0.4.0", path = "../sia_core" }
 thiserror = "2.0.18"
 tokio = { version = "1.52.0", features = ["rt-multi-thread", "sync"] }
 tokio-util = "0.7.18"
