@@ -2586,7 +2586,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "sia_core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64",
  "bip39",
@@ -2615,7 +2615,7 @@ dependencies = [
 
 [[package]]
 name = "sia_core_derive"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2652,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "base64",
  "blake2",
@@ -2698,7 +2698,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_ffi"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "log",
@@ -2715,7 +2715,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_napi"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "bytes",
  "chrono",
@@ -2735,7 +2735,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_wasm"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "console_error_panic_hook",
