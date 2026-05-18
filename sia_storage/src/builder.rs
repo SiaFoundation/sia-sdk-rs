@@ -225,8 +225,11 @@ mod test {
     use sia_core::hash_256;
     use sia_core::types::Hash256;
 
-    cross_target_tests! {
-    async fn test_app_key_derivation_golden() {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
+    #[sia_core_derive::cross_target_test]
+    fn test_app_key_derivation_golden() {
         const MNEMONIC: &str =
             "glare own entire dish exact open theme family harsh room scrap rose";
         const APP_ID: AppID =
@@ -243,6 +246,5 @@ mod test {
         let derived_app_key =
             derive_app_key(MNEMONIC, &APP_ID, &SHARED_SECRET).expect("derivation failed");
         assert_eq!(derived_app_key, expected_app_key);
-    }
     }
 }

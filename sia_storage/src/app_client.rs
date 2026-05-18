@@ -670,8 +670,11 @@ mod cross_target_test {
 
     use super::*;
 
-    cross_target_tests! {
-    async fn test_register_app_sig_hash_golden() {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
+    #[sia_core_derive::cross_target_test]
+    fn test_register_app_sig_hash_golden() {
         const REQUEST_ID: &str = "ebddc9385dace70f9a97cebce34134ac";
         const EPHEMERAL_KEY: PublicKey =
             public_key!("ed25519:9f5fb0b962f29497b3993e12c7a7880fbaf0cf52bad3620af0280895fdea8ece");
@@ -686,7 +689,8 @@ mod cross_target_test {
     }
 
     /// Ensures that our base64 url encoding is compatible with our Go implementation.
-    async fn test_base64_url() {
+    #[sia_core_derive::cross_target_test]
+    fn test_base64_url() {
         const DATA: &[u8] = b"hello, world!";
         const ENCODED_DATA: &str = "aGVsbG8sIHdvcmxkIQ==";
 
@@ -694,7 +698,8 @@ mod cross_target_test {
         assert_eq!(encoded, ENCODED_DATA);
     }
 
-    async fn test_request_hash() {
+    #[sia_core_derive::cross_target_test]
+    fn test_request_hash() {
         let method = Method::POST;
         let url = Url::parse("https://foo.bar/foo").unwrap();
         let valid_until = DateTime::from_timestamp_secs(123).unwrap();
@@ -706,7 +711,8 @@ mod cross_target_test {
         )
     }
 
-    async fn test_sign() {
+    #[sia_core_derive::cross_target_test]
+    fn test_sign() {
         let app_key = PrivateKey::from_seed(&[0u8; 32]);
 
         // with body
@@ -765,7 +771,8 @@ mod cross_target_test {
         );
     }
 
-    async fn test_shared_object_id() {
+    #[sia_core_derive::cross_target_test]
+    fn test_shared_object_id() {
         let obj = SharedObjectResponse {
             slabs: vec![Slab {
                 encryption_key: [0u8; 32].into(),
@@ -784,7 +791,6 @@ mod cross_target_test {
             object_id(&obj.slabs).to_string(),
             "1b13d5dd22605af0573cae7fe9242c1ee83727c29798308b2b170864677b46d0"
         );
-    }
     }
 }
 

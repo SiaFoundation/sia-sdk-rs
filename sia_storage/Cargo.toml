@@ -74,6 +74,9 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom = { version = "0.4.2", features = ["wasm_js"] }
 instant = { version = "0.1", features = ["wasm-bindgen"] }
 
+[dev-dependencies]
+sia_core_derive = { path = "../sia_core_derive", version = "0.1.0" }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 httptest = "0.16.4"

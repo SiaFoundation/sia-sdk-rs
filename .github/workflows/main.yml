@@ -57,6 +57,8 @@ jobs:
       matrix:
         browser: [chrome, firefox]
     runs-on: tenki-standard-medium-4c-8g
+    env:
+      WASM_BINDGEN_TEST_TIMEOUT: '300'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Setup Environment
@@ -64,11 +66,8 @@ jobs:
           rustup update stable
           rustup target add wasm32-unknown-unknown
           cargo install wasm-pack
-      - name: Test (wasm - sia_storage)
-        # --lib skips compiling the native-only benchmark example
+      - name: Test sia_storage
         run: cd sia_storage && wasm-pack test --release --headless --${{ matrix.browser }} -- --lib
-        env:
-          WASM_BINDGEN_TEST_TIMEOUT: '300'
 
   # Single required check for branch protection. Skipped (and therefore
   # non-passing) whenever any upstream job fails.
