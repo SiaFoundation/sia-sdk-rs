@@ -214,17 +214,6 @@ async fn main() {
 
     let reader = SeededReader::new(seed, args.size);
 
-    // delete all existing objects
-    println!("Deleting existing objects...");
-    let objects = sdk
-        .object_events(None, Some(100))
-        .await
-        .expect("failed to list objects");
-    for obj in objects {
-        sdk.delete_object(&obj.id).await;
-    }
-    sdk.prune_slabs().await.expect("pruning failed");
-
     // upload the data to the network
     println!("Uploading random data...");
     let mut upload_options = UploadOptions::default();
