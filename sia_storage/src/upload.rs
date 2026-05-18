@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
-use crate::hosts::{QueueError, RPCError};
+use crate::hosts::{InflightGuard, QueueError, RPCError};
 use crate::rhp4::Client;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Elapsed, Instant, sleep};
@@ -48,9 +48,11 @@ struct UsedHosts {
 
 impl UsedHosts {
     /// Pick the best host that's neither currently claimed nor has
-    /// exhausted its retry budget. Marks the result as claimed and bumps
-    /// its attempt counter.
-    fn pick(&mut self, client: &Hosts<Client>) -> Option<PublicKey> {
+    /// exhausted its retry budget. Marks the result as claimed, bumps its
+    /// attempt counter, and atomically reserves an inflight slot — the
+    /// returned [`InflightGuard`] must be held for the duration of the
+    /// upload RPC so concurrent pickers see the load.
+    fn pick(&mut self, client: &Hosts<Client>) -> Option<(PublicKey, InflightGuard)> {
         let exclude: HashSet<PublicKey> = self
             .claimed
             .iter()
@@ -61,10 +63,10 @@ impl UsedHosts {
                     .filter_map(|(k, n)| (*n >= MAX_HOST_RETRIES).then_some(*k)),
             )
             .collect();
-        let host = client.next_upload_host(&exclude)?;
+        let (host, guard) = client.next_upload_host(&exclude)?;
         *self.attempts.entry(host).or_insert(0) += 1;
         self.claimed.insert(host);
-        Some(host)
+        Some((host, guard))
     }
 
     /// Release a host whose write failed. Removes it from `claimed` so it
@@ -100,6 +102,7 @@ impl ShardUpload {
         &self,
         tasks: &mut JoinSet<(PublicKey, Result<SectorUploadResult, UploadError>)>,
         host_key: PublicKey,
+        inflight: InflightGuard,
         write_timeout: Duration,
         permit: OwnedSemaphorePermit,
     ) {
@@ -110,6 +113,10 @@ impl ShardUpload {
         let shard_index = self.shard_index;
         join_set_spawn!(tasks, async move {
             let _permit = permit;
+            // Hold the inflight guard for the duration of the RPC so the
+            // host's load is visible to concurrent pickers; dropped here
+            // either after success or failure.
+            let _inflight = inflight;
             let now = Instant::now();
             let result: Result<SectorUploadResult, UploadError> = match client
                 .write_sector(host_key, &account_key.0, data, write_timeout)
@@ -139,18 +146,21 @@ impl ShardUpload {
         });
     }
 
-    /// Atomically pick the next-best host for this shard, respecting the
-    /// slab's host accounting: skip hosts currently in flight, holding a
-    /// successful sector, or that have exhausted their retry budget.
-    fn pick_next_host(&self) -> Option<PublicKey> {
+    /// Atomically pick the next-best host for this shard and reserve an
+    /// inflight slot on it. Respects the slab's host accounting: skips
+    /// hosts currently in flight, holding a successful sector, or that
+    /// have exhausted their retry budget. The returned guard must travel
+    /// with the spawned write task so the reservation lives until the RPC
+    /// finishes.
+    fn pick_next_host(&self) -> Option<(PublicKey, InflightGuard)> {
         self.used_hosts.lock().unwrap().pick(&self.client)
     }
 
     async fn upload_shard(self) -> Result<SectorUploadResult, UploadError> {
         let permit = self.semaphore.clone().acquire_owned().await?;
-        let initial = self.pick_next_host().ok_or(QueueError::NoMoreHosts)?;
+        let (initial, initial_guard) = self.pick_next_host().ok_or(QueueError::NoMoreHosts)?;
         let mut tasks = JoinSet::new();
-        self.spawn_write(&mut tasks, initial, UPLOAD_TIMEOUT, permit);
+        self.spawn_write(&mut tasks, initial, initial_guard, UPLOAD_TIMEOUT, permit);
         loop {
             let active = tasks.len();
             tokio::select! {
@@ -172,25 +182,27 @@ impl ShardUpload {
                             // write_sector already updated the host's
                             // failure_rate on the error path. Release it
                             // from `claimed` so it can be re-picked within
-                            // its retry budget.
+                            // its retry budget. The InflightGuard for the
+                            // failed task has already dropped when the
+                            // task body exited.
                             self.used_hosts.lock().unwrap().release_failed(&host_key);
                             if tasks.is_empty() {
-                                let next = self.pick_next_host()
+                                let (next, guard) = self.pick_next_host()
                                     .ok_or(QueueError::NoMoreHosts)?;
                                 let permit = self.semaphore.clone().acquire_owned().await?;
-                                self.spawn_write(&mut tasks, next, UPLOAD_TIMEOUT, permit);
+                                self.spawn_write(&mut tasks, next, guard, UPLOAD_TIMEOUT, permit);
                             }
                         }
                     }
                 },
                 _ = sleep(Duration::from_secs(active.max(1) as u64)) => {
                     if let Ok(racer) = self.semaphore.clone().try_acquire_owned()
-                        && let Some(next) = self.pick_next_host() {
+                        && let Some((next, guard)) = self.pick_next_host() {
                             debug!(
                                 "slab {} shard {} racing slow host with {next}",
                                 self.slab_index, self.shard_index
                             );
-                            self.spawn_write(&mut tasks, next, UPLOAD_TIMEOUT, racer);
+                            self.spawn_write(&mut tasks, next, guard, UPLOAD_TIMEOUT, racer);
                         }
                 }
             }

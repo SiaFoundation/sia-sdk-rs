@@ -357,14 +357,18 @@ impl HostList {
             .count()
     }
 
-    /// Returns the upload host with the best score for handling another
-    /// shard, excluding any in `exclude`. The score is
-    /// `throughput / (inflight + 1)` and lower `failure_rate` wins first.
-    /// Returns `None` if no eligible host is available.
-    fn next_upload_host(&self, exclude: &HashSet<PublicKey>) -> Option<PublicKey> {
+    /// Picks the best upload host for another shard and reserves an
+    /// inflight slot on it. The reservation increments the winner's
+    /// `inflight_uploads` counter as part of the same call, so subsequent
+    /// pickers see the new load — the race window shrinks from "until the
+    /// RPC starts" to the scan in this function (microseconds).
+    ///
+    /// Score is `throughput / (inflight + 1)`; lower `failure_rate` wins
+    /// first. Returns `None` if no eligible host is available.
+    fn next_upload_host(&self, exclude: &HashSet<PublicKey>) -> Option<(PublicKey, InflightGuard)> {
         let hosts = self.hosts.read().unwrap();
         let metrics = self.metrics.read().unwrap();
-        let mut best: Option<(PublicKey, HostScore)> = None;
+        let mut best: Option<(PublicKey, Arc<AtomicUsize>, HostScore)> = None;
         for (hk, info) in hosts.iter() {
             if !info.good_for_upload || exclude.contains(hk) {
                 continue;
@@ -375,29 +379,19 @@ impl HostList {
             let inflight = info.inflight_uploads.load(Ordering::Relaxed);
             let score = HostScore::new(metric, inflight);
             match &best {
-                None => best = Some((*hk, score)),
-                Some((_, current)) if score > *current => best = Some((*hk, score)),
+                None => best = Some((*hk, info.inflight_uploads.clone(), score)),
+                Some((_, _, current)) if score > *current => {
+                    best = Some((*hk, info.inflight_uploads.clone(), score))
+                }
                 _ => {}
             }
         }
-        best.map(|(hk, _)| hk)
+        best.map(|(hk, counter, _)| (hk, InflightGuard::new(counter)))
     }
 
-    /// Begins tracking an in-flight upload to the host. Returns a guard that
-    /// increments the host's `inflight_uploads` counter immediately and
-    /// decrements it on drop. Returns `None` if the host is unknown.
-    fn track_inflight_upload(&self, host_key: &PublicKey) -> Option<InflightGuard> {
-        let counter = self
-            .hosts
-            .read()
-            .unwrap()
-            .get(host_key)?
-            .inflight_uploads
-            .clone();
-        Some(InflightGuard::new(counter))
-    }
-
-    /// Download analogue of [`Self::track_inflight_upload`].
+    /// Begins tracking an in-flight download from the host. Returns a guard
+    /// that increments the host's `inflight_downloads` counter immediately
+    /// and decrements it on drop. Returns `None` if the host is unknown.
     fn track_inflight_download(&self, host_key: &PublicKey) -> Option<InflightGuard> {
         let counter = self
             .hosts
@@ -444,9 +438,13 @@ impl HostList {
 /// decrements it on drop. Used to track per-host inflight uploads so the
 /// host scorer reflects current load and is balanced even on early returns
 /// or async cancellations.
-struct InflightGuard(Arc<AtomicUsize>);
+pub(crate) struct InflightGuard(Arc<AtomicUsize>);
 
 impl InflightGuard {
+    /// Increments `counter` and returns a guard that decrements it on
+    /// drop. The increment is part of the selection path so concurrent
+    /// pickers see the load on their next scan rather than only after
+    /// the RPC starts.
     fn new(counter: Arc<AtomicUsize>) -> Self {
         counter.fetch_add(1, Ordering::Relaxed);
         Self(counter)
@@ -558,13 +556,31 @@ impl<T: Transport> Hosts<T> {
         self.hosts.available_for_upload()
     }
 
-    /// Picks the best host for the next shard upload, excluding any in
-    /// `exclude`. The scorer favors the host with the highest
-    /// `throughput / (inflight + 1)` — i.e. best expected per-shard
-    /// throughput if you added one more shard. Returns `None` if no
-    /// eligible host is available.
-    pub fn next_upload_host(&self, exclude: &HashSet<PublicKey>) -> Option<PublicKey> {
+    /// Atomically picks the best upload host for another shard and reserves
+    /// an inflight slot on it. The returned [`InflightGuard`] must be kept
+    /// alive for the duration of the upload — drop it to roll the
+    /// reservation back on failure. Selection and reservation happen under
+    /// the same lock so concurrent pickers can't all observe the same low
+    /// inflight count and pile onto the same host.
+    ///
+    /// The scorer favors the host with the highest
+    /// `throughput / (inflight + 1)` — best expected per-shard throughput
+    /// if you added one more shard. Returns `None` if no eligible host is
+    /// available.
+    pub fn next_upload_host(
+        &self,
+        exclude: &HashSet<PublicKey>,
+    ) -> Option<(PublicKey, InflightGuard)> {
         self.hosts.next_upload_host(exclude)
+    }
+
+    /// Reserves an inflight slot for a download from the given host. The
+    /// returned guard increments `inflight_downloads` immediately so
+    /// concurrent `prioritize` calls see the load, and decrements on drop.
+    /// Callers should create the guard before spawning the download task
+    /// and hold it for the duration of the RPC.
+    pub fn reserve_inflight_download(&self, host_key: &PublicKey) -> Option<InflightGuard> {
+        self.hosts.track_inflight_download(host_key)
     }
 
     /// Adds a failure for the given host, updating its metrics and priority.
@@ -647,6 +663,10 @@ impl<T: Transport> Hosts<T> {
         }
     }
 
+    /// Performs an upload RPC to the given host. The caller is responsible
+    /// for holding the [`InflightGuard`] returned by
+    /// [`Self::next_upload_host`] for the duration of this call so the
+    /// host scorer reflects the load.
     pub async fn write_sector(
         &self,
         host_key: PublicKey,
@@ -655,7 +675,6 @@ impl<T: Transport> Hosts<T> {
         write_timeout: Duration,
     ) -> Result<Hash256, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        let _inflight = self.hosts.track_inflight_upload(&host_key);
         timeout(write_timeout, async {
             let (prices, _) = Self::fetch_prices(
                 self.transport.clone(),
@@ -679,6 +698,10 @@ impl<T: Transport> Hosts<T> {
         .await?
     }
 
+    /// Performs a download RPC from the given host. The caller is
+    /// responsible for holding the [`InflightGuard`] returned by
+    /// [`Self::reserve_inflight_download`] for the duration of this call so
+    /// the host scorer reflects the load.
     pub async fn read_sector(
         &self,
         host_key: PublicKey,
@@ -690,7 +713,6 @@ impl<T: Transport> Hosts<T> {
     ) -> Result<bytes::Bytes, RPCError> {
         let host = self.host_endpoint(host_key)?;
         let bytes = length as u64;
-        let _inflight = self.hosts.track_inflight_download(&host_key);
         timeout(read_timeout, async {
             let (prices, _) = Self::fetch_prices(
                 self.transport.clone(),
@@ -937,13 +959,13 @@ mod test {
         // assert it returns one of them, and that hk2 (not good_for_upload)
         // is never picked.
         let mut exclude = HashSet::new();
-        let first = hosts_manager.next_upload_host(&exclude).unwrap();
+        let (first, first_guard) = hosts_manager.next_upload_host(&exclude).unwrap();
         assert!(first == hk1 || first == hk3);
         assert_ne!(first, hk2);
 
         // Excluding the first picks the other upload-eligible host.
         exclude.insert(first);
-        let second = hosts_manager.next_upload_host(&exclude).unwrap();
+        let (second, second_guard) = hosts_manager.next_upload_host(&exclude).unwrap();
         assert!(second == hk1 || second == hk3);
         assert_ne!(second, first);
         assert_ne!(second, hk2);
@@ -951,6 +973,10 @@ mod test {
         // Excluding both leaves nothing.
         exclude.insert(second);
         assert!(hosts_manager.next_upload_host(&exclude).is_none());
+
+        // Drop the guards explicitly so the counters balance.
+        drop(first_guard);
+        drop(second_guard);
     }
 
     #[sia_core_derive::cross_target_test]
