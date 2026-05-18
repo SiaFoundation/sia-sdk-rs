@@ -229,7 +229,7 @@ impl Ord for HostScore {
         // Lower failure_rate is better (so invert here for max-comparison).
         match other.failure_rate.cmp(&self.failure_rate) {
             std::cmp::Ordering::Equal => match (self.throughput, other.throughput) {
-                (None, None) => std::cmp::Ordering::Equal,
+                (None, None) => other.inflight.cmp(&self.inflight),
                 // discovery: unsampled outranks sampled
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (Some(_), None) => std::cmp::Ordering::Less,

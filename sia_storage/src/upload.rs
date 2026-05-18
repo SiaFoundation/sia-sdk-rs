@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::sync::{Arc, Mutex};
 
@@ -20,6 +20,62 @@ use tokio::io::{AsyncRead, BufReader};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
+/// Maximum number of times a single host may be picked across all shards
+/// in a slab. Mirrors the cap from the old `HostQueue::retry` behavior so
+/// a host with a transient failure can still get a few more chances within
+/// the same slab, rather than being permanently sidelined on the first error.
+const MAX_HOST_RETRIES: usize = 3;
+
+/// Per-slab host accounting. Tracks two things:
+/// - `claimed`: hosts currently in flight, or holding a successful sector
+///   on this slab. Excluded from picks so no two shards in the slab can
+///   both succeed on the same host (slab uniqueness; the indexer rejects
+///   duplicate hosts in a slab).
+/// - `attempts`: per-host pick count. A host that hits [`MAX_HOST_RETRIES`]
+///   is permanently off-limits for the slab.
+///
+/// Lifecycle for a host:
+/// - `pick` → attempt count +1, added to claimed.
+/// - Write succeeds → stays in claimed forever. Attempt count irrelevant.
+/// - Write fails → `release_failed` removes from claimed; attempts stays
+///   incremented. Another shard (or a retry within the same shard) can
+///   re-pick the host while its attempts < `MAX_HOST_RETRIES`.
+#[derive(Default)]
+struct UsedHosts {
+    claimed: HashSet<PublicKey>,
+    attempts: HashMap<PublicKey, usize>,
+}
+
+impl UsedHosts {
+    /// Pick the best host that's neither currently claimed nor has
+    /// exhausted its retry budget. Marks the result as claimed and bumps
+    /// its attempt counter.
+    fn pick(&mut self, client: &Hosts<Client>) -> Option<PublicKey> {
+        let exclude: HashSet<PublicKey> = self
+            .claimed
+            .iter()
+            .copied()
+            .chain(
+                self.attempts
+                    .iter()
+                    .filter_map(|(k, n)| (*n >= MAX_HOST_RETRIES).then_some(*k)),
+            )
+            .collect();
+        let host = client.next_upload_host(&exclude)?;
+        *self.attempts.entry(host).or_insert(0) += 1;
+        self.claimed.insert(host);
+        Some(host)
+    }
+
+    /// Release a host whose write failed. Removes it from `claimed` so it
+    /// can be re-picked (by this shard or another) while its attempt count
+    /// is still under [`MAX_HOST_RETRIES`]. The attempt count itself is
+    /// kept so the cap continues to apply.
+    fn release_failed(&mut self, host: &PublicKey) {
+        self.claimed.remove(host);
+    }
+}
+
 struct ShardUpload {
     semaphore: Arc<Semaphore>,
     client: Hosts<Client>,
@@ -27,8 +83,8 @@ struct ShardUpload {
     data: Bytes,
     slab_index: usize,
     shard_index: usize,
-    // Tracks hosts already used by any shard in this slab.
-    used_hosts: Arc<Mutex<HashSet<PublicKey>>>,
+    /// Per-slab host accounting shared across all shards.
+    used_hosts: Arc<Mutex<UsedHosts>>,
 }
 
 struct SectorUploadResult {
@@ -42,7 +98,7 @@ const UPLOAD_TIMEOUT: Duration = Duration::from_secs(90);
 impl ShardUpload {
     fn spawn_write(
         &self,
-        tasks: &mut JoinSet<Result<SectorUploadResult, UploadError>>,
+        tasks: &mut JoinSet<(PublicKey, Result<SectorUploadResult, UploadError>)>,
         host_key: PublicKey,
         write_timeout: Duration,
         permit: OwnedSemaphorePermit,
@@ -55,35 +111,39 @@ impl ShardUpload {
         join_set_spawn!(tasks, async move {
             let _permit = permit;
             let now = Instant::now();
-            let root = client.write_sector(host_key, &account_key.0, data, write_timeout).await
-                .inspect_err(|e| {
+            let result: Result<SectorUploadResult, UploadError> = match client
+                .write_sector(host_key, &account_key.0, data, write_timeout)
+                .await
+            {
+                Ok(root) => {
+                    let elapsed = now.elapsed();
+                    debug!(
+                        "slab {slab_index} shard {shard_index} uploaded to {host_key} in {:?}",
+                        elapsed
+                    );
+                    Ok(SectorUploadResult {
+                        sector: Sector { root, host_key },
+                        shard_index,
+                        elapsed,
+                    })
+                }
+                Err(e) => {
                     debug!(
                         "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {:?} {e}",
                         now.elapsed()
                     );
-                })?;
-            let elapsed = now.elapsed();
-            debug!(
-                "slab {slab_index} shard {shard_index} uploaded to {host_key} in {:?}",
-                elapsed
-            );
-            Ok(SectorUploadResult {
-                sector: Sector { root, host_key },
-                shard_index,
-                elapsed,
-            })
+                    Err(UploadError::from(e))
+                }
+            };
+            (host_key, result)
         });
     }
 
-    /// Atomically pick the next-best host for this shard and reserve it
-    /// against the slab's `slab_used` set so no other shard in the slab
-    /// picks the same host. Returns `None` only when no eligible host
-    /// remains.
+    /// Atomically pick the next-best host for this shard, respecting the
+    /// slab's host accounting: skip hosts currently in flight, holding a
+    /// successful sector, or that have exhausted their retry budget.
     fn pick_next_host(&self) -> Option<PublicKey> {
-        let mut used = self.used_hosts.lock().unwrap();
-        let next = self.client.next_upload_host(&used)?;
-        used.insert(next);
-        Some(next)
+        self.used_hosts.lock().unwrap().pick(&self.client)
     }
 
     async fn upload_shard(self) -> Result<SectorUploadResult, UploadError> {
@@ -96,7 +156,8 @@ impl ShardUpload {
             tokio::select! {
                 biased;
                 Some(res) = tasks.join_next() => {
-                    match res? {
+                    let (host_key, write_result) = res?;
+                    match write_result {
                         Ok(result) => {
                             if result.sector.host_key != initial {
                                 debug!(
@@ -108,10 +169,11 @@ impl ShardUpload {
                             return Ok(result);
                         }
                         Err(_) => {
-                            // write_sector already incremented failure_rate
-                            // on its error path, dropping the host's score.
-                            // Pick the next best host not already used by
-                            // any shard in this slab.
+                            // write_sector already updated the host's
+                            // failure_rate on the error path. Release it
+                            // from `claimed` so it can be re-picked within
+                            // its retry budget.
+                            self.used_hosts.lock().unwrap().release_failed(&host_key);
                             if tasks.is_empty() {
                                 let next = self.pick_next_host()
                                     .ok_or(QueueError::NoMoreHosts)?;
@@ -286,14 +348,19 @@ impl Upload {
             // slab N+1's shards pick, slab N's chosen hosts have higher
             // inflight and lower score.
             //
-            // `used_hosts` enforces that every shard within this slab lands
-            // on a distinct host (the indexer rejects duplicate sectors
-            // because they break redundancy). Every host any shard picks
-            // — initial, retry, or racer — is added to the set.
-            let used_hosts: Arc<Mutex<HashSet<PublicKey>>> =
-                Arc::new(Mutex::new(HashSet::with_capacity(total_shards)));
+            // `used_hosts` enforces slab uniqueness — every shard within
+            // this slab must land on a distinct host (the indexer rejects
+            // duplicate sectors because they break redundancy) — while
+            // also allowing failed hosts to be re-picked up to
+            // `MAX_HOST_RETRIES` times across the slab.
+            let used_hosts: Arc<Mutex<UsedHosts>> =
+                Arc::new(Mutex::new(UsedHosts::default()));
             let owned_slab_key = Arc::new(slab_key.clone());
-            let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> = JoinSet::new();
+            // ShardUpload::upload_shard returns Result<SectorUploadResult, UploadError>
+            // (one settled result per shard — not the per-attempt tuple
+            // that spawn_write uses inside upload_shard).
+            let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> =
+                JoinSet::new();
             for (shard_index, mut shard) in shards.into_iter().enumerate() {
                 let owned_slab_key = owned_slab_key.clone();
                 let shard_client = client.clone();
