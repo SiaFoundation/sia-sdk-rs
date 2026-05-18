@@ -1,3 +1,9 @@
+## 0.8.1 (2026-05-18)
+
+### Fixes
+
+- Bump sia_core_derive.
+
 ## 0.8.0 (2026-04-27)
 
 ### Breaking Changes
