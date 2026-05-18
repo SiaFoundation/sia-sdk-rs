@@ -31,6 +31,8 @@ jobs:
         run: cargo doc --all-features --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
+      - name: Package
+        run: cargo package --workspace
 
   test:
     name: Test native
