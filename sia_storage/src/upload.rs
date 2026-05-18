@@ -365,14 +365,12 @@ impl Upload {
             // duplicate sectors because they break redundancy) — while
             // also allowing failed hosts to be re-picked up to
             // `MAX_HOST_RETRIES` times across the slab.
-            let used_hosts: Arc<Mutex<UsedHosts>> =
-                Arc::new(Mutex::new(UsedHosts::default()));
+            let used_hosts: Arc<Mutex<UsedHosts>> = Arc::new(Mutex::new(UsedHosts::default()));
             let owned_slab_key = Arc::new(slab_key.clone());
             // ShardUpload::upload_shard returns Result<SectorUploadResult, UploadError>
             // (one settled result per shard — not the per-attempt tuple
             // that spawn_write uses inside upload_shard).
-            let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> =
-                JoinSet::new();
+            let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> = JoinSet::new();
             for (shard_index, mut shard) in shards.into_iter().enumerate() {
                 let owned_slab_key = owned_slab_key.clone();
                 let shard_client = client.clone();
