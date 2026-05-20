@@ -184,6 +184,20 @@ impl Stream {
     }
 }
 
+/// Explicitly close both halves of the bidirectional stream when dropped.
+/// Without this, the browser holds the underlying transport resources
+/// alive until the JS stream wrappers are garbage-collected
+impl Drop for Stream {
+    fn drop(&mut self) {
+        let reader = self.reader.clone();
+        let writer = self.writer.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = JsFuture::from(writer.close()).await;
+            let _ = JsFuture::from(reader.cancel()).await;
+        });
+    }
+}
+
 /// AsyncRead for reading RPC responses. The JS `reader.read()` returns
 /// large chunks naturally, which are buffered in `self.buf`. Writes bypass
 /// poll entirely via write_all_async.
