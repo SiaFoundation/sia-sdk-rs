@@ -228,8 +228,11 @@ mod test {
         });
     }
 
-    cross_target_tests! {
-    async fn test_encrypt_sector_roundtrip() {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
+    #[sia_core_derive::cross_target_test]
+    fn test_encrypt_sector_roundtrip() {
         let key = EncryptionKey::from([1u8; 32]);
 
         let mut sector = vec![0u8; SECTOR_SIZE];
@@ -242,7 +245,8 @@ mod test {
         assert_eq!(sector, original);
     }
 
-    async fn test_encrypt_shards() {
+    #[sia_core_derive::cross_target_test]
+    fn test_encrypt_shards() {
         let key = EncryptionKey::from([1u8; 32]);
         let mut shards = vec![vec![1, 2, 3], vec![4, 5, 6]];
 
@@ -267,6 +271,7 @@ mod test {
         assert_eq!(shards[1], vec![4, 5, 6]);
     }
 
+    #[sia_core_derive::cross_target_test]
     async fn test_cipher_reader_roundtrip() {
         let key = EncryptionKey::from([1u8; 32]);
         let data = b"lorem ipsum dolor sit amet, consectetur adipiscing elit";
@@ -285,6 +290,7 @@ mod test {
     }
 
     // Direct port of Go SDK's sdk/encrypt_test.go:TestEncryptRoundtrip
+    #[sia_core_derive::cross_target_test]
     async fn test_encrypt_roundtrip() {
         const MAX_BYTES_PER_NONCE: u64 = u32::MAX as u64 * 64;
 
@@ -320,6 +326,5 @@ mod test {
 
             assert_eq!(plaintext, data, "roundtrip failed at offset {offset}");
         }
-    }
     }
 }

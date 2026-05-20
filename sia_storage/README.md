@@ -65,6 +65,17 @@ tokio::io::copy(&mut reader, &mut writer).await?;
 
 The `AppKey` grants full access to a user's data. After connecting, retrieve it with `SDK::app_key()`, then persist it using `AppKey::export()` and restore it with `AppKey::import()` so users don't need to re-approve on every launch.
 
+## Building for WebAssembly
+
+For best performance in the browser, enable the `simd128` target feature:
+
+```bash
+RUSTFLAGS="-C target-feature=+simd128" \
+  cargo build --target wasm32-unknown-unknown --release
+```
+
+The same `RUSTFLAGS` applies to `wasm-pack build`. SIMD-enabled WASM is supported by all modern browsers; no special hosting headers are required.
+
 ## License
 
 This project is licensed under the MIT License.

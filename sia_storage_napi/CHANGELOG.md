@@ -1,3 +1,15 @@
+## 0.7.2 (2026-05-18)
+
+### Fixes
+
+- Bump sia_core_derive.
+
+## 0.7.1 (2026-05-18)
+
+### Fixes
+
+- Update `sia_core` to `0.3.1`.
+
 ## 0.7.0 (2026-04-27)
 
 ### Breaking Changes

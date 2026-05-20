@@ -370,6 +370,7 @@ impl Sdk {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod test {
     use super::*;
@@ -380,7 +381,6 @@ mod test {
         seed
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn test_refresh_task_periodic_and_abort() {
         use std::sync::Arc;

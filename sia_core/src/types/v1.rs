@@ -473,30 +473,30 @@ impl Transaction {
         state.finalize().into()
     }
 
-    fn derive_child_id<T: From<blake2b_simd::Hash>>(&self, prefix: &Specifier, i: usize) -> T {
+    fn derive_child_id<T: From<blake2b_simd::Hash>>(&self, prefix: &Specifier, i: u64) -> T {
         let mut state = Params::new().hash_length(32).to_state();
         state.update(prefix.as_ref());
         self.encode_no_sigs(&mut state).unwrap();
-        state.update(&(i as u64).to_le_bytes());
+        state.update(&i.to_le_bytes());
         state.finalize().into()
     }
 
     /// siacoin_output_id returns the SiacoinOutputID for the i-th siacoin output of the transaction
-    pub fn siacoin_output_id(&self, i: usize) -> SiacoinOutputID {
+    pub fn siacoin_output_id(&self, i: u64) -> SiacoinOutputID {
         const SIACOIN_OUTPUT_ID_PREFIX: Specifier = specifier!("siacoin output");
 
         self.derive_child_id(&SIACOIN_OUTPUT_ID_PREFIX, i)
     }
 
     /// siafund_output_id returns the SiafundOutputID for the i-th siafund output of the transaction
-    pub fn siafund_output_id(&self, i: usize) -> SiafundOutputID {
+    pub fn siafund_output_id(&self, i: u64) -> SiafundOutputID {
         const SIAFUND_OUTPUT_ID_PREFIX: Specifier = specifier!("siafund output");
 
         self.derive_child_id(&SIAFUND_OUTPUT_ID_PREFIX, i)
     }
 
     /// file_contract_id returns the FileContractID for the i-th file contract of the transaction
-    pub fn file_contract_id(&self, i: usize) -> FileContractID {
+    pub fn file_contract_id(&self, i: u64) -> FileContractID {
         const FILE_CONTRACT_ID_PREFIX: Specifier = specifier!("file contract");
 
         self.derive_child_id(&FILE_CONTRACT_ID_PREFIX, i)
@@ -1068,8 +1068,7 @@ mod tests {
             key_index: u64,
             expected: &'static str,
         }
-        let test_cases = vec![
-            TestCase{
+        let test_cases = [TestCase{
                 transaction: Transaction {
                     siacoin_inputs: vec![
                         SiacoinInput{
@@ -1110,8 +1109,7 @@ mod tests {
                 timelock: 467251739279473577,
                 key_index: 1493934879227647507,
                 expected: "7aea4ec52e1f7de90261c4448a928081d4be6015252e482ec9c1cfa01663d768",
-            },
-        ];
+            }];
 
         for (i, case) in test_cases.iter().enumerate() {
             let sig_hash = case
@@ -1182,7 +1180,7 @@ mod tests {
         };
         let txn: Transaction = serde_json::from_str("{\"siacoinInputs\":[{\"parentID\":\"750d22eff727689d1d8d1c83e513a30bb68ee7f9125a4dafc882459e34c2069d\",\"unlockConditions\":{\"timelock\":0,\"publicKeys\":[\"ed25519:800ed6c2760e3e4ba1ff00128585c8cf8fed2e3dc1e3da1eb92d49f405bd6360\"],\"signaturesRequired\":6312611591377486220}}],\"siacoinOutputs\":[{\"value\":\"890415399000000000000000000000000\",\"address\":\"480a064b5fca13002a7fe575845154bbf0b3af4cc4f147cbed387d43cce3568ae2497366eaa7\"}],\"fileContracts\":[{\"filesize\":0,\"fileMerkleRoot\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"windowStart\":10536451586783908586,\"windowEnd\":9324702155635244357,\"payout\":\"0\",\"validProofOutputs\":[{\"value\":\"1933513214000000000000000000000000\",\"address\":\"944524fff2c49c401e748db37cfda7569fa6df35b704fe716394f2ac3f40ce87b4506e9906f0\"}],\"missedProofOutputs\":[{\"value\":\"2469287901000000000000000000000000\",\"address\":\"1df67838262d7109ffcd9018f183b1eb33f05659a274b89ea6b52ff3617d34a770e9dd071d2e\"}],\"unlockHash\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\",\"revisionNumber\":9657412421282982780}],\"fileContractRevisions\":[{\"parentID\":\"e4e26d93771d3bbb3d9dd306105d77cfb3a6254d1cc3495903af6e013442c63c\",\"unlockConditions\":{\"timelock\":0,\"publicKeys\":[\"ed25519:e6b9cde4eb058f8ecbb083d99779cb0f6d518d5386f019af6ead09fa52de8567\"],\"signaturesRequired\":206644730660526450},\"revisionNumber\":10595710523108536025,\"filesize\":0,\"fileMerkleRoot\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"windowStart\":4348934140507359445,\"windowEnd\":14012366839994454386,\"validProofOutputs\":[{\"value\":\"2435858510000000000000000000000000\",\"address\":\"543bc0eda69f728d0a0fbce08e5bfc5ed7b961300e0af226949e135f7d12e32f0544e5262d6f\"}],\"missedProofOutputs\":[{\"value\":\"880343701000000000000000000000000\",\"address\":\"7b7f9aee981fe0d93bb3f49c6233cf847ebdd39d7dc5253f7fc330df2167073b35f035703237\"}],\"unlockHash\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"}],\"storageProofs\":[{\"parentID\":\"c0b9e98c9e03a2740c75d673871c1ee91f36d1bb329ff3ddbf1dfa8c6e1a64eb\",\"leaf\":\"b78fa521dc62d9ced82bc3b61e0aa5a5c221d6cca5db63d94c9879543fb98c0a971094a89cd4408487ae32902248d321b545f9a051729aa0bb1725b848e3d453\",\"proof\":[\"fe08c0a061475e7e5dec19e717cf98792fa7b555d0b5d3540a05db09f59ab8de\"]}],\"minerFees\":[\"241119475000000000000000000000000\"],\"arbitraryData\":[\"2shzIHEUJYwuNHz6c/gPz+aTEWZRTpDTmemX9yYAKlY=\"],\"signatures\":[{\"parentID\":\"06d1fca03c5ddd9b09116db1b97c5451f7dc792b05362969f83e3e8dc1007f46\",\"publicKeyIndex\":6088345341283457116,\"timelock\":2014247885072555224,\"coveredFields\":{\"wholeTransaction\":true},\"signature\":\"2XNEKGZrl9RhMa2JmGsvcmqQWAIX/uxtMwLnPI6VJPcXqub6qYIuoAThYp9NAwadk+1GG6CXC66g4rOjFYuNSA==\"}]}").expect("valid transaction");
 
-        let test_cases = vec![
+        let test_cases = [
             (
                 CoveredFields {
                     whole_transaction: false,

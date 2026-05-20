@@ -50,10 +50,10 @@ impl BlockID {
         state.finalize().into()
     }
 
-    pub fn miner_output_id(&self, i: usize) -> SiacoinOutputID {
+    pub fn miner_output_id(&self, i: u64) -> SiacoinOutputID {
         let mut state = Params::new().hash_length(32).to_state();
         state.update(self.as_ref());
-        state.update(&(i as u64).to_le_bytes());
+        state.update(&i.to_le_bytes());
         state.finalize().into()
     }
 }
@@ -66,31 +66,31 @@ impl TransactionID {
     const V2_FILE_CONTRACT_PREFIX: &[u8] = b"sia/id/filecontract|";
     const V2_ATTESTATION_PREFIX: &[u8] = b"sia/id/attestation|";
 
-    fn derive_v2_child_id<T: From<blake2b_simd::Hash>>(&self, prefix: &[u8], i: usize) -> T {
+    fn derive_v2_child_id<T: From<blake2b_simd::Hash>>(&self, prefix: &[u8], i: u64) -> T {
         let mut state = Params::new().hash_length(32).to_state();
         state.update(prefix.as_ref());
         state.update(self.as_ref());
-        state.update(&(i as u64).to_le_bytes());
+        state.update(&i.to_le_bytes());
         state.finalize().into()
     }
 
     /// v2_siacoin_output_id returns the SiacoinOutputID for the i-th siacoin output of the V2 transaction
-    pub fn v2_siacoin_output_id(&self, i: usize) -> SiacoinOutputID {
+    pub fn v2_siacoin_output_id(&self, i: u64) -> SiacoinOutputID {
         self.derive_v2_child_id(Self::V2_SIACOIN_OUTPUT_PREFIX, i)
     }
 
     /// v2_siafund_output_id returns the SiafundOutputID for the i-th siafund output of the V2 transaction
-    pub fn v2_siafund_output_id(&self, i: usize) -> SiafundOutputID {
+    pub fn v2_siafund_output_id(&self, i: u64) -> SiafundOutputID {
         self.derive_v2_child_id(Self::V2_SIAFUND_OUTPUT_PREFIX, i)
     }
 
     /// v2_file_contract_id returns the FileContractID for the i-th file contract of the V2 transaction
-    pub fn v2_file_contract_id(&self, i: usize) -> FileContractID {
+    pub fn v2_file_contract_id(&self, i: u64) -> FileContractID {
         self.derive_v2_child_id(Self::V2_FILE_CONTRACT_PREFIX, i)
     }
 
     /// v2_attestation_id returns the AttestationID for the i-th attestation of the V2 transaction
-    pub fn v2_attestation_id(&self, i: usize) -> AttestationID {
+    pub fn v2_attestation_id(&self, i: u64) -> AttestationID {
         self.derive_v2_child_id(Self::V2_ATTESTATION_PREFIX, i)
     }
 }
@@ -102,30 +102,30 @@ impl FileContractID {
     const V2_PROOF_OUTPUT_ID_PREFIX: &[u8] = b"sia/id/v2filecontractoutput|";
     const V2_FILE_CONTRACT_RENEWAL_PREFIX: &[u8] = b"sia/id/v2filecontractrenewal|";
 
-    fn derive_proof_output_id<T: From<blake2b_simd::Hash>>(&self, valid: bool, i: usize) -> T {
+    fn derive_proof_output_id<T: From<blake2b_simd::Hash>>(&self, valid: bool, i: u64) -> T {
         let mut state = Params::new().hash_length(32).to_state();
         state.update(Self::PROOF_OUTPUT_ID_PREFIX.as_ref());
         state.update(self.as_ref());
         state.update(&(valid as u8).to_le_bytes());
-        state.update(&(i as u64).to_le_bytes());
+        state.update(&i.to_le_bytes());
         state.finalize().into()
     }
 
-    fn derive_v2_proof_output_id<T: From<blake2b_simd::Hash>>(&self, i: usize) -> T {
+    fn derive_v2_proof_output_id<T: From<blake2b_simd::Hash>>(&self, i: u64) -> T {
         let mut state = Params::new().hash_length(32).to_state();
         state.update(Self::V2_PROOF_OUTPUT_ID_PREFIX);
         state.update(self.as_ref());
-        state.update(&(i as u64).to_le_bytes());
+        state.update(&i.to_le_bytes());
         state.finalize().into()
     }
 
     /// valid_output_id returns the SiacoinOutputID for the i-th valid output of the contract
-    pub fn valid_output_id(&self, i: usize) -> SiacoinOutputID {
+    pub fn valid_output_id(&self, i: u64) -> SiacoinOutputID {
         self.derive_proof_output_id(true, i)
     }
 
     /// missed_output_id returns the SiacoinOutputID for the i-th missed output of the contract
-    pub fn missed_output_id(&self, i: usize) -> SiacoinOutputID {
+    pub fn missed_output_id(&self, i: u64) -> SiacoinOutputID {
         self.derive_proof_output_id(false, i)
     }
 

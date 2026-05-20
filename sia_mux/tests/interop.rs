@@ -156,27 +156,22 @@ async fn rust_server_go_client_basic_echo() {
         let mux = sia_mux::accept_anonymous(conn).await.unwrap();
 
         // Accept and echo streams until the mux closes
-        loop {
-            match mux.accept_stream().await {
-                Ok(mut stream) => {
-                    tokio::spawn(async move {
-                        let mut buf = vec![0u8; 65536];
-                        loop {
-                            match stream.read(&mut buf).await {
-                                Ok(0) => break,
-                                Ok(n) => {
-                                    if stream.write_all(&buf[..n]).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                Err(_) => break,
+        while let Ok(mut stream) = mux.accept_stream().await {
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65536];
+                loop {
+                    match stream.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if stream.write_all(&buf[..n]).await.is_err() {
+                                break;
                             }
                         }
-                        let _ = stream.close();
-                    });
+                        Err(_) => break,
+                    }
                 }
-                Err(_) => break,
-            }
+                let _ = stream.close();
+            });
         }
         let _ = mux.close().await;
     });
@@ -222,27 +217,22 @@ async fn rust_server_go_client_many_streams() {
         let (conn, _) = listener.accept().await.unwrap();
         let mux = sia_mux::accept_anonymous(conn).await.unwrap();
 
-        loop {
-            match mux.accept_stream().await {
-                Ok(mut stream) => {
-                    tokio::spawn(async move {
-                        let mut buf = vec![0u8; 65536];
-                        loop {
-                            match stream.read(&mut buf).await {
-                                Ok(0) => break,
-                                Ok(n) => {
-                                    if stream.write_all(&buf[..n]).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                Err(_) => break,
+        while let Ok(mut stream) = mux.accept_stream().await {
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65536];
+                loop {
+                    match stream.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if stream.write_all(&buf[..n]).await.is_err() {
+                                break;
                             }
                         }
-                        let _ = stream.close();
-                    });
+                        Err(_) => break,
+                    }
                 }
-                Err(_) => break,
-            }
+                let _ = stream.close();
+            });
         }
         let _ = mux.close().await;
     });

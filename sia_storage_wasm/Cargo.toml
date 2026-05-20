@@ -1,6 +1,6 @@
 [package]
 name = "sia_storage_wasm"
-version = "0.3.0"
+version = "0.3.2"
 edition = "2024"
 repository = "https://github.com/SiaFoundation/sia-sdk-rs"
 license = "MIT"
@@ -12,8 +12,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-sia_storage = { version = "0.8.0", path = "../sia_storage" }
-sia_core = { version = "0.3.0", path = "../sia_core" }
+sia_storage = { version = "0.9.1", path = "../sia_storage" }
+sia_core = { version = "0.4.1", path = "../sia_core" }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
@@ -29,4 +29,4 @@ tokio-util = { version = "0.7", features = ["compat"] }
 console_error_panic_hook = "0.1"
 log = "0.4"
 serde = "1.0.228"
-tsify = { version = "0.4", features = ["js"] }
+tsify = { version = "0.5", features = ["js"] }

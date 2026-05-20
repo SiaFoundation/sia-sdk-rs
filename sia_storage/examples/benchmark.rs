@@ -69,7 +69,7 @@ impl SeededVerifier {
         let now = Instant::now();
         Self {
             rng: SmallRng::seed_from_u64(seed),
-            size: size,
+            size,
             remaining: size,
             start: now,
             ttfb: None,

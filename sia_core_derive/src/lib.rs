@@ -1,6 +1,45 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, parse_macro_input};
+use syn::{Data, DeriveInput, Fields, ItemFn, parse_macro_input};
+
+/// Attribute macro for tests that run on both native and `wasm32`.
+///
+/// - Async fns get `#[tokio::test]` on native; on wasm the body is wrapped in
+///   a `tokio::task::LocalSet` so the test can use `tokio::task::spawn_local`.
+/// - Sync fns get the built-in `#[test]` on native.
+/// - Both flavors get `#[wasm_bindgen_test]` on wasm32.
+#[proc_macro_attribute]
+pub fn cross_target_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemFn);
+    let attrs = &input.attrs;
+    let vis = &input.vis;
+    let sig = &input.sig;
+    let block = &input.block;
+
+    let expanded = if sig.asyncness.is_some() {
+        quote! {
+            #[cfg(not(target_arch = "wasm32"))]
+            #[::tokio::test]
+            #(#attrs)*
+            #vis #sig #block
+
+            #[cfg(target_arch = "wasm32")]
+            #[::wasm_bindgen_test::wasm_bindgen_test]
+            #(#attrs)*
+            #vis #sig {
+                ::tokio::task::LocalSet::new().run_until(async move #block).await
+            }
+        }
+    } else {
+        quote! {
+            #[cfg_attr(not(target_arch = "wasm32"), test)]
+            #[cfg_attr(target_arch = "wasm32", ::wasm_bindgen_test::wasm_bindgen_test)]
+            #(#attrs)*
+            #vis #sig #block
+        }
+    };
+    TokenStream::from(expanded)
+}
 
 #[proc_macro_derive(SiaEncode)]
 pub fn derive_sia_encode(input: TokenStream) -> TokenStream {

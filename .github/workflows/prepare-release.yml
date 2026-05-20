@@ -15,18 +15,18 @@ jobs:
     if: "!contains(github.event.head_commit.message, 'chore: prepare releases')" # Skip merges from releases
     runs-on: tenki-standard-medium-4c-8g
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
       - name: Setup Knope
-        uses: knope-dev/action@8055388a38df33f0603050415ac3d8175d6b566f
+        uses: knope-dev/action@19617851f9f13ab2f27a05989c55efb18aca3675 # v2.1.2
       - name: Prepare Release
         id: prepare
         run: knope prepare-release --verbose
         continue-on-error: true
       - name: Create Pull Request
         if: steps.prepare.outcome == 'success'
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7.0.11
         with:
           delete-branch: true
           commit-message: "chore: prepare releases"

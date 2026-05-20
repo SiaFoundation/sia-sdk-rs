@@ -1,3 +1,21 @@
+## 0.1.2 (2026-05-18)
+
+### Fixes
+
+- Fix missing "full" feature from syn crate
+
+## 0.1.1 (2026-05-18)
+
+### Features
+
+#### Add `cross_target_test` attribute macro
+
+Adds a `#[cross_target_test]` proc-macro attribute that emits the appropriate
+test runner per target: `#[tokio::test]` on native and `#[wasm_bindgen_test]`
+on `wasm32`, with the body wrapped in a `tokio::task::LocalSet` on `wasm32`
+so tests can use `tokio::task::spawn_local`. Async fns get the tokio variant;
+sync fns get the built-in `#[test]`.
+
 ## 0.1.0 (2026-03-23)
 
 ### Breaking Changes
