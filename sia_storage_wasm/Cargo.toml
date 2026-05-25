@@ -17,7 +17,7 @@ sia_core = { version = "0.4.1", path = "../sia_core" }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-wasm-streams = "0.5"
+wasm-streams = "0.6"
 futures-util = { version = "0.3", default-features = false, features = ["io", "std"] }
 web-sys = { version = "0.3", features = ["ReadableStream"] }
 serde-wasm-bindgen = "0.6"

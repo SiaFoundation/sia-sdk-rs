@@ -16,13 +16,13 @@ bench = false
 # --- Cross-platform dependencies ---
 [dependencies]
 serde = "1.0.228"
-serde_json = "1.0.149"
+serde_json = "1.0.150"
 thiserror = "2.0.18"
 sia_core = { path = "../sia_core", version = "0.4.1" }
 rand = "0.10.1"
 blake2b_simd = "1.0.4"
 url = { version = "2.5.8", features = ["serde"] }
-log = "0.4.29"
+log = "0.4.30"
 bytes = "1.11.1"
 priority-queue = "2.7.0"
 serde_with = { version = "3.20.0", features = ["base64"] }
@@ -32,7 +32,7 @@ chacha20 = { version = "0.10.0", features = ["xchacha"] }
 chrono = { version = "0.4.44", features = ["serde"] }
 blake2 = "0.10.6"
 zeroize = { version = "1.8.0", features = ["derive"] }
-hkdf = "0.12.4"
+hkdf = "0.13.0"
 base64 = "0.22.1"
 ed25519-dalek = "2.2.0"
 web-time = "1"
