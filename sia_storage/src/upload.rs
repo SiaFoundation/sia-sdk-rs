@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
-use crate::hosts::{HostQueue, QueueError, RPCError};
+use crate::hosts::{HostQueue, RPCError};
 use crate::rhp4::Client;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Elapsed, Instant, sleep};
@@ -23,7 +23,7 @@ use tokio::task::JoinSet;
 struct ShardUpload {
     semaphore: Arc<Semaphore>,
     client: Hosts<Client>,
-    hosts: HostQueue,
+    hosts: Arc<Mutex<HostQueue>>,
     account_key: Arc<AppKey>,
     data: Bytes,
     slab_index: usize,
@@ -61,7 +61,7 @@ impl ShardUpload {
                         "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {:?} {e}",
                         now.elapsed()
                     );
-                    let _ = hosts.retry(host_key);
+                    hosts.lock().unwrap().retry(host_key);
                 })?;
             let elapsed = now.elapsed();
             debug!(
@@ -76,9 +76,18 @@ impl ShardUpload {
         });
     }
 
-    async fn upload_shard(self, host_key: PublicKey) -> Result<SectorUploadResult, UploadError> {
+    fn next_host(&self) -> Result<PublicKey, UploadError> {
+        self.hosts
+            .lock()
+            .unwrap()
+            .pick()
+            .ok_or(UploadError::InsufficientHosts)
+    }
+
+    async fn upload_shard(self) -> Result<SectorUploadResult, UploadError> {
         let permit = self.semaphore.clone().acquire_owned().await?;
         let mut tasks = JoinSet::new();
+        let host_key = self.next_host()?;
         self.spawn_write(&mut tasks, host_key, UPLOAD_TIMEOUT, permit);
         loop {
             let active = tasks.len();
@@ -92,13 +101,13 @@ impl ShardUpload {
                                     "slab {} shard {} penalizing original host {}",
                                     self.slab_index, self.shard_index, host_key
                                 );
-                                self.client.add_failure(host_key)
+                                self.client.add_failure(&host_key)
                             }
                             return Ok(result);
                         }
                         Err(_) => {
                             if tasks.is_empty() {
-                                let host_key = self.hosts.pop_front()?;
+                                let host_key = self.next_host()?;
                                 let permit = self.semaphore.clone().acquire_owned().await?;
                                 self.spawn_write(&mut tasks, host_key, UPLOAD_TIMEOUT, permit);
                             }
@@ -107,7 +116,7 @@ impl ShardUpload {
                 },
                 _ = sleep(Duration::from_secs(active.max(1) as u64)) => {
                     if let Ok(racer) = self.semaphore.clone().try_acquire_owned()
-                        && let Ok(host_key) = self.hosts.pop_front() {
+                        && let Ok(host_key) = self.next_host() {
                             debug!(
                                 "slab {} shard {} racing slow host",
                                 self.slab_index, self.shard_index
@@ -151,9 +160,9 @@ pub enum UploadError {
     #[error("timeout error: {0}")]
     Timeout(#[from] Elapsed),
 
-    /// An error from the host queue.
-    #[error("queue error: {0}")]
-    QueueError(#[from] QueueError),
+    /// Not enough hosts are available to meet the required shard count.
+    #[error("not enough hosts")]
+    InsufficientHosts,
 
     /// An internal semaphore error.
     #[error("semaphore error: {0}")]
@@ -210,7 +219,7 @@ impl Upload {
         options.validate()?;
         let total_shards = options.data_shards as usize + options.parity_shards as usize;
         if client.available_for_upload() < total_shards {
-            return Err(QueueError::InsufficientHosts.into());
+            return Err(UploadError::InsufficientHosts);
         }
         let erasure_coder =
             ErasureCoder::new(options.data_shards as usize, options.parity_shards as usize)
@@ -246,11 +255,17 @@ impl Upload {
         let app_key = self.app_key.clone();
         let progress_callback = self.shard_uploaded.clone();
         let slab_index = self.slab_tasks.len();
+        let hosts = client.upload_queue();
+        if hosts.len() < slab.shards.len() {
+            return Err(UploadError::InsufficientHosts);
+        }
+
         let permit = self.slab_sema.clone().acquire_owned().await?;
         let handle = AbortOnDropHandle::new(maybe_spawn!(async move {
             let _permit = permit;
             let total_shards = slab.shards.len();
             let slab_key: EncryptionKey = rand::random::<[u8; 32]>().into();
+            let hosts = Arc::new(Mutex::new(hosts));
 
             // Encode parity shards on a blocking thread; encryption runs
             // per-shard below so it parallelizes across the blocking pool.
@@ -262,15 +277,9 @@ impl Upload {
                 Ok::<_, UploadError>(shards)
             })?;
 
-            let hosts = client.upload_queue();
-            let initial_hosts = hosts.pop_n(total_shards)?;
             let owned_slab_key = Arc::new(slab_key.clone());
             let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> = JoinSet::new();
-            for (shard_index, (mut shard, initial_host)) in shards
-                .into_iter()
-                .zip(initial_hosts.into_iter())
-                .enumerate()
-            {
+            for (shard_index, mut shard) in shards.into_iter().enumerate() {
                 let owned_slab_key = owned_slab_key.clone();
                 let shard_client = client.clone();
                 let shard_hosts = hosts.clone();
@@ -290,7 +299,7 @@ impl Upload {
                         slab_index,
                         shard_index,
                     };
-                    shard_upload.upload_shard(initial_host).await
+                    shard_upload.upload_shard().await
                 });
             }
 

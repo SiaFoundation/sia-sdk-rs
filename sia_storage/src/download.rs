@@ -12,6 +12,7 @@ use crate::time::{Duration, Elapsed, Instant, sleep};
 use crate::{AppKey, DownloadOptions, Object, Sector, ShardProgress, ShardProgressCallback, Slab};
 use bytes::{Buf, Bytes};
 use chacha20::cipher::StreamCipher;
+use log::debug;
 use sia_core::rhp4::SEGMENT_SIZE;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -152,7 +153,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
         sector_length: usize,
     ) -> Result<(usize, Vec<u8>, ShardProgress), DownloadError> {
         let start = Instant::now();
-        let data = client
+        let res = client
             .read_sector(
                 task.sector.host_key,
                 &account_key.0,
@@ -162,8 +163,22 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                 // long to handle slow hosts, racing will ensure we don't waste time unnecessarily
                 Duration::from_secs(60),
             )
-            .await?;
+            .await;
         let elapsed = start.elapsed();
+
+        let data = res
+            .inspect(|_| {
+                debug!(
+                    "slab {slab_index} shard {} download succeeded in {:?}",
+                    task.shard_index, elapsed
+                )
+            })
+            .inspect_err(|e| {
+                debug!(
+                    "slab {slab_index} shard {} download failed in {:?}: {:?}",
+                    task.shard_index, elapsed, e
+                )
+            })?;
         // Bytes -> Vec<u8> is zero-copy when the Bytes is uniquely owned
         // (true here — no other refs to the response yet).
         Ok((

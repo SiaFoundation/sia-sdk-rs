@@ -90,7 +90,7 @@ pub use builder::{
 };
 pub use download::{Download, DownloadError};
 pub use encryption::EncryptionKey;
-pub use hosts::{QueueError, RPCError};
+pub use hosts::RPCError;
 pub use slabs::{Object, ObjectEvent, PinnedSlab, SealedObject, SealedObjectError, Sector, Slab};
 pub use upload::{PackedUpload, UploadError};
 
@@ -491,7 +491,6 @@ pub fn validate_recovery_phrase(phrase: &str) -> Result<(), SeedError> {
 #[cfg(test)]
 mod test {
     use crate::download::Download;
-    use crate::hosts::QueueError;
     use crate::rhp4::Client;
     use crate::upload::{PackedUpload, upload_object};
     use bytes::{Bytes, BytesMut};
@@ -1215,7 +1214,7 @@ mod test {
         .expect_err("upload to fail");
 
         match err {
-            UploadError::QueueError(QueueError::InsufficientHosts) => (),
+            UploadError::InsufficientHosts => (),
             _ => panic!(),
         }
     }
@@ -1354,7 +1353,7 @@ mod test {
         .expect_err("upload to fail");
 
         match err {
-            UploadError::QueueError(QueueError::InsufficientHosts) => (),
+            UploadError::InsufficientHosts => (),
             _ => panic!(),
         }
     }

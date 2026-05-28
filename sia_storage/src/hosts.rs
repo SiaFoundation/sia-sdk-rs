@@ -1,10 +1,11 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::sync::{Arc, RwLock};
 
 use chrono::Utc;
 use log::debug;
-use priority_queue::PriorityQueue;
+use rand::RngExt;
+use rand::rngs::SmallRng;
 use serde::{Deserialize, Serialize};
 use sia_core::rhp4::HostPrices;
 use sia_core::signing::{PrivateKey, PublicKey};
@@ -43,8 +44,6 @@ struct RPCAverage(Option<f64>); // exponential moving average of throughput in b
 
 impl RPCAverage {
     const ALPHA: f64 = 0.2;
-    // Default throughput in bytes/sec if no samples; equivalent to 1 Gbps.
-    const DEFAULT_BYTES_PER_SEC: u64 = 125_000_000;
 
     fn add_sample(&mut self, bytes_per_sec: u64) {
         match self.0 {
@@ -57,17 +56,17 @@ impl RPCAverage {
         }
     }
 
-    fn avg(&self) -> u64 {
-        match self.0 {
-            Some(avg) => avg as u64,
-            None => Self::DEFAULT_BYTES_PER_SEC,
-        }
+    fn avg(&self) -> Option<f64> {
+        self.0
     }
 }
 
 impl Display for RPCAverage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.avg(), f)
+        match self.avg() {
+            Some(v) => Display::fmt(&v, f),
+            None => f.write_str("unsampled"),
+        }
     }
 }
 
@@ -78,18 +77,6 @@ impl PartialEq for RPCAverage {
 }
 
 impl Eq for RPCAverage {}
-
-impl Ord for RPCAverage {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.avg().cmp(&other.avg())
-    }
-}
-
-impl PartialOrd for RPCAverage {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
 
 #[derive(Debug, Default, Clone)]
 struct FailureRate(Option<f64>); // exponential moving average of failure rate
@@ -110,11 +97,8 @@ impl FailureRate {
     }
 
     // Computes the failure rate as an integer percentage (0-100)
-    fn rate(&self) -> i64 {
-        match self.0 {
-            Some(rate) => (rate * 100.0).round() as i64,
-            None => 0, // presume no failures if no samples
-        }
+    fn rate(&self) -> f64 {
+        self.0.unwrap_or(0.0)
     }
 }
 
@@ -124,14 +108,6 @@ impl Display for FailureRate {
     }
 }
 
-impl PartialEq for FailureRate {
-    fn eq(&self, other: &Self) -> bool {
-        self.rate() == other.rate()
-    }
-}
-
-impl Eq for FailureRate {}
-
 impl PartialOrd for FailureRate {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -140,11 +116,29 @@ impl PartialOrd for FailureRate {
 
 impl Ord for FailureRate {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.rate().cmp(&other.rate())
+        self.rate().total_cmp(&other.rate())
     }
 }
 
-#[derive(Debug, Default, Clone, Eq, PartialEq)]
+impl PartialEq for FailureRate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for FailureRate {}
+
+// Computes throughput in bytes/sec, returning None when elapsed is zero so that
+// the sample is skipped instead of producing an invalid/infinite throughput
+// value that would skew the moving average.
+const fn bytes_per_sec(bytes: u64, elapsed: Duration) -> Option<u64> {
+    if elapsed.is_zero() {
+        return None;
+    }
+    Some((bytes as f64 / elapsed.as_secs_f64()) as u64)
+}
+
+#[derive(Debug, Default, Clone)]
 struct HostMetric {
     rpc_write_avg: RPCAverage,
     rpc_read_avg: RPCAverage,
@@ -175,44 +169,28 @@ impl HostMetric {
     }
 }
 
-// Computes throughput in bytes/sec, returning None when elapsed is zero so that
-// the sample is skipped instead of producing an invalid/infinite throughput
-// value that would skew the moving average.
-fn bytes_per_sec(bytes: u64, elapsed: Duration) -> Option<u64> {
-    if elapsed.is_zero() {
-        return None;
-    }
-    Some((bytes as f64 / elapsed.as_secs_f64()) as u64)
-}
+#[derive(Copy, Clone, Default)]
+struct Score(f64);
 
-impl Ord for HostMetric {
+impl Ord for Score {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match other.failure_rate.cmp(&self.failure_rate) {
-            // lower failure rate is higher priority
-            std::cmp::Ordering::Equal => {
-                // use average of read and write throughput as tiebreaker
-                let avg_self = self
-                    .rpc_write_avg
-                    .avg()
-                    .saturating_add(self.rpc_read_avg.avg())
-                    / 2;
-                let avg_other = other
-                    .rpc_write_avg
-                    .avg()
-                    .saturating_add(other.rpc_read_avg.avg())
-                    / 2;
-                avg_self.cmp(&avg_other) // higher average throughput is higher priority
-            }
-            ord => ord,
-        }
+        self.0.total_cmp(&other.0)
     }
 }
 
-impl PartialOrd for HostMetric {
+impl PartialOrd for Score {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
+
+impl PartialEq for Score {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for Score {}
 
 #[derive(Debug)]
 struct HostInfo {
@@ -223,13 +201,13 @@ struct HostInfo {
 #[derive(Debug)]
 struct HostList {
     hosts: RwLock<HashMap<PublicKey, HostInfo>>,
-    preferred_hosts: RwLock<PriorityQueue<PublicKey, HostMetric>>,
+    metrics: RwLock<HashMap<PublicKey, Mutex<HostMetric>>>,
 }
 
 impl HostList {
     fn new() -> Self {
         Self {
-            preferred_hosts: RwLock::new(PriorityQueue::new()),
+            metrics: RwLock::new(HashMap::new()),
             hosts: RwLock::new(HashMap::new()),
         }
     }
@@ -239,6 +217,35 @@ impl HostList {
         hosts.get(host_key).map(|h| h.addresses.clone())
     }
 
+    fn read_score(&self, host_key: &PublicKey) -> Option<Score> {
+        const DISCOVERY_BYTES_PER_SEC: f64 = 125_000_000.0;
+        const FAILURE_DECAY: f64 = -10.0;
+
+        let metrics = self.metrics.read().unwrap();
+        let metric = metrics.get(host_key)?.lock().unwrap();
+
+        let throughput = metric.rpc_read_avg.avg().unwrap_or(DISCOVERY_BYTES_PER_SEC);
+        Some(Score(
+            throughput * (FAILURE_DECAY * metric.failure_rate.rate()).exp(),
+        ))
+    }
+
+    fn write_score(&self, host_key: &PublicKey) -> Option<Score> {
+        const DISCOVERY_BYTES_PER_SEC: f64 = 125_000_000.0;
+        const FAILURE_DECAY: f64 = -6.0;
+
+        let metrics = self.metrics.read().unwrap();
+        let metric = metrics.get(host_key)?.lock().unwrap();
+
+        let throughput = metric
+            .rpc_write_avg
+            .avg()
+            .unwrap_or(DISCOVERY_BYTES_PER_SEC);
+        Some(Score(
+            throughput.sqrt() * (FAILURE_DECAY * metric.failure_rate.rate()).exp(),
+        ))
+    }
+
     /// Sorts a list of hosts according to their priority in the client's
     /// preferred hosts queue. The function `f` is used to extract the
     /// public key from each item.
@@ -246,11 +253,8 @@ impl HostList {
     where
         F: Fn(&H) -> &PublicKey,
     {
-        let preferred_hosts = self.preferred_hosts.read().unwrap();
-        hosts.sort_by(|a, b| {
-            preferred_hosts
-                .get_priority(f(b))
-                .cmp(&preferred_hosts.get_priority(f(a)))
+        hosts.sort_by_cached_key(|host| {
+            std::cmp::Reverse(self.read_score(f(host)).unwrap_or_default())
         });
     }
 
@@ -260,10 +264,10 @@ impl HostList {
     /// their metrics are retained in case they reappear later.
     fn update(&self, new_hosts: Vec<Host>, clear: bool) {
         let mut hosts = self.hosts.write().unwrap();
+        let mut metrics = self.metrics.write().unwrap();
         if clear {
             hosts.clear();
         }
-        let mut priority = self.preferred_hosts.write().unwrap();
         for host in new_hosts {
             hosts.insert(
                 host.public_key,
@@ -272,9 +276,7 @@ impl HostList {
                     good_for_upload: host.good_for_upload,
                 },
             );
-            if !priority.contains(&host.public_key) {
-                priority.push(host.public_key, HostMetric::default());
-            }
+            metrics.entry(host.public_key).or_default();
         }
     }
 
@@ -290,7 +292,7 @@ impl HostList {
 
     /// Creates a queue of hosts that are good to upload to for sequential
     /// access sorted by priority.
-    fn upload_queue(&self) -> HostQueue {
+    fn upload_queue(self: Arc<Self>) -> HostQueue {
         let mut available_hosts = self
             .hosts
             .read()
@@ -300,46 +302,38 @@ impl HostList {
             .collect::<Vec<_>>();
 
         self.prioritize(&mut available_hosts, |hk| hk);
-        HostQueue::new(available_hosts)
+        HostQueue::new(self, available_hosts)
     }
 
     /// Adds a failure for the given host, updating its metrics and priority.
-    fn add_failure(&self, host_key: PublicKey) {
-        self.preferred_hosts
-            .write()
-            .unwrap()
-            .change_priority_by(&host_key, |metric| {
-                metric.add_failure();
-            });
+    fn add_failure(&self, host_key: &PublicKey) {
+        let metrics = self.metrics.read().unwrap();
+        if let Some(metric) = metrics.get(host_key) {
+            metric.lock().unwrap().add_failure();
+        }
     }
 
     /// Adds a read sample for the given host, updating its metrics and priority.
-    fn add_read_sample(&self, host_key: PublicKey, bytes: u64, elapsed: Duration) {
-        self.preferred_hosts
-            .write()
-            .unwrap()
-            .change_priority_by(&host_key, |metric| {
-                metric.add_read_sample(bytes, elapsed);
-            });
+    fn add_read_sample(&self, host_key: &PublicKey, bytes: u64, elapsed: Duration) {
+        let metrics = self.metrics.read().unwrap();
+        if let Some(metric) = metrics.get(host_key) {
+            metric.lock().unwrap().add_read_sample(bytes, elapsed);
+        }
     }
 
     /// Adds a write sample for the given host, updating its metrics and priority.
-    fn add_write_sample(&self, host_key: PublicKey, bytes: u64, elapsed: Duration) {
-        self.preferred_hosts
-            .write()
-            .unwrap()
-            .change_priority_by(&host_key, |metric| {
-                metric.add_write_sample(bytes, elapsed);
-            });
+    fn add_write_sample(&self, host_key: &PublicKey, bytes: u64, elapsed: Duration) {
+        let metrics = self.metrics.read().unwrap();
+        if let Some(metric) = metrics.get(host_key) {
+            metric.lock().unwrap().add_write_sample(bytes, elapsed);
+        }
     }
 
-    fn add_settings_sample(&self, host_key: PublicKey, elapsed: Duration) {
-        self.preferred_hosts
-            .write()
-            .unwrap()
-            .change_priority_by(&host_key, |metric| {
-                metric.add_settings_sample(elapsed);
-            });
+    fn add_settings_sample(&self, host_key: &PublicKey, elapsed: Duration) {
+        let metrics = self.metrics.read().unwrap();
+        if let Some(metric) = metrics.get(host_key) {
+            metric.lock().unwrap().add_settings_sample(elapsed);
+        }
     }
 }
 
@@ -445,11 +439,11 @@ impl<T: Transport> Hosts<T> {
     /// Creates a queue of hosts that are good to upload to for sequential
     /// access sorted by priority.
     pub fn upload_queue(&self) -> HostQueue {
-        self.hosts.upload_queue()
+        self.hosts.clone().upload_queue()
     }
 
     /// Adds a failure for the given host, updating its metrics and priority.
-    pub fn add_failure(&self, host_key: PublicKey) {
+    pub fn add_failure(&self, host_key: &PublicKey) {
         self.hosts.add_failure(host_key);
     }
 
@@ -520,9 +514,9 @@ impl<T: Transport> Hosts<T> {
         } else {
             let (prices, elapsed) = timeout(fetch_timeout, transport.host_prices(host_endpoint))
                 .await
-                .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))?
-                .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))?;
-            hosts.add_settings_sample(host_endpoint.public_key, elapsed);
+                .inspect_err(|_| hosts.add_failure(&host_endpoint.public_key))?
+                .inspect_err(|_| hosts.add_failure(&host_endpoint.public_key))?;
+            hosts.add_settings_sample(&host_endpoint.public_key, elapsed);
             cache.set(host_endpoint.public_key, prices.clone());
             Ok((prices, true))
         }
@@ -551,9 +545,9 @@ impl<T: Transport> Hosts<T> {
                 .transport
                 .write_sector(&host, prices, account_key, sector)
                 .await
-                .inspect_err(|_| self.hosts.add_failure(host_key))
+                .inspect_err(|_| self.hosts.add_failure(&host_key))
                 .map_err(RPCError::Rhp)?;
-            self.hosts.add_write_sample(host_key, bytes, elapsed);
+            self.hosts.add_write_sample(&host_key, bytes, elapsed);
             Ok(root)
         })
         .await?
@@ -584,33 +578,13 @@ impl<T: Transport> Hosts<T> {
                 .transport
                 .read_sector(&host, prices, account_key, root, offset, length)
                 .await
-                .inspect_err(|_| self.hosts.add_failure(host_key))
+                .inspect_err(|_| self.hosts.add_failure(&host_key))
                 .map_err(RPCError::Rhp)?;
-            self.hosts.add_read_sample(host_key, bytes, elapsed);
+            self.hosts.add_read_sample(&host_key, bytes, elapsed);
             Ok(data)
         })
         .await?
     }
-}
-
-/// Errors from the host selection queue.
-#[derive(Debug, Error)]
-pub enum QueueError {
-    /// All available hosts have been tried and failed.
-    #[error("no more hosts available")]
-    NoMoreHosts,
-    /// Not enough hosts are available to meet the required shard count.
-    #[error("not enough initial hosts")]
-    InsufficientHosts,
-    /// The host queue has been closed.
-    #[error("client closed")]
-    Closed,
-    /// An internal mutex was poisoned.
-    #[error("internal mutex error")]
-    MutexError,
-    /// The host has been retried too many times.
-    #[error("host retry limit exceeded")]
-    MaxRetriesExceeded,
 }
 
 /// Maximum number of times a single host may be re-queued via
@@ -618,75 +592,62 @@ pub enum QueueError {
 const MAX_RETRIES: usize = 3;
 
 #[derive(Debug)]
-struct HostQueueInner {
-    hosts: VecDeque<PublicKey>,
-    attempts: HashMap<PublicKey, usize>,
-}
-
-/// A thread-safe queue of host public keys.
-#[derive(Debug, Clone)]
 pub(crate) struct HostQueue {
-    inner: Arc<Mutex<HostQueueInner>>,
-}
-
-impl Iterator for HostQueue {
-    type Item = PublicKey;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.pop_front().ok()
-    }
+    hosts: Arc<HostList>,
+    available: Vec<PublicKey>,
+    attempts: HashMap<PublicKey, usize>,
+    rng: SmallRng, // for testing
 }
 
 impl HostQueue {
-    pub(crate) fn new(hosts: Vec<PublicKey>) -> Self {
+    fn new(hosts: Arc<HostList>, available: Vec<PublicKey>) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HostQueueInner {
-                hosts: VecDeque::from(hosts),
-                attempts: HashMap::new(),
-            })),
+            hosts,
+            available,
+            attempts: HashMap::new(),
+            rng: rand::make_rng(),
         }
     }
 
-    pub fn pop_front(&self) -> Result<PublicKey, QueueError> {
-        let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
-        inner.hosts.pop_front().ok_or(QueueError::NoMoreHosts)
+    pub fn pick(&mut self) -> Option<PublicKey> {
+        if self.available.is_empty() {
+            return None;
+        }
+        let mut best: Option<(usize, f64)> = None;
+        for (i, pk) in self.available.iter().enumerate() {
+            let score = self.hosts.write_score(pk).unwrap_or_default();
+            let score = score.0.max(f64::MIN_POSITIVE).ln().max(1.0);
+            let score = self.rng.random::<f64>().powf(1.0 / score);
+            match best {
+                None => best = Some((i, score)),
+                Some((_, bs)) if score > bs => best = Some((i, score)),
+                _ => {}
+            }
+        }
+        let (i, _) = best?;
+        let picked = self.available.swap_remove(i);
+        Some(picked)
     }
 
-    pub fn pop_n(&self, n: usize) -> Result<Vec<PublicKey>, QueueError> {
-        let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
-        if inner.hosts.len() < n {
-            return Err(QueueError::NoMoreHosts);
-        }
-        let mut result = Vec::with_capacity(n);
-        for _ in 0..n {
-            let host_key = inner.hosts.pop_front().ok_or(QueueError::NoMoreHosts)?;
-            result.push(host_key);
-        }
-        Ok(result)
+    pub fn len(&self) -> usize {
+        self.available.len()
     }
 
-    pub fn retry(&self, host: PublicKey) -> Result<(), QueueError> {
-        let mut inner = self.inner.lock().map_err(|_| QueueError::MutexError)?;
-        let attempts = inner.attempts.get(&host).copied().unwrap_or(0);
-        if attempts >= MAX_RETRIES {
-            return Err(QueueError::MaxRetriesExceeded);
+    pub fn retry(&mut self, host: PublicKey) -> bool {
+        let attempts = self.attempts.entry(host).or_default();
+        *attempts += 1;
+        if *attempts >= MAX_RETRIES {
+            return false;
         }
-        inner.hosts.push_back(host);
-        inner
-            .attempts
-            .entry(host)
-            .and_modify(|e| *e += 1)
-            .or_insert(1);
-        Ok(())
+        true
     }
 }
 
 #[cfg(test)]
 mod test {
+    use super::*;
     use crate::rhp4::Client;
     use sia_core::signing::PrivateKey;
-
-    use super::*;
 
     fn random_pubkey() -> sia_core::signing::PublicKey {
         let mut seed = [0u8; 32];
@@ -694,10 +655,184 @@ mod test {
         PrivateKey::from_seed(&seed).public_key()
     }
 
+    fn test_host(public_key: PublicKey, good_for_upload: bool) -> Host {
+        Host {
+            public_key,
+            addresses: vec![],
+            country_code: String::new(),
+            latitude: 0.0,
+            longitude: 0.0,
+            good_for_upload,
+        }
+    }
+
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
     #[sia_core_derive::cross_target_test]
+    fn test_failure_rate() {
+        let mut fr = FailureRate::default();
+        assert_eq!(fr.rate(), 0.0, "initial failure rate should be 0");
+
+        fr.add_sample(false);
+        assert_eq!(fr.rate(), 1.0, "single failure should give rate 1.0");
+
+        for _ in 0..10 {
+            fr.add_sample(true);
+        }
+        assert!(fr.rate() < 1.0, "failure rate should decay after successes");
+
+        let mut clean = FailureRate::default();
+        for _ in 0..5 {
+            clean.add_sample(true);
+        }
+        assert_eq!(clean.rate(), 0.0, "rate stays 0 with only successes");
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_rpc_average() {
+        let mut avg = RPCAverage::default();
+        assert_eq!(avg.avg(), None, "unsampled average should be None");
+
+        avg.add_sample(100);
+        assert_eq!(avg.avg(), Some(100.0), "first sample is the average");
+
+        avg.add_sample(200);
+        assert!(
+            avg.avg().unwrap() > 100.0,
+            "average increases with higher sample",
+        );
+
+        avg.add_sample(50);
+        assert!(
+            avg.avg().unwrap() < 200.0,
+            "average decreases with lower sample",
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_write_score_uses_discovery_when_unsampled() {
+        let hosts = Hosts::new(Client::new());
+        let hk = random_pubkey();
+        hosts.update(vec![test_host(hk, true)], true);
+
+        let score = hosts
+            .hosts
+            .write_score(&hk)
+            .expect("known host should score");
+        assert!(score.0 > 0.0, "unsampled host gets the discovery baseline");
+
+        assert!(
+            hosts.hosts.write_score(&random_pubkey()).is_none(),
+            "unknown host returns None",
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_score_drops_after_failures() {
+        let hosts = Hosts::new(Client::new());
+        let hk = random_pubkey();
+        hosts.update(vec![test_host(hk, true)], true);
+
+        let healthy = hosts.hosts.write_score(&hk).unwrap();
+        for _ in 0..3 {
+            hosts.add_failure(&hk);
+        }
+        let degraded = hosts.hosts.write_score(&hk).unwrap();
+        assert!(
+            degraded.0 < healthy.0,
+            "failures should lower the score (was {} → {})",
+            healthy.0,
+            degraded.0,
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_upload_queue_filters_good_for_upload() {
+        let hosts = Hosts::new(Client::new());
+        let good = random_pubkey();
+        let bad = random_pubkey();
+        hosts.update(vec![test_host(good, true), test_host(bad, false)], true);
+
+        let queue = hosts.upload_queue();
+        assert_eq!(queue.len(), 1, "only good_for_upload hosts enter the queue");
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_pick_returns_host_when_available() {
+        // Regression: `best` was never initialized in `pick()`, so it always
+        // returned None even with hosts available — surfacing as
+        // `InsufficientHosts` at runtime.
+        let hosts = Hosts::new(Client::new());
+        let hk = random_pubkey();
+        hosts.update(vec![test_host(hk, true)], true);
+
+        let mut queue = hosts.upload_queue();
+        assert_eq!(
+            queue.pick(),
+            Some(hk),
+            "pick should return the only available host",
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_pick_drains_queue() {
+        let hosts = Hosts::new(Client::new());
+        let keys: Vec<_> = (0..5).map(|_| random_pubkey()).collect();
+        hosts.update(keys.iter().map(|k| test_host(*k, true)).collect(), true);
+
+        let mut queue = hosts.upload_queue();
+        let mut picked = std::collections::HashSet::new();
+        while let Some(hk) = queue.pick() {
+            assert!(picked.insert(hk), "pick returned the same host twice");
+        }
+        assert_eq!(picked.len(), keys.len(), "every host picked exactly once");
+        for k in &keys {
+            assert!(picked.contains(k), "every input host appears in picks");
+        }
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_pick_empty_returns_none() {
+        let hosts = Hosts::new(Client::new());
+        let mut queue = hosts.upload_queue();
+        assert_eq!(queue.pick(), None, "empty queue returns None");
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_retry_caps_at_max() {
+        let hosts = Hosts::new(Client::new());
+        let mut queue = hosts.upload_queue();
+        let hk = random_pubkey();
+
+        assert!(queue.retry(hk), "first retry under cap");
+        assert!(queue.retry(hk), "second retry under cap");
+        assert!(!queue.retry(hk), "third retry exceeds MAX_RETRIES");
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_prioritize_sorts_by_score_desc() {
+        // After scoring, hosts with samples that produce higher scores should
+        // sort ahead of less-favorable ones. We just check the relative order
+        // of two hosts with sharply different metrics.
+        let hosts = Hosts::new(Client::new());
+        let fast = random_pubkey();
+        let failing = random_pubkey();
+        hosts.update(vec![test_host(fast, true), test_host(failing, true)], true);
+        hosts
+            .hosts
+            .add_write_sample(&fast, 10_000_000, Duration::from_secs(1));
+        for _ in 0..5 {
+            hosts.hosts.add_failure(&failing);
+        }
+
+        let mut items = vec![failing, fast];
+        hosts.prioritize(&mut items, |k| k);
+        assert_eq!(items[0], fast, "fast healthy host should sort first");
+        assert_eq!(items[1], failing, "failing host should sort last");
+    }
+
+    /*#[sia_core_derive::cross_target_test]
     fn test_failure_rate() {
         let mut fr = FailureRate::default();
         assert_eq!(fr.rate(), 0, "initial failure rate should be 0%");
@@ -733,29 +868,29 @@ mod test {
         let mut avg = RPCAverage::default();
         assert_eq!(
             avg.avg(),
-            125000000,
+            None,
             "default average should be 1 Gbps before any samples"
         );
 
         avg.add_sample(100);
-        assert_eq!(avg.avg(), 100, "initial average should be first sample");
+        assert_eq!(avg.avg(), Some(100.0), "initial average should be first sample");
 
         avg.add_sample(200);
         assert!(
-            avg.avg() > 100,
+            avg.avg().unwrap() > 100.0,
             "average should increase after higher sample"
         );
 
         avg.add_sample(50);
         assert!(
-            avg.avg() < 200,
+            avg.avg().unwrap() < 200.0,
             "average should decrease after lower sample"
         );
 
         let mut avg2 = RPCAverage::default();
         avg2.add_sample(150);
         assert_eq!(
-            avg.cmp(&avg2),
+            avg.avg().unwrap().total_cmp(&avg2.avg().unwrap()),
             std::cmp::Ordering::Less,
             "lower average should be lesser"
         );
@@ -938,5 +1073,5 @@ mod test {
         // queue should be unchanged - can still pop 3
         let popped = queue.pop_n(3).expect("should pop 3");
         assert_eq!(popped.len(), 3);
-    }
+    }*/
 }
