@@ -72,17 +72,11 @@ struct SectorTask {
 }
 
 struct AwaitingRecovery {
-    /// Top `min_shards` sectors, each with their inflight slot already
-    /// reserved by [`SlabRecovery::new`]. The guards must be held until the
-    /// per-sector read tasks are spawned, then move into those tasks for
-    /// the duration of the RPC. Reserving synchronously at construction
-    /// time means concurrent `SlabRecovery::new` calls (e.g. the batch
-    /// queued by `Download::new`) see each other's load and disperse
-    /// across hosts instead of all picking the same fastest ones.
-    initial: Vec<(SectorTask, Option<InflightGuard>)>,
-    /// Remaining sectors, unreserved. Used on failure or after the 500ms
-    /// race timeout; reservation happens at spawn time on this path.
-    remaining: VecDeque<SectorTask>,
+    /// The sectors to download for this slab, paired with their inflight guards
+    /// if they were reserved by `SlabRecovery::new`. Guards are held for the
+    /// duration of the RPC in `SlabRecovery::recover_shard` to ensure the
+    /// reservation is released on completion or error.
+    sectors: Vec<(SectorTask, Option<InflightGuard>)>,
 }
 
 struct ShardsRecovered {
@@ -150,16 +144,19 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
         // into the spawned read tasks via `recover_shards` and drop with
         // them; failure/timeout retries reserve on demand from `remaining`.
         let min_shards = slab.slab.min_shards as usize;
-        let mut iter = sectors.into_iter();
-        let initial: Vec<(SectorTask, Option<InflightGuard>)> = iter
-            .by_ref()
-            .take(min_shards)
-            .map(|task| {
-                let guard = client.reserve_inflight_download(&task.sector.host_key);
-                (task, guard)
+        let sectors = sectors
+            .into_iter()
+            .enumerate()
+            .map(|(i, task)| {
+                if i < min_shards {
+                    let guard = client.reserve_inflight_download(&task.sector.host_key);
+                    return (task, guard);
+                } else {
+                    return (task, None);
+                }
             })
             .collect();
-        let remaining: VecDeque<SectorTask> = iter.collect();
+
         Ok(Self {
             client,
             account_key,
@@ -168,7 +165,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
             encryption_key: slab.slab.encryption_key,
             offset: slab.slab.offset as usize,
             length: slab.slab.length as usize,
-            state: AwaitingRecovery { initial, remaining },
+            state: AwaitingRecovery { sectors },
         })
     }
 
@@ -219,9 +216,8 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
         shard_downloaded: Option<ShardProgressCallback>,
     ) -> Result<SlabRecovery<ShardsRecovered, T>, DownloadError> {
         let mut shard_tasks = JoinSet::new();
-        let total_sectors = self.state.initial.len() + self.state.remaining.len();
-        let mut shards = vec![None; total_sectors];
-        let mut sectors = self.state.remaining;
+        let mut shards = vec![None; self.state.sectors.len()];
+        let mut sectors = VecDeque::from(self.state.sectors);
         let min_shards = self.min_shards;
         let client = self.client;
         let account_key = self.account_key;
@@ -237,7 +233,10 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
         // Spawn the initial batch using the inflight slots reserved by
         // `SlabRecovery::new`. Each guard moves into its corresponding
         // task and stays alive for the duration of the RPC.
-        for (task, inflight) in self.state.initial {
+        for i in 0..self.min_shards {
+            let (task, inflight) = sectors
+                .pop_front()
+                .ok_or(DownloadError::NotEnoughShards(i, self.min_shards))?;
             join_set_spawn!(
                 &mut shard_tasks,
                 Self::recover_shard(
@@ -282,7 +281,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                         Err(_) => {
                             if recovered_shards as usize + shard_tasks.len() + sectors.len() < min_shards as usize {
                                 return Err(DownloadError::NotEnoughShards(recovered_shards, min_shards));
-                            } else if let Some(task) = sectors.pop_front() {
+                            } else if let Some((task, _)) = sectors.pop_front() {
                                 let inflight = client.reserve_inflight_download(&task.sector.host_key);
                                 join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, inflight, self.slab_index, shard_offset, shard_length));
                             }
@@ -290,7 +289,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                     }
                 },
                 _ = sleep(Duration::from_millis(500)), if !sectors.is_empty() => {
-                    let task = sectors.pop_front().expect("sectors should not be empty");
+                    let (task, _) = sectors.pop_front().expect("sectors should not be empty");
                     let inflight = client.reserve_inflight_download(&task.sector.host_key);
                     join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, inflight, self.slab_index, shard_offset, shard_length));
                 },
