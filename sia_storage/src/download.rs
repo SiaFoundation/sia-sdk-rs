@@ -150,9 +150,9 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
             .map(|(i, task)| {
                 if i < min_shards {
                     let guard = client.reserve_inflight_download(&task.sector.host_key);
-                    return (task, guard);
+                    (task, guard)
                 } else {
-                    return (task, None);
+                    (task, None)
                 }
             })
             .collect();
