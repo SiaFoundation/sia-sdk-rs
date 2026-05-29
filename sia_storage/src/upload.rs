@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
-use crate::hosts::{InflightGuard, QueueError, RPCError, UsedHosts};
+use crate::hosts::{HostQueue, InflightGuard, QueueError, RPCError};
 use crate::rhp4::Client;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Elapsed, Instant, sleep};
@@ -27,8 +27,8 @@ struct ShardUpload {
     data: Bytes,
     slab_index: usize,
     shard_index: usize,
-    /// Per-slab host accounting shared across all shards.
-    used_hosts: Arc<Mutex<UsedHosts>>,
+    /// Per-slab host pool shared across all shards.
+    queue: Arc<Mutex<HostQueue>>,
 }
 
 struct SectorUploadResult {
@@ -88,14 +88,12 @@ impl ShardUpload {
         });
     }
 
-    /// Atomically pick the next-best host for this shard and reserve an
-    /// inflight slot on it. Respects the slab's host accounting: skips
-    /// hosts currently in flight, holding a successful sector, or that
-    /// have exhausted their retry budget. The returned guard must travel
-    /// with the spawned write task so the reservation lives until the RPC
-    /// finishes.
+    /// Atomically pick the next-best host for this shard from the slab's
+    /// pool and reserve an inflight slot on it. The returned guard must
+    /// travel with the spawned write task so the reservation lives until
+    /// the RPC finishes.
     fn pick_next_host(&self) -> Option<(PublicKey, InflightGuard)> {
-        self.used_hosts.lock().unwrap().pick()
+        self.queue.lock().unwrap().pick()
     }
 
     async fn upload_shard(self) -> Result<SectorUploadResult, UploadError> {
@@ -122,12 +120,12 @@ impl ShardUpload {
                         }
                         Err(_) => {
                             // write_sector already updated the host's
-                            // failure_rate on the error path. Release it
-                            // from `claimed` so it can be re-picked within
-                            // its retry budget. The InflightGuard for the
-                            // failed task has already dropped when the
-                            // task body exited.
-                            self.used_hosts.lock().unwrap().release_failed(&host_key);
+                            // failure_rate on the error path. Return it to
+                            // the pool so another shard (or this one) can
+                            // re-pick it within its retry budget. The
+                            // InflightGuard for the failed task dropped
+                            // when the task body exited.
+                            self.queue.lock().unwrap().retry(host_key);
                             if tasks.is_empty() {
                                 let (next, guard) = self.pick_next_host()
                                     .ok_or(QueueError::NoMoreHosts)?;
@@ -295,19 +293,19 @@ impl Upload {
             })?;
 
             // No pre-assignment of hosts: each shard picks its host
-            // just-in-time via the slab's `UsedHosts`, which scores by
+            // just-in-time via the slab's `HostQueue`, which scores by
             // `throughput / (inflight + 1)`. This disperses load across
             // hosts naturally — multiple slabs running in parallel won't
             // all pile onto the same top-N hosts, because by the time
             // slab N+1's shards pick, slab N's chosen hosts have higher
             // inflight and lower score.
             //
-            // `UsedHosts` also enforces slab uniqueness — every shard
+            // `HostQueue` also enforces slab uniqueness — every shard
             // within this slab must land on a distinct host (the indexer
             // rejects duplicate sectors because they break redundancy) —
             // while allowing failed hosts to be re-picked up to the slab's
             // retry cap.
-            let used_hosts: Arc<Mutex<UsedHosts>> = Arc::new(Mutex::new(client.slab_host_picker()));
+            let queue: Arc<Mutex<HostQueue>> = Arc::new(Mutex::new(client.slab_host_picker()));
             let owned_slab_key = Arc::new(slab_key.clone());
             // ShardUpload::upload_shard returns Result<SectorUploadResult, UploadError>
             // (one settled result per shard — not the per-attempt tuple
@@ -318,7 +316,7 @@ impl Upload {
                 let shard_client = client.clone();
                 let shard_account_key = app_key.clone();
                 let shard_sema_inner = shard_sema.clone();
-                let used_hosts = used_hosts.clone();
+                let queue = queue.clone();
                 join_set_spawn!(shard_tasks, async move {
                     let shard = maybe_spawn_blocking!({
                         encrypt_shard(&owned_slab_key, shard_index as u8, 0, &mut shard);
@@ -331,7 +329,7 @@ impl Upload {
                         data: Bytes::from(shard),
                         slab_index,
                         shard_index,
-                        used_hosts,
+                        queue,
                     };
                     shard_upload.upload_shard().await
                 });
