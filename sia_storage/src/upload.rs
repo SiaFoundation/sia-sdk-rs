@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
-use crate::hosts::{HostQueue, QueueError, RPCError};
+use crate::hosts::{HostQueue, InflightGuard, QueueError, RPCError};
 use crate::rhp4::Client;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Elapsed, Instant, sleep};
@@ -23,7 +23,7 @@ use tokio::task::JoinSet;
 struct ShardUpload {
     semaphore: Arc<Semaphore>,
     client: Hosts<Client>,
-    hosts: HostQueue,
+    hosts: Arc<Mutex<HostQueue>>,
     account_key: Arc<AppKey>,
     data: Bytes,
     slab_index: usize,
@@ -43,6 +43,7 @@ impl ShardUpload {
         &self,
         tasks: &mut JoinSet<Result<SectorUploadResult, UploadError>>,
         host_key: PublicKey,
+        inflight: InflightGuard,
         write_timeout: Duration,
         permit: OwnedSemaphorePermit,
     ) {
@@ -54,6 +55,10 @@ impl ShardUpload {
         let shard_index = self.shard_index;
         join_set_spawn!(tasks, async move {
             let _permit = permit;
+            // Hold the inflight guard for the duration of the RPC so the
+            // host's load is visible to concurrent pickers; dropped here
+            // either after success or failure.
+            let _inflight = inflight;
             let now = Instant::now();
             let root = client.write_sector(host_key, &account_key.0, data, write_timeout).await
                 .inspect_err(|e| {
@@ -61,7 +66,7 @@ impl ShardUpload {
                         "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {:?} {e}",
                         now.elapsed()
                     );
-                    let _ = hosts.retry(host_key);
+                    hosts.lock().unwrap().retry(host_key);
                 })?;
             let elapsed = now.elapsed();
             debug!(
@@ -76,10 +81,19 @@ impl ShardUpload {
         });
     }
 
-    async fn upload_shard(self, host_key: PublicKey) -> Result<SectorUploadResult, UploadError> {
+    /// Atomically pick the next-best host for this shard from the slab's
+    /// pool and reserve an inflight slot on it. The returned guard must
+    /// travel with the spawned write task so the reservation lives until
+    /// the RPC finishes.
+    fn pick_next_host(&self) -> Option<(PublicKey, InflightGuard)> {
+        self.hosts.lock().unwrap().pick()
+    }
+
+    async fn upload_shard(self) -> Result<SectorUploadResult, UploadError> {
         let permit = self.semaphore.clone().acquire_owned().await?;
+        let (initial, initial_guard) = self.pick_next_host().ok_or(QueueError::NoMoreHosts)?;
         let mut tasks = JoinSet::new();
-        self.spawn_write(&mut tasks, host_key, UPLOAD_TIMEOUT, permit);
+        self.spawn_write(&mut tasks, initial, initial_guard, UPLOAD_TIMEOUT, permit);
         loop {
             let active = tasks.len();
             tokio::select! {
@@ -87,32 +101,33 @@ impl ShardUpload {
                 Some(res) = tasks.join_next() => {
                     match res? {
                         Ok(result) => {
-                            if result.sector.host_key != host_key {
+                            if result.sector.host_key != initial {
                                 debug!(
                                     "slab {} shard {} penalizing original host {}",
-                                    self.slab_index, self.shard_index, host_key
+                                    self.slab_index, self.shard_index, initial
                                 );
-                                self.client.add_failure(host_key)
+                                self.client.add_failure(initial)
                             }
                             return Ok(result);
                         }
                         Err(_) => {
                             if tasks.is_empty() {
-                                let host_key = self.hosts.pop_front()?;
+                                let (next, guard) = self.pick_next_host()
+                                    .ok_or(QueueError::NoMoreHosts)?;
                                 let permit = self.semaphore.clone().acquire_owned().await?;
-                                self.spawn_write(&mut tasks, host_key, UPLOAD_TIMEOUT, permit);
+                                self.spawn_write(&mut tasks, next, guard, UPLOAD_TIMEOUT, permit);
                             }
                         }
                     }
                 },
                 _ = sleep(Duration::from_secs(active.max(1) as u64)) => {
                     if let Ok(racer) = self.semaphore.clone().try_acquire_owned()
-                        && let Ok(host_key) = self.hosts.pop_front() {
+                        && let Some((next, guard)) = self.pick_next_host() {
                             debug!(
-                                "slab {} shard {} racing slow host",
+                                "slab {} shard {} racing slow host with {next}",
                                 self.slab_index, self.shard_index
                             );
-                            self.spawn_write(&mut tasks, host_key, UPLOAD_TIMEOUT, racer);
+                            self.spawn_write(&mut tasks, next, guard, UPLOAD_TIMEOUT, racer);
                         }
                 }
             }
@@ -262,20 +277,28 @@ impl Upload {
                 Ok::<_, UploadError>(shards)
             })?;
 
-            let hosts = client.upload_queue();
-            let initial_hosts = hosts.pop_n(total_shards)?;
+            // No pre-assignment of hosts: each shard picks its host
+            // just-in-time via the slab's `HostQueue`, which scores by
+            // `throughput / (inflight + 1)`. This disperses load across
+            // hosts naturally — multiple slabs running in parallel won't
+            // all pile onto the same top-N hosts, because by the time
+            // slab N+1's shards pick, slab N's chosen hosts have higher
+            // inflight and lower score.
+            //
+            // `HostQueue` also enforces slab uniqueness — every shard
+            // within this slab must land on a distinct host (the indexer
+            // rejects duplicate sectors because they break redundancy) —
+            // while allowing failed hosts to be re-picked up to the slab's
+            // retry cap.
+            let hosts: Arc<Mutex<HostQueue>> = Arc::new(Mutex::new(client.upload_queue()));
             let owned_slab_key = Arc::new(slab_key.clone());
             let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> = JoinSet::new();
-            for (shard_index, (mut shard, initial_host)) in shards
-                .into_iter()
-                .zip(initial_hosts.into_iter())
-                .enumerate()
-            {
+            for (shard_index, mut shard) in shards.into_iter().enumerate() {
                 let owned_slab_key = owned_slab_key.clone();
                 let shard_client = client.clone();
-                let shard_hosts = hosts.clone();
                 let shard_account_key = app_key.clone();
                 let shard_sema_inner = shard_sema.clone();
+                let hosts = hosts.clone();
                 join_set_spawn!(shard_tasks, async move {
                     let shard = maybe_spawn_blocking!({
                         encrypt_shard(&owned_slab_key, shard_index as u8, 0, &mut shard);
@@ -284,13 +307,13 @@ impl Upload {
                     let shard_upload = ShardUpload {
                         semaphore: shard_sema_inner,
                         client: shard_client,
-                        hosts: shard_hosts,
                         account_key: shard_account_key,
                         data: Bytes::from(shard),
                         slab_index,
                         shard_index,
+                        hosts,
                     };
-                    shard_upload.upload_shard(initial_host).await
+                    shard_upload.upload_shard().await
                 });
             }
 

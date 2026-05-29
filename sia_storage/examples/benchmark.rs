@@ -14,6 +14,14 @@ struct Args {
     /// Size of the data to upload and download in bytes (default: 120 MiB)
     #[arg(short, long, default_value_t = 120 * 1024 * 1024)]
     size: usize,
+
+    /// Maximum number of concurrent shard uploads.
+    #[arg(long)]
+    upload_max_inflight: Option<usize>,
+
+    /// Maximum number of concurrent chunk downloads.
+    #[arg(long)]
+    download_max_inflight: Option<usize>,
 }
 
 const APP_META: AppMetadata = AppMetadata {
@@ -208,9 +216,13 @@ async fn main() {
 
     // upload the data to the network
     println!("Uploading random data...");
+    let mut upload_options = UploadOptions::default();
+    if let Some(n) = args.upload_max_inflight {
+        upload_options.max_inflight = n;
+    }
     let start = Instant::now();
     let obj = sdk
-        .upload(Object::default(), reader, UploadOptions::default())
+        .upload(Object::default(), reader, upload_options)
         .await
         .expect("failed to upload object");
     let upload_duration = start.elapsed();
@@ -221,10 +233,14 @@ async fn main() {
 
     // download the object back from the network
     println!("Downloading object...");
+    let mut download_options = DownloadOptions::default();
+    if let Some(n) = args.download_max_inflight {
+        download_options.max_inflight = n;
+    }
     let start = Instant::now();
     let mut verifier = SeededVerifier::new(seed, args.size);
     let mut reader = sdk
-        .download(&obj, DownloadOptions::default())
+        .download(&obj, download_options)
         .expect("failed to start download");
     copy(&mut reader, &mut verifier)
         .await

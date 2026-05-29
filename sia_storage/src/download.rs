@@ -6,7 +6,7 @@ use std::task::{Poll, ready};
 
 use crate::encryption::{Chacha20Cipher, EncryptionKey, encrypt_recovered_shards};
 use crate::erasure_coding::{self, ErasureCoder};
-use crate::hosts::{Hosts, RPCError};
+use crate::hosts::{Hosts, InflightGuard, RPCError};
 use crate::rhp4::{Client, Transport};
 use crate::time::{Duration, Elapsed, Instant, sleep};
 use crate::{AppKey, DownloadOptions, Object, Sector, ShardProgress, ShardProgressCallback, Slab};
@@ -72,7 +72,11 @@ struct SectorTask {
 }
 
 struct AwaitingRecovery {
-    sectors: Vec<SectorTask>,
+    /// The sectors to download for this slab, paired with their inflight guards
+    /// if they were reserved by `SlabRecovery::new`. Guards are held for the
+    /// duration of the RPC in `SlabRecovery::recover_shard` to ensure the
+    /// reservation is released on completion or error.
+    sectors: Vec<(SectorTask, Option<InflightGuard>)>,
 }
 
 struct ShardsRecovered {
@@ -131,6 +135,28 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
             })
             .collect::<Vec<_>>();
         client.prioritize(&mut sectors, |task| &task.sector.host_key);
+
+        // Reserve inflight slots for the top `min_shards` hosts now, while
+        // we still hold the synchronous call frame. `Download::new` queues
+        // many `SlabRecovery::new` calls back-to-back; without this, all of
+        // them would prioritize against the same all-zero inflight
+        // snapshot and pile onto the same fastest hosts. The guards travel
+        // into the spawned read tasks via `recover_shards` and drop with
+        // them; failure/timeout retries reserve on demand from `remaining`.
+        let min_shards = slab.slab.min_shards as usize;
+        let sectors = sectors
+            .into_iter()
+            .enumerate()
+            .map(|(i, task)| {
+                if i < min_shards {
+                    let guard = client.reserve_inflight_download(&task.sector.host_key);
+                    (task, guard)
+                } else {
+                    (task, None)
+                }
+            })
+            .collect();
+
         Ok(Self {
             client,
             account_key,
@@ -147,10 +173,16 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
         client: Hosts<T>,
         account_key: Arc<AppKey>,
         task: SectorTask,
+        inflight: Option<InflightGuard>,
         slab_index: usize,
         sector_offset: usize,
         sector_length: usize,
     ) -> Result<(usize, Vec<u8>, ShardProgress), DownloadError> {
+        // Hold the inflight reservation for the duration of the RPC. The
+        // guard was created by the caller before spawning so the load is
+        // visible to concurrent `prioritize` calls, then dropped here on
+        // either success or error.
+        let _inflight = inflight;
         let start = Instant::now();
         let data = client
             .read_sector(
@@ -198,8 +230,11 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
         let shard_offset = start;
         let shard_length = end - start;
 
+        // Spawn the initial batch using the inflight slots reserved by
+        // `SlabRecovery::new`. Each guard moves into its corresponding
+        // task and stays alive for the duration of the RPC.
         for i in 0..self.min_shards {
-            let task = sectors
+            let (task, inflight) = sectors
                 .pop_front()
                 .ok_or(DownloadError::NotEnoughShards(i, self.min_shards))?;
             join_set_spawn!(
@@ -208,6 +243,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                     client.clone(),
                     account_key.clone(),
                     task,
+                    inflight,
                     self.slab_index,
                     shard_offset,
                     shard_length,
@@ -245,15 +281,17 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                         Err(_) => {
                             if recovered_shards as usize + shard_tasks.len() + sectors.len() < min_shards as usize {
                                 return Err(DownloadError::NotEnoughShards(recovered_shards, min_shards));
-                            } else if let Some(task) = sectors.pop_front() {
-                                join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, self.slab_index, shard_offset, shard_length));
+                            } else if let Some((task, _)) = sectors.pop_front() {
+                                let inflight = client.reserve_inflight_download(&task.sector.host_key);
+                                join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, inflight, self.slab_index, shard_offset, shard_length));
                             }
                         }
                     }
                 },
                 _ = sleep(Duration::from_millis(500)), if !sectors.is_empty() => {
-                    let task = sectors.pop_front().expect("sectors should not be empty");
-                    join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, self.slab_index, shard_offset, shard_length));
+                    let (task, _) = sectors.pop_front().expect("sectors should not be empty");
+                    let inflight = client.reserve_inflight_download(&task.sector.host_key);
+                    join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, inflight, self.slab_index, shard_offset, shard_length));
                 },
             }
         }
@@ -447,11 +485,18 @@ impl Download {
             let hosts = self.hosts.clone();
             let account_key = self.account_key.clone();
             let shard_progress_callback = self.shard_downloaded.clone();
+            // Build the SlabRecovery synchronously so prioritization and
+            // top-K inflight reservations land before this method returns.
+            // `Download::new` queues `max_inflight` chunks back-to-back;
+            // each successive `spawn_next` must see the previous chunk's
+            // reservations to disperse picks across hosts.
+            let len = chunk_slab.slab.length as usize;
+            let recovery = SlabRecovery::new(hosts, account_key, chunk_slab);
             self.queue
                 .push_back(AbortOnDropHandle::new(maybe_spawn!(async move {
-                    let len = chunk_slab.slab.length as usize;
+                    let recovery = recovery?;
                     let mut buf = Vec::with_capacity(len);
-                    SlabRecovery::new(hosts, account_key, chunk_slab)?
+                    recovery
                         .recover_shards(shard_progress_callback)
                         .await?
                         .decode()?
