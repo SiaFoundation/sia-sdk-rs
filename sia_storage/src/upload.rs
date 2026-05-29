@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
 
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
-use crate::hosts::{InflightGuard, QueueError, RPCError};
+use crate::hosts::{InflightGuard, QueueError, RPCError, UsedHosts};
 use crate::rhp4::Client;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Elapsed, Instant, sleep};
@@ -19,64 +19,6 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, BufReader};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
-
-/// Maximum number of times a single host may be picked across all shards
-/// in a slab. Mirrors the cap from the old `HostQueue::retry` behavior so
-/// a host with a transient failure can still get a few more chances within
-/// the same slab, rather than being permanently sidelined on the first error.
-const MAX_HOST_RETRIES: usize = 3;
-
-/// Per-slab host accounting. Tracks two things:
-/// - `claimed`: hosts currently in flight, or holding a successful sector
-///   on this slab. Excluded from picks so no two shards in the slab can
-///   both succeed on the same host (slab uniqueness; the indexer rejects
-///   duplicate hosts in a slab).
-/// - `attempts`: per-host pick count. A host that hits [`MAX_HOST_RETRIES`]
-///   is permanently off-limits for the slab.
-///
-/// Lifecycle for a host:
-/// - `pick` → attempt count +1, added to claimed.
-/// - Write succeeds → stays in claimed forever. Attempt count irrelevant.
-/// - Write fails → `release_failed` removes from claimed; attempts stays
-///   incremented. Another shard (or a retry within the same shard) can
-///   re-pick the host while its attempts < `MAX_HOST_RETRIES`.
-#[derive(Default)]
-struct UsedHosts {
-    claimed: HashSet<PublicKey>,
-    attempts: HashMap<PublicKey, usize>,
-}
-
-impl UsedHosts {
-    /// Pick the best host that's neither currently claimed nor has
-    /// exhausted its retry budget. Marks the result as claimed, bumps its
-    /// attempt counter, and atomically reserves an inflight slot — the
-    /// returned [`InflightGuard`] must be held for the duration of the
-    /// upload RPC so concurrent pickers see the load.
-    fn pick(&mut self, client: &Hosts<Client>) -> Option<(PublicKey, InflightGuard)> {
-        let exclude: HashSet<PublicKey> = self
-            .claimed
-            .iter()
-            .copied()
-            .chain(
-                self.attempts
-                    .iter()
-                    .filter_map(|(k, n)| (*n >= MAX_HOST_RETRIES).then_some(*k)),
-            )
-            .collect();
-        let (host, guard) = client.next_upload_host(&exclude)?;
-        *self.attempts.entry(host).or_insert(0) += 1;
-        self.claimed.insert(host);
-        Some((host, guard))
-    }
-
-    /// Release a host whose write failed. Removes it from `claimed` so it
-    /// can be re-picked (by this shard or another) while its attempt count
-    /// is still under [`MAX_HOST_RETRIES`]. The attempt count itself is
-    /// kept so the cap continues to apply.
-    fn release_failed(&mut self, host: &PublicKey) {
-        self.claimed.remove(host);
-    }
-}
 
 struct ShardUpload {
     semaphore: Arc<Semaphore>,
@@ -153,7 +95,7 @@ impl ShardUpload {
     /// with the spawned write task so the reservation lives until the RPC
     /// finishes.
     fn pick_next_host(&self) -> Option<(PublicKey, InflightGuard)> {
-        self.used_hosts.lock().unwrap().pick(&self.client)
+        self.used_hosts.lock().unwrap().pick()
     }
 
     async fn upload_shard(self) -> Result<SectorUploadResult, UploadError> {
@@ -353,19 +295,19 @@ impl Upload {
             })?;
 
             // No pre-assignment of hosts: each shard picks its host
-            // just-in-time via `Hosts::next_upload_host`, which scores by
+            // just-in-time via the slab's `UsedHosts`, which scores by
             // `throughput / (inflight + 1)`. This disperses load across
             // hosts naturally — multiple slabs running in parallel won't
             // all pile onto the same top-N hosts, because by the time
             // slab N+1's shards pick, slab N's chosen hosts have higher
             // inflight and lower score.
             //
-            // `used_hosts` enforces slab uniqueness — every shard within
-            // this slab must land on a distinct host (the indexer rejects
-            // duplicate sectors because they break redundancy) — while
-            // also allowing failed hosts to be re-picked up to
-            // `MAX_HOST_RETRIES` times across the slab.
-            let used_hosts: Arc<Mutex<UsedHosts>> = Arc::new(Mutex::new(UsedHosts::default()));
+            // `UsedHosts` also enforces slab uniqueness — every shard
+            // within this slab must land on a distinct host (the indexer
+            // rejects duplicate sectors because they break redundancy) —
+            // while allowing failed hosts to be re-picked up to the slab's
+            // retry cap.
+            let used_hosts: Arc<Mutex<UsedHosts>> = Arc::new(Mutex::new(client.slab_host_picker()));
             let owned_slab_key = Arc::new(slab_key.clone());
             // ShardUpload::upload_shard returns Result<SectorUploadResult, UploadError>
             // (one settled result per shard — not the per-attempt tuple

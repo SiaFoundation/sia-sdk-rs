@@ -363,14 +363,18 @@ impl HostList {
     /// pickers see the new load — the race window shrinks from "until the
     /// RPC starts" to the scan in this function (microseconds).
     ///
-    /// Score is `throughput / (inflight + 1)`; lower `failure_rate` wins
-    /// first. Returns `None` if no eligible host is available.
-    fn next_upload_host(&self, exclude: &HashSet<PublicKey>) -> Option<(PublicKey, InflightGuard)> {
+    /// `is_excluded` is called for each candidate; returning `true` skips
+    /// it. Score is `throughput / (inflight + 1)`; lower `failure_rate`
+    /// wins first. Returns `None` if no eligible host is available.
+    fn next_upload_host<F>(&self, mut is_excluded: F) -> Option<(PublicKey, InflightGuard)>
+    where
+        F: FnMut(&PublicKey) -> bool,
+    {
         let hosts = self.hosts.read().unwrap();
         let metrics = self.metrics.read().unwrap();
         let mut best: Option<(PublicKey, Arc<AtomicUsize>, HostScore)> = None;
         for (hk, info) in hosts.iter() {
-            if !info.good_for_upload || exclude.contains(hk) {
+            if !info.good_for_upload || is_excluded(hk) {
                 continue;
             }
             let Some(metric) = metrics.get(hk) else {
@@ -431,6 +435,69 @@ impl HostList {
 
     fn add_settings_sample(&self, host_key: PublicKey, elapsed: Duration) {
         self.with_metric(&host_key, |m| m.add_settings_sample(elapsed));
+    }
+}
+
+/// Maximum number of times a single host may be picked across all shards
+/// in a slab. A host with a transient failure should get a few more
+/// chances within the slab rather than being permanently sidelined on the
+/// first error.
+const MAX_HOST_RETRIES: usize = 3;
+
+/// Per-slab host accounting. Tracks two things:
+/// - `claimed`: hosts currently in flight, or holding a successful sector
+///   on this slab. Excluded from picks so no two shards in the slab can
+///   both succeed on the same host (slab uniqueness; the indexer rejects
+///   duplicate hosts in a slab).
+/// - `attempts`: per-host pick count. A host that hits [`MAX_HOST_RETRIES`]
+///   is permanently off-limits for the slab.
+///
+/// Lifecycle for a host:
+/// - `pick` → attempt count +1, added to claimed.
+/// - Write succeeds → stays in claimed forever. Attempt count irrelevant.
+/// - Write fails → `release_failed` removes from claimed; attempts stays
+///   incremented. Another shard (or a retry within the same shard) can
+///   re-pick the host while its attempts < `MAX_HOST_RETRIES`.
+pub(crate) struct UsedHosts {
+    hosts: Arc<HostList>,
+    claimed: HashSet<PublicKey>,
+    attempts: HashMap<PublicKey, usize>,
+}
+
+impl UsedHosts {
+    fn new(hosts: Arc<HostList>) -> Self {
+        Self {
+            hosts,
+            claimed: HashSet::new(),
+            attempts: HashMap::new(),
+        }
+    }
+
+    /// Atomically picks the best upload host for another shard in this slab
+    /// and reserves an inflight slot on it. Skips hosts currently held in
+    /// `claimed` or whose attempt count has reached [`MAX_HOST_RETRIES`].
+    /// The returned [`InflightGuard`] must be held for the duration of the
+    /// upload RPC so concurrent pickers see the load.
+    pub(crate) fn pick(&mut self) -> Option<(PublicKey, InflightGuard)> {
+        let Self {
+            hosts,
+            claimed,
+            attempts,
+        } = self;
+        let (host, guard) = hosts.next_upload_host(|hk| {
+            claimed.contains(hk) || attempts.get(hk).is_some_and(|n| *n >= MAX_HOST_RETRIES)
+        })?;
+        *attempts.entry(host).or_insert(0) += 1;
+        claimed.insert(host);
+        Some((host, guard))
+    }
+
+    /// Releases a host whose write failed. Removes it from `claimed` so it
+    /// can be re-picked while its attempt count is still under
+    /// [`MAX_HOST_RETRIES`]. The attempt count itself is kept so the cap
+    /// continues to apply.
+    pub(crate) fn release_failed(&mut self, host: &PublicKey) {
+        self.claimed.remove(host);
     }
 }
 
@@ -556,22 +623,12 @@ impl<T: Transport> Hosts<T> {
         self.hosts.available_for_upload()
     }
 
-    /// Atomically picks the best upload host for another shard and reserves
-    /// an inflight slot on it. The returned [`InflightGuard`] must be kept
-    /// alive for the duration of the upload — drop it to roll the
-    /// reservation back on failure. Selection and reservation happen under
-    /// the same lock so concurrent pickers can't all observe the same low
-    /// inflight count and pile onto the same host.
-    ///
-    /// The scorer favors the host with the highest
-    /// `throughput / (inflight + 1)` — best expected per-shard throughput
-    /// if you added one more shard. Returns `None` if no eligible host is
-    /// available.
-    pub fn next_upload_host(
-        &self,
-        exclude: &HashSet<PublicKey>,
-    ) -> Option<(PublicKey, InflightGuard)> {
-        self.hosts.next_upload_host(exclude)
+    /// Creates a per-slab `UsedHosts` accumulator. It enforces slab
+    /// uniqueness (no two shards in a slab can land on the same host) and
+    /// caps how many times a single host can be re-picked across the
+    /// slab's shards. Each upload slab should construct its own.
+    pub fn slab_host_picker(&self) -> UsedHosts {
+        UsedHosts::new(self.hosts.clone())
     }
 
     /// Reserves an inflight slot for a download from the given host. The
@@ -813,7 +870,11 @@ mod test {
         );
 
         avg.add_sample(100);
-        assert_eq!(avg.avg(), Some(100.0), "initial average should be first sample");
+        assert_eq!(
+            avg.avg(),
+            Some(100.0),
+            "initial average should be first sample"
+        );
 
         avg.add_sample(200);
         assert!(
@@ -919,7 +980,7 @@ mod test {
     }
 
     #[sia_core_derive::cross_target_test]
-    fn test_next_upload_host() {
+    fn test_used_hosts_pick() {
         let hosts_manager = Hosts::new(Client::new());
         let hk1 = random_pubkey();
         let hk2 = random_pubkey();
@@ -958,25 +1019,51 @@ mod test {
         // and have equal score; result is deterministic-enough — we just
         // assert it returns one of them, and that hk2 (not good_for_upload)
         // is never picked.
-        let mut exclude = HashSet::new();
-        let (first, first_guard) = hosts_manager.next_upload_host(&exclude).unwrap();
+        let mut used = hosts_manager.slab_host_picker();
+        let (first, first_guard) = used.pick().unwrap();
         assert!(first == hk1 || first == hk3);
         assert_ne!(first, hk2);
 
-        // Excluding the first picks the other upload-eligible host.
-        exclude.insert(first);
-        let (second, second_guard) = hosts_manager.next_upload_host(&exclude).unwrap();
+        // Second pick excludes the first via the `claimed` set.
+        let (second, second_guard) = used.pick().unwrap();
         assert!(second == hk1 || second == hk3);
         assert_ne!(second, first);
         assert_ne!(second, hk2);
 
-        // Excluding both leaves nothing.
-        exclude.insert(second);
-        assert!(hosts_manager.next_upload_host(&exclude).is_none());
+        // Both eligible hosts now claimed — no more picks available.
+        assert!(used.pick().is_none());
 
         // Drop the guards explicitly so the counters balance.
         drop(first_guard);
         drop(second_guard);
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_used_hosts_retry_cap() {
+        // release_failed lets a host be re-picked, but MAX_HOST_RETRIES caps
+        // total picks per host across the slab.
+        let hosts_manager = Hosts::new(Client::new());
+        let hk = random_pubkey();
+        hosts_manager.update(
+            vec![Host {
+                public_key: hk,
+                addresses: vec![],
+                country_code: String::new(),
+                latitude: 0.0,
+                longitude: 0.0,
+                good_for_upload: true,
+            }],
+            true,
+        );
+
+        let mut used = hosts_manager.slab_host_picker();
+        for _ in 0..MAX_HOST_RETRIES {
+            let (picked, guard) = used.pick().unwrap();
+            assert_eq!(picked, hk);
+            used.release_failed(&picked);
+            drop(guard);
+        }
+        assert!(used.pick().is_none(), "should respect retry cap");
     }
 
     #[sia_core_derive::cross_target_test]
