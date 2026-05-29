@@ -253,9 +253,10 @@ impl PartialOrd for HostScore {
 struct HostInfo {
     addresses: Vec<NetAddress>,
     good_for_upload: bool,
-    /// Number of upload RPCs currently in flight to this host. Updated by
-    /// an [`InflightGuard`] in `Hosts::write_sector`; read by the host
-    /// scorer in `next_upload_host`.
+    /// Number of upload RPCs currently in flight to this host. The guard
+    /// is created by [`HostQueue::pick`] (incrementing this counter as
+    /// part of the selection path) and dropped when the spawned upload
+    /// task exits. Read by the scorer inside [`HostQueue::pick`].
     inflight_uploads: Arc<AtomicUsize>,
     /// Number of download RPCs currently in flight to this host. Updated
     /// by an [`InflightGuard`] in `Hosts::read_sector`; read by
@@ -413,85 +414,6 @@ impl HostList {
     }
 }
 
-/// Maximum number of attempts per host within a single slab — initial
-/// pick plus retries. A host with a transient failure should get a few
-/// more chances within the slab rather than being permanently sidelined
-/// on the first error.
-const MAX_RETRIES: usize = 3;
-
-/// Per-slab pool of upload hosts. Snapshots upload-eligible hosts at
-/// construction and hands them out one at a time. Failed hosts can be
-/// returned via [`HostQueue::retry`] for re-pick, capped at
-/// [`MAX_RETRIES`] attempts per host across the slab.
-///
-/// `available` is a snapshot, not a live view of [`HostList`]: hosts
-/// removed via [`Hosts::update`] after construction stay in the pool but
-/// are filtered at pick time when they no longer exist in `HostList`.
-/// Slabs live for seconds, so snapshot staleness doesn't materially
-/// affect placement.
-pub(crate) struct HostQueue {
-    hosts: Arc<HostList>,
-    available: Vec<PublicKey>,
-    attempts: HashMap<PublicKey, usize>,
-}
-
-impl HostQueue {
-    fn new(hosts: Arc<HostList>, available: Vec<PublicKey>) -> Self {
-        Self {
-            hosts,
-            available,
-            attempts: HashMap::new(),
-        }
-    }
-
-    /// Picks the best host from the pool and atomically reserves an
-    /// inflight slot. Scoring matches [`HostScore`]: lower `failure_rate`
-    /// wins, then unsampled hosts outrank sampled (discovery), then
-    /// `throughput / (inflight + 1)` among sampled. The winner is removed
-    /// from `available`; the returned [`InflightGuard`] must be held for
-    /// the duration of the upload RPC so concurrent pickers see the load.
-    pub(crate) fn pick(&mut self) -> Option<(PublicKey, InflightGuard)> {
-        let host_info = self.hosts.hosts.read().unwrap();
-        let metrics = self.hosts.metrics.read().unwrap();
-        let mut best: Option<(usize, HostScore, Arc<AtomicUsize>)> = None;
-        for (i, hk) in self.available.iter().enumerate() {
-            let Some(info) = host_info.get(hk) else {
-                continue;
-            };
-            let Some(metric) = metrics.get(hk) else {
-                continue;
-            };
-            let inflight = info.inflight_uploads.load(Ordering::Relaxed);
-            let score = HostScore::new(metric, inflight);
-            match &best {
-                None => best = Some((i, score, info.inflight_uploads.clone())),
-                Some((_, current, _)) if score > *current => {
-                    best = Some((i, score, info.inflight_uploads.clone()))
-                }
-                _ => {}
-            }
-        }
-        let (i, _, counter) = best?;
-        drop(host_info);
-        drop(metrics);
-        let host = self.available.swap_remove(i);
-        Some((host, InflightGuard::new(counter)))
-    }
-
-    /// Returns a failed host to the pool so it can be re-picked. Returns
-    /// `true` when the host went back into `available`, `false` when its
-    /// per-slab attempt budget is exhausted.
-    pub(crate) fn retry(&mut self, host: PublicKey) -> bool {
-        let attempts = self.attempts.entry(host).or_default();
-        *attempts += 1;
-        if *attempts >= MAX_RETRIES {
-            return false;
-        }
-        self.available.push(host);
-        true
-    }
-}
-
 /// RAII guard that increments an `AtomicUsize` on construction and
 /// decrements it on drop. Used to track per-host inflight uploads so the
 /// host scorer reflects current load and is balanced even on early returns
@@ -619,7 +541,7 @@ impl<T: Transport> Hosts<T> {
     /// host can be picked at most once until retried) and caps re-picks
     /// per host via [`MAX_RETRIES`]. Each upload slab should construct
     /// its own.
-    pub fn slab_host_picker(&self) -> HostQueue {
+    pub fn upload_queue(&self) -> HostQueue {
         HostQueue::new(self.hosts.clone(), self.hosts.upload_eligible_hosts())
     }
 
@@ -713,9 +635,8 @@ impl<T: Transport> Hosts<T> {
     }
 
     /// Performs an upload RPC to the given host. The caller is responsible
-    /// for holding the [`InflightGuard`] returned by
-    /// [`Self::next_upload_host`] for the duration of this call so the
-    /// host scorer reflects the load.
+    /// for holding the [`InflightGuard`] returned by [`HostQueue::pick`]
+    /// for the duration of this call so the host scorer reflects the load.
     pub async fn write_sector(
         &self,
         host_key: PublicKey,
@@ -803,6 +724,85 @@ pub enum QueueError {
     /// The host has been retried too many times.
     #[error("host retry limit exceeded")]
     MaxRetriesExceeded,
+}
+
+/// Maximum number of attempts per host within a single slab — initial
+/// pick plus retries. A host with a transient failure should get a few
+/// more chances within the slab rather than being permanently sidelined
+/// on the first error.
+const MAX_RETRIES: usize = 3;
+
+/// Per-slab pool of upload hosts. Snapshots upload-eligible hosts at
+/// construction and hands them out one at a time. Failed hosts can be
+/// returned via [`HostQueue::retry`] for re-pick, capped at
+/// [`MAX_RETRIES`] attempts per host across the slab.
+///
+/// `available` is a snapshot, not a live view of [`HostList`]: hosts
+/// removed via [`Hosts::update`] after construction stay in the pool but
+/// are filtered at pick time when they no longer exist in `HostList`.
+/// Slabs live for seconds, so snapshot staleness doesn't materially
+/// affect placement.
+pub(crate) struct HostQueue {
+    hosts: Arc<HostList>,
+    available: Vec<PublicKey>,
+    attempts: HashMap<PublicKey, usize>,
+}
+
+impl HostQueue {
+    fn new(hosts: Arc<HostList>, available: Vec<PublicKey>) -> Self {
+        Self {
+            hosts,
+            available,
+            attempts: HashMap::new(),
+        }
+    }
+
+    /// Picks the best host from the pool and atomically reserves an
+    /// inflight slot. Scoring matches [`HostScore`]: lower `failure_rate`
+    /// wins, then unsampled hosts outrank sampled (discovery), then
+    /// `throughput / (inflight + 1)` among sampled. The winner is removed
+    /// from `available`; the returned [`InflightGuard`] must be held for
+    /// the duration of the upload RPC so concurrent pickers see the load.
+    pub(crate) fn pick(&mut self) -> Option<(PublicKey, InflightGuard)> {
+        let host_info = self.hosts.hosts.read().unwrap();
+        let metrics = self.hosts.metrics.read().unwrap();
+        let mut best: Option<(usize, HostScore, Arc<AtomicUsize>)> = None;
+        for (i, hk) in self.available.iter().enumerate() {
+            let Some(info) = host_info.get(hk) else {
+                continue;
+            };
+            let Some(metric) = metrics.get(hk) else {
+                continue;
+            };
+            let inflight = info.inflight_uploads.load(Ordering::Relaxed);
+            let score = HostScore::new(metric, inflight);
+            match &best {
+                None => best = Some((i, score, info.inflight_uploads.clone())),
+                Some((_, current, _)) if score > *current => {
+                    best = Some((i, score, info.inflight_uploads.clone()))
+                }
+                _ => {}
+            }
+        }
+        let (i, _, counter) = best?;
+        drop(host_info);
+        drop(metrics);
+        let host = self.available.swap_remove(i);
+        Some((host, InflightGuard::new(counter)))
+    }
+
+    /// Returns a failed host to the pool so it can be re-picked. Returns
+    /// `true` when the host went back into `available`, `false` when its
+    /// per-slab attempt budget is exhausted.
+    pub(crate) fn retry(&mut self, host: PublicKey) -> bool {
+        let attempts = self.attempts.entry(host).or_default();
+        *attempts += 1;
+        if *attempts >= MAX_RETRIES {
+            return false;
+        }
+        self.available.push(host);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -1011,7 +1011,7 @@ mod test {
         // and have equal score; result is deterministic-enough — we just
         // assert it returns one of them, and that hk2 (not good_for_upload)
         // is never in the pool.
-        let mut queue = hosts_manager.slab_host_picker();
+        let mut queue = hosts_manager.upload_queue();
         let (first, first_guard) = queue.pick().unwrap();
         assert!(first == hk1 || first == hk3);
         assert_ne!(first, hk2);
@@ -1048,7 +1048,7 @@ mod test {
             true,
         );
 
-        let mut queue = hosts_manager.slab_host_picker();
+        let mut queue = hosts_manager.upload_queue();
         for i in 0..MAX_RETRIES {
             let (picked, guard) = queue.pick().unwrap();
             assert_eq!(picked, hk);

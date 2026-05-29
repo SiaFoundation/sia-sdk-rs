@@ -23,12 +23,11 @@ use tokio::task::JoinSet;
 struct ShardUpload {
     semaphore: Arc<Semaphore>,
     client: Hosts<Client>,
+    hosts: Arc<Mutex<HostQueue>>,
     account_key: Arc<AppKey>,
     data: Bytes,
     slab_index: usize,
     shard_index: usize,
-    /// Per-slab host pool shared across all shards.
-    queue: Arc<Mutex<HostQueue>>,
 }
 
 struct SectorUploadResult {
@@ -42,13 +41,14 @@ const UPLOAD_TIMEOUT: Duration = Duration::from_secs(90);
 impl ShardUpload {
     fn spawn_write(
         &self,
-        tasks: &mut JoinSet<(PublicKey, Result<SectorUploadResult, UploadError>)>,
+        tasks: &mut JoinSet<Result<SectorUploadResult, UploadError>>,
         host_key: PublicKey,
         inflight: InflightGuard,
         write_timeout: Duration,
         permit: OwnedSemaphorePermit,
     ) {
         let client = self.client.clone();
+        let hosts = self.hosts.clone();
         let account_key = self.account_key.clone();
         let data = self.data.clone();
         let slab_index = self.slab_index;
@@ -60,31 +60,24 @@ impl ShardUpload {
             // either after success or failure.
             let _inflight = inflight;
             let now = Instant::now();
-            let result: Result<SectorUploadResult, UploadError> = match client
-                .write_sector(host_key, &account_key.0, data, write_timeout)
-                .await
-            {
-                Ok(root) => {
-                    let elapsed = now.elapsed();
-                    debug!(
-                        "slab {slab_index} shard {shard_index} uploaded to {host_key} in {:?}",
-                        elapsed
-                    );
-                    Ok(SectorUploadResult {
-                        sector: Sector { root, host_key },
-                        shard_index,
-                        elapsed,
-                    })
-                }
-                Err(e) => {
+            let root = client.write_sector(host_key, &account_key.0, data, write_timeout).await
+                .inspect_err(|e| {
                     debug!(
                         "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {:?} {e}",
                         now.elapsed()
                     );
-                    Err(UploadError::from(e))
-                }
-            };
-            (host_key, result)
+                    hosts.lock().unwrap().retry(host_key);
+                })?;
+            let elapsed = now.elapsed();
+            debug!(
+                "slab {slab_index} shard {shard_index} uploaded to {host_key} in {:?}",
+                elapsed
+            );
+            Ok(SectorUploadResult {
+                sector: Sector { root, host_key },
+                shard_index,
+                elapsed,
+            })
         });
     }
 
@@ -93,7 +86,7 @@ impl ShardUpload {
     /// travel with the spawned write task so the reservation lives until
     /// the RPC finishes.
     fn pick_next_host(&self) -> Option<(PublicKey, InflightGuard)> {
-        self.queue.lock().unwrap().pick()
+        self.hosts.lock().unwrap().pick()
     }
 
     async fn upload_shard(self) -> Result<SectorUploadResult, UploadError> {
@@ -106,8 +99,7 @@ impl ShardUpload {
             tokio::select! {
                 biased;
                 Some(res) = tasks.join_next() => {
-                    let (host_key, write_result) = res?;
-                    match write_result {
+                    match res? {
                         Ok(result) => {
                             if result.sector.host_key != initial {
                                 debug!(
@@ -119,13 +111,6 @@ impl ShardUpload {
                             return Ok(result);
                         }
                         Err(_) => {
-                            // write_sector already updated the host's
-                            // failure_rate on the error path. Return it to
-                            // the pool so another shard (or this one) can
-                            // re-pick it within its retry budget. The
-                            // InflightGuard for the failed task dropped
-                            // when the task body exited.
-                            self.queue.lock().unwrap().retry(host_key);
                             if tasks.is_empty() {
                                 let (next, guard) = self.pick_next_host()
                                     .ok_or(QueueError::NoMoreHosts)?;
@@ -305,18 +290,15 @@ impl Upload {
             // rejects duplicate sectors because they break redundancy) —
             // while allowing failed hosts to be re-picked up to the slab's
             // retry cap.
-            let queue: Arc<Mutex<HostQueue>> = Arc::new(Mutex::new(client.slab_host_picker()));
+            let hosts: Arc<Mutex<HostQueue>> = Arc::new(Mutex::new(client.upload_queue()));
             let owned_slab_key = Arc::new(slab_key.clone());
-            // ShardUpload::upload_shard returns Result<SectorUploadResult, UploadError>
-            // (one settled result per shard — not the per-attempt tuple
-            // that spawn_write uses inside upload_shard).
             let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> = JoinSet::new();
             for (shard_index, mut shard) in shards.into_iter().enumerate() {
                 let owned_slab_key = owned_slab_key.clone();
                 let shard_client = client.clone();
                 let shard_account_key = app_key.clone();
                 let shard_sema_inner = shard_sema.clone();
-                let queue = queue.clone();
+                let hosts = hosts.clone();
                 join_set_spawn!(shard_tasks, async move {
                     let shard = maybe_spawn_blocking!({
                         encrypt_shard(&owned_slab_key, shard_index as u8, 0, &mut shard);
@@ -329,7 +311,7 @@ impl Upload {
                         data: Bytes::from(shard),
                         slab_index,
                         shard_index,
-                        queue,
+                        hosts,
                     };
                     shard_upload.upload_shard().await
                 });
