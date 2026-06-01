@@ -211,7 +211,6 @@ pub(crate) struct Upload {
     /// Separate from `slab_sema` since slabs can be buffered while waiting
     /// for shard uploads to complete, and we want to allow some buffering to
     /// improve performance.
-    shard_sema: Arc<Semaphore>,
     slab_tasks: VecDeque<AbortOnDropHandle<Result<UploadedSlab, UploadError>>>,
     shard_uploaded: Option<ShardProgressCallback>,
 }
@@ -248,7 +247,6 @@ impl Upload {
             )),
             erasure_coder: Arc::new(erasure_coder),
             slab_sema: Arc::new(Semaphore::new(max_slabs)),
-            shard_sema: Arc::new(Semaphore::new(options.max_inflight)),
             slab_tasks: VecDeque::new(),
             shard_uploaded: options.shard_uploaded,
         })
@@ -257,7 +255,7 @@ impl Upload {
     async fn spawn_slab(&mut self, slab: ReadSlab) -> Result<(), UploadError> {
         let client = self.client.clone();
         let rs = self.erasure_coder.clone();
-        let shard_sema = self.shard_sema.clone();
+        let shard_sema = Arc::new(Semaphore::new(slab.shards.len()));
         let app_key = self.app_key.clone();
         let progress_callback = self.shard_uploaded.clone();
         let slab_index = self.slab_tasks.len();
