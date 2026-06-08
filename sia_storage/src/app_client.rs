@@ -1811,6 +1811,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_unpin_slab() {
+        let slab_id =
+            hash_256!("43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28");
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(request::method_path(
+                "DELETE",
+                "/slabs/43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28",
+            ))
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        client.unpin_slab(&app_key, &slab_id).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_register_flow() {
         let ephemeral_key = PrivateKey::from_seed(&rand::random());
         let ephemeral_pk = ephemeral_key.public_key();
