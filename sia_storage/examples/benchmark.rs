@@ -1,37 +1,101 @@
+use std::collections::BTreeMap;
+use std::error::Error;
 use std::io::{BufRead, stdin};
+use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use directories::ProjectDirs;
+use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use sia_storage::{AppMetadata, Builder, DownloadOptions, Object, UploadOptions};
+use serde::{Deserialize, Serialize};
+use sia_storage::{
+    AppKey, AppMetadata, Builder, DownloadOptions, Object, Sdk, UploadOptions,
+    generate_recovery_phrase,
+};
+use tokio::fs;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, copy};
-
-#[derive(Parser)]
-struct Args {
-    /// Size of the data to upload and download in bytes (default: 120 MiB)
-    #[arg(short, long, default_value_t = 120 * 1024 * 1024)]
-    size: usize,
-
-    /// Maximum number of concurrent shard uploads.
-    #[arg(long)]
-    upload_max_inflight: Option<usize>,
-
-    /// Maximum number of concurrent chunk downloads.
-    #[arg(long)]
-    download_max_inflight: Option<usize>,
-}
 
 const APP_META: AppMetadata = AppMetadata {
     id: sia_storage::app_id!("5c0b1af28e6ac76395b2087ea987297b9c496f90d2ab3e3d3d07980ae4c43633"),
-    name: "My Example App",
-    description: "My Example App Description",
-    service_url: "https://myexampleapp.com",
+    name: "Benchmark",
+    description: "A simple upload and download benchmark for the SDK",
+    service_url: "https://sia.tech",
     logo_url: None,
     callback_url: None,
 };
+
+const DEFAULT_INDEXER: &str = "https://sia.storage";
+const DEFAULT_PROFILE: &str = "default";
+
+#[derive(Parser)]
+#[command(name = "benchmark", about = "Benchmark Sia uploads and downloads")]
+struct Cli {
+    /// Profile to use. Each profile binds an app key to an indexer.
+    #[arg(long, default_value = DEFAULT_PROFILE, global = true)]
+    profile: String,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Authorize the app against an indexer and store the resulting key under
+    /// the chosen profile, so subsequent runs can skip the auth flow.
+    Login {
+        /// Indexer URL to authorize against. Recorded on the profile.
+        #[arg(long, default_value = DEFAULT_INDEXER)]
+        indexer: String,
+
+        /// Generate a new recovery phrase instead of prompting for one.
+        #[arg(long)]
+        new: bool,
+    },
+    /// Run the upload/download benchmark using a stored profile.
+    Run {
+        /// Size of the data to upload and download in bytes (default: 120 MiB)
+        #[arg(short, long, default_value_t = 120 * 1024 * 1024)]
+        size: usize,
+
+        /// Maximum number of concurrent shard uploads.
+        #[arg(long)]
+        upload_max_inflight: Option<usize>,
+
+        /// Maximum number of concurrent chunk downloads.
+        #[arg(long)]
+        download_max_inflight: Option<usize>,
+    },
+    /// List configured profiles.
+    Profiles,
+}
+
+fn progress_bar(size: u64, msg: &'static str) -> ProgressBar {
+    let pb = ProgressBar::new(size);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{msg} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bitrate}, {eta})",
+        )
+        .unwrap()
+        .with_key("bitrate", |state: &ProgressState, w: &mut dyn std::fmt::Write| {
+            let elapsed = state.elapsed();
+            let rate = if elapsed.is_zero() {
+                "0.00 bps".to_string()
+            } else {
+                format_bitrate(state.pos(), elapsed)
+            };
+            let _ = w.write_str(&rate);
+        })
+        .progress_chars("=>-"),
+    );
+    pb.set_message(msg);
+    pb
+}
 
 // A reader that produces a deterministic stream of random bytes based on a seed.
 struct SeededReader {
@@ -70,10 +134,11 @@ struct SeededVerifier {
     start: Instant,
     ttfb: Option<Duration>,
     elapsed: Vec<Duration>,
+    progress: ProgressBar,
 }
 
 impl SeededVerifier {
-    fn new(seed: u64, size: usize) -> Self {
+    fn new(seed: u64, size: usize, progress: ProgressBar) -> Self {
         let now = Instant::now();
         Self {
             rng: SmallRng::seed_from_u64(seed),
@@ -82,6 +147,7 @@ impl SeededVerifier {
             start: now,
             ttfb: None,
             elapsed: Vec::new(),
+            progress,
         }
     }
 
@@ -124,6 +190,7 @@ impl AsyncWrite for SeededVerifier {
         }
         self.remaining -= buf.len();
         self.elapsed.push(elapsed);
+        self.progress.inc(buf.len() as u64);
         Poll::Ready(Ok(buf.len()))
     }
 
@@ -173,72 +240,175 @@ fn format_bitrate(bytes: u64, duration: Duration) -> String {
     unreachable!()
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() {
-    env_logger::init();
+#[derive(Default, Deserialize, Serialize)]
+struct Config {
+    #[serde(default)]
+    profiles: BTreeMap<String, Profile>,
+}
 
-    // authorize the app to access the user's storage
-    let builder = Builder::new("https://sia.storage", APP_META).expect("failed to create builder");
+#[derive(Deserialize, Serialize)]
+struct Profile {
+    indexer: String,
+    /// 32-byte app key, hex-encoded.
+    app_key: String,
+}
 
-    let builder = builder
-        .request_connection()
-        .await
-        .expect("failed to request connection");
+fn config_path() -> Result<PathBuf, Box<dyn Error>> {
+    let dirs = ProjectDirs::from("tech", "Sia", "sia-benchmark")
+        .ok_or("could not determine config directory")?;
+    Ok(dirs.config_dir().join("config.toml"))
+}
+
+async fn load_config() -> Result<Config, Box<dyn Error>> {
+    let path = config_path()?;
+    match fs::read_to_string(&path).await {
+        Ok(text) => Ok(toml::from_str(&text)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn save_config(config: &Config) -> Result<PathBuf, Box<dyn Error>> {
+    let path = config_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    fs::write(&path, toml::to_string_pretty(config)?).await?;
+    Ok(path)
+}
+
+async fn read_profile(profile: &str) -> Result<(String, AppKey), Box<dyn Error>> {
+    let config = load_config().await?;
+    let p = config.profiles.get(profile).ok_or_else(|| {
+        format!("profile `{profile}` not found; run `benchmark --profile {profile} login` first")
+    })?;
+    let mut buf = [0u8; 32];
+    hex::decode_to_slice(&p.app_key, &mut buf)?;
+    Ok((p.indexer.clone(), AppKey::import(buf)))
+}
+
+async fn upsert_profile(
+    profile: &str,
+    indexer: &str,
+    key: &AppKey,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let mut config = load_config().await?;
+    config.profiles.insert(
+        profile.to_string(),
+        Profile {
+            indexer: indexer.trim().to_string(),
+            app_key: hex::encode(key.export()),
+        },
+    );
+    save_config(&config).await
+}
+
+async fn login(profile: &str, indexer: &str, new: bool) -> Result<(), Box<dyn Error>> {
+    let builder = Builder::new(indexer, APP_META)?;
+    let builder = builder.request_connection().await?;
     println!(
         "Visit the following URL to authorize the application: {}",
         builder.response_url()
     );
-
-    let builder = builder
-        .wait_for_approval()
-        .await
-        .expect("failed to wait for approval");
+    let builder = builder.wait_for_approval().await?;
     println!("Connection approved!");
 
-    println!("Enter recovery phrase:");
-    let phrase = stdin()
-        .lock()
-        .lines()
-        .next()
-        .expect("failed to read recovery phrase")
-        .expect("failed to read recovery phrase");
+    let phrase = if new {
+        let phrase = generate_recovery_phrase();
+        println!("Generated recovery phrase (write it down):\n  {phrase}");
+        phrase
+    } else {
+        println!("Enter recovery phrase:");
+        stdin()
+            .lock()
+            .lines()
+            .next()
+            .ok_or("failed to read recovery phrase")??
+    };
 
-    let sdk = builder
-        .register(&phrase)
-        .await
-        .expect("failed to register app");
-    println!("App registered successfully!");
+    let sdk = builder.register(&phrase).await?;
+    let path = upsert_profile(profile, indexer, sdk.app_key()).await?;
+    println!(
+        "Profile `{profile}` saved to {} (indexer: {indexer})",
+        path.display()
+    );
+    Ok(())
+}
 
-    let args = Args::parse();
+async fn connect(profile: &str) -> Result<Sdk, Box<dyn Error>> {
+    let (indexer, app_key) = read_profile(profile).await?;
+    let builder = Builder::new(&indexer, APP_META)?;
+    let sdk = builder.connected(&app_key).await?.ok_or_else(|| {
+        format!("app key for profile `{profile}` is not authenticated; run `benchmark --profile {profile} login`")
+    })?;
+    let account = sdk.account().await?;
+    if !account.ready {
+        return Err("account is not ready yet — the indexer is still propagating registration on the network; try again shortly".into());
+    }
+    Ok(sdk)
+}
+
+async fn list_profiles() -> Result<(), Box<dyn Error>> {
+    let config = load_config().await?;
+    if config.profiles.is_empty() {
+        println!("No profiles configured. Run `benchmark login` to create one.");
+        return Ok(());
+    }
+    let pad = config.profiles.keys().map(|n| n.len()).max().unwrap_or(0);
+    for (name, profile) in &config.profiles {
+        println!("  {name:<pad$}  {}", profile.indexer);
+    }
+    Ok(())
+}
+
+async fn run_benchmark(
+    sdk: Sdk,
+    size: usize,
+    upload_max_inflight: Option<usize>,
+    download_max_inflight: Option<usize>,
+) {
     let seed: u64 = rand::random();
-
-    let reader = SeededReader::new(seed, args.size);
+    let reader = SeededReader::new(seed, size);
 
     // upload the data to the network
-    println!("Uploading random data...");
     let mut upload_options = UploadOptions::default();
-    if let Some(n) = args.upload_max_inflight {
+    if let Some(n) = upload_max_inflight {
         upload_options.max_inflight = n;
     }
+    let encoded_size = sia_storage::encoded_size(
+        size as u64,
+        upload_options.data_shards,
+        upload_options.parity_shards,
+    );
+    // The bar tracks unencoded progress, so shard callbacks (which report
+    // encoded bytes) are scaled back to their unencoded equivalent.
+    let upload_progress = progress_bar(size as u64, "upload  ");
+    upload_progress.set_message(format!("upload (encoded {})", format_bytes(encoded_size)));
+    let upload_progress_cb = upload_progress.clone();
+    let encoded_uploaded = Arc::new(AtomicU64::new(0));
+    let unencoded_size = size as u64;
+    upload_options = upload_options.on_shard_uploaded(move |p| {
+        let encoded = encoded_uploaded.fetch_add(p.shard_size as u64, Ordering::Relaxed)
+            + p.shard_size as u64;
+        let unencoded = (encoded as u128 * unencoded_size as u128 / encoded_size as u128) as u64;
+        upload_progress_cb.set_position(unencoded);
+    });
     let start = Instant::now();
     let obj = sdk
         .upload(Object::default(), reader, upload_options)
         .await
         .expect("failed to upload object");
     let upload_duration = start.elapsed();
-
-    // pin the object to ensure it remains available on the network.
-    sdk.pin_object(&obj).await.expect("object to be pinned");
-    println!("Object pinned successfully!");
+    upload_progress.finish();
 
     // download the object back from the network
-    println!("Downloading object...");
     let mut download_options = DownloadOptions::default();
-    if let Some(n) = args.download_max_inflight {
+    if let Some(n) = download_max_inflight {
         download_options.max_inflight = n;
     }
+    let download_progress = progress_bar(size as u64, "download");
     let start = Instant::now();
-    let mut verifier = SeededVerifier::new(seed, args.size);
+    let mut verifier = SeededVerifier::new(seed, size, download_progress.clone());
     let mut reader = sdk
         .download(&obj, download_options)
         .expect("failed to start download");
@@ -246,6 +416,7 @@ async fn main() {
         .await
         .expect("failed to copy data");
     let download_duration = start.elapsed();
+    download_progress.finish();
     println!(
         "Object uploaded ID: {}\tSize: {}\tEncoded: {}\tElapsed: {:?}\tThroughput: {}\tEncoded Throughput: {}",
         obj.id(),
@@ -265,4 +436,23 @@ async fn main() {
         format_bitrate(obj.size(), download_duration),
         verifier.gap_max().unwrap_or_default(),
     );
+}
+
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> Result<(), Box<dyn Error>> {
+    env_logger::init();
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Login { indexer, new } => login(&cli.profile, &indexer, new).await,
+        Command::Run {
+            size,
+            upload_max_inflight,
+            download_max_inflight,
+        } => {
+            let sdk = connect(&cli.profile).await?;
+            run_benchmark(sdk, size, upload_max_inflight, download_max_inflight).await;
+            Ok(())
+        }
+        Command::Profiles => list_profiles().await,
+    }
 }
