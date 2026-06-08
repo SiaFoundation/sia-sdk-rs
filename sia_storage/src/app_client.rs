@@ -394,7 +394,7 @@ impl Client {
     pub(crate) async fn pin_slabs(
         &self,
         app_key: &PrivateKey,
-        slabs: Vec<SlabPinParams>,
+        slabs: &[SlabPinParams],
     ) -> Result<Vec<Hash256>, Error> {
         self.post_json("slabs", app_key, Some(&slabs)).await
     }

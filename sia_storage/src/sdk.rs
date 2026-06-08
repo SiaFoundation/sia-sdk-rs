@@ -339,7 +339,7 @@ impl Sdk {
 
     /// Pins an object to the indexer
     pub async fn pin_object(&self, object: &Object) -> Result<(), Error> {
-        let slabs = object
+        let slabs: Vec<SlabPinParams> = object
             .slabs()
             .iter()
             .map(|s| SlabPinParams {
@@ -349,10 +349,13 @@ impl Sdk {
             })
             .collect();
 
-        self.api_client
-            .pin_slabs(&self.app_key.0, slabs)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
+        const BATCH_SIZE: usize = 50;
+        for batch in slabs.chunks(BATCH_SIZE) {
+            self.api_client
+                .pin_slabs(&self.app_key.0, batch)
+                .await
+                .map_err(|e| Error::App(format!("{e:?}")))?;
+        }
 
         self.api_client
             .pin_object(&self.app_key.0, &object.seal(self.app_key.as_ref()))
