@@ -1,10 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::io::{BufRead, stdin};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -70,6 +70,10 @@ enum Command {
         /// Maximum number of concurrent chunk downloads.
         #[arg(long)]
         download_max_inflight: Option<usize>,
+
+        /// Print a per-host breakdown of shards and throughput after the run.
+        #[arg(long)]
+        host_summary: bool,
     },
     /// List configured profiles.
     Profiles,
@@ -361,11 +365,58 @@ async fn list_profiles() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[derive(Default)]
+struct HostStat {
+    shards: usize,
+    bytes: u64,
+    /// Summed per-shard transfer time. Shards to the same host can overlap, so
+    /// this overcounts wall-clock; it estimates the per-connection rate.
+    elapsed: Duration,
+}
+
+type HostStats = Arc<Mutex<HashMap<String, HostStat>>>;
+
+fn record_shard(stats: &HostStats, host: String, bytes: u64, elapsed: Duration) {
+    let mut map = stats.lock().unwrap();
+    let entry = map.entry(host).or_default();
+    entry.shards += 1;
+    entry.bytes += bytes;
+    entry.elapsed += elapsed;
+}
+
+fn print_host_summary(label: &str, stats: &HostStats) {
+    let map = stats.lock().unwrap();
+    if map.is_empty() {
+        return;
+    }
+    let rate = |s: &HostStat| {
+        if s.elapsed.is_zero() {
+            0.0
+        } else {
+            s.bytes as f64 / s.elapsed.as_secs_f64()
+        }
+    };
+    let mut rows: Vec<_> = map.iter().collect();
+    rows.sort_by(|a, b| rate(b.1).total_cmp(&rate(a.1)));
+    println!("\n{label} per-host summary ({} hosts):", map.len());
+    for (host, s) in &rows {
+        println!(
+            "  {host}  {:>4} shards  {:>11}  {}",
+            s.shards,
+            format_bytes(s.bytes),
+            format_bitrate(s.bytes, s.elapsed),
+        );
+    }
+    let total: u64 = map.values().map(|s| s.bytes).sum();
+    println!("  total {} across {} hosts", format_bytes(total), map.len());
+}
+
 async fn run_benchmark(
     sdk: Sdk,
     size: usize,
     upload_max_inflight: Option<usize>,
     download_max_inflight: Option<usize>,
+    host_summary: bool,
 ) {
     let seed: u64 = rand::random();
     let reader = SeededReader::new(seed, size);
@@ -380,18 +431,25 @@ async fn run_benchmark(
         upload_options.data_shards,
         upload_options.parity_shards,
     );
-    // The bar tracks unencoded progress, so shard callbacks (which report
-    // encoded bytes) are scaled back to their unencoded equivalent.
+
     let upload_progress = progress_bar(size as u64, "upload  ");
-    upload_progress.set_message(format!("upload (encoded {})", format_bytes(encoded_size)));
+    upload_progress.set_message("upload");
     let upload_progress_cb = upload_progress.clone();
     let encoded_uploaded = Arc::new(AtomicU64::new(0));
     let unencoded_size = size as u64;
+    let upload_hosts: HostStats = Arc::new(Mutex::new(HashMap::new()));
+    let upload_hosts_cb = upload_hosts.clone();
     upload_options = upload_options.on_shard_uploaded(move |p| {
         let encoded = encoded_uploaded.fetch_add(p.shard_size as u64, Ordering::Relaxed)
             + p.shard_size as u64;
         let unencoded = (encoded as u128 * unencoded_size as u128 / encoded_size as u128) as u64;
         upload_progress_cb.set_position(unencoded);
+        record_shard(
+            &upload_hosts_cb,
+            p.host_key.to_string(),
+            p.shard_size as u64,
+            p.elapsed,
+        );
     });
     let start = Instant::now();
     let obj = sdk
@@ -401,11 +459,20 @@ async fn run_benchmark(
     let upload_duration = start.elapsed();
     upload_progress.finish();
 
-    // download the object back from the network
     let mut download_options = DownloadOptions::default();
     if let Some(n) = download_max_inflight {
         download_options.max_inflight = n;
     }
+    let download_hosts: HostStats = Arc::new(Mutex::new(HashMap::new()));
+    let download_hosts_cb = download_hosts.clone();
+    download_options = download_options.on_shard_downloaded(move |p| {
+        record_shard(
+            &download_hosts_cb,
+            p.host_key.to_string(),
+            p.shard_size as u64,
+            p.elapsed,
+        );
+    });
     let download_progress = progress_bar(size as u64, "download");
     let start = Instant::now();
     let mut verifier = SeededVerifier::new(seed, size, download_progress.clone());
@@ -417,25 +484,41 @@ async fn run_benchmark(
         .expect("failed to copy data");
     let download_duration = start.elapsed();
     download_progress.finish();
+    println!("\nUpload");
+    println!("  {:<15}{}", "Size:", format_bytes(obj.size()));
+    println!("  {:<15}{}", "Encoded:", format_bytes(obj.encoded_size()));
+    println!("  {:<15}{:?}", "Elapsed:", upload_duration);
     println!(
-        "Object uploaded ID: {}\tSize: {}\tEncoded: {}\tElapsed: {:?}\tThroughput: {}\tEncoded Throughput: {}",
-        obj.id(),
-        format_bytes(obj.size()),
-        format_bytes(obj.encoded_size()),
-        upload_duration,
-        format_bitrate(obj.size(), upload_duration),
-        format_bitrate(obj.encoded_size(), upload_duration),
+        "  {:<15}{}",
+        "Throughput:",
+        format_bitrate(obj.size(), upload_duration)
     );
     println!(
-        "Object downloaded ID: {}\tSize: {}\tEncoded: {}\tElapsed: {:?}\tTTFB: {:?}\tThroughput: {}\tMax Write Latency: {:?}",
-        obj.id(),
-        format_bytes(obj.size()),
-        format_bytes(obj.encoded_size()),
-        download_duration,
-        verifier.ttfb().unwrap_or_default(),
-        format_bitrate(obj.size(), download_duration),
-        verifier.gap_max().unwrap_or_default(),
+        "  {:<15}{}",
+        "Encoded rate:",
+        format_bitrate(obj.encoded_size(), upload_duration)
     );
+
+    println!("\nDownload");
+    println!("  {:<15}{}", "Size:", format_bytes(obj.size()));
+    println!("  {:<15}{}", "Encoded:", format_bytes(obj.encoded_size()));
+    println!("  {:<15}{:?}", "Elapsed:", download_duration);
+    println!("  {:<15}{:?}", "TTFB:", verifier.ttfb().unwrap_or_default());
+    println!(
+        "  {:<15}{}",
+        "Throughput:",
+        format_bitrate(obj.size(), download_duration)
+    );
+    println!(
+        "  {:<15}{:?}",
+        "Max latency:",
+        verifier.gap_max().unwrap_or_default()
+    );
+
+    if host_summary {
+        print_host_summary("Upload", &upload_hosts);
+        print_host_summary("Download", &download_hosts);
+    }
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -448,9 +531,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             size,
             upload_max_inflight,
             download_max_inflight,
+            host_summary,
         } => {
             let sdk = connect(&cli.profile).await?;
-            run_benchmark(sdk, size, upload_max_inflight, download_max_inflight).await;
+            run_benchmark(
+                sdk,
+                size,
+                upload_max_inflight,
+                download_max_inflight,
+                host_summary,
+            )
+            .await;
             Ok(())
         }
         Command::Profiles => list_profiles().await,
