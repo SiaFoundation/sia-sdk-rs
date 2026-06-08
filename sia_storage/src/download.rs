@@ -230,10 +230,9 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
         let shard_offset = start;
         let shard_length = end - start;
 
-        // Spawn the initial batch using the inflight slots reserved by
-        // `SlabRecovery::new`. Each guard moves into its corresponding
-        // task and stays alive for the duration of the RPC.
-        for i in 0..self.min_shards {
+        // overprovision the recovery to reduce tail latency from slow hosts
+        let spawn_shards = self.min_shards * 3 / 2;
+        for i in 0..spawn_shards {
             let (task, inflight) = sectors
                 .pop_front()
                 .ok_or(DownloadError::NotEnoughShards(i, self.min_shards))?;
