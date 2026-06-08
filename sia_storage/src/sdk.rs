@@ -339,7 +339,7 @@ impl Sdk {
 
     /// Pins an object to the indexer
     pub async fn pin_object(&self, object: &Object) -> Result<(), Error> {
-        let slabs = object
+        let slabs: Vec<SlabPinParams> = object
             .slabs()
             .iter()
             .map(|s| SlabPinParams {
@@ -349,15 +349,34 @@ impl Sdk {
             })
             .collect();
 
-        self.api_client
-            .pin_slabs(&self.app_key.0, slabs)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
+        const BATCH_SIZE: usize = 50;
+        let mut pinned: Vec<Hash256> = Vec::with_capacity(slabs.len());
+        let unpin_slabs = async |pinned: &[Hash256]| {
+            for id in pinned {
+                if let Err(e) = self.api_client.unpin_slab(&self.app_key.0, id).await {
+                    warn!("failed to unpin slab after pinning failed {id}: {e:?}");
+                }
+            }
+        };
 
-        self.api_client
+        for batch in slabs.chunks(BATCH_SIZE) {
+            match self.api_client.pin_slabs(&self.app_key.0, batch).await {
+                Ok(ids) => pinned.extend(ids),
+                Err(e) => {
+                    unpin_slabs(&pinned).await;
+                    return Err(Error::App(format!("{e:?}")));
+                }
+            }
+        }
+
+        if let Err(e) = self
+            .api_client
             .pin_object(&self.app_key.0, &object.seal(self.app_key.as_ref()))
             .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
+        {
+            unpin_slabs(&pinned).await;
+            return Err(Error::App(format!("{e:?}")));
+        }
         Ok(())
     }
 

@@ -394,9 +394,18 @@ impl Client {
     pub(crate) async fn pin_slabs(
         &self,
         app_key: &PrivateKey,
-        slabs: Vec<SlabPinParams>,
+        slabs: &[SlabPinParams],
     ) -> Result<Vec<Hash256>, Error> {
         self.post_json("slabs", app_key, Some(&slabs)).await
+    }
+
+    /// Unpins a slab from the indexer by its ID.
+    pub(crate) async fn unpin_slab(
+        &self,
+        app_key: &PrivateKey,
+        slab_id: &Hash256,
+    ) -> Result<(), Error> {
+        self.delete(&format!("slabs/{slab_id}"), app_key).await
     }
 
     /// Unpins slabs not used by any object on the account.
