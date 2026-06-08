@@ -484,9 +484,9 @@ async fn run_benchmark(
         .expect("failed to copy data");
     let download_duration = start.elapsed();
     download_progress.finish();
+    println!("\n{:<15}{}", "Size:", format_bytes(obj.size()));
+    println!("{:<15}{}", "Encoded:", format_bytes(obj.encoded_size()));
     println!("\nUpload");
-    println!("  {:<15}{}", "Size:", format_bytes(obj.size()));
-    println!("  {:<15}{}", "Encoded:", format_bytes(obj.encoded_size()));
     println!("  {:<15}{:?}", "Elapsed:", upload_duration);
     println!(
         "  {:<15}{}",
@@ -495,13 +495,12 @@ async fn run_benchmark(
     );
     println!(
         "  {:<15}{}",
-        "Encoded rate:",
+        "Encoded Throughput:",
         format_bitrate(obj.encoded_size(), upload_duration)
     );
 
     println!("\nDownload");
     println!("  {:<15}{}", "Size:", format_bytes(obj.size()));
-    println!("  {:<15}{}", "Encoded:", format_bytes(obj.encoded_size()));
     println!("  {:<15}{:?}", "Elapsed:", download_duration);
     println!("  {:<15}{:?}", "TTFB:", verifier.ttfb().unwrap_or_default());
     println!(
