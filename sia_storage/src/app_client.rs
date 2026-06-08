@@ -399,15 +399,6 @@ impl Client {
         self.post_json("slabs", app_key, Some(&slabs)).await
     }
 
-    /// Unpins a slab from the indexer by its ID.
-    pub(crate) async fn unpin_slab(
-        &self,
-        app_key: &PrivateKey,
-        slab_id: &Hash256,
-    ) -> Result<(), Error> {
-        self.delete(&format!("slabs/{slab_id}"), app_key).await
-    }
-
     /// Unpins slabs not used by any object on the account.
     pub(crate) async fn prune_slabs(&self, app_key: &PrivateKey) -> Result<(), Error> {
         self.post_json::<(), EmptyResponse>("slabs/prune", app_key, None)
@@ -1808,25 +1799,6 @@ mod tests {
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string()).unwrap();
         client.pin_object(&app_key, &object).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_unpin_slab() {
-        let slab_id =
-            hash_256!("43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28");
-        let server = Server::run();
-
-        server.expect(
-            Expectation::matching(request::method_path(
-                "DELETE",
-                "/slabs/43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28",
-            ))
-            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
-        );
-
-        let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string()).unwrap();
-        client.unpin_slab(&app_key, &slab_id).await.unwrap();
     }
 
     #[tokio::test]

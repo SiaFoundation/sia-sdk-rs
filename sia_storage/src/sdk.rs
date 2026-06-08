@@ -350,33 +350,17 @@ impl Sdk {
             .collect();
 
         const BATCH_SIZE: usize = 50;
-        let mut pinned: Vec<Hash256> = Vec::with_capacity(slabs.len());
-        let unpin_slabs = async |pinned: &[Hash256]| {
-            for id in pinned {
-                if let Err(e) = self.api_client.unpin_slab(&self.app_key.0, id).await {
-                    warn!("failed to unpin slab after pinning failed {id}: {e:?}");
-                }
-            }
-        };
-
         for batch in slabs.chunks(BATCH_SIZE) {
-            match self.api_client.pin_slabs(&self.app_key.0, batch).await {
-                Ok(ids) => pinned.extend(ids),
-                Err(e) => {
-                    unpin_slabs(&pinned).await;
-                    return Err(Error::App(format!("{e:?}")));
-                }
-            }
+            self.api_client
+                .pin_slabs(&self.app_key.0, batch)
+                .await
+                .map_err(|e| Error::App(format!("{e:?}")))?;
         }
 
-        if let Err(e) = self
-            .api_client
+        self.api_client
             .pin_object(&self.app_key.0, &object.seal(self.app_key.as_ref()))
             .await
-        {
-            unpin_slabs(&pinned).await;
-            return Err(Error::App(format!("{e:?}")));
-        }
+            .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())
     }
 
