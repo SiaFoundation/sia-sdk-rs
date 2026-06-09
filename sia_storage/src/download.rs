@@ -31,7 +31,7 @@ pub enum DownloadError {
 
     /// Not enough shards were successfully downloaded to recover the data.
     #[error("not enough shards: {0}/{1}")]
-    NotEnoughShards(u8, u8),
+    NotEnoughShards(usize, usize),
 
     /// The requested range is out of bounds.
     #[error("invalid range: {0}-{1}")]
@@ -98,7 +98,7 @@ struct SlabRecovery<State, T: Transport> {
     account_key: Arc<AppKey>,
 
     slab_index: usize,
-    min_shards: u8,
+    min_shards: usize,
     encryption_key: EncryptionKey,
     offset: usize,
     length: usize,
@@ -161,7 +161,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
             client,
             account_key,
             slab_index: slab.index,
-            min_shards: slab.slab.min_shards,
+            min_shards,
             encryption_key: slab.slab.encryption_key,
             offset: slab.slab.offset as usize,
             length: slab.slab.length as usize,
@@ -218,24 +218,25 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
         let mut shard_tasks = JoinSet::new();
         let mut shards = vec![None; self.state.sectors.len()];
         let mut sectors = VecDeque::from(self.state.sectors);
-        let min_shards = self.min_shards;
+
         let client = self.client;
         let account_key = self.account_key;
         let encryption_key = self.encryption_key;
 
         // compute the sector aligned region to download
-        let chunk_size = SEGMENT_SIZE * self.min_shards as usize;
+        let min_shards = self.min_shards;
+        let chunk_size = SEGMENT_SIZE * min_shards;
         let start = (self.offset / chunk_size) * SEGMENT_SIZE;
         let end = (self.offset + self.length).div_ceil(chunk_size) * SEGMENT_SIZE;
         let shard_offset = start;
         let shard_length = end - start;
 
         // overprovision the recovery to reduce tail latency from slow hosts
-        let spawn_shards = self.min_shards * 3 / 2;
+        let spawn_shards = (min_shards * 3 / 2).min(sectors.len());
         for i in 0..spawn_shards {
             let (task, inflight) = sectors
                 .pop_front()
-                .ok_or(DownloadError::NotEnoughShards(i, self.min_shards))?;
+                .ok_or(DownloadError::NotEnoughShards(i, min_shards))?;
             join_set_spawn!(
                 &mut shard_tasks,
                 Self::recover_shard(
@@ -249,8 +250,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                 )
             );
         }
-        let mut recovered_shards: u8 = 0;
-
+        let mut recovered_shards: usize = 0;
         loop {
             tokio::select! {
                 Some(res) = shard_tasks.join_next() => {
@@ -278,7 +278,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                             }
                         },
                         Err(_) => {
-                            if recovered_shards as usize + shard_tasks.len() + sectors.len() < min_shards as usize {
+                            if recovered_shards + shard_tasks.len() + sectors.len() < min_shards {
                                 return Err(DownloadError::NotEnoughShards(recovered_shards, min_shards));
                             } else if let Some((task, _)) = sectors.pop_front() {
                                 let inflight = client.reserve_inflight_download(&task.sector.host_key);
@@ -299,8 +299,8 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
 
 impl<T: Transport> SlabRecovery<ShardsRecovered, T> {
     fn decode(self) -> Result<SlabRecovery<SlabDecoded, T>, DownloadError> {
-        let parity_shards = self.state.shards.len() - self.min_shards as usize;
-        let rs = ErasureCoder::new(self.min_shards as usize, parity_shards)?;
+        let parity_shards = self.state.shards.len() - self.min_shards;
+        let rs = ErasureCoder::new(self.min_shards, parity_shards)?;
         let mut shards = self.state.shards;
         // decrypt the downloaded shards in place and recover the data shards
         encrypt_recovered_shards(
@@ -312,7 +312,7 @@ impl<T: Transport> SlabRecovery<ShardsRecovered, T> {
         rs.reconstruct_data_shards(&mut shards)?;
         let data_shards = shards
             .into_iter()
-            .take(self.min_shards as usize)
+            .take(self.min_shards)
             .map(|s| Bytes::from(s.unwrap())) // safe: data shards were just reconstructed
             .collect();
         Ok(SlabRecovery {

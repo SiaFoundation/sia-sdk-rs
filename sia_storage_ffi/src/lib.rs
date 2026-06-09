@@ -784,7 +784,7 @@ impl From<UploadOptions> for sia_storage::UploadOptions {
 #[derive(uniffi::Record)]
 pub struct DownloadOptions {
     #[uniffi(default = None)]
-    pub max_inflight: Option<u8>,
+    pub max_inflight: Option<u32>,
     #[uniffi(default = None)]
     pub offset: Option<u64>,
     #[uniffi(default = None)]

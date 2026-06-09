@@ -399,7 +399,7 @@ impl FromNapiValue for SendableUploadOptions {
 /// Download options.
 #[napi(object, object_to_js = false)]
 pub struct DownloadOptions {
-    pub max_inflight: Option<u8>,
+    pub max_inflight: Option<u32>,
     pub offset: Option<BigInt>,
     pub length: Option<BigInt>,
     #[napi(ts_type = "(progress: ShardProgress) => void")]
