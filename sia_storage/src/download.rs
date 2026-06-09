@@ -336,26 +336,28 @@ impl<T: Transport> SlabRecovery<SlabDecoded, T> {
     }
 }
 
-struct ChunkSlab {
+pub(crate) struct ChunkSlab {
     slab: Slab,
     index: usize,
 }
 
-/// Downloads an object by recovering chunks of each slab in parallel and
-/// writing them to the output writer in order.
-///
-/// note: this is pulled out for now to enable easier testing. In the future, when
-/// we can mock the SDK, this should be moved directly into the Download method.
-/// Iterator-like state for splitting slabs into chunks.
-struct ChunkIter<const N: usize> {
+const INITIAL_CHUNK_SIZE: usize = 1 << 15; // 32 KiB
+const MAX_CHUNK_SIZE: usize = 1 << 20; // 1 MiB
+
+/// Iterator-like state for splitting slabs into chunks. The chunk size starts
+/// at [`INITIAL_CHUNK_SIZE`] for a fast first byte and doubles per chunk up to
+/// `SECTOR_SIZE`, so a long transfer settles into large reads without paying
+/// that latency up front.
+pub(crate) struct ChunkIter {
     slabs: Vec<Slab>,
     slab_idx: usize,
     offset: u64,
     remaining: u64,
+    chunk_size: usize,
 }
 
-impl<const N: usize> ChunkIter<N> {
-    fn new(slabs: Vec<Slab>, offset: u64, length: u64) -> Self {
+impl ChunkIter {
+    pub(crate) fn new(slabs: Vec<Slab>, offset: u64, length: u64) -> Self {
         let mut slab_idx = 0;
         let mut offset = offset;
         while slab_idx < slabs.len() {
@@ -371,11 +373,12 @@ impl<const N: usize> ChunkIter<N> {
             slab_idx,
             offset,
             remaining: length,
+            chunk_size: INITIAL_CHUNK_SIZE,
         }
     }
 }
 
-impl<const N: usize> Iterator for ChunkIter<N> {
+impl Iterator for ChunkIter {
     type Item = ChunkSlab;
 
     fn next(&mut self) -> Option<ChunkSlab> {
@@ -387,7 +390,7 @@ impl<const N: usize> Iterator for ChunkIter<N> {
         let slab_offset = slab.offset as u64 + self.offset;
         let slab_length = (slab.length as u64 - self.offset)
             .min(self.remaining)
-            .min(N as u64);
+            .min(self.chunk_size as u64);
         self.offset += slab_length;
 
         if self.offset >= slab.length as u64 {
@@ -395,6 +398,7 @@ impl<const N: usize> Iterator for ChunkIter<N> {
             self.slab_idx += 1;
         }
         self.remaining -= slab_length;
+        self.chunk_size = self.chunk_size.saturating_mul(2).min(MAX_CHUNK_SIZE);
 
         let mut chunk = slab.clone();
         chunk.offset = slab_offset as u32;
@@ -406,8 +410,13 @@ impl<const N: usize> Iterator for ChunkIter<N> {
     }
 }
 
-const CHUNK_SIZE: usize = 1 << 18; // 256 KiB
-
+/// Downloads an object by recovering chunks of each slab in parallel and
+/// writing them to the output writer in order.
+///
+/// note: this is pulled out for now to enable easier testing. In the future, when
+/// we can mock the SDK, this should be moved directly into the Download method.
+/// Initial per-chunk size. Kept small so the first chunk — and therefore the
+/// first byte — lands in roughly one round trip.
 pub struct Download {
     hosts: Hosts<Client>,
     account_key: Arc<AppKey>,
@@ -416,7 +425,7 @@ pub struct Download {
     // download state
     buf: Bytes,
     queue: VecDeque<AbortOnDropHandle<Result<Vec<u8>, DownloadError>>>,
-    chunk_iter: ChunkIter<CHUNK_SIZE>,
+    chunk_iter: ChunkIter,
     // sticky error
     //
     // note: in Go we would store the error and return it, but that would
@@ -784,14 +793,15 @@ mod test {
         assert_eq!(data, recovered_data);
 
         let events = progress.lock().unwrap();
-        // each slab is split into CHUNK_SIZE (256 KiB) chunks for download.
-        // each chunk recovers min_shards shards independently.
-        let chunks_per_slab = optimal_data_size.div_ceil(CHUNK_SIZE);
-        let expected_total = chunks_per_slab * min_shards * num_slabs;
+        // the chunk size ramps, so chunks per slab isn't uniform; replay the
+        // same iterator the downloader uses to count them. each chunk recovers
+        // min_shards shards independently.
+        let total_chunks = ChunkIter::new(obj.slabs().to_vec(), 0, data_size as u64).count();
+        let expected_total = total_chunks * min_shards;
         assert_eq!(
             events.len(),
             expected_total,
-            "expected {expected_total} progress callbacks ({chunks_per_slab} chunks × {min_shards} shards × {num_slabs} slabs), got {}",
+            "expected {expected_total} progress callbacks ({total_chunks} chunks × {min_shards} shards), got {}",
             events.len()
         );
 

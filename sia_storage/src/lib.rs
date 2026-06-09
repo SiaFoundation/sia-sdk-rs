@@ -334,7 +334,7 @@ impl DownloadOptions {
 impl Default for DownloadOptions {
     fn default() -> Self {
         Self {
-            max_inflight: 256, // ~64 MiB in memory
+            max_inflight: 64, // ~64 MiB in memory
             offset: 0,
             length: None,
             shard_downloaded: None,
@@ -1460,8 +1460,11 @@ mod test {
         assert_eq!(data, recovered_data);
 
         let download_progress = download_progress.lock().unwrap();
-        let chunks_per_slab = OPTIMAL_DATA_SIZE as usize / (1 << 18);
-        let expected_total = chunks_per_slab * min_shards * num_slabs;
+        // the chunk size ramps, so chunks per slab isn't uniform; replay the
+        // same iterator the downloader uses to count them.
+        let total_chunks =
+            crate::download::ChunkIter::new(obj.slabs().to_vec(), 0, data_size as u64).count();
+        let expected_total = total_chunks * min_shards;
         let actual_total: usize = download_progress.values().sum();
         assert_eq!(
             actual_total, expected_total,
