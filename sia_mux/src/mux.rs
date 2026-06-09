@@ -338,29 +338,35 @@ impl Stream {
     /// Append a FLAG_LAST frame to the write buffer, move the stream from
     /// active to closing, and notify the write loop. Returns any pre-existing
     /// fatal error from the mux.
+    ///
+    /// If the stream was never established (no frame was ever sent to the
+    /// peer), no FLAG_LAST is sent: the peer doesn't know this stream exists
+    /// and would treat the frame as an unknown stream, failing the entire mux.
     fn send_close_frame(&mut self) -> Option<MuxError> {
         self.closed = true;
+
+        let mut s = self.mux_state.lock().unwrap();
+        let err = s.err.clone();
+        s.streams.remove(&self.id);
+
+        if !self.established {
+            return err;
+        }
 
         let header = FrameHeader {
             id: self.id,
             length: 0,
             flags: FLAG_LAST,
         };
-
-        let err = {
-            let mut s = self.mux_state.lock().unwrap();
-            let err = s.err.clone();
-            append_frame(&mut s.write_buf, header, &[]);
-            s.streams.remove(&self.id);
-            s.closing.insert(
-                self.id,
-                ClosingStreamEntry {
-                    frame_count: 0,
-                    closed: time::Instant::now(),
-                },
-            );
-            err
-        };
+        append_frame(&mut s.write_buf, header, &[]);
+        s.closing.insert(
+            self.id,
+            ClosingStreamEntry {
+                frame_count: 0,
+                closed: time::Instant::now(),
+            },
+        );
+        drop(s);
 
         self.write_notify.notify_one();
         err
@@ -1041,6 +1047,42 @@ mod tests {
 
         // Use AsyncWrite::shutdown instead of Stream::close
         stream.shutdown().await.unwrap();
+        dial_mux.close().await.unwrap();
+        accept_handle.await.unwrap();
+    }
+
+    /// Verify that closing a stream that was never established (no frame ever
+    /// written) does NOT send a FLAG_LAST frame. The peer never learned of the
+    /// stream, so a FLAG_LAST would be treated as an unknown stream and fail
+    /// the whole mux. We confirm the mux stays healthy by opening a real
+    /// stream afterwards and exchanging data over it.
+    #[tokio::test]
+    async fn close_unestablished_stream_keeps_mux_alive() {
+        let (dial_mux, accept_mux) = new_testing_pair().await;
+
+        let accept_handle = tokio::spawn(async move {
+            let mut stream = accept_mux.accept_stream().await.unwrap();
+            let mut buf = vec![0u8; 1024];
+            let n = stream.read(&mut buf).await.unwrap();
+            stream.write_all(&buf[..n]).await.unwrap();
+            stream.close().unwrap();
+            accept_mux.close().await.unwrap();
+        });
+
+        // Dial a stream and drop it without ever writing — never established.
+        drop(dial_mux.dial_stream().unwrap());
+        // And one closed explicitly without writing.
+        dial_mux.dial_stream().unwrap().close().unwrap();
+
+        // The mux must still be usable: open a real stream and echo a message.
+        let mut stream = dial_mux.dial_stream().unwrap();
+        let msg = b"still alive";
+        stream.write_all(msg).await.unwrap();
+        let mut buf = vec![0u8; 1024];
+        let n = stream.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], msg, "mux was torn down by stray FLAG_LAST");
+
+        stream.close().unwrap();
         dial_mux.close().await.unwrap();
         accept_handle.await.unwrap();
     }
