@@ -1,3 +1,14 @@
+## 0.3.3 (2026-06-10)
+
+### Features
+
+- Changed download chunking to ramp up to reduce round trips on large downloads.
+- Overprovision shard downloads to reduce tail latency from slow hosts
+
+### Fixes
+
+- Fix memory leak in WASM download method
+
 ## 0.3.2 (2026-05-18)
 
 ### Fixes
