@@ -1,3 +1,15 @@
+## 0.9.2 (2026-06-10)
+
+### Features
+
+- Changed download chunking to ramp up to reduce round trips on large downloads.
+- Overprovision shard downloads to reduce tail latency from slow hosts
+- Take into account inflight uploads and downloads when ranking hosts.
+
+### Fixes
+
+- Pin slabs in batches within pin_object.
+
 ## 0.9.1 (2026-05-18)
 
 ### Fixes

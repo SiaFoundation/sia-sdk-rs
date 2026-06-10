@@ -1,3 +1,14 @@
+## 0.9.0 (2026-06-10)
+
+### Breaking Changes
+
+- Changed DownloadOptions::max_inflight from u8 to u32.
+
+### Features
+
+- Changed download chunking to ramp up to reduce round trips on large downloads.
+- Overprovision shard downloads to reduce tail latency from slow hosts
+
 ## 0.8.1 (2026-05-18)
 
 ### Fixes
