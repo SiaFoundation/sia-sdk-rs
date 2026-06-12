@@ -17,8 +17,36 @@ use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::PublicKey;
 use thiserror::Error;
 use tokio::io::{AsyncRead, BufReader};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::task::JoinSet;
+
+/// RAII increment of the pipeline's waiting-shard count. Held while a
+/// shard has no upload attempt in flight (encode, encrypt, or a permit
+/// wait) and dropped once it does, so the racing gate stays balanced
+/// even when tasks are cancelled mid-wait.
+struct WaitingGuard(watch::Sender<usize>);
+
+impl WaitingGuard {
+    fn new(waiting: watch::Sender<usize>) -> Self {
+        // Only notify on the 0 boundary: watchers gate on `waiting == 0`,
+        // so intermediate transitions would wake every parked shard task
+        // for nothing.
+        waiting.send_if_modified(|w| {
+            *w += 1;
+            *w == 1
+        });
+        Self(waiting)
+    }
+}
+
+impl Drop for WaitingGuard {
+    fn drop(&mut self) {
+        self.0.send_if_modified(|w| {
+            *w -= 1;
+            *w == 0
+        });
+    }
+}
 
 struct ShardUpload {
     semaphore: Arc<Semaphore>,
@@ -28,6 +56,7 @@ struct ShardUpload {
     data: Bytes,
     slab_index: usize,
     shard_index: usize,
+    waiting: watch::Sender<usize>,
 }
 
 struct SectorUploadResult {
@@ -89,16 +118,28 @@ impl ShardUpload {
         self.hosts.lock().unwrap().pick()
     }
 
-    async fn upload_shard(self) -> Result<SectorUploadResult, UploadError> {
+    async fn upload_shard(
+        self,
+        waiting_guard: WaitingGuard,
+    ) -> Result<SectorUploadResult, UploadError> {
         let permit = self.semaphore.clone().acquire_owned().await?;
+        // This shard is about to have an attempt in flight; it no longer
+        // blocks racing.
+        drop(waiting_guard);
+        let mut waiting_rx = self.waiting.subscribe();
         let (initial, initial_guard) = self.pick_next_host().ok_or(QueueError::NoMoreHosts)?;
         let mut tasks = JoinSet::new();
         self.spawn_write(&mut tasks, initial, initial_guard, UPLOAD_TIMEOUT, permit);
+        let mut eligible = *waiting_rx.borrow_and_update() == 0;
+        let mut last_event = Instant::now();
+
+        let mut race_timeout = self.client.write_race_timeout(self.data.len() as u32);
         loop {
-            let active = tasks.len();
             tokio::select! {
                 biased;
                 Some(res) = tasks.join_next() => {
+                    last_event = Instant::now();
+                    race_timeout = self.client.write_race_timeout(self.data.len() as u32);
                     match res? {
                         Ok(result) => {
                             if result.sector.host_key != initial {
@@ -120,16 +161,33 @@ impl ShardUpload {
                         }
                     }
                 },
-                _ = sleep(Duration::from_secs(active.max(1) as u64)) => {
-                    if let Ok(racer) = self.semaphore.clone().try_acquire_owned()
+                // Fires once racing will not steal work and no attempt has made progress for a race-timeout interval.
+                _ = sleep((last_event + race_timeout).saturating_duration_since(Instant::now())), if eligible => {
+                    let elapsed = last_event.elapsed();
+                    last_event = Instant::now();
+                    race_timeout = self.client.write_race_timeout(self.data.len() as u32);
+                    eligible = *waiting_rx.borrow_and_update() == 0;
+                    if eligible
+                        && let Ok(racer) = self.semaphore.clone().try_acquire_owned()
                         && let Some((next, guard)) = self.pick_next_host() {
                             debug!(
-                                "slab {} shard {} racing slow host with {next}",
-                                self.slab_index, self.shard_index
+                                "slab {} shard {} racing slow host with {next} after {:?}",
+                                self.slab_index, self.shard_index, elapsed
                             );
                             self.spawn_write(&mut tasks, next, guard, UPLOAD_TIMEOUT, racer);
                         }
-                }
+                },
+                // `wait_for` re-checks inside the watch future, so this arm
+                // only resolves on a real gate transition instead of waking
+                // the loop for every counter change. `self.waiting` keeps
+                // the channel open for the life of this loop, so it cannot
+                // fail.
+                // discard the returned Ref so the arm output doesn't hold a
+                // borrow of the receiver
+                _ = async { let _ = waiting_rx.wait_for(|waiting| *waiting == 0).await; }, if !eligible => {
+                    eligible = true;
+                    race_timeout = self.client.write_race_timeout(self.data.len() as u32);
+                },
             }
         }
     }
@@ -212,6 +270,10 @@ pub(crate) struct Upload {
     /// for shard uploads to complete, and we want to allow some buffering to
     /// improve performance.
     shard_sema: Arc<Semaphore>,
+    /// Number of shards that do not yet have an upload attempt in flight.
+    /// Shard tasks only race slow hosts while this is zero, so racers never
+    /// take permits that a primary shard is waiting for.
+    waiting: watch::Sender<usize>,
     slab_tasks: VecDeque<AbortOnDropHandle<Result<UploadedSlab, UploadError>>>,
     shard_uploaded: Option<ShardProgressCallback>,
 }
@@ -249,6 +311,7 @@ impl Upload {
             erasure_coder: Arc::new(erasure_coder),
             slab_sema: Arc::new(Semaphore::new(max_slabs)),
             shard_sema: Arc::new(Semaphore::new(options.max_inflight)),
+            waiting: watch::channel(0).0,
             slab_tasks: VecDeque::new(),
             shard_uploaded: options.shard_uploaded,
         })
@@ -262,6 +325,14 @@ impl Upload {
         let progress_callback = self.shard_uploaded.clone();
         let slab_index = self.slab_tasks.len();
         let permit = self.slab_sema.clone().acquire_owned().await?;
+        // Count this slab's shards as waiting before the task spawns so the
+        // racing gate can't open between buffering and encode.
+        let waiting = self.waiting.clone();
+        let waiting_guards: Vec<WaitingGuard> = slab
+            .shards
+            .iter()
+            .map(|_| WaitingGuard::new(waiting.clone()))
+            .collect();
         let handle = AbortOnDropHandle::new(maybe_spawn!(async move {
             let _permit = permit;
             let total_shards = slab.shards.len();
@@ -293,12 +364,15 @@ impl Upload {
             let hosts: Arc<Mutex<HostQueue>> = Arc::new(Mutex::new(client.upload_queue()));
             let owned_slab_key = Arc::new(slab_key.clone());
             let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> = JoinSet::new();
-            for (shard_index, mut shard) in shards.into_iter().enumerate() {
+            for ((shard_index, mut shard), waiting_guard) in
+                shards.into_iter().enumerate().zip(waiting_guards)
+            {
                 let owned_slab_key = owned_slab_key.clone();
                 let shard_client = client.clone();
                 let shard_account_key = app_key.clone();
                 let shard_sema_inner = shard_sema.clone();
                 let hosts = hosts.clone();
+                let waiting = waiting.clone();
                 join_set_spawn!(shard_tasks, async move {
                     let shard = maybe_spawn_blocking!({
                         encrypt_shard(&owned_slab_key, shard_index as u8, 0, &mut shard);
@@ -312,8 +386,9 @@ impl Upload {
                         slab_index,
                         shard_index,
                         hosts,
+                        waiting,
                     };
-                    shard_upload.upload_shard().await
+                    shard_upload.upload_shard(waiting_guard).await
                 });
             }
 
@@ -559,6 +634,12 @@ pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Host;
+    use sia_core::signing::PrivateKey;
+    use sia_core::types::v2::{NetAddress, Protocol};
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
     fn opts(data: u8, parity: u8) -> UploadOptions {
         UploadOptions {
@@ -566,6 +647,136 @@ mod tests {
             parity_shards: parity,
             ..Default::default()
         }
+    }
+
+    fn test_host(public_key: PublicKey) -> Host {
+        Host {
+            public_key,
+            addresses: vec![NetAddress {
+                protocol: Protocol::QUIC,
+                address: "localhost:1234".to_string(),
+            }],
+            country_code: "US".to_string(),
+            latitude: 0.0,
+            longitude: 0.0,
+            good_for_upload: true,
+        }
+    }
+
+    /// Sets up five fast hosts with seeded write metrics plus one unsampled
+    /// slow host. The discovery preference guarantees the slow host wins the
+    /// initial pick, and the seeded p95 keeps the race timer near its 50ms
+    /// floor so a racer (when allowed) beats the slow host comfortably.
+    fn racing_setup(slow_delay: Duration) -> (Hosts<Client>, Arc<AppKey>, PublicKey) {
+        let transport = Client::new();
+        let hosts_manager = Hosts::new(transport.clone());
+        let app_key = Arc::new(AppKey::import(rand::random()));
+        let fast: Vec<PublicKey> = (0..5)
+            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
+            .collect();
+        let slow = PrivateKey::from_seed(&rand::random()).public_key();
+        hosts_manager.update(
+            fast.iter()
+                .chain(std::iter::once(&slow))
+                .map(|pk| test_host(*pk))
+                .collect(),
+            true,
+        );
+        for pk in &fast {
+            hosts_manager.record_write_sample(*pk, SECTOR_SIZE as u32, Duration::from_millis(10));
+        }
+        transport.set_slow_hosts([slow], slow_delay);
+        (hosts_manager, app_key, slow)
+    }
+
+    fn shard_upload(
+        hosts_manager: &Hosts<Client>,
+        app_key: &Arc<AppKey>,
+        waiting: &watch::Sender<usize>,
+    ) -> ShardUpload {
+        ShardUpload {
+            semaphore: Arc::new(Semaphore::new(4)),
+            client: hosts_manager.clone(),
+            hosts: Arc::new(Mutex::new(hosts_manager.upload_queue())),
+            account_key: app_key.clone(),
+            data: Bytes::from(vec![0u8; SECTOR_SIZE]),
+            slab_index: 0,
+            shard_index: 0,
+            waiting: waiting.clone(),
+        }
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_upload_race_gated_while_shards_waiting() {
+        let (hosts_manager, app_key, slow) = racing_setup(Duration::from_millis(600));
+        // another shard is still waiting for an attempt, so the slow initial
+        // host must not be raced
+        let (waiting, _) = watch::channel(1usize);
+        let upload = shard_upload(&hosts_manager, &app_key, &waiting);
+        let start = Instant::now();
+        let result = upload
+            .upload_shard(WaitingGuard::new(waiting.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.sector.host_key, slow,
+            "gated shard must finish on the slow host"
+        );
+        assert!(
+            start.elapsed() >= Duration::from_millis(500),
+            "gated shard must not race: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_upload_race_when_idle() {
+        let (hosts_manager, app_key, slow) = racing_setup(Duration::from_millis(600));
+        let (waiting, _) = watch::channel(0usize);
+        let upload = shard_upload(&hosts_manager, &app_key, &waiting);
+        let start = Instant::now();
+        let result = upload
+            .upload_shard(WaitingGuard::new(waiting.clone()))
+            .await
+            .unwrap();
+        assert_ne!(
+            result.sector.host_key, slow,
+            "idle pipeline should race the slow host"
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "racer should win quickly: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_upload_race_triggered_by_idle_transition() {
+        let (hosts_manager, app_key, slow) = racing_setup(Duration::from_millis(1500));
+        let (waiting, _) = watch::channel(1usize);
+        // the "other" waiting shard starts its attempt 150ms in; the gate
+        // opening should start racing immediately rather than waiting
+        // another race-timeout interval
+        let flip = waiting.clone();
+        maybe_spawn!(async move {
+            sleep(Duration::from_millis(150)).await;
+            flip.send_modify(|w| *w -= 1);
+        });
+        let upload = shard_upload(&hosts_manager, &app_key, &waiting);
+        let start = Instant::now();
+        let result = upload
+            .upload_shard(WaitingGuard::new(waiting.clone()))
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert_ne!(
+            result.sector.host_key, slow,
+            "race should start once the pipeline goes idle"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(140) && elapsed < Duration::from_millis(1000),
+            "racer should win shortly after the gate opens: {elapsed:?}"
+        );
     }
 
     #[test]
