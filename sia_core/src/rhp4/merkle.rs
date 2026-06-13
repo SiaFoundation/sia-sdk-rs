@@ -8,54 +8,8 @@ use crate::types::Hash256;
 use blake2b_simd::Params;
 use blake2b_simd::many::{HashManyJob, hash_many};
 use bytes::Bytes;
-#[cfg(not(target_arch = "wasm32"))]
-use rayon::prelude::*;
 use thiserror::Error;
 use tokio::io::{self, AsyncRead, AsyncReadExt};
-
-/// Parallel iteration on native, sequential on WASM.
-///
-/// On native, calls the rayon `par_` variant (e.g. `par_chunks_mut`).
-/// On WASM, calls the standard library equivalent (e.g. `chunks_mut`).
-/// Both return iterators with compatible `.for_each()` and `.map().collect()` APIs.
-///
-/// ```ignore
-/// maybe_par!(slice, chunks_exact_mut, 4).enumerate().for_each(|(i, chunk)| { ... });
-/// maybe_par!(slice, chunks_mut, size).for_each(|chunk| { ... });
-/// let v: Vec<T> = maybe_par!(slice, chunks_exact, 64).map(|c| hash(c)).collect();
-/// ```
-macro_rules! maybe_par {
-    ($slice:expr, chunks_mut, $size:expr) => {{
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            $slice.par_chunks_mut($size)
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            $slice.chunks_mut($size)
-        }
-    }};
-    ($slice:expr, chunks_exact_mut, $size:expr) => {{
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            $slice.par_chunks_exact_mut($size)
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            $slice.chunks_exact_mut($size)
-        }
-    }};
-    ($slice:expr, chunks_exact, $size:expr) => {{
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            $slice.par_chunks_exact($size)
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            $slice.chunks_exact($size)
-        }
-    }};
-}
 
 /// Calculates the Merkle root of a sector
 pub fn sector_root(sector: &[u8]) -> Hash256 {
@@ -64,7 +18,8 @@ pub fn sector_root(sector: &[u8]) -> Hash256 {
     params.hash_length(32);
 
     let mut tree_hashes = vec![Hash256::default(); LEAVES_PER_SECTOR];
-    maybe_par!(tree_hashes, chunks_exact_mut, 4)
+    tree_hashes
+        .chunks_exact_mut(4)
         .enumerate()
         .for_each(|(i, chunk)| {
             // prepare inputs
@@ -93,7 +48,7 @@ pub fn sector_root(sector: &[u8]) -> Hash256 {
 
     let mut chunk_size = 4;
     while chunk_size <= tree_hashes.len() {
-        maybe_par!(tree_hashes, chunks_mut, chunk_size).for_each(|nodes| {
+        tree_hashes.chunks_mut(chunk_size).for_each(|nodes| {
             // prepare inputs
             let mut inputs = [[0u8; 65]; 2];
             for (j, input) in inputs.iter_mut().enumerate() {
