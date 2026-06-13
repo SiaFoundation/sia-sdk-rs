@@ -190,6 +190,22 @@ impl HostList {
         self.with_metric(&host_key, |m| m.add_failure());
     }
 
+    /// Expected duration of a `size`-byte write to the host based on its
+    /// throughput average. `None` when the host has no write samples yet.
+    fn estimate_write_duration(&self, host_key: &PublicKey, size: u32) -> Option<Duration> {
+        let metrics = self.metrics.read().unwrap();
+        let rate = metrics.get(host_key)?.write_throughput()?;
+        Some(Duration::from_secs_f64(size as f64 / *rate))
+    }
+
+    /// Expected duration of a `size`-byte read from the host based on its
+    /// throughput average. `None` when the host has no read samples yet.
+    fn estimate_read_duration(&self, host_key: &PublicKey, size: u32) -> Option<Duration> {
+        let metrics = self.metrics.read().unwrap();
+        let rate = metrics.get(host_key)?.read_throughput()?;
+        Some(Duration::from_secs_f64(size as f64 / *rate))
+    }
+
     /// Adds a read sample for the given host, updating its metrics.
     fn add_read_sample(&self, host_key: PublicKey, transfer: Transfer) {
         self.with_metric(&host_key, |m| m.add_read_sample(transfer));
@@ -356,6 +372,18 @@ impl<T: Transport> Hosts<T> {
     /// Adds a failure for the given host, updating its metrics and priority.
     pub fn add_failure(&self, host_key: PublicKey) {
         self.hosts.add_failure(host_key);
+    }
+
+    /// Expected duration of a `size`-byte write to the host based on its
+    /// recent samples.
+    pub fn estimate_write_duration(&self, host_key: &PublicKey, size: u32) -> Option<Duration> {
+        self.hosts.estimate_write_duration(host_key, size)
+    }
+
+    /// Expected duration of a `size`-byte read from the host based on its
+    /// recent samples.
+    pub fn estimate_read_duration(&self, host_key: &PublicKey, size: u32) -> Option<Duration> {
+        self.hosts.estimate_read_duration(host_key, size)
     }
 
     /// Records a successful write for the host's metrics and the global

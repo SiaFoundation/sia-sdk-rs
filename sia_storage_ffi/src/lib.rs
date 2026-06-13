@@ -741,7 +741,7 @@ impl Download {
 #[derive(uniffi::Record)]
 pub struct UploadOptions {
     #[uniffi(default = None)]
-    pub max_inflight: Option<u32>,
+    pub max_buffered_slabs: Option<u32>,
 
     #[uniffi(default = None)]
     pub data_shards: Option<u8>,
@@ -757,10 +757,7 @@ pub struct UploadOptions {
 impl From<UploadOptions> for sia_storage::UploadOptions {
     fn from(val: UploadOptions) -> Self {
         let mut options = sia_storage::UploadOptions::default();
-        options.max_inflight = val
-            .max_inflight
-            .map(|v| v as usize)
-            .unwrap_or(options.max_inflight);
+        options.max_buffered_slabs = val.max_buffered_slabs.map(|v| v as usize);
         options.data_shards = val.data_shards.unwrap_or(options.data_shards);
         options.parity_shards = val.parity_shards.unwrap_or(options.parity_shards);
         options.shard_uploaded =
@@ -784,7 +781,7 @@ impl From<UploadOptions> for sia_storage::UploadOptions {
 #[derive(uniffi::Record)]
 pub struct DownloadOptions {
     #[uniffi(default = None)]
-    pub max_inflight: Option<u32>,
+    pub max_buffered_chunks: Option<u32>,
     #[uniffi(default = None)]
     pub offset: Option<u64>,
     #[uniffi(default = None)]
@@ -798,10 +795,7 @@ pub struct DownloadOptions {
 impl From<DownloadOptions> for sia_storage::DownloadOptions {
     fn from(val: DownloadOptions) -> Self {
         let mut options = sia_storage::DownloadOptions::default();
-        options.max_inflight = val
-            .max_inflight
-            .map(|v| v as usize)
-            .unwrap_or(options.max_inflight);
+        options.max_buffered_chunks = val.max_buffered_chunks.map(|v| v as usize);
         options.offset = val.offset.unwrap_or(options.offset);
         options.length = val.length;
         options.shard_downloaded =

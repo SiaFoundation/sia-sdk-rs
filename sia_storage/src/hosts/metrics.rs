@@ -121,6 +121,14 @@ impl HostMetric {
         self.failure_rate.add_sample(false);
     }
 
+    pub(super) fn write_throughput(&self) -> Option<TransferRate> {
+        self.rpc_write_avg.avg()
+    }
+
+    pub(super) fn read_throughput(&self) -> Option<TransferRate> {
+        self.rpc_read_avg.avg()
+    }
+
     /// Combined read + write throughput average. `None` only when neither side
     /// has been sampled. Used by [`HostScore`] for the discovery preference
     /// (unsampled outranks sampled).

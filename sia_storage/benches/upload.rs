@@ -54,9 +54,9 @@ fn upload_benchmark(c: &mut Criterion) {
     let mut large_group = c.benchmark_group("120MiB");
     large_group.throughput(Throughput::Bytes(input.len() as u64));
 
-    // all shards in flight
+    // large in-memory slab budget
     large_group.bench_with_input(
-        BenchmarkId::new("upload", "90 inflight"),
+        BenchmarkId::new("upload", "90 slabs"),
         &input,
         |b, input| {
             b.to_async(&runtime).iter(|| async {
@@ -64,7 +64,7 @@ fn upload_benchmark(c: &mut Criterion) {
                     uploader.clone(),
                     input.clone(),
                     UploadOptions {
-                        max_inflight: 90,
+                        max_buffered_slabs: Some(90),
                         ..Default::default()
                     },
                 )
@@ -75,7 +75,7 @@ fn upload_benchmark(c: &mut Criterion) {
     );
 
     large_group.bench_with_input(
-        BenchmarkId::new("upload", "10 inflight"),
+        BenchmarkId::new("upload", "10 slabs"),
         &input,
         |b, input| {
             b.to_async(&runtime).iter(|| async {
@@ -83,7 +83,7 @@ fn upload_benchmark(c: &mut Criterion) {
                     uploader.clone(),
                     input.clone(),
                     UploadOptions {
-                        max_inflight: 10,
+                        max_buffered_slabs: Some(10),
                         ..Default::default()
                     },
                 )
@@ -105,7 +105,7 @@ fn upload_benchmark(c: &mut Criterion) {
     });
 
     large_group.bench_with_input(
-        BenchmarkId::new("download", "30 inflight"),
+        BenchmarkId::new("download", "30 chunks"),
         &object,
         |b, object| {
             b.to_async(&runtime).iter(|| async {
@@ -113,7 +113,7 @@ fn upload_benchmark(c: &mut Criterion) {
                     .download(
                         object,
                         DownloadOptions {
-                            max_inflight: 30,
+                            max_buffered_chunks: Some(30),
                             ..Default::default()
                         },
                     )
@@ -126,7 +126,7 @@ fn upload_benchmark(c: &mut Criterion) {
     );
 
     large_group.bench_with_input(
-        BenchmarkId::new("download", "10 inflight"),
+        BenchmarkId::new("download", "10 chunks"),
         &object,
         |b, object| {
             b.to_async(&runtime).iter(|| async {
@@ -134,7 +134,7 @@ fn upload_benchmark(c: &mut Criterion) {
                     .download(
                         object,
                         DownloadOptions {
-                            max_inflight: 10,
+                            max_buffered_chunks: Some(10),
                             ..Default::default()
                         },
                     )

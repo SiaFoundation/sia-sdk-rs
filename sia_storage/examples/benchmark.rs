@@ -63,13 +63,13 @@ enum Command {
         #[arg(short, long, default_value_t = 120 * 1024 * 1024)]
         size: usize,
 
-        /// Maximum number of concurrent shard uploads.
+        /// Maximum number of slabs buffered in memory during upload.
         #[arg(long)]
-        upload_max_inflight: Option<usize>,
+        upload_max_buffered_slabs: Option<usize>,
 
-        /// Maximum number of concurrent chunk downloads.
+        /// Maximum number of chunks buffered in memory during download.
         #[arg(long)]
-        download_max_inflight: Option<usize>,
+        download_max_buffered_chunks: Option<usize>,
 
         /// Print a per-host breakdown of shards and throughput after the run.
         #[arg(long)]
@@ -414,18 +414,18 @@ fn print_host_summary(label: &str, stats: &HostStats) {
 async fn run_benchmark(
     sdk: Sdk,
     size: usize,
-    upload_max_inflight: Option<usize>,
-    download_max_inflight: Option<usize>,
+    upload_max_buffered_slabs: Option<usize>,
+    download_max_buffered_chunks: Option<usize>,
     host_summary: bool,
 ) {
     let seed: u64 = rand::random();
     let reader = SeededReader::new(seed, size);
 
     // upload the data to the network
-    let mut upload_options = UploadOptions::default();
-    if let Some(n) = upload_max_inflight {
-        upload_options.max_inflight = n;
-    }
+    let mut upload_options = UploadOptions {
+        max_buffered_slabs: upload_max_buffered_slabs,
+        ..Default::default()
+    };
     let encoded_size = sia_storage::encoded_size(
         size as u64,
         upload_options.data_shards,
@@ -459,10 +459,10 @@ async fn run_benchmark(
     let upload_duration = start.elapsed();
     upload_progress.finish();
 
-    let mut download_options = DownloadOptions::default();
-    if let Some(n) = download_max_inflight {
-        download_options.max_inflight = n;
-    }
+    let mut download_options = DownloadOptions {
+        max_buffered_chunks: download_max_buffered_chunks,
+        ..Default::default()
+    };
     let download_hosts: HostStats = Arc::new(Mutex::new(HashMap::new()));
     let download_hosts_cb = download_hosts.clone();
     download_options = download_options.on_shard_downloaded(move |p| {
@@ -538,16 +538,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Command::Login { indexer, new } => login(&cli.profile, &indexer, new).await,
         Command::Run {
             size,
-            upload_max_inflight,
-            download_max_inflight,
+            upload_max_buffered_slabs,
+            download_max_buffered_chunks,
             host_summary,
         } => {
             let sdk = connect(&cli.profile).await?;
             run_benchmark(
                 sdk,
                 size,
-                upload_max_inflight,
-                download_max_inflight,
+                upload_max_buffered_slabs,
+                download_max_buffered_chunks,
                 host_summary,
             )
             .await;

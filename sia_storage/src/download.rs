@@ -1,9 +1,11 @@
 use std::collections::VecDeque;
 use std::fmt::Debug;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Poll, ready};
 
+use crate::congestion::InflightController;
 use crate::encryption::{Chacha20Cipher, EncryptionKey, encrypt_recovered_shards};
 use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::{Hosts, InflightGuard, RPCError};
@@ -77,6 +79,23 @@ struct SectorTask {
 /// Racing further ahead steals capacity from chunks the reader needs first.
 const RACE_WINDOW: usize = 3;
 
+/// Starting chunk limit; slow start grows it quickly when uncongested.
+const INITIAL_INFLIGHT: usize = 8;
+/// Lower bound on the adaptive limit. One chunk still fans out
+/// `min_shards * 3 / 2` sector reads.
+const MIN_INFLIGHT: usize = 1;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn default_chunks_in_memory() -> usize {
+    let budget = crate::default_memory_budget();
+    (budget / MAX_CHUNK_SIZE as u64).max(1) as usize
+}
+
+#[cfg(target_arch = "wasm32")]
+fn default_chunks_in_memory() -> usize {
+    32
+}
+
 struct AwaitingRecovery {
     /// The sectors to download for this slab, paired with their inflight guards
     /// if they were reserved by `SlabRecovery::new`. Guards are held for the
@@ -107,6 +126,7 @@ struct SlabDecoded {
 /// for WASM, we can reuse the state machine and its await points and swap
 /// out the async primitives.
 struct SlabRecovery<State, T: Transport> {
+    controller: Arc<InflightController>,
     client: Hosts<T>,
     account_key: Arc<AppKey>,
 
@@ -126,6 +146,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
         slab: ChunkSlab,
         seq: usize,
         popped: watch::Sender<usize>,
+        controller: Arc<InflightController>,
     ) -> Result<Self, DownloadError> {
         if slab.slab.min_shards == 0 {
             return Err(DownloadError::InvalidSlab(
@@ -174,6 +195,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
 
         Ok(Self {
             client,
+            controller,
             account_key,
             slab_index: slab.index,
             min_shards,
@@ -188,65 +210,70 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
         })
     }
 
-    async fn recover_shard(
-        client: Hosts<T>,
-        account_key: Arc<AppKey>,
+    fn recover_shard(
+        &self,
         task: SectorTask,
         inflight: Option<InflightGuard>,
-        slab_index: usize,
-        sector_offset: usize,
-        sector_length: usize,
-    ) -> Result<(usize, Vec<u8>, ShardProgress), DownloadError> {
-        // Hold the inflight reservation for the duration of the RPC. The
-        // guard was created by the caller before spawning so the load is
-        // visible to concurrent `prioritize` calls, then dropped here on
-        // either success or error.
-        let _inflight = inflight;
-        let start = Instant::now();
-        let data = client
-            .read_sector(
-                task.sector.host_key,
-                &account_key.0,
-                task.sector.root,
-                sector_offset,
-                sector_length,
-                // long to handle slow hosts, racing will ensure we don't waste time unnecessarily
-                Duration::from_secs(60),
-            )
-            .await?;
-        let elapsed = start.elapsed();
-        debug!(
-            "slab {} shard {} recovered from {} in {:?}",
-            slab_index, task.shard_index, task.sector.host_key, elapsed
-        );
-        // Bytes -> Vec<u8> is zero-copy when the Bytes is uniquely owned
-        // (true here — no other refs to the response yet).
-        Ok((
-            task.shard_index,
-            Vec::from(data),
-            ShardProgress {
-                host_key: task.sector.host_key,
-                shard_size: sector_length,
-                shard_index: task.shard_index,
-                slab_index,
-                elapsed,
-            },
-        )) // no other references to the data exist, so this is safe
+        shard_offset: usize,
+        shard_length: usize,
+    ) -> impl Future<Output = Result<(usize, Vec<u8>, ShardProgress), DownloadError>> + 'static
+    {
+        let client = self.client.clone();
+        let controller = self.controller.clone();
+        let account_key = self.account_key.clone();
+        let slab_index = self.slab_index;
+        async move {
+            // Hold the inflight reservation for the duration of the RPC. The
+            // guard was created by the caller before spawning so the load is
+            // visible to concurrent `prioritize` calls, then dropped here on
+            // either success or error.
+            let _inflight = inflight;
+            let expected =
+                client.estimate_read_duration(&task.sector.host_key, shard_length as u32);
+            let start = Instant::now();
+            let result = client
+                .read_sector(
+                    task.sector.host_key,
+                    &account_key.0,
+                    task.sector.root,
+                    shard_offset,
+                    shard_length,
+                    // long to handle slow hosts, racing will ensure we don't waste time unnecessarily
+                    Duration::from_secs(60),
+                )
+                .await;
+            let elapsed = start.elapsed();
+            controller.record(expected, elapsed, result.is_ok());
+            let data = result?;
+            debug!(
+                "slab {} shard {} recovered from {} in {:?}",
+                slab_index, task.shard_index, task.sector.host_key, elapsed
+            );
+            // Bytes -> Vec<u8> is zero-copy when the Bytes is uniquely owned
+            // (true here — no other refs to the response yet).
+            Ok((
+                task.shard_index,
+                Vec::from(data),
+                ShardProgress {
+                    host_key: task.sector.host_key,
+                    shard_size: shard_length,
+                    shard_index: task.shard_index,
+                    slab_index,
+                    elapsed,
+                },
+            ))
+        }
     }
 
     async fn recover_shards(
-        self,
+        mut self,
         shard_downloaded: Option<ShardProgressCallback>,
     ) -> Result<SlabRecovery<ShardsRecovered, T>, DownloadError> {
         let mut shard_tasks = JoinSet::new();
         let mut shards = vec![None; self.state.sectors.len()];
-        let mut sectors = VecDeque::from(self.state.sectors);
+        let mut sectors = VecDeque::from(std::mem::take(&mut self.state.sectors));
         let seq = self.state.seq;
         let mut popped_rx = self.state.popped.subscribe();
-
-        let client = self.client;
-        let account_key = self.account_key;
-        let encryption_key = self.encryption_key;
 
         // compute the sector aligned region to download
         let min_shards = self.min_shards;
@@ -264,27 +291,19 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                 .ok_or(DownloadError::NotEnoughShards(i, min_shards))?;
             join_set_spawn!(
                 &mut shard_tasks,
-                Self::recover_shard(
-                    client.clone(),
-                    account_key.clone(),
-                    task,
-                    inflight,
-                    self.slab_index,
-                    shard_offset,
-                    shard_length,
-                )
+                self.recover_shard(task, inflight, shard_offset, shard_length)
             );
         }
         let mut recovered_shards: usize = 0;
         let mut eligible = seq < *popped_rx.borrow_and_update() + RACE_WINDOW;
         let mut last_event = Instant::now();
 
-        let mut race_timeout = client.read_race_timeout(shard_length as u32);
+        let mut race_timeout = self.client.read_race_timeout(shard_length as u32);
         loop {
             tokio::select! {
                 Some(res) = shard_tasks.join_next() => {
                     last_event = Instant::now();
-                    race_timeout = client.read_race_timeout(shard_length as u32);
+                    race_timeout = self.client.read_race_timeout(shard_length as u32);
                     match res? {
                         Ok((index, data, progress)) => {
                             shards[index] = Some(data);
@@ -294,11 +313,12 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                             }
                             if recovered_shards >= min_shards {
                                 return Ok(SlabRecovery {
-                                    client,
-                                    account_key,
+                                    client: self.client,
+                                    controller: self.controller,
+                                    account_key: self.account_key,
                                     min_shards,
                                     slab_index: self.slab_index,
-                                    encryption_key,
+                                    encryption_key: self.encryption_key,
                                     offset: self.offset,
                                     length: self.length,
                                     state: ShardsRecovered {
@@ -312,8 +332,8 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                             if recovered_shards + shard_tasks.len() + sectors.len() < min_shards {
                                 return Err(DownloadError::NotEnoughShards(recovered_shards, min_shards));
                             } else if let Some((task, _)) = sectors.pop_front() {
-                                let inflight = client.reserve_inflight_download(&task.sector.host_key);
-                                join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, inflight, self.slab_index, shard_offset, shard_length));
+                                let inflight = self.client.reserve_inflight_download(&task.sector.host_key);
+                                join_set_spawn!(&mut shard_tasks, self.recover_shard(task, inflight, shard_offset, shard_length));
                             }
                         }
                     }
@@ -323,9 +343,9 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                     let elapsed = last_event.elapsed();
                     last_event = Instant::now();
                     let (task, _) = sectors.pop_front().expect("sectors should not be empty");
-                    let inflight = client.reserve_inflight_download(&task.sector.host_key);
+                    let inflight = self.client.reserve_inflight_download(&task.sector.host_key);
                     debug!("chunk {seq} racing slow host with {} after {:?}", task.sector.host_key, elapsed);
-                    join_set_spawn!(&mut shard_tasks, Self::recover_shard(client.clone(), account_key.clone(), task, inflight, self.slab_index, shard_offset, shard_length));
+                    join_set_spawn!(&mut shard_tasks, self.recover_shard(task, inflight, shard_offset, shard_length));
                 },
                 // `wait_for` re-checks inside the watch future, so this arm
                 // only resolves once the chunk actually enters the window
@@ -333,7 +353,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                 // monotonic (`popped` only increases), so it never reverts.
                 _ = popped_rx.wait_for(|popped| seq < *popped + RACE_WINDOW), if !eligible => {
                     eligible = true;
-                    race_timeout = client.read_race_timeout(shard_length as u32);
+                    race_timeout = self.client.read_race_timeout(shard_length as u32);
                 },
             }
         }
@@ -360,6 +380,7 @@ impl<T: Transport> SlabRecovery<ShardsRecovered, T> {
             .collect();
         Ok(SlabRecovery {
             client: self.client,
+            controller: self.controller,
             account_key: self.account_key,
             min_shards: self.min_shards,
             slab_index: self.slab_index,
@@ -466,6 +487,7 @@ pub struct Download {
     cipher: Chacha20Cipher,
 
     // download state
+    max_buffered_chunks: usize,
     buf: Bytes,
     queue: VecDeque<AbortOnDropHandle<Result<Vec<u8>, DownloadError>>>,
     chunk_iter: ChunkIter,
@@ -474,6 +496,7 @@ pub struct Download {
     /// Number of chunks handed to the reader so far. Chunk tasks watch this
     /// to decide whether they are within [`RACE_WINDOW`] of the read head.
     popped: watch::Sender<usize>,
+    controller: Arc<InflightController>,
     // sticky error
     //
     // note: in Go we would store the error and return it, but that would
@@ -513,7 +536,7 @@ impl AsyncRead for Download {
             };
             self.queue.pop_front();
             self.popped.send_modify(|p| *p += 1);
-            self.spawn_next();
+            self.refill();
             self.cipher.apply_keystream(&mut result); // decrypt
             self.buf = Bytes::from(result);
             self.drain_buf(buf);
@@ -537,33 +560,52 @@ impl Download {
         self.queue.clear();
     }
 
-    fn spawn_next(&mut self) {
-        if let Some(chunk_slab) = self.chunk_iter.next() {
-            let hosts = self.hosts.clone();
-            let account_key = self.account_key.clone();
-            let shard_progress_callback = self.shard_downloaded.clone();
-            // Build the SlabRecovery synchronously so prioritization and
-            // top-K inflight reservations land before this method returns.
-            // `Download::new` queues `max_inflight` chunks back-to-back;
-            // each successive `spawn_next` must see the previous chunk's
-            // reservations to disperse picks across hosts.
-            let len = chunk_slab.slab.length as usize;
-            let seq = self.next_seq;
-            self.next_seq += 1;
-            let recovery =
-                SlabRecovery::new(hosts, account_key, chunk_slab, seq, self.popped.clone());
-            self.queue
-                .push_back(AbortOnDropHandle::new(maybe_spawn!(async move {
-                    let recovery = recovery?;
-                    let mut buf = Vec::with_capacity(len);
-                    recovery
-                        .recover_shards(shard_progress_callback)
-                        .await?
-                        .decode()?
-                        .write(&mut buf)
-                        .await?;
-                    Ok(buf)
-                })));
+    /// Spawns the next chunk recovery. Returns `false` once the chunk
+    /// iterator is exhausted.
+    fn spawn_next(&mut self) -> bool {
+        let Some(chunk_slab) = self.chunk_iter.next() else {
+            return false;
+        };
+        let hosts = self.hosts.clone();
+        let account_key = self.account_key.clone();
+        let shard_progress_callback = self.shard_downloaded.clone();
+        // Build the SlabRecovery synchronously so prioritization and
+        // top-K inflight reservations land before this method returns.
+        // `Download::new` queues chunks back-to-back; each successive
+        // `spawn_next` must see the previous chunk's reservations to
+        // disperse picks across hosts.
+        let len = chunk_slab.slab.length as usize;
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        let recovery = SlabRecovery::new(
+            hosts,
+            account_key,
+            chunk_slab,
+            seq,
+            self.popped.clone(),
+            self.controller.clone(),
+        );
+        self.queue
+            .push_back(AbortOnDropHandle::new(maybe_spawn!(async move {
+                let recovery = recovery?;
+                let mut buf = Vec::with_capacity(len);
+                recovery
+                    .recover_shards(shard_progress_callback)
+                    .await?
+                    .decode()?
+                    .write(&mut buf)
+                    .await?;
+                Ok(buf)
+            })));
+        true
+    }
+
+    /// Tops the chunk queue up to the controller's current limit.
+    fn refill(&mut self) {
+        while self.queue.len() < self.controller.limit().min(self.max_buffered_chunks) {
+            if !self.spawn_next() {
+                break;
+            }
         }
     }
 
@@ -598,7 +640,7 @@ impl Download {
                 return Err(e.into());
             }
         };
-        self.spawn_next();
+        self.refill();
         self.cipher.apply_keystream(&mut result); // decrypt
         Ok(result)
     }
@@ -609,32 +651,54 @@ impl Download {
         account_key: Arc<AppKey>,
         options: DownloadOptions,
     ) -> Result<Self, DownloadError> {
-        if options.max_inflight == 0 {
+        if options.max_buffered_chunks == Some(0) {
             return Err(DownloadError::Custom(
-                "max_inflight must be greater than 0".to_string(),
+                "max buffered chunks must be greater than 0".to_string(),
             ));
         }
+        // The limit is in chunks but samples arrive per sector read, so a
+        // window must span roughly min_shards completions per chunk.
+        let scale = object
+            .slabs()
+            .first()
+            .map(|s| s.min_shards as usize)
+            .unwrap_or(1);
+        // The memory budget caps buffered chunks; the controller adapts the
+        // queue depth at or below it.
+        let max_buffered_chunks = options
+            .max_buffered_chunks
+            .unwrap_or_else(default_chunks_in_memory);
+        let controller = Arc::new(InflightController::new(
+            INITIAL_INFLIGHT,
+            MIN_INFLIGHT,
+            max_buffered_chunks,
+            scale,
+        ));
         let object_size = object.size();
         let cipher = object.cipher(options.offset);
         let available = object_size.saturating_sub(options.offset);
         let remaining = options.length.unwrap_or(available).min(available);
         let slabs = object.slabs().to_vec();
         let chunk_iter = ChunkIter::new(slabs, options.offset, remaining);
+        let max_buffered_chunks = options
+            .max_buffered_chunks
+            .unwrap_or_else(default_chunks_in_memory);
+        debug!("max_buffered_chunks {max_buffered_chunks}");
         let mut download = Self {
+            max_buffered_chunks,
             hosts,
             account_key,
             cipher,
             buf: Bytes::new(),
-            queue: VecDeque::with_capacity(options.max_inflight),
+            queue: VecDeque::with_capacity(controller.limit()),
             chunk_iter,
             next_seq: 0,
             popped: watch::channel(0).0,
+            controller,
             errored: false,
             shard_downloaded: options.shard_downloaded,
         };
-        for _ in 0..options.max_inflight {
-            download.spawn_next();
-        }
+        download.refill();
         Ok(download)
     }
 }
@@ -657,6 +721,15 @@ mod test {
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
+    fn test_controller() -> Arc<InflightController> {
+        Arc::new(InflightController::new(
+            INITIAL_INFLIGHT,
+            MIN_INFLIGHT,
+            100,
+            10,
+        ))
+    }
 
     #[sia_core_derive::cross_target_test]
     async fn test_out_of_order_download() {
@@ -776,6 +849,7 @@ mod test {
                 ChunkSlab { slab, index: 0 },
                 0,
                 watch::channel(0).0,
+                test_controller(),
             )
             .unwrap()
             .recover_shards(None)
@@ -962,6 +1036,7 @@ mod test {
             racing_chunk(&slab),
             RACE_WINDOW, // first chunk outside the window
             watch::channel(0).0,
+            test_controller(),
         )
         .unwrap()
         .recover_shards(None)
@@ -984,6 +1059,7 @@ mod test {
             racing_chunk(&slab),
             0,
             watch::channel(0).0,
+            test_controller(),
         )
         .unwrap()
         .recover_shards(None)
@@ -1015,6 +1091,7 @@ mod test {
             racing_chunk(&slab),
             RACE_WINDOW,
             popped_tx,
+            test_controller(),
         )
         .unwrap()
         .recover_shards(None)

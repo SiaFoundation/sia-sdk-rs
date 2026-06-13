@@ -52,6 +52,7 @@ use sia_core::signing::PrivateKey;
 
 mod app_client;
 mod builder;
+mod congestion;
 mod download;
 mod encryption;
 mod erasure_coding;
@@ -299,9 +300,16 @@ pub struct ShardProgress {
 }
 
 /// Options for configuring a download.
+#[derive(Default)]
 pub struct DownloadOptions {
-    /// Maximum number of concurrent chunk downloads. Defaults to 80.
-    pub max_inflight: usize,
+    /// Upper bound on concurrent chunk downloads. This can
+    /// increase performance due to parallelism at the cost of
+    /// memory.
+    ///
+    /// Each chunk is around 1MiB in memory.
+    ///
+    /// Defaults to 10% of system memory when unset.
+    pub max_buffered_chunks: Option<usize>,
     /// Byte offset to start downloading from.
     pub offset: u64,
     /// Number of bytes to download. If `None`, downloads the entire object.
@@ -331,25 +339,19 @@ impl DownloadOptions {
     }
 }
 
-impl Default for DownloadOptions {
-    fn default() -> Self {
-        Self {
-            max_inflight: 64, // ~64 MiB in memory
-            offset: 0,
-            length: None,
-            shard_downloaded: None,
-        }
-    }
-}
-
 /// Options for configuring an upload.
 pub struct UploadOptions {
     /// The number of data shards per slab. Defaults to 10.
     pub data_shards: u8,
     /// The number of parity shards per slab. Defaults to 20.
     pub parity_shards: u8,
-    /// The maximum number of concurrent shard uploads. Defaults to 15.
-    pub max_inflight: usize,
+    /// The maximum number of slabs to actively hold in memory. Higher
+    /// values may increase throughput due to parallelism at the cost
+    /// of more memory usage.
+    ///
+    /// At least one fully-encoded slab must be in memory. Defaults to
+    /// 10% of system memory.
+    pub max_buffered_slabs: Option<usize>,
 
     /// Optional callback to receive progress updates for each uploaded shard.
     pub shard_uploaded: Option<ShardProgressCallback>,
@@ -399,9 +401,9 @@ impl UploadOptions {
         const MIN_RECOVERY_PROBABILITY: f64 = 99.99;
         const MAX_TOTAL_SHARDS: u16 = 256;
 
-        if self.max_inflight == 0 {
+        if self.max_buffered_slabs == Some(0) {
             return Err(UploadError::InvalidOptions(
-                "max_inflight must be greater than 0".into(),
+                "max buffered slabs must be greater than 0".into(),
             ));
         }
 
@@ -462,10 +464,27 @@ impl Default for UploadOptions {
         Self {
             data_shards: 10,
             parity_shards: 20,
-            max_inflight: 15,
+            max_buffered_slabs: None,
             shard_uploaded: None,
         }
     }
+}
+
+/// Number of whole `slab_size`-byte slabs that fit in 10% of total system
+/// memory, at least one. The default in-memory slab budget when
+/// [`UploadOptions::max_slabs_in_memory`] is unset. On wasm, where total
+/// memory isn't queryable, this is a fixed 2 slabs.
+#[cfg(not(target_arch = "wasm32"))]
+fn default_memory_budget() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    // Cap at a cgroup memory limit when present (e.g. a container quota
+    // below physical RAM); otherwise use physical RAM. Both are in bytes.
+    let total = match sys.cgroup_limits() {
+        Some(limits) => sys.total_memory().min(limits.total_memory),
+        None => sys.total_memory(),
+    };
+    total / 10
 }
 
 /// Estimates the on-network encoded size of data after erasure coding.

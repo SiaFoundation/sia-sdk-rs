@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
 
+use crate::congestion::InflightController;
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
 use crate::hosts::{HostQueue, InflightGuard, QueueError, RPCError};
@@ -17,7 +18,7 @@ use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::PublicKey;
 use thiserror::Error;
 use tokio::io::{AsyncRead, BufReader};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::JoinSet;
 
 /// RAII increment of the pipeline's waiting-shard count. Held while a
@@ -48,8 +49,94 @@ impl Drop for WaitingGuard {
     }
 }
 
+/// Starting inflight limit; slow start grows it quickly when uncongested.
+const INITIAL_INFLIGHT: usize = 8;
+/// Lower bound on the adaptive limit. Two permits keep a stuck tail
+/// shard raceable.
+const MIN_INFLIGHT: usize = 2;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn default_slabs_in_memory(slab_size: usize) -> usize {
+    let budget = crate::default_memory_budget();
+    (budget / slab_size as u64).max(1) as usize
+}
+
+#[cfg(target_arch = "wasm32")]
+fn default_slabs_in_memory(_slab_size: usize) -> usize {
+    2
+}
+
+/// Gates concurrent shard uploads at the [`InflightController`]'s current
+/// limit.
+struct UploadLimiter {
+    inflight: Mutex<usize>,
+    notify: Notify,
+    controller: InflightController,
+}
+
+impl UploadLimiter {
+    fn new(initial: usize, floor: usize, cap: usize) -> Self {
+        Self {
+            inflight: Mutex::new(0),
+            notify: Notify::new(),
+            // scale 1: the limited unit (a shard upload) is also the sampled unit
+            controller: InflightController::new(initial, floor, cap, 1),
+        }
+    }
+
+    async fn acquire(self: &Arc<Self>) -> UploadPermit {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        loop {
+            // Register before checking so a wake between the check and the
+            // await isn't lost.
+            notified.as_mut().enable();
+            if let Some(permit) = self.try_acquire() {
+                return permit;
+            }
+            notified.as_mut().await;
+            notified.set(self.notify.notified());
+        }
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Option<UploadPermit> {
+        let limit = self.controller.limit();
+        let mut inflight = self.inflight.lock().unwrap();
+        if *inflight < limit {
+            *inflight += 1;
+            Some(UploadPermit {
+                limiter: self.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Feeds a completion to the controller and wakes parked acquirers for
+    /// any newly opened slots.
+    fn record(&self, expected: Option<Duration>, elapsed: Duration, ok: bool) {
+        let delta = self.controller.record(expected, elapsed, ok);
+        for _ in 0..delta.max(0) {
+            self.notify.notify_one();
+        }
+    }
+}
+
+/// Permit for one shard-upload attempt. On drop — including task
+/// cancellation — it releases the slot and wakes a waiter.
+struct UploadPermit {
+    limiter: Arc<UploadLimiter>,
+}
+
+impl Drop for UploadPermit {
+    fn drop(&mut self) {
+        *self.limiter.inflight.lock().unwrap() -= 1;
+        self.limiter.notify.notify_one();
+    }
+}
+
 struct ShardUpload {
-    semaphore: Arc<Semaphore>,
+    limiter: Arc<UploadLimiter>,
     client: Hosts<Client>,
     hosts: Arc<Mutex<HostQueue>>,
     account_key: Arc<AppKey>,
@@ -74,30 +161,32 @@ impl ShardUpload {
         host_key: PublicKey,
         inflight: InflightGuard,
         write_timeout: Duration,
-        permit: OwnedSemaphorePermit,
+        permit: UploadPermit,
     ) {
         let client = self.client.clone();
         let hosts = self.hosts.clone();
+        let limiter = self.limiter.clone();
         let account_key = self.account_key.clone();
         let data = self.data.clone();
         let slab_index = self.slab_index;
         let shard_index = self.shard_index;
         join_set_spawn!(tasks, async move {
+            // hold the guards for the duration of the RPC
             let _permit = permit;
-            // Hold the inflight guard for the duration of the RPC so the
-            // host's load is visible to concurrent pickers; dropped here
-            // either after success or failure.
             let _inflight = inflight;
+            let expected = client.estimate_write_duration(&host_key, data.len() as u32);
             let now = Instant::now();
-            let root = client.write_sector(host_key, &account_key.0, data, write_timeout).await
-                .inspect_err(|e| {
-                    debug!(
-                        "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {:?} {e}",
-                        now.elapsed()
-                    );
-                    hosts.lock().unwrap().retry(host_key);
-                })?;
+            let result = client
+                .write_sector(host_key, &account_key.0, data, write_timeout)
+                .await;
             let elapsed = now.elapsed();
+            limiter.record(expected, elapsed, result.is_ok());
+            let root = result.inspect_err(|e| {
+                debug!(
+                    "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {elapsed:?} {e}",
+                );
+                hosts.lock().unwrap().retry(host_key);
+            })?;
             debug!(
                 "slab {slab_index} shard {shard_index} uploaded to {host_key} in {:?}",
                 elapsed
@@ -122,7 +211,7 @@ impl ShardUpload {
         self,
         waiting_guard: WaitingGuard,
     ) -> Result<SectorUploadResult, UploadError> {
-        let permit = self.semaphore.clone().acquire_owned().await?;
+        let permit = self.limiter.acquire().await;
         // This shard is about to have an attempt in flight; it no longer
         // blocks racing.
         drop(waiting_guard);
@@ -155,7 +244,7 @@ impl ShardUpload {
                             if tasks.is_empty() {
                                 let (next, guard) = self.pick_next_host()
                                     .ok_or(QueueError::NoMoreHosts)?;
-                                let permit = self.semaphore.clone().acquire_owned().await?;
+                                let permit = self.limiter.acquire().await;
                                 self.spawn_write(&mut tasks, next, guard, UPLOAD_TIMEOUT, permit);
                             }
                         }
@@ -168,7 +257,7 @@ impl ShardUpload {
                     race_timeout = self.client.write_race_timeout(self.data.len() as u32);
                     eligible = *waiting_rx.borrow_and_update() == 0;
                     if eligible
-                        && let Ok(racer) = self.semaphore.clone().try_acquire_owned()
+                        && let Some(racer) = self.limiter.try_acquire()
                         && let Some((next, guard)) = self.pick_next_host() {
                             debug!(
                                 "slab {} shard {} racing slow host with {next} after {:?}",
@@ -265,11 +354,11 @@ pub(crate) struct Upload {
     slab_buffer: Option<SlabReader>,
     /// Semaphore to limit the maximum number of slabs in memory at once.
     slab_sema: Arc<Semaphore>,
-    /// Semaphore to limit the maximum number of shards in flight at once.
+    /// Adaptive limit on the number of shards in flight at once.
     /// Separate from `slab_sema` since slabs can be buffered while waiting
     /// for shard uploads to complete, and we want to allow some buffering to
     /// improve performance.
-    shard_sema: Arc<Semaphore>,
+    limiter: Arc<UploadLimiter>,
     /// Number of shards that do not yet have an upload attempt in flight.
     /// Shard tasks only race slow hosts while this is zero, so racers never
     /// take permits that a primary shard is waiting for.
@@ -295,12 +384,10 @@ impl Upload {
                     UploadError::InvalidOptions(format!("failed to create erasure coder: {e}"))
                 })?;
 
-        let total_shards = options.data_shards as usize + options.parity_shards as usize;
-        // cap number of active slabs to limit memory usage.
-        let max_slabs = options
-            .max_inflight
-            .div_ceil(total_shards)
-            .saturating_add(1);
+        let max_buffered_slabs = options
+            .max_buffered_slabs
+            .unwrap_or_else(|| default_slabs_in_memory(options.slab_size()));
+        debug!("max_buffered_slabs {max_buffered_slabs}");
         Ok(Self {
             client,
             app_key,
@@ -309,8 +396,14 @@ impl Upload {
                 options.parity_shards as usize,
             )),
             erasure_coder: Arc::new(erasure_coder),
-            slab_sema: Arc::new(Semaphore::new(max_slabs)),
-            shard_sema: Arc::new(Semaphore::new(options.max_inflight)),
+            slab_sema: Arc::new(Semaphore::new(max_buffered_slabs)),
+            // The memory budget bounds shards in flight: at most every shard
+            // of every buffered slab.
+            limiter: Arc::new(UploadLimiter::new(
+                INITIAL_INFLIGHT,
+                MIN_INFLIGHT,
+                max_buffered_slabs * total_shards,
+            )),
             waiting: watch::channel(0).0,
             slab_tasks: VecDeque::new(),
             shard_uploaded: options.shard_uploaded,
@@ -320,7 +413,7 @@ impl Upload {
     async fn spawn_slab(&mut self, slab: ReadSlab) -> Result<(), UploadError> {
         let client = self.client.clone();
         let rs = self.erasure_coder.clone();
-        let shard_sema = self.shard_sema.clone();
+        let limiter = self.limiter.clone();
         let app_key = self.app_key.clone();
         let progress_callback = self.shard_uploaded.clone();
         let slab_index = self.slab_tasks.len();
@@ -370,7 +463,7 @@ impl Upload {
                 let owned_slab_key = owned_slab_key.clone();
                 let shard_client = client.clone();
                 let shard_account_key = app_key.clone();
-                let shard_sema_inner = shard_sema.clone();
+                let shard_limiter = limiter.clone();
                 let hosts = hosts.clone();
                 let waiting = waiting.clone();
                 join_set_spawn!(shard_tasks, async move {
@@ -379,7 +472,7 @@ impl Upload {
                         shard
                     });
                     let shard_upload = ShardUpload {
-                        semaphore: shard_sema_inner,
+                        limiter: shard_limiter,
                         client: shard_client,
                         account_key: shard_account_key,
                         data: Bytes::from(shard),
@@ -695,7 +788,7 @@ mod tests {
         waiting: &watch::Sender<usize>,
     ) -> ShardUpload {
         ShardUpload {
-            semaphore: Arc::new(Semaphore::new(4)),
+            limiter: Arc::new(UploadLimiter::new(4, 2, 4)),
             client: hosts_manager.clone(),
             hosts: Arc::new(Mutex::new(hosts_manager.upload_queue())),
             account_key: app_key.clone(),
