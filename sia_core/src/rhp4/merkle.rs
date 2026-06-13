@@ -206,7 +206,8 @@ impl RangeProof {
                 .get(off..off + n)
                 .ok_or(ProofValidationError::NotSegmentAligned)?;
 
-            let leaf_hashes: Vec<Hash256> = maybe_par!(data_slice, chunks_exact, 64)
+            let leaf_hashes: Vec<Hash256> = data_slice
+                .chunks_exact(64)
                 .map(|segment| sum_leaf(&params, segment))
                 .collect();
 
