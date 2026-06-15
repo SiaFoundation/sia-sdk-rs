@@ -522,7 +522,17 @@ async fn run_benchmark(
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::init();
+    // Write RUST_LOG output to a timestamped file instead of the terminal
+    // so it doesn't interleave with the progress bars.
+    let log_path = format!(
+        "benchmark-{}.log",
+        chrono::Local::now().format("%Y%m%dT%H%M%S")
+    );
+    let log_file = std::fs::File::create(&log_path)?;
+    env_logger::Builder::from_default_env()
+        .target(env_logger::Target::Pipe(Box::new(log_file)))
+        .init();
+    eprintln!("logging to {log_path}");
     let cli = Cli::parse();
     match cli.command {
         Command::Login { indexer, new } => login(&cli.profile, &indexer, new).await,

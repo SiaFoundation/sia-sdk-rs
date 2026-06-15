@@ -1,12 +1,12 @@
 use std::collections::HashMap;
-use std::fmt::{Debug, Display};
+use std::fmt::Debug;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use chrono::Utc;
 use log::debug;
 use serde::{Deserialize, Serialize};
-use sia_core::rhp4::HostPrices;
+use sia_core::rhp4::{HostPrices, SECTOR_SIZE};
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
@@ -14,8 +14,11 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
+use crate::hosts::metrics::{HostMetric, HostScore, RPCAverage, Transfer};
 use crate::rhp4::{HostEndpoint, Transport};
 use crate::time::{Duration, Elapsed, Instant, timeout};
+
+mod metrics;
 
 /// Represents a host in the Sia network. The
 /// addresses can be used to connect to the host.
@@ -35,218 +38,6 @@ pub struct Host {
     pub longitude: f64,
     /// Whether the host is currently suitable for uploading data.
     pub good_for_upload: bool,
-}
-
-#[derive(Debug, Default, Clone)]
-struct RPCAverage(Option<f64>); // exponential moving average of throughput in bytes/sec
-
-impl RPCAverage {
-    const ALPHA: f64 = 0.2;
-
-    fn add_sample(&mut self, bytes_per_sec: u64) {
-        match self.0 {
-            Some(avg) => {
-                self.0 = Some(Self::ALPHA * (bytes_per_sec as f64) + (1.0 - Self::ALPHA) * avg);
-            }
-            None => {
-                self.0 = Some(bytes_per_sec as f64);
-            }
-        }
-    }
-
-    /// Returns the current average in bytes/sec, or `None` if no samples have
-    /// been recorded yet. Callers decide how to treat unsampled hosts.
-    fn avg(&self) -> Option<f64> {
-        self.0
-    }
-}
-
-impl Display for RPCAverage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.avg() {
-            Some(v) => Display::fmt(&v, f),
-            None => f.write_str("unsampled"),
-        }
-    }
-}
-
-impl PartialEq for RPCAverage {
-    fn eq(&self, other: &Self) -> bool {
-        self.avg() == other.avg()
-    }
-}
-
-impl Eq for RPCAverage {}
-
-#[derive(Debug, Default, Clone)]
-struct FailureRate(Option<f64>); // exponential moving average of failure rate
-
-impl FailureRate {
-    const ALPHA: f64 = 0.2;
-
-    fn add_sample(&mut self, success: bool) {
-        let sample = if success { 0.0 } else { 1.0 };
-        match self.0 {
-            Some(rate) => {
-                self.0 = Some(Self::ALPHA * sample + (1.0 - Self::ALPHA) * rate);
-            }
-            None => {
-                self.0 = Some(sample);
-            }
-        }
-    }
-
-    // Computes the failure rate as an integer percentage (0-100)
-    fn rate(&self) -> i64 {
-        match self.0 {
-            Some(rate) => (rate * 100.0).round() as i64,
-            None => 0, // presume no failures if no samples
-        }
-    }
-}
-
-impl Display for FailureRate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}%", self.rate())
-    }
-}
-
-impl PartialEq for FailureRate {
-    fn eq(&self, other: &Self) -> bool {
-        self.rate() == other.rate()
-    }
-}
-
-impl Eq for FailureRate {}
-
-impl PartialOrd for FailureRate {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for FailureRate {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.rate().cmp(&other.rate())
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-struct HostMetric {
-    rpc_write_avg: RPCAverage,
-    rpc_read_avg: RPCAverage,
-    failure_rate: FailureRate,
-}
-
-impl HostMetric {
-    fn add_write_sample(&mut self, bytes: u64, elapsed: Duration) {
-        if let Some(bps) = bytes_per_sec(bytes, elapsed) {
-            self.rpc_write_avg.add_sample(bps);
-        }
-        self.failure_rate.add_sample(true);
-    }
-
-    fn add_read_sample(&mut self, bytes: u64, elapsed: Duration) {
-        if let Some(bps) = bytes_per_sec(bytes, elapsed) {
-            self.rpc_read_avg.add_sample(bps);
-        }
-        self.failure_rate.add_sample(true);
-    }
-
-    fn add_settings_sample(&mut self, elapsed: Duration) {
-        self.add_read_sample(270, elapsed); // serialized settings response is ~270 bytes
-    }
-
-    fn add_failure(&mut self) {
-        self.failure_rate.add_sample(false);
-    }
-
-    /// Combined read + write throughput average. `None` only when neither side
-    /// has been sampled. Used by [`HostScore`] for the discovery preference
-    /// (unsampled outranks sampled).
-    fn combined_throughput(&self) -> Option<f64> {
-        match (self.rpc_write_avg.avg(), self.rpc_read_avg.avg()) {
-            (None, None) => None,
-            (Some(w), Some(r)) => Some((w + r) / 2.0),
-            (Some(v), None) | (None, Some(v)) => Some(v),
-        }
-    }
-}
-
-// Computes throughput in bytes/sec, returning None when elapsed is zero so that
-// the sample is skipped instead of producing an invalid/infinite throughput
-// value that would skew the moving average.
-fn bytes_per_sec(bytes: u64, elapsed: Duration) -> Option<u64> {
-    if elapsed.is_zero() {
-        return None;
-    }
-    Some((bytes as f64 / elapsed.as_secs_f64()) as u64)
-}
-
-/// Score for picking the next upload host. Higher is better.
-///
-/// Sort order:
-/// 1. Lower `failure_rate` wins.
-/// 2. Unsampled hosts (no throughput data) outrank sampled ones — this is
-///    the "discovery" preference so every available host eventually gets
-///    tried at least once.
-/// 3. Among sampled hosts, higher `throughput / (inflight + 1)` wins —
-///    the expected per-shard throughput if you added one more shard. That
-///    penalizes already-busy hosts proportionally to load, so a saturated
-///    fast host can lose to an idle slower one, while a genuinely much
-///    faster host still wins even when serving a few shards.
-#[derive(Debug, Clone, Copy)]
-struct HostScore {
-    failure_rate: i64,
-    throughput: Option<f64>,
-    inflight: usize,
-}
-
-impl HostScore {
-    fn new(metric: &HostMetric, inflight: usize) -> Self {
-        Self {
-            failure_rate: metric.failure_rate.rate(),
-            throughput: metric.combined_throughput(),
-            inflight,
-        }
-    }
-
-    fn weighted_throughput(&self) -> Option<f64> {
-        self.throughput.map(|t| t / (self.inflight as f64 + 1.0))
-    }
-}
-
-impl PartialEq for HostScore {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == std::cmp::Ordering::Equal
-    }
-}
-
-impl Eq for HostScore {}
-
-impl Ord for HostScore {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Lower failure_rate is better (so invert here for max-comparison).
-        match other.failure_rate.cmp(&self.failure_rate) {
-            std::cmp::Ordering::Equal => match (self.throughput, other.throughput) {
-                (None, None) => other.inflight.cmp(&self.inflight),
-                // discovery: unsampled outranks sampled
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (Some(_), Some(_)) => self
-                    .weighted_throughput()
-                    .unwrap()
-                    .total_cmp(&other.weighted_throughput().unwrap()),
-            },
-            ord => ord,
-        }
-    }
-}
-
-impl PartialOrd for HostScore {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 #[derive(Debug)]
@@ -400,17 +191,13 @@ impl HostList {
     }
 
     /// Adds a read sample for the given host, updating its metrics.
-    fn add_read_sample(&self, host_key: PublicKey, bytes: u64, elapsed: Duration) {
-        self.with_metric(&host_key, |m| m.add_read_sample(bytes, elapsed));
+    fn add_read_sample(&self, host_key: PublicKey, transfer: Transfer) {
+        self.with_metric(&host_key, |m| m.add_read_sample(transfer));
     }
 
     /// Adds a write sample for the given host, updating its metrics.
-    fn add_write_sample(&self, host_key: PublicKey, bytes: u64, elapsed: Duration) {
-        self.with_metric(&host_key, |m| m.add_write_sample(bytes, elapsed));
-    }
-
-    fn add_settings_sample(&self, host_key: PublicKey, elapsed: Duration) {
-        self.with_metric(&host_key, |m| m.add_settings_sample(elapsed));
+    fn add_write_sample(&self, host_key: PublicKey, transfer: Transfer) {
+        self.with_metric(&host_key, |m| m.add_write_sample(transfer));
     }
 }
 
@@ -492,6 +279,9 @@ pub(crate) struct Hosts<T: Transport> {
     transport: T,
     price_cache: Arc<HostCache<HostPrices>>,
     hosts: Arc<HostList>,
+
+    global_write_avg: Arc<RwLock<RPCAverage>>,
+    global_read_avg: Arc<RwLock<RPCAverage>>,
 }
 
 impl<T: Transport> Hosts<T> {
@@ -500,6 +290,9 @@ impl<T: Transport> Hosts<T> {
             transport,
             hosts: Arc::new(HostList::new()),
             price_cache: Arc::new(HostCache::new()),
+
+            global_write_avg: Arc::new(RwLock::new(RPCAverage::default())),
+            global_read_avg: Arc::new(RwLock::new(RPCAverage::default())),
         }
     }
 
@@ -557,6 +350,56 @@ impl<T: Transport> Hosts<T> {
     /// Adds a failure for the given host, updating its metrics and priority.
     pub fn add_failure(&self, host_key: PublicKey) {
         self.hosts.add_failure(host_key);
+    }
+
+    /// Records a successful write for the host's metrics and the global
+    /// write throughput EMA. Zero-size or zero-duration transfers are
+    /// skipped rather than recorded as infinite throughput.
+    pub fn record_write_sample(&self, host_key: PublicKey, size: u32, elapsed: Duration) {
+        let Some(transfer) = Transfer::try_new(size, elapsed) else {
+            return;
+        };
+        self.hosts.add_write_sample(host_key, transfer);
+        self.global_write_avg
+            .write()
+            .unwrap()
+            .add_sample(transfer.rate());
+    }
+
+    /// Read equivalent of [`Self::record_write_sample`].
+    pub fn record_read_sample(&self, host_key: PublicKey, size: u32, elapsed: Duration) {
+        let Some(transfer) = Transfer::try_new(size, elapsed) else {
+            return;
+        };
+        self.hosts.add_read_sample(host_key, transfer);
+        self.global_read_avg
+            .write()
+            .unwrap()
+            .add_sample(transfer.rate());
+    }
+
+    /// Expected duration of a `bytes`-sized write on a typical host.
+    /// Falls back to a static until the first write is sampled.
+    pub fn write_estimate(&self, bytes: u32) -> Duration {
+        const DEFAULT: Transfer = Transfer::new(SECTOR_SIZE as u32, Duration::from_secs(5));
+        self.global_write_avg
+            .read()
+            .unwrap()
+            .avg()
+            .map(|rate| Duration::from_secs_f64(bytes as f64 / *rate))
+            .unwrap_or_else(|| DEFAULT.estimate_duration(bytes))
+    }
+
+    /// Expected duration of a `bytes`-sized read on a typical host.
+    /// Falls back to a static until the first read is sampled.
+    pub fn read_estimate(&self, bytes: u32) -> Duration {
+        const DEFAULT: Transfer = Transfer::new(1 << 20, Duration::from_secs(1));
+        self.global_read_avg
+            .read()
+            .unwrap()
+            .avg()
+            .map(|rate| Duration::from_secs_f64(bytes as f64 / *rate))
+            .unwrap_or_else(|| DEFAULT.estimate_duration(bytes))
     }
 
     /// Warms connections to the given hosts by prefetching their prices. This can help seed
@@ -624,11 +467,10 @@ impl<T: Transport> Hosts<T> {
         {
             Ok((prices, false))
         } else {
-            let (prices, elapsed) = timeout(fetch_timeout, transport.host_prices(host_endpoint))
+            let (prices, _) = timeout(fetch_timeout, transport.host_prices(host_endpoint))
                 .await
                 .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))?
                 .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))?;
-            hosts.add_settings_sample(host_endpoint.public_key, elapsed);
             cache.set(host_endpoint.public_key, prices.clone());
             Ok((prices, true))
         }
@@ -655,14 +497,14 @@ impl<T: Transport> Hosts<T> {
                 false,
             )
             .await?;
-            let bytes = sector.len() as u64;
+            let bytes = sector.len() as u32;
             let (root, elapsed) = self
                 .transport
                 .write_sector(&host, prices, account_key, sector)
                 .await
                 .inspect_err(|_| self.hosts.add_failure(host_key))
                 .map_err(RPCError::Rhp)?;
-            self.hosts.add_write_sample(host_key, bytes, elapsed);
+            self.record_write_sample(host_key, bytes, elapsed);
             Ok(root)
         })
         .await?
@@ -682,7 +524,7 @@ impl<T: Transport> Hosts<T> {
         read_timeout: Duration,
     ) -> Result<bytes::Bytes, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        let bytes = length as u64;
+        let bytes = length as u32;
         timeout(read_timeout, async {
             let (prices, _) = Self::fetch_prices(
                 self.transport.clone(),
@@ -699,7 +541,7 @@ impl<T: Transport> Hosts<T> {
                 .await
                 .inspect_err(|_| self.hosts.add_failure(host_key))
                 .map_err(RPCError::Rhp)?;
-            self.hosts.add_read_sample(host_key, bytes, elapsed);
+            self.record_read_sample(host_key, bytes, elapsed);
             Ok(data)
         })
         .await?
@@ -822,156 +664,6 @@ mod test {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
     #[sia_core_derive::cross_target_test]
-    fn test_failure_rate() {
-        let mut fr = FailureRate::default();
-        assert_eq!(fr.rate(), 0, "initial failure rate should be 0%");
-        fr.add_sample(false);
-        assert_eq!(fr.rate(), 100, "initial failure should be 100%");
-
-        for _ in 0..5 {
-            fr.add_sample(true);
-        }
-        assert!(
-            fr.rate() < 100,
-            "failure rate should decrease after successes"
-        );
-
-        let mut fr2 = FailureRate::default();
-        for _ in 0..5 {
-            fr2.add_sample(true);
-        }
-        assert_eq!(
-            fr2.rate(),
-            0,
-            "failure rate should be 0% after only successes"
-        );
-        assert_eq!(
-            fr.cmp(&fr2),
-            std::cmp::Ordering::Greater,
-            "higher failure rate should be greater"
-        );
-    }
-
-    #[sia_core_derive::cross_target_test]
-    fn test_rpc_average() {
-        let mut avg = RPCAverage::default();
-        assert_eq!(
-            avg.avg(),
-            None,
-            "unsampled average should be None (no 1 Gbps default)"
-        );
-
-        avg.add_sample(100);
-        assert_eq!(
-            avg.avg(),
-            Some(100.0),
-            "initial average should be first sample"
-        );
-
-        avg.add_sample(200);
-        assert!(
-            avg.avg() > Some(100.0),
-            "average should increase after higher sample"
-        );
-
-        avg.add_sample(50);
-        assert!(
-            avg.avg() < Some(200.0),
-            "average should decrease after lower sample"
-        );
-    }
-
-    #[sia_core_derive::cross_target_test]
-    fn test_host_metric_ordering() {
-        // Sorting a list of HostMetric by HostScore (inflight=0) should
-        // descend by failure_rate then by throughput.
-        let mut hosts = vec![
-            HostMetric::default(),
-            HostMetric::default(),
-            HostMetric::default(),
-        ];
-        hosts[0].failure_rate.add_sample(false);
-        hosts[1].failure_rate.add_sample(false);
-        hosts[2].failure_rate.add_sample(false);
-        for _ in 0..10 {
-            hosts[0].failure_rate.add_sample(true);
-        }
-        for _ in 0..5 {
-            hosts[1].failure_rate.add_sample(true);
-        }
-        // Sort by HostScore ascending; reverse to get desc.
-        hosts.sort_by(|a, b| HostScore::new(a, 0).cmp(&HostScore::new(b, 0)));
-        let rates = hosts
-            .into_iter()
-            .rev()
-            .map(|h| h.failure_rate)
-            .collect::<Vec<FailureRate>>();
-        assert!(
-            rates.is_sorted(),
-            "hosts should be sorted by failure rate desc"
-        );
-
-        let mut hosts = vec![
-            HostMetric::default(),
-            HostMetric::default(),
-            HostMetric::default(),
-        ];
-        hosts[0].rpc_write_avg.add_sample(100);
-        hosts[1].rpc_write_avg.add_sample(1000);
-        hosts[2].rpc_write_avg.add_sample(500);
-        hosts.sort_by(|a, b| HostScore::new(a, 0).cmp(&HostScore::new(b, 0)));
-        let rates = hosts
-            .into_iter()
-            .rev()
-            .map(|h| h.rpc_write_avg.avg())
-            .collect::<Vec<Option<f64>>>();
-        assert!(
-            rates.is_sorted_by(|a, b| a >= b),
-            "hosts should be sorted by rpc write avg desc"
-        );
-    }
-
-    #[sia_core_derive::cross_target_test]
-    fn test_host_ranking() {
-        // End-to-end host ranking via HostScore at the metric layer.
-        // All-unsampled, all-equal: HostScore::new with inflight=0 is the
-        // pure-quality ranking and ties for hosts with no samples.
-        let unsampled_a = HostScore::new(&HostMetric::default(), 0);
-        let unsampled_b = HostScore::new(&HostMetric::default(), 0);
-        assert_eq!(unsampled_a.cmp(&unsampled_b), std::cmp::Ordering::Equal);
-
-        // Sample one host: unsampled now outranks it (discovery preference).
-        let sampled_slow = {
-            let mut m = HostMetric::default();
-            m.add_write_sample(100, Duration::from_secs(1));
-            m
-        };
-        let sampled_slow_score = HostScore::new(&sampled_slow, 0);
-        assert!(
-            unsampled_a > sampled_slow_score,
-            "unsampled should outrank sampled (discovery)",
-        );
-
-        // Among sampled, faster wins.
-        let sampled_fast = {
-            let mut m = HostMetric::default();
-            m.add_read_sample(1000, Duration::from_secs(1));
-            m
-        };
-        let sampled_fast_score = HostScore::new(&sampled_fast, 0);
-        assert!(sampled_fast_score > sampled_slow_score);
-
-        // Failure trumps throughput.
-        let failing_fast = {
-            let mut m = sampled_fast.clone();
-            m.add_failure();
-            m
-        };
-        let failing_fast_score = HostScore::new(&failing_fast, 0);
-        assert!(failing_fast_score < sampled_slow_score);
-    }
-
-    #[sia_core_derive::cross_target_test]
     fn test_host_queue_pick() {
         let hosts_manager = Hosts::new(Client::new());
         let hk1 = random_pubkey();
@@ -1065,7 +757,7 @@ mod test {
         // Same metric but different inflight: the less-loaded host wins.
         let metric = {
             let mut m = HostMetric::default();
-            m.add_write_sample(1_000_000, Duration::from_secs(1));
+            m.add_write_sample(Transfer::new(1_000_000, Duration::from_secs(1)));
             m
         };
         let busy = HostScore::new(&metric, 4);
@@ -1075,7 +767,7 @@ mod test {
         // A 10x faster host beats an idle slow host even when it has some load.
         let fast_metric = {
             let mut m = HostMetric::default();
-            m.add_write_sample(10_000_000, Duration::from_secs(1));
+            m.add_write_sample(Transfer::new(10_000_000, Duration::from_secs(1)));
             m
         };
         let fast_busy = HostScore::new(&fast_metric, 4);
@@ -1135,10 +827,10 @@ mod test {
         // the only differentiator.
         hosts_manager
             .hosts
-            .add_read_sample(hk1, 1_000_000, Duration::from_secs(1));
+            .add_read_sample(hk1, Transfer::new(1_000_000, Duration::from_secs(1)));
         hosts_manager
             .hosts
-            .add_read_sample(hk2, 1_000_000, Duration::from_secs(1));
+            .add_read_sample(hk2, Transfer::new(1_000_000, Duration::from_secs(1)));
 
         // With both idle, sort order is arbitrary among ties — assert the
         // ranking switches when we add inflight to one of them.
