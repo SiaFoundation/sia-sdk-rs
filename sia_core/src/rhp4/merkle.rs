@@ -8,54 +8,8 @@ use crate::types::Hash256;
 use blake2b_simd::Params;
 use blake2b_simd::many::{HashManyJob, hash_many};
 use bytes::Bytes;
-#[cfg(not(target_arch = "wasm32"))]
-use rayon::prelude::*;
 use thiserror::Error;
 use tokio::io::{self, AsyncRead, AsyncReadExt};
-
-/// Parallel iteration on native, sequential on WASM.
-///
-/// On native, calls the rayon `par_` variant (e.g. `par_chunks_mut`).
-/// On WASM, calls the standard library equivalent (e.g. `chunks_mut`).
-/// Both return iterators with compatible `.for_each()` and `.map().collect()` APIs.
-///
-/// ```ignore
-/// maybe_par!(slice, chunks_exact_mut, 4).enumerate().for_each(|(i, chunk)| { ... });
-/// maybe_par!(slice, chunks_mut, size).for_each(|chunk| { ... });
-/// let v: Vec<T> = maybe_par!(slice, chunks_exact, 64).map(|c| hash(c)).collect();
-/// ```
-macro_rules! maybe_par {
-    ($slice:expr, chunks_mut, $size:expr) => {{
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            $slice.par_chunks_mut($size)
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            $slice.chunks_mut($size)
-        }
-    }};
-    ($slice:expr, chunks_exact_mut, $size:expr) => {{
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            $slice.par_chunks_exact_mut($size)
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            $slice.chunks_exact_mut($size)
-        }
-    }};
-    ($slice:expr, chunks_exact, $size:expr) => {{
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            $slice.par_chunks_exact($size)
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            $slice.chunks_exact($size)
-        }
-    }};
-}
 
 /// Calculates the Merkle root of a sector
 pub fn sector_root(sector: &[u8]) -> Hash256 {
@@ -64,7 +18,8 @@ pub fn sector_root(sector: &[u8]) -> Hash256 {
     params.hash_length(32);
 
     let mut tree_hashes = vec![Hash256::default(); LEAVES_PER_SECTOR];
-    maybe_par!(tree_hashes, chunks_exact_mut, 4)
+    tree_hashes
+        .chunks_exact_mut(4)
         .enumerate()
         .for_each(|(i, chunk)| {
             // prepare inputs
@@ -93,7 +48,7 @@ pub fn sector_root(sector: &[u8]) -> Hash256 {
 
     let mut chunk_size = 4;
     while chunk_size <= tree_hashes.len() {
-        maybe_par!(tree_hashes, chunks_mut, chunk_size).for_each(|nodes| {
+        tree_hashes.chunks_mut(chunk_size).for_each(|nodes| {
             // prepare inputs
             let mut inputs = [[0u8; 65]; 2];
             for (j, input) in inputs.iter_mut().enumerate() {
@@ -187,35 +142,48 @@ impl RangeProof {
 
     fn roots(&self, start: usize, end: usize) -> Result<VecDeque<Hash256>, ProofValidationError> {
         assert!(start < end);
-        let mut i = start;
-        let j = end;
-        let mut roots = VecDeque::new();
         let mut params = Params::new();
         params.hash_length(32);
 
+        let total = (end - start) * SEGMENT_SIZE;
+        let data = self
+            .1
+            .get(..total)
+            .ok_or(ProofValidationError::NotSegmentAligned)?;
+
+        let mut leaf_hashes: Vec<Hash256> = Vec::with_capacity(end - start);
+        let mut groups = data.chunks_exact(4 * SEGMENT_SIZE);
+        for group in &mut groups {
+            let mut inputs = [[0u8; SEGMENT_SIZE + 1]; 4];
+            for (input, segment) in inputs.iter_mut().zip(group.chunks_exact(SEGMENT_SIZE)) {
+                input[0] = LEAF_HASH_PREFIX[0];
+                input[1..].copy_from_slice(segment);
+            }
+            let mut jobs = [
+                HashManyJob::new(&params, &inputs[0][..]),
+                HashManyJob::new(&params, &inputs[1][..]),
+                HashManyJob::new(&params, &inputs[2][..]),
+                HashManyJob::new(&params, &inputs[3][..]),
+            ];
+            hash_many(&mut jobs);
+            leaf_hashes.extend(jobs.iter().map(|job| Hash256::from(job.to_hash())));
+        }
+        for segment in groups.remainder().chunks_exact(SEGMENT_SIZE) {
+            leaf_hashes.push(sum_leaf(&params, segment));
+        }
+
+        let mut roots = VecDeque::new();
         let mut acc = merkle::Accumulator::new();
-        let mut off: usize = 0;
+        let mut leaves = leaf_hashes.into_iter();
+        let mut i = start;
+        let j = end;
         while i < j {
             acc.reset();
-
             let subtree_size = next_subtree_size(i, j);
-            let n = subtree_size * SEGMENT_SIZE;
-
-            let data_slice = self
-                .1
-                .get(off..off + n)
-                .ok_or(ProofValidationError::NotSegmentAligned)?;
-
-            let leaf_hashes: Vec<Hash256> = maybe_par!(data_slice, chunks_exact, 64)
-                .map(|segment| sum_leaf(&params, segment))
-                .collect();
-
-            for h in leaf_hashes {
-                acc.add_leaf(h);
+            for _ in 0..subtree_size {
+                acc.add_leaf(leaves.next().expect("leaf count matches range"));
             }
-
             roots.push_back(acc.root());
-            off += n;
             i += subtree_size;
         }
         Ok(roots)
@@ -396,6 +364,21 @@ mod tests {
 
         let verified_data = RangeProof(proof, data.clone()) // clone since RangeProof usually owns the data
             .verify(&sector_root, 24, 42)
+            .expect("proof validation failed");
+        assert_eq!(&data, &verified_data);
+    }
+
+    #[test]
+    fn test_verify_full_range_proof() {
+        let mut data = vec![0u8; SECTOR_SIZE];
+        data.iter_mut()
+            .enumerate()
+            .for_each(|(i, x)| *x = (i % 256) as u8);
+        let data = Bytes::from(data);
+        let root = sector_root(&data);
+
+        let verified_data = RangeProof(vec![], data.clone())
+            .verify(&root, 0, LEAVES_PER_SECTOR)
             .expect("proof validation failed");
         assert_eq!(&data, &verified_data);
     }

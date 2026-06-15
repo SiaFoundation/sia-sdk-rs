@@ -1,25 +1,20 @@
-/// Offload expensive computation to a rayon thread on native, run inline on WASM.
+/// Offload expensive computation to a blocking thread on native, run inline on WASM.
 ///
-/// On native, the expression is moved into a `rayon::spawn` closure and the result
-/// is sent back via a `tokio::sync::oneshot` channel. On WASM (single-threaded),
-/// the expression is evaluated inline.
+/// On native, the expression is moved into a `tokio::task::spawn_blocking` closure;
+/// on WASM (single-threaded) the expression is evaluated inline.
 ///
 /// Must be called from an async context (the native path uses `.await`).
 /// The expression must be `Send + 'static` on native (captured by `move` closure).
 ///
 /// ```ignore
-/// let root = maybe_rayon!(merkle::sector_root(data.as_ref()));
-/// let result = maybe_rayon!(proof.verify(&root, start, end))?;
+/// let root = maybe_spawn_blocking!(merkle::sector_root(data.as_ref()));
+/// let result = maybe_spawn_blocking!(proof.verify(&root, start, end))?;
 /// ```
-macro_rules! maybe_rayon {
+macro_rules! maybe_spawn_blocking {
     ($body:expr) => {{
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            rayon::spawn(move || {
-                let _ = tx.send($body);
-            });
-            rx.await.unwrap()
+            tokio::task::spawn_blocking(move || $body).await.unwrap()
         }
         #[cfg(target_arch = "wasm32")]
         {
