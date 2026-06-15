@@ -707,7 +707,7 @@ impl RPCWriteSector<RPCComplete> {
         r: &mut (impl AsyncRead + Unpin),
     ) -> Result<RPCWriteSectorResult, Error> {
         let response: RPCWriteSectorResponse = read_response(r).await?;
-        let root = maybe_rayon!(merkle::sector_root(self.data.as_ref()));
+        let root = maybe_spawn_blocking!(merkle::sector_root(self.data.as_ref()));
         if response.root != root {
             return Err(Error::SectorRootMismatch {
                 expected: root,
@@ -801,7 +801,7 @@ impl RPCReadSector<RPCComplete> {
         let start = offset / SEGMENT_SIZE;
         let end = (offset + length).div_ceil(SEGMENT_SIZE);
 
-        let data = maybe_rayon!(
+        let data = maybe_spawn_blocking!(
             response
                 .data
                 .verify(&root, start, end)
