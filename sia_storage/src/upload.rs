@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
 
+use crate::congestion::InflightController;
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
 use crate::hosts::{HostQueue, InflightGuard, QueueError, RPCError};
@@ -17,7 +18,7 @@ use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::PublicKey;
 use thiserror::Error;
 use tokio::io::{AsyncRead, BufReader};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinSet;
 
 /// RAII increment of the pipeline's waiting-shard count. Held while a
@@ -47,7 +48,7 @@ impl Drop for WaitingGuard {
 }
 
 struct ShardUpload {
-    semaphore: Arc<Semaphore>,
+    limiter: Arc<UploadLimiter>,
     client: Hosts<Client>,
     hosts: Arc<Mutex<HostQueue>>,
     account_key: Arc<AppKey>,
@@ -66,6 +67,150 @@ struct SectorUploadResult {
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(90);
 const RACE_FACTOR: f64 = 1.5;
 
+const INITIAL_INFLIGHT: usize = 8;
+const MIN_INFLIGHT: usize = 2;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn default_slabs_in_memory(slab_size: usize) -> usize {
+    (crate::default_memory_budget() / slab_size as u64).max(1) as usize
+}
+
+#[cfg(target_arch = "wasm32")]
+fn default_slabs_in_memory(_slab_size: usize) -> usize {
+    2
+}
+
+/// Gates concurrent shard uploads at the [`InflightController`]'s current
+/// limit. Replaces a fixed semaphore so the limit can adapt while uploads are
+/// in flight.
+struct UploadLimiter {
+    inflight: Mutex<usize>,
+    /// Shards whose memory is committed but whose upload hasn't finished yet.
+    /// Limits slab encoding so it can't runaway with memory that will sit idle.
+    committed: Mutex<usize>,
+    notify: Notify,
+    /// Wakes the slab gate ([`Self::reserve`]) when the backlog drops or the
+    /// limit grows.
+    capacity: Notify,
+    controller: InflightController,
+}
+
+impl UploadLimiter {
+    fn new(initial: usize, floor: usize, cap: usize) -> Self {
+        Self {
+            inflight: Mutex::new(0),
+            committed: Mutex::new(0),
+            notify: Notify::new(),
+            capacity: Notify::new(),
+            // scale 1: the limited unit (a shard upload) is also the sampled unit
+            controller: InflightController::new(initial, floor, cap, 1),
+        }
+    }
+
+    /// Waits until the committed backlog leaves room for another slab, then
+    /// commits `shards` and returns one [`ShardPermit`] per shard. The backlog
+    /// is allowed to reach `limit + shards`. Enough to keep `limit` shards in
+    /// flight plus one slab of lookahead, so slabs interleave within the memory
+    /// budge.
+    async fn reserve(self: &Arc<Self>, shards: usize) -> Vec<ShardPermit> {
+        let notified = self.capacity.notified();
+        tokio::pin!(notified);
+        loop {
+            // Register before checking so a wake between the check and the
+            // await isn't lost.
+            notified.as_mut().enable();
+            {
+                let mut committed = self.committed.lock().unwrap();
+                // `limit + shards`: the in-flight target plus a slab of
+                // lookahead. `+ shards <= cap`: the new slab must still fit the
+                // memory budget. The first slab always fits since `shards <=
+                // cap`, so a slab larger than the limit never deadlocks.
+                if *committed < self.controller.limit() + shards
+                    && *committed + shards <= self.controller.cap()
+                {
+                    *committed += shards;
+                    return (0..shards)
+                        .map(|_| ShardPermit {
+                            limiter: self.clone(),
+                        })
+                        .collect();
+                }
+            }
+            notified.as_mut().await;
+            notified.set(self.capacity.notified());
+        }
+    }
+
+    async fn acquire(self: &Arc<Self>) -> UploadPermit {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        loop {
+            // Register before checking so a wake between the check and the
+            // await isn't lost.
+            notified.as_mut().enable();
+            if let Some(permit) = self.try_acquire() {
+                return permit;
+            }
+            notified.as_mut().await;
+            notified.set(self.notify.notified());
+        }
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Option<UploadPermit> {
+        let limit = self.controller.limit();
+        let mut inflight = self.inflight.lock().unwrap();
+        if *inflight < limit {
+            *inflight += 1;
+            Some(UploadPermit {
+                limiter: self.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Feeds a completion to the controller and wakes parked acquirers for any
+    /// newly opened slots.
+    fn record(&self, expected: Option<Duration>, elapsed: Duration, ok: bool) {
+        let delta = self.controller.record(expected, elapsed, ok);
+        for _ in 0..delta.max(0) {
+            self.notify.notify_one();
+        }
+        if delta > 0 {
+            // the limit grew recheck the slab gate
+            self.capacity.notify_one();
+        }
+    }
+}
+
+/// Permit for one shard-upload attempt. On drop — including task cancellation —
+/// it releases the slot and wakes a waiter.
+struct UploadPermit {
+    limiter: Arc<UploadLimiter>,
+}
+
+impl Drop for UploadPermit {
+    fn drop(&mut self) {
+        *self.limiter.inflight.lock().unwrap() -= 1;
+        self.limiter.notify.notify_one();
+    }
+}
+
+/// Reservation for one buffered shard's memory, issued by
+/// [`UploadLimiter::reserve`]. Held from encode until the shard's upload
+/// finishes; on drop — including a failed or cancelled shard — it frees the
+/// slot in the backlog and wakes the slab gate.
+struct ShardPermit {
+    limiter: Arc<UploadLimiter>,
+}
+
+impl Drop for ShardPermit {
+    fn drop(&mut self) {
+        *self.limiter.committed.lock().unwrap() -= 1;
+        self.limiter.capacity.notify_one();
+    }
+}
+
 impl ShardUpload {
     fn spawn_write(
         &self,
@@ -73,10 +218,11 @@ impl ShardUpload {
         host_key: PublicKey,
         inflight: InflightGuard,
         write_timeout: Duration,
-        permit: OwnedSemaphorePermit,
+        permit: UploadPermit,
     ) {
         let client = self.client.clone();
         let hosts = self.hosts.clone();
+        let limiter = self.limiter.clone();
         let account_key = self.account_key.clone();
         let data = self.data.clone();
         let slab_index = self.slab_index;
@@ -87,16 +233,22 @@ impl ShardUpload {
             // host's load is visible to concurrent pickers; dropped here
             // either after success or failure.
             let _inflight = inflight;
-            let now = Instant::now();
-            let root = client.write_sector(host_key, &account_key.0, data, write_timeout).await
+            // Per-host expected for the controller's congestion ratio, captured
+            // before the write so it excludes this transfer.
+            let expected = client.estimate_write_duration(&host_key, data.len() as u32);
+            let start = Instant::now();
+            let result = client
+                .write_sector(host_key, &account_key.0, data, write_timeout)
+                .await;
+            let elapsed = start.elapsed();
+            limiter.record(expected, elapsed, result.is_ok());
+            let root = result
                 .inspect_err(|e| {
                     debug!(
-                        "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {:?} {e}",
-                        now.elapsed()
+                        "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {elapsed:?} {e}",
                     );
                     hosts.lock().unwrap().retry(host_key);
                 })?;
-            let elapsed = now.elapsed();
             debug!(
                 "slab {slab_index} shard {shard_index} uploaded to {host_key} in {:?}",
                 elapsed
@@ -121,7 +273,7 @@ impl ShardUpload {
         self,
         waiting_guard: WaitingGuard,
     ) -> Result<SectorUploadResult, UploadError> {
-        let permit = self.semaphore.clone().acquire_owned().await?;
+        let permit = self.limiter.acquire().await;
         // This shard is about to have an attempt in flight; it no longer
         // blocks racing.
         drop(waiting_guard);
@@ -155,7 +307,7 @@ impl ShardUpload {
                             if tasks.is_empty() {
                                 let (next, guard) = self.pick_next_host()
                                     .ok_or(QueueError::NoMoreHosts)?;
-                                let permit = self.semaphore.clone().acquire_owned().await?;
+                                let permit = self.limiter.acquire().await;
                                 self.spawn_write(&mut tasks, next, guard, UPLOAD_TIMEOUT, permit);
                             }
                         }
@@ -167,7 +319,7 @@ impl ShardUpload {
                     last_event = Instant::now();
                     eligible = *waiting_rx.borrow_and_update() == 0;
                     if eligible
-                        && let Ok(racer) = self.semaphore.clone().try_acquire_owned()
+                        && let Some(racer) = self.limiter.try_acquire()
                         && let Some((next, guard)) = self.pick_next_host() {
                             debug!(
                                 "slab {} shard {} racing slow host with {next} after {:?}",
@@ -219,10 +371,6 @@ pub enum UploadError {
     #[error("queue error: {0}")]
     QueueError(#[from] QueueError),
 
-    /// An internal semaphore error.
-    #[error("semaphore error: {0}")]
-    SemaphoreError(#[from] tokio::sync::AcquireError),
-
     /// An internal task join error.
     #[error("join error: {0}")]
     JoinError(#[from] tokio::task::JoinError),
@@ -254,13 +402,8 @@ pub(crate) struct Upload {
     app_key: Arc<AppKey>,
     erasure_coder: Arc<ErasureCoder>,
     slab_buffer: Option<SlabReader>,
-    /// Semaphore to limit the maximum number of slabs in memory at once.
-    slab_sema: Arc<Semaphore>,
-    /// Semaphore to limit the maximum number of shards in flight at once.
-    /// Separate from `slab_sema` since slabs can be buffered while waiting
-    /// for shard uploads to complete, and we want to allow some buffering to
-    /// improve performance.
-    shard_sema: Arc<Semaphore>,
+    /// Adaptive limit on shards in flight and buffered slabs
+    limiter: Arc<UploadLimiter>,
     /// Number of shards that do not yet have an upload attempt in flight.
     /// Shard tasks only race slow hosts while this is zero, so racers never
     /// take permits that a primary shard is waiting for.
@@ -286,12 +429,9 @@ impl Upload {
                     UploadError::InvalidOptions(format!("failed to create erasure coder: {e}"))
                 })?;
 
-        let total_shards = options.data_shards as usize + options.parity_shards as usize;
-        // cap number of active slabs to limit memory usage.
-        let max_slabs = options
-            .max_inflight
-            .div_ceil(total_shards)
-            .saturating_add(1);
+        let max_buffered_slabs = options
+            .max_buffered_slabs
+            .unwrap_or_else(|| default_slabs_in_memory(options.slab_size()));
         Ok(Self {
             client,
             app_key,
@@ -300,8 +440,11 @@ impl Upload {
                 options.parity_shards as usize,
             )),
             erasure_coder: Arc::new(erasure_coder),
-            slab_sema: Arc::new(Semaphore::new(max_slabs)),
-            shard_sema: Arc::new(Semaphore::new(options.max_inflight)),
+            limiter: Arc::new(UploadLimiter::new(
+                INITIAL_INFLIGHT,
+                MIN_INFLIGHT,
+                max_buffered_slabs.saturating_add(total_shards),
+            )),
             waiting: watch::channel(0).0,
             slab_tasks: VecDeque::new(),
             shard_uploaded: options.shard_uploaded,
@@ -311,11 +454,11 @@ impl Upload {
     async fn spawn_slab(&mut self, slab: ReadSlab) -> Result<(), UploadError> {
         let client = self.client.clone();
         let rs = self.erasure_coder.clone();
-        let shard_sema = self.shard_sema.clone();
+        let limiter = self.limiter.clone();
         let app_key = self.app_key.clone();
         let progress_callback = self.shard_uploaded.clone();
         let slab_index = self.slab_tasks.len();
-        let permit = self.slab_sema.clone().acquire_owned().await?;
+        let shard_permits = limiter.reserve(slab.shards.len()).await;
         // Count this slab's shards as waiting before the task spawns so the
         // racing gate can't open between buffering and encode.
         let waiting = self.waiting.clone();
@@ -325,7 +468,6 @@ impl Upload {
             .map(|_| WaitingGuard::new(waiting.clone()))
             .collect();
         let handle = AbortOnDropHandle::new(maybe_spawn!(async move {
-            let _permit = permit;
             let total_shards = slab.shards.len();
             let slab_key: EncryptionKey = rand::random::<[u8; 32]>().into();
 
@@ -355,22 +497,28 @@ impl Upload {
             let hosts: Arc<Mutex<HostQueue>> = Arc::new(Mutex::new(client.upload_queue()));
             let owned_slab_key = Arc::new(slab_key.clone());
             let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> = JoinSet::new();
-            for ((shard_index, mut shard), waiting_guard) in
-                shards.into_iter().enumerate().zip(waiting_guards)
+            for (((shard_index, mut shard), waiting_guard), shard_permit) in shards
+                .into_iter()
+                .enumerate()
+                .zip(waiting_guards)
+                .zip(shard_permits)
             {
                 let owned_slab_key = owned_slab_key.clone();
                 let shard_client = client.clone();
                 let shard_account_key = app_key.clone();
-                let shard_sema_inner = shard_sema.clone();
+                let limiter = limiter.clone();
                 let hosts = hosts.clone();
                 let waiting = waiting.clone();
                 join_set_spawn!(shard_tasks, async move {
+                    // Hold the memory reservation until the upload finishes (or
+                    // this task is dropped), then release it on drop.
+                    let _shard_permit = shard_permit;
                     let shard = maybe_spawn_blocking!({
                         encrypt_shard(&owned_slab_key, shard_index as u8, 0, &mut shard);
                         shard
                     });
                     let shard_upload = ShardUpload {
-                        semaphore: shard_sema_inner,
+                        limiter,
                         client: shard_client,
                         account_key: shard_account_key,
                         data: Bytes::from(shard),
@@ -686,7 +834,7 @@ mod tests {
         waiting: &watch::Sender<usize>,
     ) -> ShardUpload {
         ShardUpload {
-            semaphore: Arc::new(Semaphore::new(4)),
+            limiter: Arc::new(UploadLimiter::new(4, 2, 4)),
             client: hosts_manager.clone(),
             hosts: Arc::new(Mutex::new(hosts_manager.upload_queue())),
             account_key: app_key.clone(),
@@ -695,6 +843,78 @@ mod tests {
             shard_index: 0,
             waiting: waiting.clone(),
         }
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_reserve_interleaves_a_lookahead_slab() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // The limit stays at 2 (no completions). The gate admits `limit +
+        // shards` of backlog — the in-flight target plus a slab of lookahead —
+        // so two 4-shard slabs fit before it parks, giving the slow pipe one
+        // slab to interleave rather than stalling at a single slab.
+        let limiter = Arc::new(UploadLimiter::new(2, 2, 100));
+        let mut permits = limiter.reserve(4).await; // 0 -> 4
+        permits.extend(limiter.reserve(4).await); // 4 -> 8: the lookahead slab still fits
+
+        // A third reservation parks: committed 8 >= limit 2 + shards 4.
+        let done = Arc::new(AtomicBool::new(false));
+        let gate = limiter.clone();
+        let flag = done.clone();
+        maybe_spawn!(async move {
+            let _permits = gate.reserve(4).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        sleep(Duration::from_millis(50)).await;
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "reserve must park once the lookahead slab is buffered"
+        );
+
+        // Drop permits to drain below limit + shards (6); the parked
+        // reservation resumes.
+        for _ in 0..3 {
+            permits.pop(); // 8 -> 5
+        }
+        sleep(Duration::from_millis(50)).await;
+        assert!(
+            done.load(Ordering::SeqCst),
+            "reserve must resume once the backlog clears"
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_reserve_caps_at_memory_budget() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // A tiny budget (cap = 2 shards) bounds the backlog even though the
+        // limit's lookahead would otherwise admit more: only one 2-shard slab
+        // fits at a time.
+        let limiter = Arc::new(UploadLimiter::new(2, 2, 2));
+        let permits = limiter.reserve(2).await; // 0 -> 2 (0 + 2 <= cap 2)
+
+        // A second slab would exceed the budget (2 + 2 > 2), so it parks even
+        // though committed (2) is still under limit + shards (4).
+        let done = Arc::new(AtomicBool::new(false));
+        let gate = limiter.clone();
+        let flag = done.clone();
+        maybe_spawn!(async move {
+            let _permits = gate.reserve(2).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        sleep(Duration::from_millis(50)).await;
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "reserve must park at the memory budget"
+        );
+
+        // Drop the permits; the budget now has room and the reservation resumes.
+        drop(permits); // 2 -> 0
+        sleep(Duration::from_millis(50)).await;
+        assert!(
+            done.load(Ordering::SeqCst),
+            "reserve must resume once the budget frees"
+        );
     }
 
     #[sia_core_derive::cross_target_test]

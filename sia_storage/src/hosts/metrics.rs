@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fmt::Display;
 use std::ops::Deref;
 
@@ -97,21 +98,55 @@ impl Ord for FailureRate {
     }
 }
 
+/// Windowed minimum of recent transfer paces — the best (fastest) per-byte rate
+/// seen lately. Unlike the throughput EMA it ignores slow samples, so sustained
+/// slowdown reads as a ratio above 1 instead of being absorbed into the average.
+#[derive(Debug, Default, Clone)]
+struct PaceWindow {
+    samples: VecDeque<TransferPace>,
+}
+
+impl PaceWindow {
+    const WINDOW: usize = 64;
+    const MIN_SAMPLES: usize = 3;
+
+    fn add_sample(&mut self, pace: TransferPace) {
+        if self.samples.len() == Self::WINDOW {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(pace);
+    }
+
+    fn best(&self) -> Option<TransferPace> {
+        if self.samples.len() < Self::MIN_SAMPLES {
+            return None;
+        }
+        self.samples
+            .iter()
+            .copied()
+            .min_by(|a, b| a.partial_cmp(b).expect("pace is finite"))
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub(super) struct HostMetric {
     rpc_write_avg: RPCAverage,
     rpc_read_avg: RPCAverage,
+    write_paces: PaceWindow,
+    read_paces: PaceWindow,
     failure_rate: FailureRate,
 }
 
 impl HostMetric {
     pub(super) fn add_write_sample(&mut self, transfer: Transfer) {
         self.rpc_write_avg.add_sample(transfer.rate());
+        self.write_paces.add_sample(transfer.pace());
         self.failure_rate.add_sample(true);
     }
 
     pub(super) fn add_read_sample(&mut self, transfer: Transfer) {
         self.rpc_read_avg.add_sample(transfer.rate());
+        self.read_paces.add_sample(transfer.pace());
         self.failure_rate.add_sample(true);
     }
 
@@ -128,6 +163,18 @@ impl HostMetric {
             (Some(w), Some(r)) => Some((w + r) / 2.0),
             (Some(v), None) | (None, Some(v)) => Some(v),
         }
+    }
+
+    /// Best (fastest) recent read pace — the controller's congestion baseline.
+    /// `None` until a few reads are sampled.
+    pub(super) fn read_best_pace(&self) -> Option<TransferPace> {
+        self.read_paces.best()
+    }
+
+    /// Best (fastest) recent write pace — the controller's congestion baseline.
+    /// `None` until a few writes are sampled.
+    pub(super) fn write_best_pace(&self) -> Option<TransferPace> {
+        self.write_paces.best()
     }
 }
 
