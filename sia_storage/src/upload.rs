@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use crate::congestion::InflightController;
+use crate::congestion::{InflightController, SamplePermit};
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
 use crate::hosts::{HostQueue, InflightGuard, QueueError, RPCError};
@@ -169,10 +169,16 @@ impl UploadLimiter {
         }
     }
 
+    /// Issues a sampling token; capture it at dispatch and hand it back to
+    /// [`Self::record`] on completion.
+    fn sample(&self) -> SamplePermit {
+        self.controller.sample()
+    }
+
     /// Feeds a completion to the controller and wakes parked acquirers for any
     /// newly opened slots.
-    fn record(&self, expected: Option<Duration>, elapsed: Duration, ok: bool) {
-        let delta = self.controller.record(expected, elapsed, ok);
+    fn record(&self, permit: SamplePermit, elapsed: Duration, ok: bool) {
+        let delta = self.controller.record(permit, elapsed, ok);
         for _ in 0..delta.max(0) {
             self.notify.notify_one();
         }
@@ -233,15 +239,13 @@ impl ShardUpload {
             // host's load is visible to concurrent pickers; dropped here
             // either after success or failure.
             let _inflight = inflight;
-            // Per-host expected for the controller's congestion ratio, captured
-            // before the write so it excludes this transfer.
-            let expected = client.estimate_write_duration(&host_key, data.len() as u32);
+            let sample = limiter.sample();
             let start = Instant::now();
             let result = client
                 .write_sector(host_key, &account_key.0, data, write_timeout)
                 .await;
             let elapsed = start.elapsed();
-            limiter.record(expected, elapsed, result.is_ok());
+            limiter.record(sample, elapsed, result.is_ok());
             let root = result
                 .inspect_err(|e| {
                     debug!(

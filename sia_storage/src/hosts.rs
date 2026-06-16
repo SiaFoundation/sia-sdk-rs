@@ -190,30 +190,6 @@ impl HostList {
         self.with_metric(&host_key, |m| m.add_failure());
     }
 
-    /// Expected duration of a `size`-byte write to the host from its best
-    /// recent pace. `None` until the host has a few write samples.
-    fn estimate_write_duration(&self, host_key: &PublicKey, size: u32) -> Option<Duration> {
-        let metrics = self.metrics.read().unwrap();
-        Some(
-            metrics
-                .get(host_key)?
-                .write_best_pace()?
-                .estimate_duration(size),
-        )
-    }
-
-    /// Expected duration of a `size`-byte read from the host from its best
-    /// recent pace. `None` until the host has a few read samples.
-    fn estimate_read_duration(&self, host_key: &PublicKey, size: u32) -> Option<Duration> {
-        let metrics = self.metrics.read().unwrap();
-        Some(
-            metrics
-                .get(host_key)?
-                .read_best_pace()?
-                .estimate_duration(size),
-        )
-    }
-
     /// Adds a read sample for the given host, updating its metrics.
     fn add_read_sample(&self, host_key: PublicKey, transfer: Transfer) {
         self.with_metric(&host_key, |m| m.add_read_sample(transfer));
@@ -374,18 +350,6 @@ impl<T: Transport> Hosts<T> {
     /// Adds a failure for the given host, updating its metrics and priority.
     pub fn add_failure(&self, host_key: PublicKey) {
         self.hosts.add_failure(host_key);
-    }
-
-    /// Expected duration of a `size`-byte write to the host from its own
-    /// throughput EMA.
-    pub fn estimate_write_duration(&self, host_key: &PublicKey, size: u32) -> Option<Duration> {
-        self.hosts.estimate_write_duration(host_key, size)
-    }
-
-    /// Expected duration of a `size`-byte read to the host from its own
-    /// throughput EMA.
-    pub fn estimate_read_duration(&self, host_key: &PublicKey, size: u32) -> Option<Duration> {
-        self.hosts.estimate_read_duration(host_key, size)
     }
 
     /// Records a successful write for the host's metrics and the global

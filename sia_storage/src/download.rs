@@ -224,8 +224,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
             // visible to concurrent `prioritize` calls, then dropped here on
             // either success or error.
             let _inflight = inflight;
-            let expected =
-                client.estimate_read_duration(&task.sector.host_key, sector_length as u32);
+            let permit = controller.sample();
             let start = Instant::now();
             let result = client
                 .read_sector(
@@ -239,7 +238,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
                 )
                 .await;
             let elapsed = start.elapsed();
-            controller.record(expected, elapsed, result.is_ok());
+            controller.record(permit, elapsed, result.is_ok());
             let data = result?;
             debug!(
                 "slab {} shard {} recovered from {} in {:?}",
