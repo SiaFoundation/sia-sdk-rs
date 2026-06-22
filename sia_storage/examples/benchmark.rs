@@ -63,6 +63,11 @@ enum Command {
         #[arg(short, long, default_value_t = 120 * 1024 * 1024)]
         size: usize,
 
+        /// Warms the SDK by doing a smaller upload and download before the actual benchmark
+        /// to seed the upload and download pipeline's metrics.
+        #[arg(short, long)]
+        warm: bool,
+
         /// Maximum number of slabs buffered in memory during upload.
         #[arg(long)]
         upload_max_buffered_slabs: Option<usize>,
@@ -411,21 +416,57 @@ fn print_host_summary(label: &str, stats: &HostStats) {
     println!("  total {} across {} hosts", format_bytes(total), map.len());
 }
 
+// Runs an upload/download roundtrip purely to seed the pipeline metrics. It
+// shows progress bars and verifies the data, but records no host stats and
+// prints no results.
+async fn warmup(
+    sdk: &Sdk,
+    size: usize,
+    upload_options: UploadOptions,
+    download_options: DownloadOptions,
+) -> Result<(), Box<dyn Error>> {
+    let seed: u64 = rand::random();
+    let reader = SeededReader::new(seed, size);
+
+    let encoded_size = sia_storage::encoded_size(
+        size as u64,
+        upload_options.data_shards,
+        upload_options.parity_shards,
+    );
+    let upload_progress = progress_bar(size as u64, "warm up ");
+    let upload_progress_cb = upload_progress.clone();
+    let encoded_uploaded = Arc::new(AtomicU64::new(0));
+    let unencoded_size = size as u64;
+
+    let upload_options = upload_options.on_shard_uploaded(move |p| {
+        let encoded = encoded_uploaded.fetch_add(p.shard_size as u64, Ordering::Relaxed)
+            + p.shard_size as u64;
+        let unencoded = (encoded as u128 * unencoded_size as u128 / encoded_size as u128) as u64;
+        upload_progress_cb.set_position(unencoded);
+    });
+    let obj = sdk
+        .upload(Object::default(), reader, upload_options)
+        .await?;
+    upload_progress.finish();
+
+    let download_progress = progress_bar(size as u64, "warm dl ");
+    let mut verifier = SeededVerifier::new(seed, size, download_progress.clone());
+    let mut reader = sdk.download(&obj, download_options)?;
+    copy(&mut reader, &mut verifier).await?;
+    download_progress.finish();
+    Ok(())
+}
+
 async fn run_benchmark(
     sdk: Sdk,
     size: usize,
-    upload_max_buffered_slabs: Option<usize>,
-    download_max_buffered_chunks: Option<usize>,
+    mut upload_options: UploadOptions,
+    mut download_options: DownloadOptions,
     host_summary: bool,
 ) {
     let seed: u64 = rand::random();
     let reader = SeededReader::new(seed, size);
 
-    // upload the data to the network
-    let mut upload_options = UploadOptions {
-        max_buffered_slabs: upload_max_buffered_slabs,
-        ..Default::default()
-    };
     let encoded_size = sia_storage::encoded_size(
         size as u64,
         upload_options.data_shards,
@@ -459,10 +500,6 @@ async fn run_benchmark(
     let upload_duration = start.elapsed();
     upload_progress.finish();
 
-    let mut download_options = DownloadOptions {
-        max_buffered_chunks: download_max_buffered_chunks,
-        ..Default::default()
-    };
     let download_hosts: HostStats = Arc::new(Mutex::new(HashMap::new()));
     let download_hosts_cb = download_hosts.clone();
     download_options = download_options.on_shard_downloaded(move |p| {
@@ -538,19 +575,38 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Command::Login { indexer, new } => login(&cli.profile, &indexer, new).await,
         Command::Run {
             size,
+            warm,
             upload_max_buffered_slabs,
             download_max_buffered_chunks,
             host_summary,
         } => {
             let sdk = connect(&cli.profile).await?;
-            run_benchmark(
-                sdk,
-                size,
-                upload_max_buffered_slabs,
-                download_max_buffered_chunks,
-                host_summary,
-            )
-            .await;
+
+            // upload the data to the network
+            let upload_options = UploadOptions {
+                max_buffered_slabs: upload_max_buffered_slabs,
+                ..Default::default()
+            };
+
+            let download_options = DownloadOptions {
+                max_buffered_chunks: download_max_buffered_chunks,
+                ..Default::default()
+            };
+
+            if warm {
+                let warm_size = size
+                    .saturating_div(10)
+                    .max(upload_options.optimal_data_size()); // at least a full slab
+                warmup(
+                    &sdk,
+                    warm_size,
+                    upload_options.clone(),
+                    download_options.clone(),
+                )
+                .await?;
+            }
+
+            run_benchmark(sdk, size, upload_options, download_options, host_summary).await;
             Ok(())
         }
         Command::Profiles => list_profiles().await,

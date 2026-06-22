@@ -300,7 +300,7 @@ pub struct ShardProgress {
 }
 
 /// Options for configuring a download.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DownloadOptions {
     /// Upper bound on concurrent chunk downloads. This can
     /// increase performance due to parallelism at the cost of
@@ -340,6 +340,7 @@ impl DownloadOptions {
 }
 
 /// Options for configuring an upload.
+#[derive(Clone)]
 pub struct UploadOptions {
     /// The number of data shards per slab. Defaults to 10.
     pub data_shards: u8,
