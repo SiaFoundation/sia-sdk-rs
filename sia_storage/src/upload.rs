@@ -447,7 +447,7 @@ impl Upload {
             limiter: Arc::new(UploadLimiter::new(
                 INITIAL_INFLIGHT,
                 MIN_INFLIGHT,
-                max_buffered_slabs.saturating_add(total_shards),
+                max_buffered_slabs.saturating_mul(total_shards),
             )),
             waiting: watch::channel(0).0,
             slab_tasks: VecDeque::new(),
