@@ -1234,7 +1234,7 @@ mod tests {
     async fn test_check_app_auth() {
         let server = Server::run();
         let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("").to_string()).unwrap();
+        let client = Client::new(server.url("/").to_string()).unwrap();
 
         // approved request
         server.expect(

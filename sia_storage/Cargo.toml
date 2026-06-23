@@ -46,6 +46,7 @@ reqwest = { version = "0.12.28", default-features = false, features = ["charset"
 tokio = { version = "1.52.3", features = ["fs", "sync", "io-util", "macros", "rt", "time"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 sia_mux = { version = "0.1.0", path = "../sia_mux" }
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 
 # --- WASM-only dependencies ---
 [target.'cfg(target_arch = "wasm32")'.dependencies]

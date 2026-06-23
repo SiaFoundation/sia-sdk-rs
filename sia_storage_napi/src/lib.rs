@@ -361,7 +361,7 @@ impl SendableCallback<ShardProgress> {
 #[napi(object, object_to_js = false)]
 #[derive(Default)]
 pub struct UploadOptions {
-    pub max_inflight: Option<u32>,
+    pub max_buffered_slabs: Option<u32>,
     pub data_shards: Option<u8>,
     pub parity_shards: Option<u8>,
     #[napi(ts_type = "(progress: ShardProgress) => void")]
@@ -373,10 +373,7 @@ impl From<UploadOptions> for sia_storage::UploadOptions {
         let mut options = sia_storage::UploadOptions::default();
         options.data_shards = val.data_shards.unwrap_or(options.data_shards);
         options.parity_shards = val.parity_shards.unwrap_or(options.parity_shards);
-        options.max_inflight = val
-            .max_inflight
-            .map(|v| v as usize)
-            .unwrap_or(options.max_inflight);
+        options.max_buffered_slabs = val.max_buffered_slabs.map(|v| v as usize);
         options.shard_uploaded = val.on_shard_uploaded.map(|cb| cb.into_shard_callback());
         options
     }
@@ -399,7 +396,7 @@ impl FromNapiValue for SendableUploadOptions {
 /// Download options.
 #[napi(object, object_to_js = false)]
 pub struct DownloadOptions {
-    pub max_inflight: Option<u32>,
+    pub max_buffered_chunks: Option<u32>,
     pub offset: Option<BigInt>,
     pub length: Option<BigInt>,
     #[napi(ts_type = "(progress: ShardProgress) => void")]
@@ -410,10 +407,10 @@ impl TryFrom<DownloadOptions> for sia_storage::DownloadOptions {
     type Error = napi::Error;
 
     fn try_from(val: DownloadOptions) -> Result<Self> {
-        let mut options = sia_storage::DownloadOptions::default();
-        if let Some(max_inflight) = val.max_inflight {
-            options.max_inflight = max_inflight as usize;
-        }
+        let mut options = sia_storage::DownloadOptions {
+            max_buffered_chunks: val.max_buffered_chunks.map(|v| v as usize),
+            ..Default::default()
+        };
         if let Some(offset) = val.offset {
             let (signed, offset, lossless) = offset.get_u64();
             if signed {

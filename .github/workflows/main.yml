@@ -31,8 +31,6 @@ jobs:
         run: cargo doc --all-features --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
-      - name: Package
-        run: cargo package --workspace --registry crates-io
 
   test:
     name: Test native

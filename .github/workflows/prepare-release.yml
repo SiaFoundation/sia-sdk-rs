@@ -24,6 +24,8 @@ jobs:
         id: prepare
         run: knope prepare-release --verbose
         continue-on-error: true
+      - name: Package
+        run: cargo package --workspace --registry crates-io 
       - name: Create Pull Request
         if: steps.prepare.outcome == 'success'
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7.0.11

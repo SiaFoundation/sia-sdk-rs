@@ -105,7 +105,7 @@ const _: &str = r#"
 export interface UploadOptions {
     dataShards?: number;
     parityShards?: number;
-    maxInflight?: number;
+    maxBufferedSlabs?: number;
     onShardUploaded?: (progress: ShardProgress) => void;
 }
 "#;
@@ -139,8 +139,8 @@ pub(crate) fn upload_options_from_js(val: JsValue) -> sia_storage::UploadOptions
     if let Some(v) = get_f64(&obj, "parityShards") {
         options.parity_shards = v as u8;
     }
-    if let Some(v) = get_f64(&obj, "maxInflight") {
-        options.max_inflight = v as usize;
+    if let Some(v) = get_f64(&obj, "maxBufferedSlabs") {
+        options.max_buffered_slabs = Some(v as usize);
     }
     if let Some(cb) = get_function(&obj, "onShardUploaded") {
         options.shard_uploaded = Some(shard_progress_callback(cb));
@@ -151,7 +151,7 @@ pub(crate) fn upload_options_from_js(val: JsValue) -> sia_storage::UploadOptions
 #[wasm_bindgen(typescript_custom_section)]
 const _: &str = r#"
 export interface DownloadOptions {
-    maxInflight?: number;
+    maxBufferedChunks?: number;
     offset?: number;
     length?: number;
     onShardDownloaded?: (progress: ShardProgress) => void;
@@ -161,8 +161,8 @@ export interface DownloadOptions {
 pub(crate) fn download_options_from_js(val: JsValue) -> sia_storage::DownloadOptions {
     let obj = js_sys::Object::from(val);
     let mut options = sia_storage::DownloadOptions::default();
-    if let Some(v) = get_f64(&obj, "maxInflight") {
-        options.max_inflight = v as usize;
+    if let Some(v) = get_f64(&obj, "maxBufferedChunks") {
+        options.max_buffered_chunks = Some(v as usize);
     }
     if let Some(v) = get_f64(&obj, "offset") {
         options.offset = v as u64;
