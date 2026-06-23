@@ -1,3 +1,26 @@
+## 0.10.0 (2026-06-23)
+
+### Breaking Changes
+
+#### Added adaptive transfer concurrency
+
+Uploads and downloads no longer take a fixed `max_inflight` concurrency limit — concurrency now adapts to network conditions automatically. Memory use is bounded directly instead, by two new options: `UploadOptions::max_buffered_slabs` and `DownloadOptions::max_buffered_chunks`, each defaulting to roughly 10% of system memory when unset. The `max_inflight` field is removed from the upload, download, and language-binding option types.
+
+### Features
+
+- Changed download chunking to ramp up to reduce round trips on large downloads.
+- Overprovision shard downloads to reduce tail latency from slow hosts
+- Take into account inflight uploads and downloads when ranking hosts.
+
+### Fixes
+
+- Pin slabs in batches within pin_object.
+- Removed rayon dependency due to panics at high concurrency
+
+#### Made racing adaptive so that racers will not steal slots from higher priority work
+
+For uploads, racing will only start when every shard has an attempt in flight. For downloads, racing will only start when the chunk is near the read head. The race timeout is derived from the p95 of recently completed RPCs instead of a fixed interval so only hosts well outside the normal latency spread get raced.
+
 ## 0.9.1 (2026-05-18)
 
 ### Fixes
