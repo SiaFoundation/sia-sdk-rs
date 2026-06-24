@@ -11,6 +11,7 @@ keywords = ["sia", "decentralized", "blockchain", "depin", "storage"]
 
 [lib]
 path = "src/lib.rs"
+bench = false
 
 [dependencies]
 base64 = "0.22.1"
