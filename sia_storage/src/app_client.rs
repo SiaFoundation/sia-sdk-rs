@@ -670,9 +670,6 @@ mod cross_target_test {
 
     use super::*;
 
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
-
     #[sia_core_derive::cross_target_test]
     fn test_register_app_sig_hash_golden() {
         const REQUEST_ID: &str = "ebddc9385dace70f9a97cebce34134ac";

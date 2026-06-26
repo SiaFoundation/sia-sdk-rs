@@ -202,9 +202,6 @@ impl InflightController {
 mod tests {
     use super::*;
 
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
-
     fn step(c: &InflightController, secs: f64) -> usize {
         let start = c.limit();
         let mut n = 0;

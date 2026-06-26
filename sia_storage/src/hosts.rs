@@ -660,9 +660,6 @@ mod test {
         PrivateKey::from_seed(&seed).public_key()
     }
 
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
-
     #[sia_core_derive::cross_target_test]
     fn test_host_queue_pick() {
         let hosts_manager = Hosts::new(Client::new());

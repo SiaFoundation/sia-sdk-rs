@@ -35,7 +35,7 @@ fn check_backend(name: &str, n: usize, f: HashBlocksFn) {
     }
 }
 
-#[test]
+#[sia_core_derive::cross_target_test]
 fn single_block_matches_reference() {
     let blocks = random_blocks(7, 4);
     for b in &blocks {
@@ -50,7 +50,7 @@ fn single_block_matches_reference() {
     assert_eq!(sum_pair(&l, &r), reference(&block, 1));
 }
 
-#[test]
+#[sia_core_derive::cross_target_test]
 fn backends_match_reference() {
     check_backend("scalar", 4, super::generic::hash_blocks);
 
@@ -71,7 +71,7 @@ fn backends_match_reference() {
     check_backend("wasm", 4, super::wasm::hash_blocks);
 }
 
-#[test]
+#[sia_core_derive::cross_target_test]
 fn bulk_matches_reference() {
     // A non-multiple-of-8 length exercises the dispatched kernel and the scalar
     // remainder on every backend width.

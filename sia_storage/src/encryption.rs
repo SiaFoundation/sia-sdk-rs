@@ -210,9 +210,6 @@ mod test {
         });
     }
 
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
-
     #[sia_core_derive::cross_target_test]
     fn test_encrypt_sector_roundtrip() {
         let key = EncryptionKey::from([1u8; 32]);

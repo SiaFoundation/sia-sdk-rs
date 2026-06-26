@@ -225,9 +225,6 @@ mod test {
     use sia_core::hash_256;
     use sia_core::types::Hash256;
 
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
-
     #[sia_core_derive::cross_target_test]
     fn test_app_key_derivation_golden() {
         const MNEMONIC: &str =
