@@ -192,9 +192,6 @@ mod tests {
         vec![i; SECTOR_SIZE]
     }
 
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
-
     #[sia_core_derive::cross_target_test]
     fn test_encode_shards() {
         let data_shards = 2;

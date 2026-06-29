@@ -345,9 +345,6 @@ impl_transfer!(TransferRate, TransferPace);
 mod test {
     use super::*;
 
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
-
     #[sia_core_derive::cross_target_test]
     fn test_failure_rate() {
         let mut fr = FailureRate::default();

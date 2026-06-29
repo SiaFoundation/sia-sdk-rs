@@ -35,4 +35,7 @@ pub mod macros;
 pub mod merkle;
 pub mod rhp4;
 
+#[cfg(test)]
+mod test_util;
+
 extern crate self as sia_core;

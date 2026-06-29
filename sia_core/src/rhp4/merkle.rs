@@ -3,80 +3,25 @@ use std::collections::VecDeque;
 use super::{LEAVES_PER_SECTOR, SECTOR_SIZE, SEGMENT_SIZE};
 use crate::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use crate::encoding_async::AsyncSiaDecode;
-use crate::merkle::{self, Accumulator, LEAF_HASH_PREFIX, NODE_HASH_PREFIX, sum_leaf, sum_node};
+use crate::merkle::{self, Accumulator};
 use crate::types::Hash256;
-use blake2b_simd::Params;
-use blake2b_simd::many::{HashManyJob, hash_many};
 use bytes::Bytes;
 use thiserror::Error;
-use tokio::io::{self, AsyncRead, AsyncReadExt};
+use tokio::io::{self};
 
 /// Calculates the Merkle root of a sector
 pub fn sector_root(sector: &[u8]) -> Hash256 {
     assert_eq!(sector.len(), SECTOR_SIZE);
-    let mut params = Params::new();
-    params.hash_length(32);
 
-    let mut tree_hashes = vec![Hash256::default(); LEAVES_PER_SECTOR];
-    tree_hashes
-        .chunks_exact_mut(4)
-        .enumerate()
-        .for_each(|(i, chunk)| {
-            // prepare inputs
-            let mut inputs = [[0u8; SEGMENT_SIZE + 1]; 4];
-            for (j, input) in inputs.iter_mut().enumerate() {
-                let start = i * 4 + j;
-                let end = start + 1;
-                input[0] = LEAF_HASH_PREFIX[0];
-                input[1..].copy_from_slice(&sector[SEGMENT_SIZE * start..SEGMENT_SIZE * end]);
-            }
+    let mut nodes = vec![[0u8; 32]; LEAVES_PER_SECTOR];
+    merkle::hash_leaves_many(&mut nodes, merkle::as_blocks(sector));
 
-            // hash them
-            let mut jobs = [
-                HashManyJob::new(&params, &inputs[0][..]),
-                HashManyJob::new(&params, &inputs[1][..]),
-                HashManyJob::new(&params, &inputs[2][..]),
-                HashManyJob::new(&params, &inputs[3][..]),
-            ];
-            hash_many(&mut jobs);
-
-            // collect results
-            for j in 0..4 {
-                chunk[j] = jobs[j].to_hash().into();
-            }
-        });
-
-    let mut chunk_size = 4;
-    while chunk_size <= tree_hashes.len() {
-        tree_hashes.chunks_mut(chunk_size).for_each(|nodes| {
-            // prepare inputs
-            let mut inputs = [[0u8; 65]; 2];
-            for (j, input) in inputs.iter_mut().enumerate() {
-                input[0] = NODE_HASH_PREFIX[0];
-                let step = j * chunk_size / 2;
-                input[1..33].copy_from_slice(nodes[step].as_ref());
-                input[33..65].copy_from_slice(nodes[step + chunk_size / 4].as_ref());
-            }
-
-            // hash them
-            let mut jobs = [
-                HashManyJob::new(&params, &inputs[0][..]),
-                HashManyJob::new(&params, &inputs[1][..]),
-            ];
-            hash_many(&mut jobs);
-
-            // collect results
-            nodes[0] = jobs[0].to_hash().into();
-            nodes[nodes.len() / 2] = jobs[1].to_hash().into();
-        });
-        chunk_size *= 2;
+    while nodes.len() > 1 {
+        let mut parents = vec![[0u8; 32]; nodes.len() / 2];
+        merkle::hash_nodes_many(&mut parents, &nodes);
+        nodes = parents;
     }
-    // hash last two nodes into roots
-    sum_node(
-        &params,
-        &tree_hashes[0],
-        &tree_hashes[tree_hashes.len() / 2],
-    )
+    nodes[0].into()
 }
 
 #[derive(Debug, Error)]
@@ -142,8 +87,6 @@ impl RangeProof {
 
     fn roots(&self, start: usize, end: usize) -> Result<VecDeque<Hash256>, ProofValidationError> {
         assert!(start < end);
-        let mut params = Params::new();
-        params.hash_length(32);
 
         let total = (end - start) * SEGMENT_SIZE;
         let data = self
@@ -151,26 +94,8 @@ impl RangeProof {
             .get(..total)
             .ok_or(ProofValidationError::NotSegmentAligned)?;
 
-        let mut leaf_hashes: Vec<Hash256> = Vec::with_capacity(end - start);
-        let mut groups = data.chunks_exact(4 * SEGMENT_SIZE);
-        for group in &mut groups {
-            let mut inputs = [[0u8; SEGMENT_SIZE + 1]; 4];
-            for (input, segment) in inputs.iter_mut().zip(group.chunks_exact(SEGMENT_SIZE)) {
-                input[0] = LEAF_HASH_PREFIX[0];
-                input[1..].copy_from_slice(segment);
-            }
-            let mut jobs = [
-                HashManyJob::new(&params, &inputs[0][..]),
-                HashManyJob::new(&params, &inputs[1][..]),
-                HashManyJob::new(&params, &inputs[2][..]),
-                HashManyJob::new(&params, &inputs[3][..]),
-            ];
-            hash_many(&mut jobs);
-            leaf_hashes.extend(jobs.iter().map(|job| Hash256::from(job.to_hash())));
-        }
-        for segment in groups.remainder().chunks_exact(SEGMENT_SIZE) {
-            leaf_hashes.push(sum_leaf(&params, segment));
-        }
+        let mut leaf_hashes = vec![[0u8; 32]; end - start];
+        merkle::hash_leaves_many(&mut leaf_hashes, merkle::as_blocks(data));
 
         let mut roots = VecDeque::new();
         let mut acc = merkle::Accumulator::new();
@@ -181,7 +106,7 @@ impl RangeProof {
             acc.reset();
             let subtree_size = next_subtree_size(i, j);
             for _ in 0..subtree_size {
-                acc.add_leaf(leaves.next().expect("leaf count matches range"));
+                acc.add_leaf(leaves.next().expect("leaf count matches range").into());
             }
             roots.push_back(acc.root());
             i += subtree_size;
@@ -213,41 +138,6 @@ fn range_proof_size(leaves_per_sector: usize, start: usize, end: usize) -> usize
     let right_hashes = (!(end - 1) & path_mask).count_ones() as usize;
     left_hashes + right_hashes
 }
-
-pub async fn sector_root_from_reader<R: AsyncRead + Unpin>(
-    r: &mut R,
-) -> Result<Hash256, ProofValidationError> {
-    let mut acc = merkle::Accumulator::new();
-    let r = r.take(SECTOR_SIZE as u64); // cap at a sector
-    let mut r = io::BufReader::new(r);
-
-    let mut leaf = [0u8; SEGMENT_SIZE];
-    loop {
-        // read a leaf
-        let mut bytes_read = 0;
-        while bytes_read < leaf.len() {
-            let n = r.read(&mut leaf[bytes_read..]).await?;
-            if n == 0 {
-                break;
-            }
-            bytes_read += n;
-        }
-        // if no bytes were read, we are done
-        // if a full segment was read, we add the leaf
-        // otherwise, we got a partial segment, which results in an error
-        match bytes_read {
-            0 => return Ok(acc.root()),
-            SEGMENT_SIZE => {
-                let h = sum_leaf(Params::new().hash_length(32), &leaf);
-                acc.add_leaf(h);
-            }
-            _ => {
-                return Err(ProofValidationError::NotSegmentAligned);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,55 +218,156 @@ mod tests {
         assert_eq!(next_subtree_size(24, 42), 8);
     }
 
-    #[tokio::test]
-    async fn test_sector_root_from_reader() {
-        // prepare slightly more than a sector worth of data to make sure we
-        // only compute the hash over the first SECTOR_SIZE bytes
-        let data = vec![0u8; SECTOR_SIZE + 64];
-        let root = sector_root_from_reader(&mut &data[..]).await.unwrap();
+    fn random_sector() -> Vec<u8> {
+        const SECTOR_SEED: u64 = 0x0123456789abcdef;
 
-        let expected_root =
-            hash_256!("50ed59cecd5ed3ca9e65cec0797202091dbba45272dafa3faa4e27064eedd52c");
-        assert_eq!(root, expected_root);
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        crate::test_util::fill(SECTOR_SEED, &mut sector);
+        sector
+    }
+
+    // Proof vectors are golden, from go.sia.tech/core rhp/v2.BuildProof.
+    fn sector_proof_24_42() -> (Vec<Hash256>, Bytes, Hash256) {
+        let sector = random_sector();
+        let root = sector_root(&sector);
+        let data = Bytes::copy_from_slice(&sector[24 * SEGMENT_SIZE..42 * SEGMENT_SIZE]);
+        let proof = vec![
+            hash_256!("9596ec473dc28ec9ed9f40aff5023d724447584e2229d64b252bad1882d346f3"),
+            hash_256!("e28c4f2c253195bd718757a7d3f7015cef60f570b2dc19cad1508c219b1c0495"),
+            hash_256!("13162b01bcbd53f56ee3090431c274b43194009ab037dd2f8fc6fcce69b85d2d"),
+            hash_256!("e9bf7f6b9e17c0942e34d50b6851419fc64d7e8bde24b50334ac58c6d53d4f81"),
+            hash_256!("4168077910d52f8694b0084d45a4b22db0f497984e95b29bb47a82c0e8b249bb"),
+            hash_256!("a17f44317bd8647db096d6cc3080428de8cea4caf391cbcf8d39bc683970962f"),
+            hash_256!("2c1262b5c876c9616e738f32948d5b0621dd4eb7058c760f0669d364bed69027"),
+            hash_256!("28c7e0115673a315b1fa5b21a29d79e156fe1a627b0d8228f08cd0f7ca5e674d"),
+            hash_256!("ff5657a7b775b6d95a43d66b7cdf0241e624f459f861176c3e5dacde9876d98d"),
+            hash_256!("d01cf598e2582f186359ff260e48bce40f9279105c66077d59a456bdd2d0f4ec"),
+            hash_256!("c07d4d530161f9adfe5eb862af5dd7edc4fa8eb0310fcb25ef7eb51ede7b1e3a"),
+            hash_256!("206fea02d289dd4205cea7032693f9253d5bff89e6019157dedf8b6ddc057b95"),
+            hash_256!("d1896e9cbb9b49f9d6d9b8ccf6c14fe6466edd7c39e1beb3973783e7595d4e15"),
+            hash_256!("8b21c694a70ac9302bd5b5523c5efb34d69e09835b93bfd36da018d5f6f2ab42"),
+            hash_256!("c8a63e994d8d16fdb1a169f1baea63b1e7aa5cd29dd418e2eaa5427b85761d6a"),
+        ];
+        (proof, data, root)
     }
 
     #[test]
     fn test_verify_range_proof() {
-        let data = Bytes::from(vec![0u8; SECTOR_SIZE]);
-        let sector_root = sector_root(&data);
-        let proof: Vec<Hash256> = vec![
-            hash_256!("f0022a573326ecc0e4c18cf56b9a31d94dc792f8ec20ecbbc57d33c75db24c54"),
-            hash_256!("d66f6fce29310f5d2db0d2398e6d93b23c9fa1982b7249b07664590b7aebc49a"),
-            hash_256!("5b3bc22a619574a668c4e2a22fa72210611813c6ed44cf445789ee316102bfe1"),
-            hash_256!("3d8e644caa3e7ac720b1f7ce42d829ecf2c0ad7ef656258f4c1c90422074ba23"),
-            hash_256!("f0022a573326ecc0e4c18cf56b9a31d94dc792f8ec20ecbbc57d33c75db24c54"),
-            hash_256!("9213804e199cab3449185a5517f54e49c1d6b0892b8269ed4baab62dbf3e8ebb"),
-            hash_256!("f052bf6db4444532ed0d8fdfc67c0ce9688fb4042d461a5bb367506de5e712a8"),
-            hash_256!("61b3d824e7b4662df867477f09335dfecfc990c9f0b3731fbec981428b38190d"),
-            hash_256!("272b122c6943a7dd6b5e2797a727de61f53c274f29d7d3e4e30d40620f83dc2b"),
-            hash_256!("5ce18ab62a07bb4d4def2509f8bfa982d5cfd07deb533248abfd7b305652470c"),
-            hash_256!("39cb8aa6feace01924b732664b81a8f41d688cbd7817154c663c1686a4cf6a0e"),
-            hash_256!("95ab608799eb9c485712a4c995d4e22ea7b20024fe81730f5b4deb4982e97b78"),
-            hash_256!("6530f5433504ba845332dd51742b57f0666456c99b78f67c72fac381980527b1"),
-            hash_256!("53ae21d13da92c6741cf44e9b08e0c0616485402c343e4f6c92e5c8516187bcf"),
-            hash_256!("f2c4d3e9ce380389b1088d44ddb30276fbff5f75803c2bd13678b690f4187d7e"),
-        ];
-
-        let verified_data = RangeProof(proof, data.clone()) // clone since RangeProof usually owns the data
-            .verify(&sector_root, 24, 42)
+        let (proof, data, root) = sector_proof_24_42();
+        let verified_data = RangeProof(proof, data.clone())
+            .verify(&root, 24, 42)
             .expect("proof validation failed");
         assert_eq!(&data, &verified_data);
     }
 
     #[test]
-    fn test_verify_full_range_proof() {
-        let mut data = vec![0u8; SECTOR_SIZE];
-        data.iter_mut()
-            .enumerate()
-            .for_each(|(i, x)| *x = (i % 256) as u8);
-        let data = Bytes::from(data);
-        let root = sector_root(&data);
+    fn test_verify_range_proof_rejects_tampered_proof() {
+        let (mut proof, data, root) = sector_proof_24_42();
+        proof[0] = Hash256::default();
+        let err = RangeProof(proof, data)
+            .verify(&root, 24, 42)
+            .expect_err("a tampered proof must be rejected");
+        assert!(matches!(err, ProofValidationError::InvalidProofRoot { .. }));
+    }
 
+    #[test]
+    fn test_verify_range_proof_rejects_wrong_root() {
+        let (proof, data, _) = sector_proof_24_42();
+        let err = RangeProof(proof, data)
+            .verify(&Hash256::default(), 24, 42)
+            .expect_err("verification against the wrong root must fail");
+        assert!(matches!(err, ProofValidationError::InvalidProofRoot { .. }));
+    }
+
+    #[test]
+    fn test_verify_range_proof_rejects_wrong_length() {
+        let (mut proof, data, root) = sector_proof_24_42();
+        proof.push(Hash256::default());
+        let err = RangeProof(proof, data)
+            .verify(&root, 24, 42)
+            .expect_err("a wrong-length proof must be rejected");
+        assert!(matches!(
+            err,
+            ProofValidationError::InvalidProofLength {
+                expected: 15,
+                actual: 16
+            }
+        ));
+    }
+
+    #[test]
+    fn test_verify_range_proof_rejects_short_data() {
+        let (proof, _, root) = sector_proof_24_42();
+        let short = Bytes::from(vec![0u8; 100]);
+        let err = RangeProof(proof, short)
+            .verify(&root, 24, 42)
+            .expect_err("insufficient range data must be rejected");
+        assert!(matches!(err, ProofValidationError::NotSegmentAligned));
+    }
+
+    #[test]
+    fn test_verify_range_proof_first_leaf() {
+        let sector = random_sector();
+        let root = sector_root(&sector);
+        let leaf = Bytes::copy_from_slice(&sector[..SEGMENT_SIZE]);
+        let proof = vec![
+            hash_256!("8550799550a2e7a81b99c4d8822380edc6f1e1aad34ce186f7e73449833efe51"),
+            hash_256!("8efc5ed40031e486aad5927ac2dd0fe5540f420d93565c56daa415d92b2bd83f"),
+            hash_256!("076e6419baca3cc9949dcd0e84f6b23fbd029b8cf4579b49f11d6d00767d2491"),
+            hash_256!("fb59d0ffbe76c218a0a6c34337198137c1d9300552696804e15de865de994b50"),
+            hash_256!("af28f37b51e5ae1a920dbf0e4121508e8677a9ddecfdf5d4c107bae8ab16dac0"),
+            hash_256!("b983f8ed5c3f70589b7c2d34f65c93ac714cfbf1eca619355eeacd2923abed9d"),
+            hash_256!("a17f44317bd8647db096d6cc3080428de8cea4caf391cbcf8d39bc683970962f"),
+            hash_256!("2c1262b5c876c9616e738f32948d5b0621dd4eb7058c760f0669d364bed69027"),
+            hash_256!("28c7e0115673a315b1fa5b21a29d79e156fe1a627b0d8228f08cd0f7ca5e674d"),
+            hash_256!("ff5657a7b775b6d95a43d66b7cdf0241e624f459f861176c3e5dacde9876d98d"),
+            hash_256!("d01cf598e2582f186359ff260e48bce40f9279105c66077d59a456bdd2d0f4ec"),
+            hash_256!("c07d4d530161f9adfe5eb862af5dd7edc4fa8eb0310fcb25ef7eb51ede7b1e3a"),
+            hash_256!("206fea02d289dd4205cea7032693f9253d5bff89e6019157dedf8b6ddc057b95"),
+            hash_256!("d1896e9cbb9b49f9d6d9b8ccf6c14fe6466edd7c39e1beb3973783e7595d4e15"),
+            hash_256!("8b21c694a70ac9302bd5b5523c5efb34d69e09835b93bfd36da018d5f6f2ab42"),
+            hash_256!("c8a63e994d8d16fdb1a169f1baea63b1e7aa5cd29dd418e2eaa5427b85761d6a"),
+        ];
+        let verified = RangeProof(proof, leaf.clone())
+            .verify(&root, 0, 1)
+            .expect("first-leaf proof must verify");
+        assert_eq!(&leaf, &verified);
+    }
+
+    #[test]
+    fn test_verify_range_proof_last_leaf() {
+        let sector = random_sector();
+        let root = sector_root(&sector);
+        let leaf = Bytes::copy_from_slice(&sector[(LEAVES_PER_SECTOR - 1) * SEGMENT_SIZE..]);
+        let proof = vec![
+            hash_256!("96f13920f86d041f75219a0d4366792cda5108c7288dbbf11b1b0a25ed8dfded"),
+            hash_256!("655701359abe8ae8db16a354033d7f50b56763380229f2e1bfc42361bd8f1306"),
+            hash_256!("aa2facdc65c75e2b40f046c667cbce9d85fc33e5dcc826636047ac21e946e91b"),
+            hash_256!("d8e9facb499f9fe86425f15050090baa43e8ff8d1d345203bd53eb59e542cfc2"),
+            hash_256!("21d5dce0cb524ba04cd773a31237f49b553201693074147dce48c4f355b3abd0"),
+            hash_256!("bf6adda2756b1c669e6742a43470e2e918e134c730e007d706a3ca58fe568e51"),
+            hash_256!("5c87a42f3ab69ef8e76c6175c9059ccbd3e9b11e39162384cb507c2d3f4e069e"),
+            hash_256!("3831ae99af721b392b8ae1030b2868737731be0d4ee6eb0e12e0c2eaa8f08015"),
+            hash_256!("112ee512b1e0d0f565ee60023613f19598ee8253c535ba59668233dc13f14e5a"),
+            hash_256!("652d6ffedd4b3a73c7093693c854f894be21d6c8fd20df7e69c2f2982683e8ca"),
+            hash_256!("9eeb76d680303180161abfc26ba06fd06702ba35828232c78d6b9ee186fe01f6"),
+            hash_256!("d8e8d7145a2eedf5d4a1d003c44ac034e2299be9978fc1b5e77a0353b0049869"),
+            hash_256!("9da31df94a2c2b41a7e33bc3191045a36664edc6868f4e5e1bff806c8cfbae16"),
+            hash_256!("dd456d31603bc8810eeafb6653000a8487459b11f2019568b5de13d62cdeae64"),
+            hash_256!("4517d881a2ed6e8bd1614609128206a34214b4acbe27e580e1c74b78db0b73d0"),
+            hash_256!("10718bfa13e66cf96762749b3848edafe7ac7e47d0a5f13260c9e9badbb56a15"),
+        ];
+        let verified = RangeProof(proof, leaf.clone())
+            .verify(&root, LEAVES_PER_SECTOR - 1, LEAVES_PER_SECTOR)
+            .expect("last-leaf proof must verify");
+        assert_eq!(&leaf, &verified);
+    }
+
+    #[test]
+    fn test_verify_full_range_proof() {
+        let sector = random_sector();
+        let root = sector_root(&sector);
+        let data = Bytes::from(sector);
         let verified_data = RangeProof(vec![], data.clone())
             .verify(&root, 0, LEAVES_PER_SECTOR)
             .expect("proof validation failed");

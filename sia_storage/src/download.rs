@@ -697,9 +697,6 @@ mod test {
     use crate::upload::{upload_object, upload_slabs};
     use crate::{Host, ShardProgress, UploadOptions};
 
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
-
     #[sia_core_derive::cross_target_test]
     async fn test_out_of_order_download() {
         let upload_options = UploadOptions::default();

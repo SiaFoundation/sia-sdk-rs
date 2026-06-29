@@ -431,9 +431,6 @@ mod test {
         buf
     }
 
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
-
     #[sia_core_derive::cross_target_test]
     fn test_object_id() {
         let slabs = vec![Slab {

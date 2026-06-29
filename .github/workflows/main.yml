@@ -51,11 +51,11 @@ jobs:
         run: cargo test --all-features
 
   test-wasm:
-    name: Test WASM (${{ matrix.browser }})
+    name: Test WASM (${{ matrix.runtime }})
     strategy:
       fail-fast: false
       matrix:
-        browser: [chrome, firefox]
+        runtime: [chrome, firefox, node]
     runs-on: tenki-standard-medium-4c-8g
     env:
       WASM_BINDGEN_TEST_TIMEOUT: '300'
@@ -66,14 +66,77 @@ jobs:
           rustup update stable
           rustup target add wasm32-unknown-unknown
           cargo install wasm-pack
+      - name: Configure runtime
+        run: |
+          if [ "${{ matrix.runtime }}" = "node" ]; then
+            echo "WASM_FLAGS=--node" >> "$GITHUB_ENV"
+          else
+            echo "WASM_FLAGS=--headless --${{ matrix.runtime }}" >> "$GITHUB_ENV"
+            echo "WASM_BINDGEN_USE_BROWSER=1" >> "$GITHUB_ENV"
+          fi
+      - name: Test sia_core merkle (simd128)
+        run: cd sia_core && wasm-pack test --release $WASM_FLAGS -- --lib
       - name: Test sia_storage
-        run: cd sia_storage && wasm-pack test --release --headless --${{ matrix.browser }} -- --lib
+        run: cd sia_storage && wasm-pack test --release $WASM_FLAGS -- --lib
+
+  # The blake2b backend is selected at runtime, so each must be exercised on a
+  # CPU that actually has its target features. RunsOn supplies the families.
+  simd:
+    name: Test SIMD (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: AVX-512 # Sapphire Rapids
+            runner: runs-on=${{ github.run_id }}/family=c7i/image=ubuntu24-full-x64
+            arch: x86_64
+            require: avx512f
+            disallow: ""
+          - name: AVX2 # Zen 3: AVX2 but no AVX-512, so the dispatcher picks AVX2
+            runner: runs-on=${{ github.run_id }}/family=c6a/image=ubuntu24-full-x64
+            arch: x86_64
+            require: avx2
+            disallow: avx512f
+          - name: NEON # Graviton 4
+            runner: runs-on=${{ github.run_id }}/family=c8g/image=ubuntu24-full-arm64
+            arch: aarch64
+            require: asimd
+            disallow: ""
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Confirm CPU features
+        run: |
+          set -e
+          echo "uname: $(uname -a)"
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            features=$(grep -m1 '^flags' /proc/cpuinfo | sed 's/.*: //')
+          else
+            features=$(grep -m1 '^Features' /proc/cpuinfo | sed 's/.*: //')
+          fi
+          echo "features: $features"
+          if ! echo " $features " | grep -qw "${{ matrix.require }}"; then
+            echo "required feature '${{ matrix.require }}' missing on this runner"
+            exit 1
+          fi
+          if [ -n "${{ matrix.disallow }}" ] && echo " $features " | grep -qw "${{ matrix.disallow }}"; then
+            echo "runner has '${{ matrix.disallow }}'; dispatcher would select a different backend"
+            exit 1
+          fi
+      - name: Setup Rust
+        # Fresh install rather than update; avoids a cross-device rename error on these runners.
+        run: |
+          rustup self update
+          rm -rf ~/.rustup
+          rustup toolchain install stable
+      - name: Test
+        run: cargo test -p sia_core merkle
 
   # Single required check for branch protection. Skipped (and therefore
   # non-passing) whenever any upstream job fails.
   success:
     name: success
-    needs: [lint, test, test-wasm]
+    needs: [lint, test, test-wasm, simd]
     runs-on: tenki-standard-medium-4c-8g
     steps:
       - run: echo success

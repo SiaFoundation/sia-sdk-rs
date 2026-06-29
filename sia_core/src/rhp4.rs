@@ -12,7 +12,7 @@ use crate::types::{Address, ChainIndex, Currency, Hash256};
 pub(crate) mod merkle;
 pub mod protocol;
 
-pub use merkle::{sector_root, sector_root_from_reader};
+pub use merkle::sector_root;
 
 pub const SEGMENT_SIZE: usize = 64;
 pub const SECTOR_SIZE: usize = 1 << 22;

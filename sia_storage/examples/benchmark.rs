@@ -527,22 +527,21 @@ async fn run_benchmark(
     println!("  {:<15}{:?}", "Elapsed:", upload_duration);
     println!(
         "  {:<15}{}",
-        "Throughput:",
+        "Rate:",
         format_bitrate(obj.size(), upload_duration)
     );
     println!(
         "  {:<15}{}",
-        "Encoded Throughput:",
+        "Encoded Rate:",
         format_bitrate(obj.encoded_size(), upload_duration)
     );
 
     println!("\nDownload");
-    println!("  {:<15}{}", "Size:", format_bytes(obj.size()));
     println!("  {:<15}{:?}", "Elapsed:", download_duration);
     println!("  {:<15}{:?}", "TTFB:", verifier.ttfb().unwrap_or_default());
     println!(
         "  {:<15}{}",
-        "Throughput:",
+        "Rate:",
         format_bitrate(obj.size(), download_duration)
     );
     println!(

@@ -543,9 +543,6 @@ mod test {
         u64::from_le_bytes(bytes)
     }
 
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
-
     #[sia_core_derive::cross_target_test]
     async fn test_upload_download_packed() {
         let app_key = Arc::new(AppKey::import(random_seed()));

@@ -781,9 +781,6 @@ mod tests {
     use sia_core::signing::PrivateKey;
     use sia_core::types::v2::{NetAddress, Protocol};
 
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
-
     fn opts(data: u8, parity: u8) -> UploadOptions {
         UploadOptions {
             data_shards: data,
