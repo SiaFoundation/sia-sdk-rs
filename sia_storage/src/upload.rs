@@ -11,7 +11,8 @@ use crate::slabs::SlabVersion;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Elapsed, Instant, sleep};
 use crate::{
-    AppKey, Hosts, Object, Sector, ShardProgress, ShardProgressCallback, Slab, UploadOptions,
+    AppKey, Download, DownloadOptions, Hosts, Object, PackedUploadOptions, Sector, ShardProgress,
+    ShardProgressCallback, Slab, UploadOptions,
 };
 use bytes::Bytes;
 use log::debug;
@@ -384,6 +385,10 @@ pub enum UploadError {
     #[error("api error: {0}")]
     ApiError(#[from] crate::app_client::Error),
 
+    /// An error downloading existing data while merging an overwrite.
+    #[error("download error: {0}")]
+    Download(#[from] crate::DownloadError),
+
     /// The slab ID returned by the indexer does not match the expected value.
     #[error("slab id mismatch")]
     InvalidSlabId,
@@ -619,6 +624,32 @@ impl Upload {
         Ok(slabs)
     }
 
+    /// Downloads `[offset, offset + len)` of `object` and feeds it into the
+    /// pipeline. A no-op when `len` is 0.
+    async fn feed_range(
+        &mut self,
+        object: &Object,
+        data_key: &EncryptionKey,
+        offset: u64,
+        len: u64,
+    ) -> Result<(), UploadError> {
+        if len == 0 {
+            return Ok(());
+        }
+        let download = Download::new(
+            object,
+            self.client.clone(),
+            self.app_key.clone(),
+            DownloadOptions {
+                offset,
+                length: Some(len),
+                ..Default::default()
+            },
+        )?;
+        self.read(data_key.clone(), download).await?;
+        Ok(())
+    }
+
     /// Returns the number of bytes remaining until reaching the optimal
     /// packed size. Adding objects larger than this will start a new slab.
     pub(crate) fn remaining(&self) -> usize {
@@ -654,10 +685,10 @@ impl PackedUpload {
     pub(crate) fn new(
         client: Hosts<Client>,
         app_key: Arc<AppKey>,
-        options: UploadOptions,
+        options: PackedUploadOptions,
     ) -> Result<Self, UploadError> {
         Ok(Self {
-            upload: Upload::new(client, app_key, options)?,
+            upload: Upload::new(client, app_key, options.into())?,
             objects: Vec::new(),
         })
     }
@@ -695,7 +726,6 @@ impl PackedUpload {
     /// [finalize](Self::finalize) to collect the objects added so far.
     pub async fn add<R: AsyncRead + Unpin>(&mut self, r: R) -> Result<u64, UploadError> {
         let object = Object::default();
-
         // buffer the reader since SlabReader reads 64 bytes at a time
         let r = BufReader::new(r);
         let start = self.upload.length();
@@ -759,21 +789,76 @@ pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
     reader: R,
     options: UploadOptions,
 ) -> Result<Object, UploadError> {
-    let mut upload = Upload::new(hosts, app_key, options)?;
     // buffer the reader since SlabReader reads 64 bytes at a time
+    let reader = BufReader::new(reader);
+    let Some(start_offset) = options.start_offset else {
+        let mut upload = Upload::new(hosts, app_key, options)?;
+        upload.read(object.data_key.clone(), reader).await?;
+        object.slabs.extend(upload.finish().await?);
+        return Ok(object);
+    };
+
+    let object_size = object.size();
+    if start_offset > object_size {
+        return Err(UploadError::OutOfRange(
+            start_offset as usize,
+            object_size as usize,
+        ));
+    }
+
+    // Feed the existing head bytes, then the new data, then the existing tail
+    // bytes into the pipeline; it re-chunks the whole stream into fresh slabs.
+    let data_key = object.data_key.clone();
+    let (head_index, head_start) = slab_at_offset(&object.slabs, start_offset);
+    let mut upload = Upload::new(hosts, app_key, options)?;
     upload
-        .read(object.data_key.clone(), BufReader::new(reader))
+        .feed_range(&object, &data_key, head_start, start_offset - head_start)
         .await?;
-    object.slabs.extend(upload.finish().await?);
+    let n = upload.read(data_key.clone(), reader).await?;
+    if n == 0 {
+        return Ok(object);
+    }
+    let end = start_offset + n;
+    let (tail_index, tail_start) = slab_at_offset(&object.slabs, end);
+    let mut replace_end = tail_index;
+    if end < object_size && end > tail_start {
+        let tail_end = tail_start + object.slabs[tail_index].length as u64;
+        upload
+            .feed_range(&object, &data_key, end, tail_end - end)
+            .await?;
+        replace_end += 1;
+    }
+
+    object
+        .slabs
+        .splice(head_index..replace_end, upload.finish().await?);
     Ok(object)
+}
+
+/// Returns the index of the slab containing `offset` and the object byte offset
+/// at which that slab begins. If `offset` is at or past the end, returns
+/// `(slabs.len(), object_size)`.
+fn slab_at_offset(slabs: &[Slab], offset: u64) -> (usize, u64) {
+    let mut start = 0u64;
+    for (i, slab) in slabs.iter().enumerate() {
+        let next = start + slab.length as u64;
+        if offset < next {
+            return (i, start);
+        }
+        start = next;
+    }
+    (slabs.len(), start)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Host;
+    use bytes::BytesMut;
+    use rand::Rng;
     use sia_core::signing::PrivateKey;
     use sia_core::types::v2::{NetAddress, Protocol};
+    use std::io::Cursor;
 
     fn opts(data: u8, parity: u8) -> UploadOptions {
         UploadOptions {
@@ -1009,6 +1094,170 @@ mod tests {
                 "{data}-of-{total}: expected ok={ok}, got {:?}",
                 result.err()
             );
+        }
+    }
+
+    /// Uploads `data`, overwrites `patch_len` bytes of value `patch_byte` at
+    /// `offset`, then verifies the result downloads back to the expected bytes.
+    /// Returns the (original, overwritten) objects for key assertions. Uses a
+    /// fresh transport per call so each case's sectors are freed afterward.
+    async fn overwrite_case(
+        data: Bytes,
+        offset: usize,
+        patch_byte: u8,
+        patch_len: usize,
+    ) -> (Object, Object) {
+        let options = UploadOptions::default();
+        let transport = Client::new();
+        let hosts = Hosts::new(transport.clone());
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                })
+                .collect(),
+            true,
+        );
+        let app_key = Arc::new(AppKey::import(rand::random()));
+
+        let base = upload_object(
+            hosts.clone(),
+            app_key.clone(),
+            Object::default(),
+            Cursor::new(data.clone()),
+            options.clone(),
+        )
+        .await
+        .unwrap();
+
+        let new = upload_object(
+            hosts.clone(),
+            app_key.clone(),
+            base.clone(),
+            Cursor::new(vec![patch_byte; patch_len]),
+            UploadOptions {
+                start_offset: Some(offset as u64),
+                ..options
+            },
+        )
+        .await
+        .unwrap();
+
+        let end = offset + patch_len;
+        let mut expected = data.to_vec();
+        if end > expected.len() {
+            expected.resize(end, 0);
+        }
+        expected[offset..end]
+            .iter_mut()
+            .for_each(|b| *b = patch_byte);
+        assert_eq!(new.size(), expected.len() as u64, "size");
+
+        let mut recovered = Vec::with_capacity(expected.len());
+        let mut download = Download::new(&new, hosts, app_key, DownloadOptions::default()).unwrap();
+        tokio::io::copy(&mut download, &mut recovered)
+            .await
+            .unwrap();
+        assert_eq!(expected, recovered, "content");
+        (base, new)
+    }
+
+    /// Overwriting a byte range rewrites only the slabs it covers — merging the
+    /// partial head and tail with existing data and re-keying them — across
+    /// one-, two-, and three-slab spans, an aligned head, and an extension past
+    /// the end, leaving untouched slabs (and their keys) intact.
+    #[sia_core_derive::cross_target_test]
+    async fn test_overwrite_object() {
+        let optimal = UploadOptions::default().optimal_data_size();
+        fn rand_bytes(n: usize) -> Bytes {
+            let mut d = BytesMut::zeroed(n);
+            rand::rng().fill_bytes(&mut d);
+            d.freeze()
+        }
+
+        // one-slab span: overwrite inside the second slab; the first is kept.
+        let (base, new) =
+            overwrite_case(rand_bytes(optimal + 4096), optimal + 1000, 0xA1, 1000).await;
+        assert_eq!(new.slabs().len(), 2);
+        assert_eq!(
+            new.slabs()[0].encryption_key,
+            base.slabs()[0].encryption_key
+        );
+        assert_ne!(
+            new.slabs()[1].encryption_key,
+            base.slabs()[1].encryption_key
+        );
+
+        // two-slab span with an aligned head (no head download): start on slab
+        // 1's boundary and run through it into slab 2; slab 0 is kept.
+        let (base, new) =
+            overwrite_case(rand_bytes(optimal * 2 + 4096), optimal, 0xB2, optimal + 100).await;
+        assert_eq!(new.slabs().len(), 3);
+        assert_eq!(
+            new.slabs()[0].encryption_key,
+            base.slabs()[0].encryption_key
+        );
+        assert_ne!(
+            new.slabs()[1].encryption_key,
+            base.slabs()[1].encryption_key
+        );
+
+        // three-slab span: head in slab 0, slab 1 fully overwritten (no
+        // download), tail in slab 2.
+        let (base, new) =
+            overwrite_case(rand_bytes(optimal * 2 + 4096), 100, 0xC3, optimal * 2).await;
+        assert_eq!(new.slabs().len(), 3);
+        assert_ne!(
+            new.slabs()[0].encryption_key,
+            base.slabs()[0].encryption_key
+        );
+
+        // extend past the end: overwrite from inside the last slab beyond EOF.
+        let (base, new) =
+            overwrite_case(rand_bytes(optimal + 4096), optimal + 1000, 0xD4, 8192).await;
+        assert_eq!(new.size(), (optimal + 1000 + 8192) as u64);
+        assert_eq!(
+            new.slabs()[0].encryption_key,
+            base.slabs()[0].encryption_key
+        );
+
+        // end on a slab boundary: head in slab 1, overwrite ending exactly at the
+        // start of slab 2, which must be left untouched (not re-keyed).
+        let (base, new) = overwrite_case(
+            rand_bytes(optimal * 2 + 4096),
+            optimal + 1000,
+            0xE5,
+            optimal - 1000,
+        )
+        .await;
+        assert_eq!(new.slabs().len(), 3);
+        assert_eq!(
+            new.slabs()[0].encryption_key,
+            base.slabs()[0].encryption_key
+        );
+        assert_ne!(
+            new.slabs()[1].encryption_key,
+            base.slabs()[1].encryption_key
+        );
+        assert_eq!(
+            new.slabs()[2].encryption_key,
+            base.slabs()[2].encryption_key
+        );
+
+        // empty overwrite: a 0-byte patch is a no-op that leaves every slab
+        // (and its key) untouched.
+        let (base, new) = overwrite_case(rand_bytes(optimal + 4096), 1000, 0x00, 0).await;
+        assert_eq!(new.slabs().len(), base.slabs().len());
+        for (new_slab, base_slab) in new.slabs().iter().zip(base.slabs()) {
+            assert_eq!(new_slab.encryption_key, base_slab.encryption_key);
         }
     }
 }

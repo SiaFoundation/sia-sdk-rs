@@ -752,6 +752,11 @@ pub struct UploadOptions {
     #[uniffi(default = None)]
     pub parity_shards: Option<u8>,
 
+    /// When set, overwrites the object's existing data starting at this byte
+    /// offset instead of appending.
+    #[uniffi(default = None)]
+    pub start_offset: Option<u64>,
+
     /// Optional callback to report upload progress.
     #[uniffi(default = None)]
     pub shard_uploaded: Option<Arc<dyn ProgressCallback>>,
@@ -760,6 +765,47 @@ pub struct UploadOptions {
 impl From<UploadOptions> for sia_storage::UploadOptions {
     fn from(val: UploadOptions) -> Self {
         let mut options = sia_storage::UploadOptions::default();
+        options.max_buffered_slabs = val.max_buffered_slabs.map(|v| v as usize);
+        options.data_shards = val.data_shards.unwrap_or(options.data_shards);
+        options.parity_shards = val.parity_shards.unwrap_or(options.parity_shards);
+        options.start_offset = val.start_offset;
+        options.shard_uploaded =
+            val.shard_uploaded
+                .map(|callback| -> sia_storage::ShardProgressCallback {
+                    Arc::new(move |p: sia_storage::ShardProgress| {
+                        callback.progress(ShardProgress {
+                            host_key: p.host_key.to_string(),
+                            shard_size: p.shard_size as u64,
+                            shard_index: p.shard_index as u32,
+                            slab_index: p.slab_index as u32,
+                            elapsed_ms: p.elapsed.as_millis() as u64,
+                        });
+                    })
+                });
+        options
+    }
+}
+
+/// Provides options for a packed upload operation.
+#[derive(uniffi::Record)]
+pub struct PackedUploadOptions {
+    #[uniffi(default = None)]
+    pub max_buffered_slabs: Option<u32>,
+
+    #[uniffi(default = None)]
+    pub data_shards: Option<u8>,
+
+    #[uniffi(default = None)]
+    pub parity_shards: Option<u8>,
+
+    /// Optional callback to report upload progress.
+    #[uniffi(default = None)]
+    pub shard_uploaded: Option<Arc<dyn ProgressCallback>>,
+}
+
+impl From<PackedUploadOptions> for sia_storage::PackedUploadOptions {
+    fn from(val: PackedUploadOptions) -> Self {
+        let mut options = sia_storage::PackedUploadOptions::default();
         options.max_buffered_slabs = val.max_buffered_slabs.map(|v| v as usize);
         options.data_shards = val.data_shards.unwrap_or(options.data_shards);
         options.parity_shards = val.parity_shards.unwrap_or(options.parity_shards);
@@ -838,12 +884,15 @@ impl Sdk {
     /// for more efficient uploads. The returned `PackedUpload` can be used to add objects to the upload, and then finalized to get the resulting objects.
     ///
     /// # Arguments
-    /// * `options` - The [UploadOptions] to use for the upload.
+    /// * `options` - The [PackedUploadOptions] to use for the upload.
     ///
     /// # Returns
     /// A [PackedUpload] that can be used to add objects and finalize the upload.
-    pub async fn upload_packed(&self, options: UploadOptions) -> Result<PackedUpload, UploadError> {
-        let options: sia_storage::UploadOptions = options.into();
+    pub async fn upload_packed(
+        &self,
+        options: PackedUploadOptions,
+    ) -> Result<PackedUpload, UploadError> {
+        let options: sia_storage::PackedUploadOptions = options.into();
         let packed_upload = self
             .inner
             .upload_packed(options)
