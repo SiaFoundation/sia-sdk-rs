@@ -10,10 +10,10 @@ use crate::encryption::{Chacha20Cipher, EncryptionKey, encrypt_recovered_shards}
 use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::{Hosts, InflightGuard, RPCError};
 use crate::rhp4::{Client, Transport};
+use crate::slabs::SlabVersion::{V0, V1};
 use crate::time::{Duration, Elapsed, Instant, sleep};
 use crate::{AppKey, DownloadOptions, Object, Sector, ShardProgress, ShardProgressCallback, Slab};
 use bytes::{Buf, Bytes};
-use chacha20::cipher::StreamCipher;
 use log::debug;
 use sia_core::rhp4::SEGMENT_SIZE;
 use thiserror::Error;
@@ -395,6 +395,7 @@ impl<T: Transport> SlabRecovery<SlabDecoded, T> {
 pub(crate) struct ChunkSlab {
     slab: Slab,
     index: usize,
+    object_offset: u64,
 }
 
 const INITIAL_CHUNK_SIZE: usize = 1 << 15; // 32 KiB
@@ -408,12 +409,16 @@ pub(crate) struct ChunkIter {
     slabs: Vec<Slab>,
     slab_idx: usize,
     offset: u64,
+    object_offset: u64,
     remaining: u64,
     chunk_size: usize,
 }
 
 impl ChunkIter {
     pub(crate) fn new(slabs: Vec<Slab>, offset: u64, length: u64) -> Self {
+        // the absolute offset into the object's logical stream, before the
+        // walk below consumes `offset` down to a within-slab remainder.
+        let object_offset = offset;
         let mut slab_idx = 0;
         let mut offset = offset;
         while slab_idx < slabs.len() {
@@ -428,6 +433,7 @@ impl ChunkIter {
             slabs,
             slab_idx,
             offset,
+            object_offset,
             remaining: length,
             chunk_size: INITIAL_CHUNK_SIZE,
         }
@@ -443,11 +449,13 @@ impl Iterator for ChunkIter {
         }
         let slab_index = self.slab_idx;
         let slab = &self.slabs[slab_index];
+        let object_offset = self.object_offset;
         let slab_offset = slab.offset as u64 + self.offset;
         let slab_length = (slab.length as u64 - self.offset)
             .min(self.remaining)
             .min(self.chunk_size as u64);
         self.offset += slab_length;
+        self.object_offset += slab_length;
 
         if self.offset >= slab.length as u64 {
             self.offset = 0;
@@ -462,6 +470,7 @@ impl Iterator for ChunkIter {
         Some(ChunkSlab {
             slab: chunk,
             index: slab_index,
+            object_offset,
         })
     }
 }
@@ -476,7 +485,7 @@ impl Iterator for ChunkIter {
 pub struct Download {
     hosts: Hosts<Client>,
     account_key: Arc<AppKey>,
-    cipher: Chacha20Cipher,
+    data_key: EncryptionKey,
 
     // download state
     controller: Arc<InflightController>,
@@ -514,7 +523,7 @@ impl AsyncRead for Download {
         }
 
         if let Some(chunk_handle) = self.queue.front_mut() {
-            let mut result = match ready!(Pin::new(chunk_handle).poll(cx)) {
+            let result = match ready!(Pin::new(chunk_handle).poll(cx)) {
                 Ok(Ok(data)) => data,
                 Ok(Err(e)) => {
                     self.set_err();
@@ -528,7 +537,6 @@ impl AsyncRead for Download {
             self.queue.pop_front();
             self.popped.send_modify(|p| *p += 1);
             self.refill();
-            self.cipher.apply_keystream(&mut result); // decrypt
             self.buf = Bytes::from(result);
             self.drain_buf(buf);
         }
@@ -567,6 +575,19 @@ impl Download {
         let len = chunk_slab.slab.length as usize;
         let seq = self.next_seq;
         self.next_seq += 1;
+        let mut cipher = match chunk_slab.slab.version {
+            V0 => Chacha20Cipher::new(self.data_key.clone(), chunk_slab.object_offset),
+            V1 => {
+                let nonce: [u8; 24] = chunk_slab.slab.encryption_key.as_ref()[..24]
+                    .try_into()
+                    .unwrap();
+                Chacha20Cipher::with_nonce(
+                    self.data_key.clone(),
+                    chunk_slab.slab.offset as u64,
+                    nonce,
+                )
+            }
+        };
         let recovery = SlabRecovery::new(
             hosts,
             self.controller.clone(),
@@ -585,6 +606,7 @@ impl Download {
                     .decode()?
                     .write(&mut buf)
                     .await?;
+                cipher.apply_keystream(&mut buf);
                 Ok(buf)
             })));
         true
@@ -620,7 +642,7 @@ impl Download {
             return Ok(Vec::new()); // EOF
         };
         self.popped.send_modify(|p| *p += 1);
-        let mut result = match chunk_handle.await {
+        let result = match chunk_handle.await {
             Ok(Ok(data)) => data,
             Ok(Err(e)) => {
                 self.set_err();
@@ -632,7 +654,6 @@ impl Download {
             }
         };
         self.refill();
-        self.cipher.apply_keystream(&mut result); // decrypt
         Ok(result)
     }
 
@@ -648,7 +669,7 @@ impl Download {
             ));
         }
         let object_size = object.size();
-        let cipher = object.cipher(options.offset);
+        let data_key = object.data_key.clone();
         let available = object_size.saturating_sub(options.offset);
         let remaining = options.length.unwrap_or(available).min(available);
         let slabs = object.slabs().to_vec();
@@ -666,8 +687,8 @@ impl Download {
         let mut download = Self {
             hosts,
             account_key,
-            cipher,
             controller,
+            data_key,
             buf: Bytes::new(),
             queue: VecDeque::with_capacity(max_buffered_chunks),
             chunk_iter,
@@ -694,7 +715,7 @@ mod test {
     use sia_core::types::v2::NetAddress;
 
     use crate::hosts::Hosts;
-    use crate::upload::{upload_object, upload_slabs};
+    use crate::upload::upload_object;
     use crate::{Host, ShardProgress, UploadOptions};
 
     #[sia_core_derive::cross_target_test]
@@ -754,6 +775,211 @@ mod test {
         assert_eq!(data, recovered_data);
     }
 
+    /// Regression: a V1 object (each slab encrypted with its own key used as
+    /// the cipher nonce over the object data key) must round-trip through the
+    /// full download reader, including a ranged read that crosses a slab
+    /// boundary so the per-slab nonce and slab-local seek are exercised.
+    #[sia_core_derive::cross_target_test]
+    async fn test_download_v1_object() {
+        let upload_options = UploadOptions::default();
+        let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
+
+        let transport = Client::new();
+        let hosts = Hosts::new(transport.clone());
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: sia_core::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                })
+                .collect(),
+            true,
+        );
+
+        // a full slab plus a partial one, so the download spans a slab boundary
+        let mut data = BytesMut::zeroed(optimal_data_size + 4096);
+        rand::rng().fill_bytes(&mut data);
+        let data = data.freeze();
+        let app_key = Arc::new(AppKey::import(rand::random()));
+
+        let obj = upload_object(
+            hosts.clone(),
+            app_key.clone(),
+            Object::default(),
+            Cursor::new(data.clone()),
+            upload_options,
+        )
+        .await
+        .unwrap();
+
+        // guard: exercise the V1 path, not V0
+        assert!(
+            obj.slabs().iter().all(|s| s.version == V1),
+            "expected V1 slabs, got {:?}",
+            obj.slabs().iter().map(|s| s.version).collect::<Vec<_>>()
+        );
+
+        let mut recovered = Vec::with_capacity(data.len());
+        let mut download = Download::new(
+            &obj,
+            hosts.clone(),
+            app_key.clone(),
+            DownloadOptions::default(),
+        )
+        .unwrap();
+        tokio::io::copy(&mut download, &mut recovered)
+            .await
+            .unwrap();
+        assert_eq!(data, recovered, "full V1 download mismatch");
+
+        // ranged read across a slab boundary, exercising the V1 slab-local seek
+        let offset = optimal_data_size - 1000;
+        let length = 2000;
+        let mut ranged = Vec::with_capacity(length);
+        let mut download = Download::new(
+            &obj,
+            hosts.clone(),
+            app_key.clone(),
+            DownloadOptions {
+                offset: offset as u64,
+                length: Some(length as u64),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        tokio::io::copy(&mut download, &mut ranged).await.unwrap();
+        assert_eq!(
+            &data[offset..offset + length],
+            &ranged[..],
+            "ranged V1 download mismatch"
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_download_v0_object() {
+        let upload_options = UploadOptions::default();
+        let data_shards = upload_options.data_shards as usize;
+        let parity_shards = upload_options.parity_shards as usize;
+        let total_shards = data_shards + parity_shards;
+
+        let transport = Client::new();
+        let hosts = Hosts::new(transport.clone());
+        let host_keys: Vec<_> = (0..total_shards)
+            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
+            .collect();
+        hosts.update(
+            host_keys
+                .iter()
+                .map(|&public_key| Host {
+                    public_key,
+                    addresses: vec![NetAddress {
+                        protocol: sia_core::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                })
+                .collect(),
+            true,
+        );
+
+        let mut plaintext = vec![0u8; 100_000];
+        rand::rng().fill_bytes(&mut plaintext);
+        let app_key = Arc::new(AppKey::import(rand::random()));
+        let data_key: EncryptionKey = rand::random::<[u8; 32]>().into();
+        let slab_key: EncryptionKey = rand::random::<[u8; 32]>().into();
+
+        // V0 layer: one stream cipher over the whole object, keyed by the data key
+        let mut stream = plaintext.clone();
+        Chacha20Cipher::new(data_key.clone(), 0).apply_keystream(&mut stream);
+
+        let mut shards = vec![vec![0u8; SECTOR_SIZE]; total_shards];
+        let stripe = SEGMENT_SIZE * data_shards;
+        for (p, &b) in stream.iter().enumerate() {
+            let shard = (p % stripe) / SEGMENT_SIZE;
+            let seg_start = (p / stripe) * SEGMENT_SIZE;
+            shards[shard][seg_start + (p % SEGMENT_SIZE)] = b;
+        }
+        ErasureCoder::new(data_shards, parity_shards)
+            .unwrap()
+            .encode_shards(&mut shards)
+            .unwrap();
+
+        let mut sectors = Vec::with_capacity(total_shards);
+        for (i, mut shard) in shards.into_iter().enumerate() {
+            crate::encryption::encrypt_shard(&slab_key, i as u8, 0, &mut shard);
+            let root = hosts
+                .write_sector(
+                    host_keys[i],
+                    &app_key.0,
+                    Bytes::from(shard),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+            sectors.push(Sector {
+                root,
+                host_key: host_keys[i],
+            });
+        }
+
+        let obj = Object::new(
+            data_key,
+            vec![Slab {
+                version: V0,
+                encryption_key: slab_key,
+                min_shards: data_shards as u8,
+                sectors,
+                offset: 0,
+                length: plaintext.len() as u32,
+            }],
+            Vec::new(),
+        );
+        assert_eq!(obj.slabs()[0].version, V0);
+
+        let mut recovered = Vec::with_capacity(plaintext.len());
+        let mut download = Download::new(
+            &obj,
+            hosts.clone(),
+            app_key.clone(),
+            DownloadOptions::default(),
+        )
+        .unwrap();
+        tokio::io::copy(&mut download, &mut recovered)
+            .await
+            .unwrap();
+        assert_eq!(plaintext, recovered, "full V0 download mismatch");
+
+        let (offset, length) = (40_000usize, 20_000usize);
+        let mut ranged = Vec::with_capacity(length);
+        let mut download = Download::new(
+            &obj,
+            hosts.clone(),
+            app_key.clone(),
+            DownloadOptions {
+                offset: offset as u64,
+                length: Some(length as u64),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        tokio::io::copy(&mut download, &mut ranged).await.unwrap();
+        assert_eq!(
+            &plaintext[offset..offset + length],
+            &ranged[..],
+            "ranged V0 download mismatch"
+        );
+    }
+
     #[sia_core_derive::cross_target_test]
     async fn test_slab_recovery() {
         let upload_options = UploadOptions::default();
@@ -782,14 +1008,16 @@ mod test {
         let data = data.freeze();
         let app_key = Arc::new(AppKey::import(rand::random()));
 
-        let slabs = upload_slabs(
+        let obj = upload_object(
             hosts.clone(),
             app_key.clone(),
+            Object::default(),
             Cursor::new(data.clone()),
             upload_options,
         )
         .await
         .unwrap();
+        let slabs = obj.slabs();
 
         let test_cases: Vec<(&str, usize, usize)> = vec![
             ("full slab", 0, optimal_data_size),
@@ -818,7 +1046,11 @@ mod test {
                     10,
                 )),
                 app_key.clone(),
-                ChunkSlab { slab, index: 0 },
+                ChunkSlab {
+                    slab,
+                    index: 0,
+                    object_offset: offset as u64,
+                },
                 0,
                 watch::channel(0).0,
             )
@@ -831,6 +1063,11 @@ mod test {
             .write(&mut recovered_data)
             .await
             .unwrap();
+            // SlabRecovery only strips the per-shard layer; remove the object
+            // data-key layer here.
+            let nonce: [u8; 24] = slabs[0].encryption_key.as_ref()[..24].try_into().unwrap();
+            Chacha20Cipher::with_nonce(obj.data_key.clone(), offset as u64, nonce)
+                .apply_keystream(&mut recovered_data);
             assert_eq!(
                 &data[offset..offset + length],
                 &recovered_data[..],
@@ -969,15 +1206,16 @@ mod test {
         let data = data.freeze();
         let app_key = Arc::new(AppKey::import(rand::random()));
 
-        let slabs = upload_slabs(
+        let obj = upload_object(
             hosts.clone(),
             app_key.clone(),
+            Object::default(),
             Cursor::new(data),
             upload_options,
         )
         .await
         .unwrap();
-        let slab = slabs[0].clone();
+        let slab = obj.slabs()[0].clone();
 
         let slow_set: Vec<_> = slab.sectors.iter().take(15).map(|s| s.host_key).collect();
         for host_key in &slow_set {
@@ -994,6 +1232,7 @@ mod test {
         ChunkSlab {
             slab: chunk,
             index: 0,
+            object_offset: 0,
         }
     }
 

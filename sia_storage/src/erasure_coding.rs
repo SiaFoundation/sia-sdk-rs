@@ -6,6 +6,9 @@ use sia_reed_solomon::ReedSolomon;
 use thiserror::Error;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::EncryptionKey;
+use crate::encryption::Chacha20Cipher;
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("ReedSolomon error: {0}")]
@@ -85,12 +88,14 @@ impl ErasureCoder {
 /// partial slab.
 pub(crate) struct SlabReader {
     data_shards: usize,
+    encryption_key: EncryptionKey,
     shards: Vec<Vec<u8>>,
     length: usize,
     total_length: u64,
 }
 
 pub(crate) struct ReadSlab {
+    pub encryption_key: EncryptionKey,
     pub length: usize,
     pub shards: Vec<Vec<u8>>,
 }
@@ -100,6 +105,7 @@ impl SlabReader {
         let total_shards = data_shards + parity_shards;
         Self {
             data_shards,
+            encryption_key: rand::random::<[u8; 32]>().into(),
             shards: vec![vec![0u8; SECTOR_SIZE]; total_shards],
             length: 0,
             total_length: 0,
@@ -124,13 +130,18 @@ impl SlabReader {
     }
 
     /// Finalizes the slab reader, returning any remaining data as a slab.
-    pub(crate) fn finish(mut self) -> Option<ReadSlab> {
+    pub fn finish(mut self) -> Option<ReadSlab> {
         if self.length == 0 {
             return None;
         }
         let length = self.length;
         let shards = mem::take(&mut self.shards);
-        Some(ReadSlab { length, shards })
+        let encryption_key = mem::replace(&mut self.encryption_key, [0u8; 32].into());
+        Some(ReadSlab {
+            encryption_key,
+            length,
+            shards,
+        })
     }
 
     /// Reads data from the reader until reaching the optimal slab size or EOF,
@@ -139,14 +150,17 @@ impl SlabReader {
     ///
     /// If the optimal slab size is reached, the completed slab is returned.
     /// Any remaining data should be retrieved using [finish](Self::finish).
-    pub(crate) async fn read_slab<R: AsyncRead + Unpin>(
+    pub async fn read_slab<R: AsyncRead + Unpin>(
         &mut self,
+        data_key: EncryptionKey,
         r: &mut R,
     ) -> io::Result<(usize, Option<ReadSlab>)> {
         let remaining = self.optimal_data_size() - self.length;
         if remaining == 0 {
             return Ok((0, None));
         }
+        let nonce: [u8; 24] = self.encryption_key.as_ref()[..24].try_into().unwrap();
+        let mut cipher = Chacha20Cipher::with_nonce(data_key, self.length as u64, nonce);
         let mut r = r.take(remaining as u64);
         let mut total_read = 0;
         loop {
@@ -166,6 +180,7 @@ impl SlabReader {
             if n == 0 {
                 break;
             }
+            cipher.apply_keystream(&mut segment[..n]);
             self.length += n;
             self.total_length += n as u64;
             total_read += n;
@@ -174,7 +189,13 @@ impl SlabReader {
             let length = mem::take(&mut self.length);
             let total_shards = self.shards.len();
             let shards = mem::replace(&mut self.shards, vec![vec![0u8; SECTOR_SIZE]; total_shards]);
-            Some(ReadSlab { length, shards })
+            let encryption_key =
+                mem::replace(&mut self.encryption_key, rand::random::<[u8; 32]>().into());
+            Some(ReadSlab {
+                encryption_key,
+                length,
+                shards,
+            })
         } else {
             None
         };
@@ -190,6 +211,29 @@ mod tests {
 
     fn init_shard(i: u8) -> Vec<u8> {
         vec![i; SECTOR_SIZE]
+    }
+
+    /// Reverses the per-segment encryption `read_slab` applies, restoring the
+    /// data shards to plaintext so the striping assertions can compare against
+    /// the original input. Mirrors `read_slab`'s logical-order walk.
+    fn decrypt_data_shards(
+        shards: &mut [Vec<u8>],
+        data_shards: usize,
+        data_key: &EncryptionKey,
+        slab_key: &EncryptionKey,
+        length: usize,
+    ) {
+        let nonce: [u8; 24] = slab_key.as_ref()[..24].try_into().unwrap();
+        let mut cipher = Chacha20Cipher::with_nonce(data_key.clone(), 0, nonce);
+        let stripe = SEGMENT_SIZE * data_shards;
+        let mut p = 0;
+        while p < length {
+            let shard = (p % stripe) / SEGMENT_SIZE;
+            let seg_start = (p / stripe) * SEGMENT_SIZE;
+            let n = SEGMENT_SIZE.min(length - p);
+            cipher.apply_keystream(&mut shards[shard][seg_start..seg_start + n]);
+            p += n;
+        }
     }
 
     #[sia_core_derive::cross_target_test]
@@ -245,24 +289,26 @@ mod tests {
             let mut data = vec![0u8; data_size];
             getrandom::fill(&mut data).unwrap();
 
+            let data_key = EncryptionKey::from([7u8; 32]);
             let mut reader = SlabReader::new(DATA_SHARDS, PARITY_SHARDS);
             let (n, slab) = reader
-                .read_slab(&mut Cursor::new(data.clone()))
+                .read_slab(data_key.clone(), &mut Cursor::new(data.clone()))
                 .await
                 .unwrap();
             assert_eq!(n, expected_size, "data size {data_size} read mismatch");
 
-            let (size, shards) = if data_size >= SLAB_SIZE {
+            let (size, mut shards, slab_key) = if data_size >= SLAB_SIZE {
                 let slab = slab.expect("expected full slab");
-                (slab.length, slab.shards)
+                (slab.length, slab.shards, slab.encryption_key)
             } else {
                 assert!(
                     slab.is_none(),
                     "data size {data_size} should not fill a slab"
                 );
                 let slab = reader.finish().unwrap();
-                (slab.length, slab.shards)
+                (slab.length, slab.shards, slab.encryption_key)
             };
+            decrypt_data_shards(&mut shards, DATA_SHARDS, &data_key, &slab_key, size);
 
             assert_eq!(size, expected_size, "data size {data_size} mismatch");
             assert_eq!(
@@ -299,9 +345,10 @@ mod tests {
         data[3 * SECTOR_SIZE..].fill(4);
         let data = Bytes::from(data);
 
+        let data_key = EncryptionKey::from([7u8; 32]);
         let mut reader = SlabReader::new(DATA_SHARDS, PARITY_SHARDS);
         let (n, slab) = reader
-            .read_slab(&mut Cursor::new(data.clone()))
+            .read_slab(data_key.clone(), &mut Cursor::new(data.clone()))
             .await
             .unwrap();
         assert_eq!(n, data.len());
@@ -309,6 +356,13 @@ mod tests {
         let slab = reader.finish().unwrap();
         let size = slab.length;
         let mut shards = slab.shards;
+        decrypt_data_shards(
+            &mut shards,
+            DATA_SHARDS,
+            &data_key,
+            &slab.encryption_key,
+            size,
+        );
         assert_eq!(size, data.len());
 
         // we expect 5 shards and the last one is an empty parity shard
