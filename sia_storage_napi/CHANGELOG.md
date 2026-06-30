@@ -1,3 +1,9 @@
+## 0.8.1 (2026-06-30)
+
+### Features
+
+- Switch sector root and range proof verifier to optimized SIMD backends.
+
 ## 0.8.0 (2026-06-23)
 
 ### Breaking Changes
