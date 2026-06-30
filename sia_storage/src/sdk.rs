@@ -343,6 +343,7 @@ impl Sdk {
             .slabs()
             .iter()
             .map(|s| SlabPinParams {
+                version: s.version,
                 encryption_key: s.encryption_key.clone(),
                 min_shards: s.min_shards,
                 sectors: s.sectors.clone(),

@@ -206,6 +206,7 @@ impl From<sia_storage::PinnedSlab> for PinnedSlab {
 /// A slab representing a contiguous erasure-coded segment of a file.
 #[napi(object)]
 pub struct Slab {
+    pub version: u8,
     pub encryption_key: Buffer,
     pub min_shards: u8,
     pub sectors: Vec<PinnedSector>,
@@ -216,6 +217,7 @@ pub struct Slab {
 impl From<sia_storage::Slab> for Slab {
     fn from(s: sia_storage::Slab) -> Self {
         Self {
+            version: s.version as u8,
             encryption_key: Buffer::from(s.encryption_key.as_ref().to_vec()),
             min_shards: s.min_shards,
             sectors: s
@@ -237,6 +239,8 @@ impl TryInto<sia_storage::Slab> for Slab {
 
     fn try_into(self) -> Result<sia_storage::Slab> {
         Ok(sia_storage::Slab {
+            version: sia_storage::SlabVersion::try_from(self.version)
+                .map_err(Error::from_reason)?,
             encryption_key: sia_storage::EncryptionKey::try_from(self.encryption_key.as_ref())
                 .map_err(|e| Error::from_reason(e.to_string()))?,
             min_shards: self.min_shards,

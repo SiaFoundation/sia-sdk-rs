@@ -7,6 +7,7 @@ use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
 use crate::hosts::{HostQueue, InflightGuard, QueueError, RPCError};
 use crate::rhp4::Client;
+use crate::slabs::SlabVersion;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Elapsed, Instant, sleep};
 use crate::{
@@ -609,6 +610,7 @@ impl Upload {
         while let Some(handle) = self.slab_tasks.pop_front() {
             let slab = handle.await??;
             slabs.push(Slab {
+                version: SlabVersion::V0,
                 encryption_key: slab.encryption_key,
                 offset: 0,
                 min_shards,
