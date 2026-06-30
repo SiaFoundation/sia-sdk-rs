@@ -28,11 +28,62 @@ pub struct Sector {
     pub host_key: PublicKey,
 }
 
+/// The version of the slab
+#[repr(u8)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub enum SlabVersion {
+    #[default]
+    V0 = 0,
+    /// V1 changes how the object data key works. When encrypting, the slab key is used as a nonce on the data key so that
+    /// we can overwrite slab data without re-encrypting the whole object and without
+    /// reusing the encryption key.
+    V1 = 1,
+}
+
+impl From<SlabVersion> for u8 {
+    fn from(value: SlabVersion) -> Self {
+        value as u8
+    }
+}
+
+impl SiaEncodable for SlabVersion {
+    fn encode<W: std::io::prelude::Write>(&self, w: &mut W) -> encoding::Result<()> {
+        w.write_all(&[*self as u8])?;
+        Ok(())
+    }
+
+    fn encoded_length(&self) -> usize {
+        1
+    }
+}
+
+impl SiaDecodable for SlabVersion {
+    fn decode<R: std::io::prelude::Read>(r: &mut R) -> encoding::Result<Self> {
+        Self::try_from(u8::decode(r)?).map_err(encoding::Error::InvalidValue)
+    }
+}
+
+impl TryFrom<u8> for SlabVersion {
+    type Error = String;
+
+    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::V0),
+            1 => Ok(Self::V1),
+            _ => Err(format!("unsupported version {value}")),
+        }
+    }
+}
+
 /// A Slab is an erasure-coded collection of sectors. The sectors can be downloaded and
 /// used to recover the original data.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Slab {
+    /// The encoding version of this slab.
+    #[serde(default)]
+    pub version: SlabVersion,
     /// The encryption key used to encrypt and decrypt this slab's data.
     pub encryption_key: EncryptionKey,
     /// The minimum number of sectors required to recover the slab's data.
@@ -50,7 +101,10 @@ impl Slab {
     /// its contents, excluding the host key, length, and offset.
     pub fn digest(&self) -> Hash256 {
         let mut state = Blake2b256::new();
-
+        if self.version != SlabVersion::V0 {
+            // V0 doesn't have a version field and the existing IDs can't change for backwards compatibility
+            self.version.encode(&mut state).unwrap();
+        }
         (self.min_shards as u64).encode(&mut state).unwrap();
         self.encryption_key.encode(&mut state).unwrap();
         self.sectors.iter().for_each(|sector| {
@@ -62,13 +116,15 @@ impl Slab {
 
 impl SiaEncodable for Slab {
     fn encoded_length(&self) -> usize {
-        self.encryption_key.encoded_length()
+        self.version.encoded_length()
+            + self.encryption_key.encoded_length()
             + self.min_shards.encoded_length()
             + self.sectors.encoded_length()
             + 8 // combined offset|length u64
     }
 
     fn encode<W: std::io::Write>(&self, w: &mut W) -> encoding::Result<()> {
+        self.version.encode(w)?;
         self.encryption_key.encode(w)?;
         self.min_shards.encode(w)?;
         self.sectors.encode(w)?;
@@ -80,12 +136,14 @@ impl SiaEncodable for Slab {
 
 impl SiaDecodable for Slab {
     fn decode<R: std::io::Read>(r: &mut R) -> encoding::Result<Self> {
+        let version = SlabVersion::decode(r)?;
         let encryption_key = EncryptionKey::decode(r)?;
         let min_shards = u8::decode(r)?;
         let sectors = Vec::<Sector>::decode(r)?;
         let combined = u64::decode(r)?;
 
         Ok(Self {
+            version,
             encryption_key,
             min_shards,
             sectors,
@@ -432,8 +490,37 @@ mod test {
     }
 
     #[sia_core_derive::cross_target_test]
+    fn test_slab_version_serde_numeric() {
+        let slab = Slab {
+            version: SlabVersion::V1,
+            encryption_key: [1u8; 32].into(),
+            min_shards: 1,
+            sectors: vec![],
+            offset: 0,
+            length: 0,
+        };
+
+        let mut value = serde_json::to_value(&slab).unwrap();
+        assert_eq!(value["version"], serde_json::json!(1));
+        assert_eq!(
+            serde_json::from_value::<Slab>(value.clone())
+                .unwrap()
+                .version,
+            SlabVersion::V1
+        );
+
+        // legacy data without a version field decodes as V0
+        value.as_object_mut().unwrap().remove("version");
+        assert_eq!(
+            serde_json::from_value::<Slab>(value).unwrap().version,
+            SlabVersion::V0
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
     fn test_object_id() {
         let slabs = vec![Slab {
+            version: SlabVersion::V0,
             encryption_key: [0u8; 32].into(),
             min_shards: 1,
             sectors: vec![Sector {
@@ -470,6 +557,7 @@ mod test {
             encrypted_data_key: vec![1, 2, 3],
             encrypted_metadata_key: vec![3, 2, 1],
             slabs: vec![Slab {
+                version: SlabVersion::V0,
                 encryption_key: encryption_key.into(),
                 min_shards: 1,
                 sectors: vec![Sector {
@@ -496,6 +584,7 @@ mod test {
     #[sia_core_derive::cross_target_test]
     fn test_slab_digest() {
         let s = Slab {
+            version: SlabVersion::V0,
             min_shards: 1,
             encryption_key: [
                 152, 138, 169, 77, 22, 195, 154, 192, 91, 139, 241, 61, 75, 225, 38, 124, 225, 31,
@@ -537,6 +626,7 @@ mod test {
     fn test_object_roundtrip() {
         let slabs = vec![
             Slab {
+                version: SlabVersion::V0,
                 encryption_key: random_bytes_32().into(),
                 min_shards: 2,
                 sectors: vec![],
@@ -544,6 +634,7 @@ mod test {
                 length: 100,
             },
             Slab {
+                version: SlabVersion::V0,
                 encryption_key: random_bytes_32().into(),
                 min_shards: 2,
                 sectors: vec![],
@@ -590,7 +681,7 @@ mod test {
 
         let expected_metadata = hex::decode("b9d615255cc17596e3870c3adf5e11c1da0dd78e30f29c6b6d223949c7d91492db55cdc6e04ce65b5b1fea4ccc953e883d5bf23e9c893ecb5221e7315f16e7f95dfc70f0ed1ee1306e8733a22a5faf1b139f01f0f77ae00d71fe3bbefa4b65aca80f749e4788ace89beaa79ac651aedc54cba7066264df9db54c22c1e17cea1a").expect("hex");
 
-        let sealed_data = hex::decode("480000000000000063f49bd7cf21d25565ebb26a900efabec342418989958f09b735073af7dd5076231c32524ff6208f3a85f8cc8dd4a6ac913e0df51a34ab9ee325b41fc3de93a1107becc3b527f4870200000000000000739b1966a1d8ab194c0f0ebe012b00259491c13b73e1ad67128957590714dd33000000000000000000881300000a000000a4e3e3f002e05ff9d05a3193cc1513a66c10d82979a0a2fc9aa0aa4c7de2c64600000000000000000000100000200000005cc53fb91b99eb0d4aa422a820d2e64109a344e5234d7fb31ec62460f5dc52b6ae0b67c71093cebdb7a6cb79a65dfb6f2cb28eb3704a302a4517269fce75680c48000000000000008465df0369c7a4144257ce38bb566b47350e21ae0049b97d56348c1269c4fa5a1ea32f88c20e0ba000446f66e955c191d816bd4f3576caacbd309149343c629c0c7a7fc99201644da800000000000000f58f39972c8b1db49fef8606f20e690fb68fc9d29b5ab0da3a871ddb0cd5e66968ea0cf852a521697f422baac24c9418ca42fbc766d08fe0b55417e4d0f42831040e1c4e3dba1557ef7285649ab1c810ee1771a4c04d2bea4b2bbf592d3e3a1cee7a9217191242a6526db0c0ac09398f2090179063b0bdc2278a88540531f6ad3b5d44ecac36b1fef09205a2011ea4539a9abb914f23461a443efe47e581698416e452fa37af929a8bf8668d999920b5ec04005f2b947194b19271846b3c375e75257eebaad288bcb1eb36f6748562d97fcd0904eb491090ea8f61c0ddbc741f187af2b22151180400096e88f1ffffff00096e88f1ffffff").expect("hex");
+        let sealed_data = hex::decode("480000000000000063f49bd7cf21d25565ebb26a900efabec342418989958f09b735073af7dd5076231c32524ff6208f3a85f8cc8dd4a6ac913e0df51a34ab9ee325b41fc3de93a1107becc3b527f487020000000000000000739b1966a1d8ab194c0f0ebe012b00259491c13b73e1ad67128957590714dd33000000000000000000881300000a00000000a4e3e3f002e05ff9d05a3193cc1513a66c10d82979a0a2fc9aa0aa4c7de2c64600000000000000000000100000200000005cc53fb91b99eb0d4aa422a820d2e64109a344e5234d7fb31ec62460f5dc52b6ae0b67c71093cebdb7a6cb79a65dfb6f2cb28eb3704a302a4517269fce75680c48000000000000008465df0369c7a4144257ce38bb566b47350e21ae0049b97d56348c1269c4fa5a1ea32f88c20e0ba000446f66e955c191d816bd4f3576caacbd309149343c629c0c7a7fc99201644da800000000000000f58f39972c8b1db49fef8606f20e690fb68fc9d29b5ab0da3a871ddb0cd5e66968ea0cf852a521697f422baac24c9418ca42fbc766d08fe0b55417e4d0f42831040e1c4e3dba1557ef7285649ab1c810ee1771a4c04d2bea4b2bbf592d3e3a1cee7a9217191242a6526db0c0ac09398f2090179063b0bdc2278a88540531f6ad3b5d44ecac36b1fef09205a2011ea4539a9abb914f23461a443efe47e581698416e452fa37af929a8bf8668d999920b5ec04005f2b947194b19271846b3c375e75257eebaad288bcb1eb36f6748562d97fcd0904eb491090ea8f61c0ddbc741f187af2b22151180400096e88f1ffffff00096e88f1ffffff").expect("hex");
         let sealed = SealedObject::decode(&mut &sealed_data[..]).expect("decode");
         let opened = sealed.open(&app_key).expect("open");
 
