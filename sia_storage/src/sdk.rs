@@ -16,7 +16,8 @@ use crate::time::Duration;
 use crate::upload::{PackedUpload, upload_object};
 use crate::{
     Account, AppKey, BuilderError, Download, DownloadError, DownloadOptions, Host, HostQuery,
-    Object, ObjectEvent, ObjectsCursor, PinnedSlab, SealedObjectError, UploadError, UploadOptions,
+    Object, ObjectEvent, ObjectsCursor, PackedUploadOptions, PinnedSlab, SealedObjectError,
+    UploadError, UploadOptions,
 };
 
 /// Errors that can occur when using the SDK.
@@ -182,11 +183,11 @@ impl Sdk {
     /// for more efficient uploads. The returned `PackedUpload` can be used to add objects to the upload, and then finalized to get the resulting objects.
     ///
     /// # Arguments
-    /// * `options` - The [UploadOptions] to use for the upload.
+    /// * `options` - The [PackedUploadOptions] to use for the upload.
     ///
     /// # Returns
     /// A [PackedUpload] that can be used to add objects and finalize the upload.
-    pub fn upload_packed(&self, options: UploadOptions) -> Result<PackedUpload, UploadError> {
+    pub fn upload_packed(&self, options: PackedUploadOptions) -> Result<PackedUpload, UploadError> {
         PackedUpload::new(self.hosts.clone(), self.app_key.clone(), options)
     }
 

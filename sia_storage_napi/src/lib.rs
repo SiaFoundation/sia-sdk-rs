@@ -370,18 +370,30 @@ pub struct UploadOptions {
     pub max_buffered_slabs: Option<u32>,
     pub data_shards: Option<u8>,
     pub parity_shards: Option<u8>,
+    pub start_offset: Option<BigInt>,
     #[napi(ts_type = "(progress: ShardProgress) => void")]
     pub on_shard_uploaded: Option<SendableCallback<ShardProgress>>,
 }
 
-impl From<UploadOptions> for sia_storage::UploadOptions {
-    fn from(val: UploadOptions) -> Self {
+impl TryFrom<UploadOptions> for sia_storage::UploadOptions {
+    type Error = napi::Error;
+
+    fn try_from(val: UploadOptions) -> Result<Self> {
         let mut options = sia_storage::UploadOptions::default();
         options.data_shards = val.data_shards.unwrap_or(options.data_shards);
         options.parity_shards = val.parity_shards.unwrap_or(options.parity_shards);
         options.max_buffered_slabs = val.max_buffered_slabs.map(|v| v as usize);
         options.shard_uploaded = val.on_shard_uploaded.map(|cb| cb.into_shard_callback());
-        options
+        if let Some(start_offset) = val.start_offset {
+            let (signed, value, lossless) = start_offset.get_u64();
+            if signed {
+                return Err(Error::from_reason("start_offset must be non-negative"));
+            } else if !lossless {
+                return Err(Error::from_reason("start_offset too large"));
+            }
+            options.start_offset = Some(value);
+        }
+        Ok(options)
     }
 }
 
@@ -395,6 +407,42 @@ impl FromNapiValue for SendableUploadOptions {
         value: napi::sys::napi_value,
     ) -> Result<Self> {
         let opts = unsafe { UploadOptions::from_napi_value(env, value)? };
+        Ok(Self(opts.try_into()?))
+    }
+}
+
+/// Packed upload options.
+#[napi(object, object_to_js = false)]
+#[derive(Default)]
+pub struct PackedUploadOptions {
+    pub max_buffered_slabs: Option<u32>,
+    pub data_shards: Option<u8>,
+    pub parity_shards: Option<u8>,
+    #[napi(ts_type = "(progress: ShardProgress) => void")]
+    pub on_shard_uploaded: Option<SendableCallback<ShardProgress>>,
+}
+
+impl From<PackedUploadOptions> for sia_storage::PackedUploadOptions {
+    fn from(val: PackedUploadOptions) -> Self {
+        let mut options = sia_storage::PackedUploadOptions::default();
+        options.data_shards = val.data_shards.unwrap_or(options.data_shards);
+        options.parity_shards = val.parity_shards.unwrap_or(options.parity_shards);
+        options.max_buffered_slabs = val.max_buffered_slabs.map(|v| v as usize);
+        options.shard_uploaded = val.on_shard_uploaded.map(|cb| cb.into_shard_callback());
+        options
+    }
+}
+
+/// A Send-safe wrapper around `PackedUploadOptions` that converts the JS
+/// callback into a `ThreadsafeFunction` during napi parameter extraction.
+pub struct SendablePackedUploadOptions(pub(crate) sia_storage::PackedUploadOptions);
+
+impl FromNapiValue for SendablePackedUploadOptions {
+    unsafe fn from_napi_value(
+        env: napi::sys::napi_env,
+        value: napi::sys::napi_value,
+    ) -> Result<Self> {
+        let opts = unsafe { PackedUploadOptions::from_napi_value(env, value)? };
         Ok(Self(opts.into()))
     }
 }
@@ -679,9 +727,12 @@ impl Sdk {
 
     /// Creates a new packed upload for efficiently uploading multiple small
     /// objects together. Returns a `PackedUpload` handle.
-    #[napi(ts_args_type = "options?: UploadOptions")]
-    pub fn upload_packed(&self, options: Option<SendableUploadOptions>) -> Result<PackedUpload> {
-        let options: sia_storage::UploadOptions = options.map(|o| o.0).unwrap_or_default();
+    #[napi(ts_args_type = "options?: PackedUploadOptions")]
+    pub fn upload_packed(
+        &self,
+        options: Option<SendablePackedUploadOptions>,
+    ) -> Result<PackedUpload> {
+        let options: sia_storage::PackedUploadOptions = options.map(|o| o.0).unwrap_or_default();
         let optimal_data_size = options.optimal_data_size() as u64;
         let packed_upload = self
             .inner

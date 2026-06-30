@@ -358,6 +358,11 @@ pub struct UploadOptions {
 
     /// Optional callback to receive progress updates for each uploaded shard.
     pub shard_uploaded: Option<ShardProgressCallback>,
+
+    /// When set, the reader's data overwrites the object starting at this byte
+    /// offset instead of being appended. Only the slabs covering the
+    /// overwritten range are rewritten.
+    pub start_offset: Option<u64>,
 }
 
 impl UploadOptions {
@@ -469,6 +474,61 @@ impl Default for UploadOptions {
             parity_shards: 20,
             max_buffered_slabs: None,
             shard_uploaded: None,
+            start_offset: None,
+        }
+    }
+}
+
+/// Options for configuring a packed upload.
+#[derive(Clone)]
+pub struct PackedUploadOptions {
+    /// The number of data shards per slab. Defaults to 10.
+    pub data_shards: u8,
+    /// The number of parity shards per slab. Defaults to 20.
+    pub parity_shards: u8,
+    /// The maximum number of slabs to actively hold in memory. Higher
+    /// values may increase throughput due to parallelism at the cost
+    /// of more memory usage.
+    ///
+    /// At least one fully-encoded slab must be in memory. Defaults to
+    /// 10% of system memory.
+    pub max_buffered_slabs: Option<usize>,
+
+    /// Optional callback to receive progress updates for each uploaded shard.
+    pub shard_uploaded: Option<ShardProgressCallback>,
+}
+
+impl Default for PackedUploadOptions {
+    fn default() -> Self {
+        Self {
+            data_shards: 10,
+            parity_shards: 20,
+            max_buffered_slabs: None,
+            shard_uploaded: None,
+        }
+    }
+}
+
+impl PackedUploadOptions {
+    /// Returns the optimal data size per slab in bytes.
+    pub fn optimal_data_size(&self) -> usize {
+        SECTOR_SIZE * self.data_shards as usize
+    }
+
+    /// Returns the total slab size including parity shards in bytes.
+    pub fn slab_size(&self) -> usize {
+        SECTOR_SIZE * (self.data_shards as usize + self.parity_shards as usize)
+    }
+}
+
+impl From<PackedUploadOptions> for UploadOptions {
+    fn from(options: PackedUploadOptions) -> Self {
+        Self {
+            data_shards: options.data_shards,
+            parity_shards: options.parity_shards,
+            max_buffered_slabs: options.max_buffered_slabs,
+            shard_uploaded: options.shard_uploaded,
+            start_offset: None,
         }
     }
 }
@@ -567,8 +627,12 @@ mod test {
         );
         let input: Bytes = Bytes::from("Hello, world!");
 
-        let mut packed_upload =
-            PackedUpload::new(hosts.clone(), app_key.clone(), UploadOptions::default()).unwrap();
+        let mut packed_upload = PackedUpload::new(
+            hosts.clone(),
+            app_key.clone(),
+            PackedUploadOptions::default(),
+        )
+        .unwrap();
         assert_eq!(packed_upload.remaining(), OPTIMAL_DATA_SIZE);
 
         packed_upload
@@ -656,8 +720,12 @@ mod test {
         random_bytes(&mut large_input);
         let large_input = large_input.freeze();
 
-        let mut packed_upload =
-            PackedUpload::new(hosts.clone(), app_key.clone(), UploadOptions::default()).unwrap();
+        let mut packed_upload = PackedUpload::new(
+            hosts.clone(),
+            app_key.clone(),
+            PackedUploadOptions::default(),
+        )
+        .unwrap();
         packed_upload
             .add(Cursor::new(small_input.clone()))
             .await
@@ -743,8 +811,12 @@ mod test {
         random_bytes(&mut exact_input);
         let exact_input = exact_input.freeze();
 
-        let mut packed_upload =
-            PackedUpload::new(hosts.clone(), app_key.clone(), UploadOptions::default()).unwrap();
+        let mut packed_upload = PackedUpload::new(
+            hosts.clone(),
+            app_key.clone(),
+            PackedUploadOptions::default(),
+        )
+        .unwrap();
         packed_upload
             .add(Cursor::new(exact_input.clone()))
             .await
@@ -797,8 +869,12 @@ mod test {
         );
         let non_empty: Bytes = Bytes::from("hello");
 
-        let mut packed_upload =
-            PackedUpload::new(hosts.clone(), app_key.clone(), UploadOptions::default()).unwrap();
+        let mut packed_upload = PackedUpload::new(
+            hosts.clone(),
+            app_key.clone(),
+            PackedUploadOptions::default(),
+        )
+        .unwrap();
         // empty at head, between, and tail; interleaved with a non-empty.
         packed_upload
             .add(Cursor::new(Bytes::new()))
@@ -884,8 +960,12 @@ mod test {
         let partial: Vec<u8> = (0..100u8).collect();
         let good: Bytes = Bytes::from_static(b"recoverable object data after the hole");
 
-        let mut packed_upload =
-            PackedUpload::new(hosts.clone(), app_key.clone(), UploadOptions::default()).unwrap();
+        let mut packed_upload = PackedUpload::new(
+            hosts.clone(),
+            app_key.clone(),
+            PackedUploadOptions::default(),
+        )
+        .unwrap();
         packed_upload
             .add(ErrAfter {
                 data: partial.clone(),
