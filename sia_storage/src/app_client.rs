@@ -477,7 +477,7 @@ impl Client {
         url.set_fragment(Some(
             format!(
                 "encryption_key={}",
-                URL_SAFE.encode(object.data_key().as_ref())
+                URL_SAFE.encode(object.data_key.as_ref())
             )
             .as_str(),
         ));
@@ -953,7 +953,7 @@ mod tests {
         assert!(client.shared_object(invalid_url).await.is_err());
 
         let result = client.shared_object(share_url).await.unwrap();
-        assert_eq!(result.data_key(), &data_key);
+        assert_eq!(&result.data_key, &data_key);
         assert_eq!(result.slabs(), &slabs);
     }
 
