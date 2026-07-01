@@ -508,11 +508,14 @@ impl Client {
                     Some(fragment) => Ok(fragment),
                     None => Err(Error::Format("missing encryption_key".into())),
                 }?;
+                // decode_slice writes only n bytes into out; require a full 32
                 let mut out = [0u8; 32];
-                URL_SAFE.decode_slice(fragment, &mut out).map_err(|_| {
-                    Error::Format("encryption key must be 32 hex-encoded bytes".into())
-                })?;
-                Ok(EncryptionKey::from(out))
+                match URL_SAFE.decode_slice(fragment, &mut out) {
+                    Ok(32) => Ok(EncryptionKey::from(out)),
+                    _ => Err(Error::Format(
+                        "encryption key must be 32 bytes, base64url-encoded".into(),
+                    )),
+                }
             }
             None => Err(Error::Format("missing encryption_key".into())),
         }?;
