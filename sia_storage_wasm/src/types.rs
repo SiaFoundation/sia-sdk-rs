@@ -271,6 +271,7 @@ export interface Sector {
 }
 
 export interface Slab {
+    version: number;
     encryptionKey: string;
     minShards: number;
     offset: number;
