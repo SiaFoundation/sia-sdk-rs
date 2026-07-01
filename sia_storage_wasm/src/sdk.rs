@@ -14,7 +14,8 @@ use crate::packed::PackedUpload;
 use crate::run_local;
 use crate::stream_reader::js_stream_reader;
 use crate::types::{
-    self, HostQuery, ObjectEvent, download_options_from_js, ms_to_chrono, upload_options_from_js,
+    self, HostQuery, ObjectEvent, download_options_from_js, ms_to_chrono,
+    packed_upload_options_from_js, upload_options_from_js,
 };
 
 /// The main Sia storage SDK. Provides methods for uploading, downloading,
@@ -197,7 +198,10 @@ impl Sdk {
         options: Option<JsValue>,
     ) -> Result<PinnedObject, JsError> {
         let sdk = self.inner.clone();
-        let opts = options.map(upload_options_from_js).unwrap_or_default();
+        let opts = match options {
+            Some(v) => upload_options_from_js(v)?,
+            None => Default::default(),
+        };
         let obj = object.0;
         let reader = js_stream_reader(source).compat();
         let result = run_local(async move { sdk.upload(obj, reader, opts).await })
@@ -212,7 +216,9 @@ impl Sdk {
     /// `finalize()` to get the resulting `PinnedObject` handles.
     #[wasm_bindgen(js_name = "uploadPacked")]
     pub fn upload_packed(&self, options: Option<JsValue>) -> Result<PackedUpload, JsError> {
-        let opts = options.map(upload_options_from_js).unwrap_or_default();
+        let opts = options
+            .map(packed_upload_options_from_js)
+            .unwrap_or_default();
         Ok(PackedUpload::new(
             self.inner.upload_packed(opts).map_err(to_js_err)?,
         ))
