@@ -17,7 +17,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::DecryptError;
-use crate::slabs::Sector;
+use crate::slabs::{Sector, SlabVersion};
 use crate::time::Duration;
 use crate::{
     Account, AppMetadata, HostQuery, Object, ObjectsCursor, PinnedSlab, SealedObject, Slab,
@@ -100,6 +100,7 @@ pub(crate) struct RegisterAppResponse {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SlabPinParams {
+    pub version: SlabVersion,
     pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
@@ -666,6 +667,7 @@ mod cross_target_test {
     use base64::prelude::*;
     use sia_core::{hash_256, public_key, signature};
 
+    use crate::slabs::SlabVersion::V0;
     use crate::slabs::object_id;
 
     use super::*;
@@ -772,6 +774,7 @@ mod cross_target_test {
     fn test_shared_object_id() {
         let obj = SharedObjectResponse {
             slabs: vec![Slab {
+                version: V0,
                 encryption_key: [0u8; 32].into(),
                 min_shards: 1,
                 sectors: vec![Sector {
@@ -800,6 +803,7 @@ mod tests {
     use sia_core::signing::Signature;
     use sia_core::{hash_256, public_key};
 
+    use crate::slabs::SlabVersion::V0;
     use crate::{AppID, GeoLocation, Protocol};
 
     use super::*;
@@ -893,6 +897,7 @@ mod tests {
     async fn test_shared_object_roundtrip() {
         let data_key: EncryptionKey = [42u8; 32].into();
         let slabs = vec![Slab {
+            version: V0,
             encryption_key: [1u8; 32].into(),
             min_shards: 1,
             sectors: vec![Sector {
@@ -1321,6 +1326,7 @@ mod tests {
             metadata_signature: Signature::from([2u8; 64]),
             slabs: vec![
                 Slab {
+                    version: V0,
                     encryption_key: [1u8; 32].into(),
                     min_shards: 1,
                     sectors: vec![
@@ -1345,6 +1351,7 @@ mod tests {
                     length: 7,
                 },
                 Slab {
+                    version: V0,
                     encryption_key: [1u8; 32].into(),
                     min_shards: 1,
                     sectors: vec![
@@ -1455,6 +1462,7 @@ mod tests {
             encrypted_metadata_key: vec![1u8; 72],
             slabs: vec![
                 Slab {
+                    version: V0,
                     encryption_key: [1u8; 32].into(),
                     min_shards: 1,
                     sectors: vec![
@@ -1479,6 +1487,7 @@ mod tests {
                     length: 256,
                 },
                 Slab {
+                    version: V0,
                     encryption_key: [2u8; 32].into(),
                     min_shards: 1,
                     sectors: vec![
@@ -1754,6 +1763,7 @@ mod tests {
             metadata_signature: Signature::from([2u8; 64]),
             slabs: vec![
                 Slab {
+                    version: V0,
                     encryption_key: [1u8; 32].into(),
                     min_shards: 2,
                     sectors: vec![],
@@ -1761,6 +1771,7 @@ mod tests {
                     length: 256,
                 },
                 Slab {
+                    version: V0,
                     encryption_key: [2u8; 32].into(),
                     min_shards: 2,
                     sectors: vec![],
