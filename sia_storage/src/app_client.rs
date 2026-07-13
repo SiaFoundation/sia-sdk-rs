@@ -1834,8 +1834,8 @@ mod tests {
                     .status(StatusCode::OK)
                     .body(format!(
                         r#"{{"responseURL":"http://example.com/auth/connect/{request_id}","statusURL":"{}","registerURL":"{}","expiration":"2030-01-01T00:00:00Z"}}"#,
-                        &server.url(&format!("/auth/connect/{request_id}/status")).to_string(),
-                        &server.url(&format!("/auth/connect/{request_id}/register")).to_string()
+                        server.url(&format!("/auth/connect/{request_id}/status")),
+                        server.url(&format!("/auth/connect/{request_id}/register"))
                     ))
                     .unwrap(),
             ),
