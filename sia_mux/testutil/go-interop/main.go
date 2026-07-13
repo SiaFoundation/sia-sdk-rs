@@ -30,7 +30,7 @@ func echoServer(port int) error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 
 	// Print the actual port (useful when port=0)
 	fmt.Printf("READY %d\n", l.Addr().(*net.TCPAddr).Port)
@@ -39,13 +39,13 @@ func echoServer(port int) error {
 	if err != nil {
 		return fmt.Errorf("accept tcp: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	m, err := mux.AcceptAnonymous(conn)
 	if err != nil {
 		return fmt.Errorf("accept mux: %w", err)
 	}
-	defer m.Close()
+	defer func() { _ = m.Close() }()
 
 	// Accept streams and echo until the mux is closed
 	for {
@@ -55,8 +55,8 @@ func echoServer(port int) error {
 			return nil
 		}
 		go func() {
-			defer stream.Close()
-			io.Copy(stream, stream)
+			defer func() { _ = stream.Close() }()
+			_, _ = io.Copy(stream, stream)
 		}()
 	}
 }
@@ -66,13 +66,13 @@ func echoClient(addr string, numStreams int, msgSize int) error {
 	if err != nil {
 		return fmt.Errorf("dial tcp: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	m, err := mux.DialAnonymous(conn)
 	if err != nil {
 		return fmt.Errorf("dial mux: %w", err)
 	}
-	defer m.Close()
+	defer func() { _ = m.Close() }()
 
 	type result struct {
 		streamID int
@@ -83,7 +83,7 @@ func echoClient(addr string, numStreams int, msgSize int) error {
 	for i := 0; i < numStreams; i++ {
 		stream := m.DialStream()
 		go func(id int) {
-			defer stream.Close()
+			defer func() { _ = stream.Close() }()
 
 			// Build test message
 			msg := make([]byte, msgSize)

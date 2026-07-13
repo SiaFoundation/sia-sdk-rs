@@ -1487,7 +1487,7 @@ mod test {
             expected_total, actual_total
         );
 
-        for ((slab_idx, shard_idx), _) in download_progress.iter() {
+        for (slab_idx, shard_idx) in download_progress.keys() {
             assert!(
                 *shard_idx < total_shards,
                 "invalid shard index {} in callback",
