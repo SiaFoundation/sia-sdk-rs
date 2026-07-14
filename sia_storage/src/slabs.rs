@@ -157,6 +157,9 @@ impl SiaDecodable for Slab {
 #[serde(rename_all = "camelCase")]
 /// A slab that has been pinned to the indexer.
 pub struct PinnedSlab {
+    /// The encoding version of this slab.
+    #[serde(default)]
+    pub version: SlabVersion,
     /// The unique identifier of the slab.
     pub id: Hash256,
     /// The encryption key used to encrypt and decrypt this slab's data.
