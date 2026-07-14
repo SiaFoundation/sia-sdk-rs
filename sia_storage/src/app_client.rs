@@ -1073,6 +1073,7 @@ mod tests {
     #[tokio::test]
     async fn test_slab() {
         let slab = PinnedSlab {
+            version: V0,
             id: "43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28"
                 .parse()
                 .unwrap(),
