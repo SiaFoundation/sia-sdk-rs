@@ -280,6 +280,7 @@ export interface Slab {
 }
 
 export interface PinnedSlab {
+    version: number;
     id: string;
     encryptionKey: string;
     minShards: number;

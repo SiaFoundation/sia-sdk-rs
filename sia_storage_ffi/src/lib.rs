@@ -201,8 +201,8 @@ impl PinnedObject {
             slabs: sealed
                 .slabs
                 .into_iter()
-                .map(|s| s.try_into().unwrap())
-                .collect(),
+                .map(|s| s.try_into().map_err(encoding::Error::InvalidValue))
+                .collect::<Result<_, _>>()?,
             encrypted_metadata: sealed.encrypted_metadata,
             data_signature: Signature::try_from(sealed.data_signature.as_ref())?,
             metadata_signature: Signature::try_from(sealed.metadata_signature.as_ref())?,
@@ -326,8 +326,8 @@ impl TryInto<sia_storage::SealedObject> for SealedObject {
             slabs: self
                 .slabs
                 .into_iter()
-                .map(|s| s.try_into().unwrap())
-                .collect(),
+                .map(|s| s.try_into().map_err(encoding::Error::InvalidValue))
+                .collect::<Result<_, _>>()?,
             encrypted_metadata: self.encrypted_metadata,
             data_signature: Signature::try_from(self.data_signature.as_ref())?,
             metadata_signature: Signature::try_from(self.metadata_signature.as_ref())?,
@@ -422,6 +422,7 @@ pub struct PinnedSector {
 /// A PinnedSlab represents a slab that has been pinned to the indexer.
 #[derive(uniffi::Record)]
 pub struct PinnedSlab {
+    pub version: u8,
     pub id: String,
     pub encryption_key: Vec<u8>,
     pub min_shards: u8,
@@ -431,6 +432,7 @@ pub struct PinnedSlab {
 impl From<sia_storage::PinnedSlab> for PinnedSlab {
     fn from(s: sia_storage::PinnedSlab) -> Self {
         Self {
+            version: s.version as u8,
             id: s.id.to_string(),
             encryption_key: s.encryption_key.as_ref().to_vec(),
             min_shards: s.min_shards,

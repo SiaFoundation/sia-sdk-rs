@@ -179,6 +179,7 @@ pub struct PinnedSector {
 /// A pinned slab from the indexer.
 #[napi(object)]
 pub struct PinnedSlab {
+    pub version: u8,
     pub id: String,
     pub encryption_key: Buffer,
     pub min_shards: u8,
@@ -188,6 +189,7 @@ pub struct PinnedSlab {
 impl From<sia_storage::PinnedSlab> for PinnedSlab {
     fn from(s: sia_storage::PinnedSlab) -> Self {
         Self {
+            version: s.version as u8,
             id: s.id.to_string(),
             encryption_key: Buffer::from(s.encryption_key.as_ref().to_vec()),
             min_shards: s.min_shards,
