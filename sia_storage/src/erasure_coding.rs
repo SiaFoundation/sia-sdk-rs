@@ -222,7 +222,7 @@ mod tests {
         slab_key: &EncryptionKey,
         length: usize,
     ) {
-        let mut cipher = Chacha20Cipher::new_v1(data_key.clone(), 0, &slab_key);
+        let mut cipher = Chacha20Cipher::new_v1(data_key.clone(), 0, slab_key);
         let stripe = SEGMENT_SIZE * data_shards;
         let mut p = 0;
         while p < length {
