@@ -120,7 +120,10 @@ impl Chacha20Cipher {
         self.inner.apply_keystream(second);
     }
 
-    pub fn new(key: EncryptionKey, offset: u64) -> Self {
+    /// Initalizes the cipher with an empty nonce.
+    ///
+    /// Keys should never be re-used.
+    pub fn new_v0(key: EncryptionKey, offset: u64) -> Self {
         let mut cipher = Self::rekey_cipher(&key, offset, [0u8; 24]);
         cipher.seek(offset % Self::MAX_BYTES_PER_NONCE);
         Self {
@@ -131,13 +134,17 @@ impl Chacha20Cipher {
         }
     }
 
-    pub fn with_nonce(key: EncryptionKey, offset: u64, nonce: [u8; 24]) -> Self {
+    /// Initializes the cipher using the slab key as a nonce.
+    ///
+    /// Key re-use is safe, but not recommended.
+    pub fn new_v1(data_key: EncryptionKey, offset: u64, slab_key: &EncryptionKey) -> Self {
+        let nonce: [u8; 24] = slab_key.as_ref()[..24].try_into().unwrap();
         // this purposefully does not call rekey so we do not clobber the nonce
-        let mut cipher = XChaCha20::new(key.as_ref().into(), &nonce.into());
+        let mut cipher = XChaCha20::new(data_key.as_ref().into(), &nonce.into());
         cipher.seek(offset % Self::MAX_BYTES_PER_NONCE);
         Self {
             inner: cipher,
-            key,
+            key: data_key,
             offset,
             nonce,
         }
@@ -146,7 +153,6 @@ impl Chacha20Cipher {
 
 #[cfg(test)]
 mod test {
-
     use sia_core::rhp4::SECTOR_SIZE;
 
     use super::*;
@@ -235,10 +241,49 @@ mod test {
             2 * MAX_BYTES_PER_NONCE,
         ] {
             let mut ciphertext = data.to_vec();
-            Chacha20Cipher::new(key.clone(), offset).apply_keystream(&mut ciphertext);
+            Chacha20Cipher::new_v0(key.clone(), offset).apply_keystream(&mut ciphertext);
 
             let mut plaintext = ciphertext.clone();
-            Chacha20Cipher::new(key.clone(), offset).apply_keystream(&mut plaintext);
+            Chacha20Cipher::new_v0(key.clone(), offset).apply_keystream(&mut plaintext);
+
+            assert_eq!(plaintext, data, "roundtrip failed at offset {offset}");
+        }
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_v1_encrypt_roundtrip() {
+        const MAX_BYTES_PER_NONCE: u64 = u32::MAX as u64 * 64;
+
+        let mut data = [0u8; 4096];
+        random_bytes(&mut data);
+
+        let data_key = random_key();
+
+        for offset in [
+            0,
+            16,
+            31,
+            63,
+            64,
+            96,
+            128,
+            2048,
+            4096,
+            MAX_BYTES_PER_NONCE - 127,
+            MAX_BYTES_PER_NONCE - 128,
+            MAX_BYTES_PER_NONCE - 63,
+            MAX_BYTES_PER_NONCE - 64,
+            MAX_BYTES_PER_NONCE,
+            2 * MAX_BYTES_PER_NONCE,
+        ] {
+            let mut ciphertext = data.to_vec();
+            let slab_key = random_key();
+            Chacha20Cipher::new_v1(data_key.clone(), offset, &slab_key)
+                .apply_keystream(&mut ciphertext);
+
+            let mut plaintext = ciphertext.clone();
+            Chacha20Cipher::new_v1(data_key.clone(), offset, &slab_key)
+                .apply_keystream(&mut plaintext);
 
             assert_eq!(plaintext, data, "roundtrip failed at offset {offset}");
         }

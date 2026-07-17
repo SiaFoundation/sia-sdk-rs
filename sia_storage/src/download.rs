@@ -576,17 +576,12 @@ impl Download {
         let seq = self.next_seq;
         self.next_seq += 1;
         let mut cipher = match chunk_slab.slab.version {
-            V0 => Chacha20Cipher::new(self.data_key.clone(), chunk_slab.object_offset),
-            V1 => {
-                let nonce: [u8; 24] = chunk_slab.slab.encryption_key.as_ref()[..24]
-                    .try_into()
-                    .unwrap();
-                Chacha20Cipher::with_nonce(
-                    self.data_key.clone(),
-                    chunk_slab.slab.offset as u64,
-                    nonce,
-                )
-            }
+            V0 => Chacha20Cipher::new_v0(self.data_key.clone(), chunk_slab.object_offset),
+            V1 => Chacha20Cipher::new_v1(
+                self.data_key.clone(),
+                chunk_slab.slab.offset as u64,
+                &chunk_slab.slab.encryption_key,
+            ),
         };
         let recovery = SlabRecovery::new(
             hosts,
@@ -900,7 +895,7 @@ mod test {
 
         // V0 layer: one stream cipher over the whole object, keyed by the data key
         let mut stream = plaintext.clone();
-        Chacha20Cipher::new(data_key.clone(), 0).apply_keystream(&mut stream);
+        Chacha20Cipher::new_v0(data_key.clone(), 0).apply_keystream(&mut stream);
 
         let mut shards = vec![vec![0u8; SECTOR_SIZE]; total_shards];
         let stripe = SEGMENT_SIZE * data_shards;
@@ -1065,9 +1060,12 @@ mod test {
             .unwrap();
             // SlabRecovery only strips the per-shard layer; remove the object
             // data-key layer here.
-            let nonce: [u8; 24] = slabs[0].encryption_key.as_ref()[..24].try_into().unwrap();
-            Chacha20Cipher::with_nonce(obj.data_key.clone(), offset as u64, nonce)
-                .apply_keystream(&mut recovered_data);
+            Chacha20Cipher::new_v1(
+                obj.data_key.clone(),
+                offset as u64,
+                &slabs[0].encryption_key,
+            )
+            .apply_keystream(&mut recovered_data);
             assert_eq!(
                 &data[offset..offset + length],
                 &recovered_data[..],

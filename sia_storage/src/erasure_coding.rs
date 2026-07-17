@@ -159,8 +159,7 @@ impl SlabReader {
         if remaining == 0 {
             return Ok((0, None));
         }
-        let nonce: [u8; 24] = self.encryption_key.as_ref()[..24].try_into().unwrap();
-        let mut cipher = Chacha20Cipher::with_nonce(data_key, self.length as u64, nonce);
+        let mut cipher = Chacha20Cipher::new_v1(data_key, self.length as u64, &self.encryption_key);
         let mut r = r.take(remaining as u64);
         let mut total_read = 0;
         loop {
@@ -223,8 +222,7 @@ mod tests {
         slab_key: &EncryptionKey,
         length: usize,
     ) {
-        let nonce: [u8; 24] = slab_key.as_ref()[..24].try_into().unwrap();
-        let mut cipher = Chacha20Cipher::with_nonce(data_key.clone(), 0, nonce);
+        let mut cipher = Chacha20Cipher::new_v1(data_key.clone(), 0, &slab_key);
         let stripe = SEGMENT_SIZE * data_shards;
         let mut p = 0;
         while p < length {
