@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sia_core::rhp4::SECTOR_SIZE;
 
 use crate::AppKey;
-use crate::encryption::{Chacha20Cipher, CipherReader, EncryptionKey};
+use crate::encryption::EncryptionKey;
 use serde_with::base64::Base64;
 use serde_with::{DefaultOnNull, serde_as};
 use sia_core::blake2::{Blake2b256, Digest};
@@ -11,7 +11,6 @@ use sia_core::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode}
 use sia_core::signing::{PublicKey, Signature};
 use sia_core::types::Hash256;
 use thiserror::Error;
-use tokio::io::AsyncRead;
 
 use crate::object_encryption::{
     DecryptError, open_data_key, open_metadata, open_metadata_key, seal_data_key, seal_metadata,
@@ -336,9 +335,9 @@ pub struct ObjectEvent {
 /// Objects can be sealed with [Object::seal] for storage on the indexer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Object {
-    data_key: EncryptionKey, // not public to avoid accidental exposure
+    pub(crate) data_key: EncryptionKey, // not public to avoid accidental exposure
 
-    slabs: Vec<Slab>,
+    pub(crate) slabs: Vec<Slab>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 
@@ -431,27 +430,6 @@ impl Object {
             created_at: self.created_at,
             updated_at: self.updated_at,
         }
-    }
-
-    pub(crate) fn slabs_mut(&mut self) -> &mut Vec<Slab> {
-        &mut self.slabs
-    }
-
-    /// Returns a reader that encrypts data on-the-fly using the object's encryption key.
-    pub(crate) fn reader<R: AsyncRead + Unpin>(&self, r: R, offset: u64) -> CipherReader<R> {
-        CipherReader::new(r, self.data_key.clone(), offset)
-    }
-
-    /// Returns a cipher that can be used to encrypt or decrypt data using the object's encryption key.
-    pub(crate) fn cipher(&self, offset: u64) -> Chacha20Cipher {
-        Chacha20Cipher::new(self.data_key.clone(), offset)
-    }
-
-    /// Returns the object's encryption key.
-    ///
-    /// Be careful when using this function to avoid accidental exposure.
-    pub(crate) fn data_key(&self) -> &EncryptionKey {
-        &self.data_key
     }
 }
 

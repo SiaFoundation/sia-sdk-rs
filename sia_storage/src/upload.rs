@@ -474,7 +474,6 @@ impl Upload {
             .collect();
         let handle = AbortOnDropHandle::new(maybe_spawn!(async move {
             let total_shards = slab.shards.len();
-            let slab_key: EncryptionKey = rand::random::<[u8; 32]>().into();
 
             // Encode parity shards on a blocking thread; encryption runs
             // per-shard below so it parallelizes across the blocking pool.
@@ -500,7 +499,7 @@ impl Upload {
             // while allowing failed hosts to be re-picked up to the slab's
             // retry cap.
             let hosts: Arc<Mutex<HostQueue>> = Arc::new(Mutex::new(client.upload_queue()));
-            let owned_slab_key = Arc::new(slab_key.clone());
+            let owned_slab_key = Arc::new(slab.encryption_key.clone());
             let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> = JoinSet::new();
             for (((shard_index, mut shard), waiting_guard), shard_permit) in shards
                 .into_iter()
@@ -537,7 +536,7 @@ impl Upload {
             }
 
             let mut slab_out = UploadedSlab {
-                encryption_key: slab_key,
+                encryption_key: slab.encryption_key,
                 length: slab.length as u32,
                 shards: vec![None; total_shards],
             };
@@ -575,17 +574,16 @@ impl Upload {
     /// slab-upload tasks as they fill. Returns the number of bytes read.
     pub(crate) async fn read<R: AsyncRead + Unpin>(
         &mut self,
-        reader: &mut R,
+        data_key: EncryptionKey,
+        mut reader: R,
     ) -> Result<u64, UploadError> {
-        // buffer the reader since SlabReader reads 64 bytes at a time
-        let mut reader = BufReader::new(reader);
         let mut total_length: u64 = 0;
         loop {
             let (n, slab) = self
                 .slab_buffer
                 .as_mut()
                 .unwrap()
-                .read_slab(&mut reader)
+                .read_slab(data_key.clone(), &mut reader)
                 .await?;
             if n == 0 {
                 return Ok(total_length);
@@ -610,7 +608,7 @@ impl Upload {
         while let Some(handle) = self.slab_tasks.pop_front() {
             let slab = handle.await??;
             slabs.push(Slab {
-                version: SlabVersion::V0,
+                version: SlabVersion::V1,
                 encryption_key: slab.encryption_key,
                 offset: 0,
                 min_shards,
@@ -634,19 +632,6 @@ impl Upload {
     pub(crate) fn optimal_data_size(&self) -> usize {
         self.slab_buffer.as_ref().unwrap().optimal_data_size()
     }
-}
-
-/// Reads from the provided reader until EOF and uploads its contents as a
-/// sequence of slabs. Convenience wrapper around [Upload].
-pub(crate) async fn upload_slabs<R: AsyncRead + Unpin>(
-    hosts: Hosts<Client>,
-    app_key: Arc<AppKey>,
-    mut reader: R,
-    options: UploadOptions,
-) -> Result<Vec<Slab>, UploadError> {
-    let mut upload = Upload::new(hosts, app_key, options)?;
-    upload.read(&mut reader).await?;
-    upload.finish().await
 }
 
 struct ObjectUpload {
@@ -711,8 +696,10 @@ impl PackedUpload {
     pub async fn add<R: AsyncRead + Unpin>(&mut self, r: R) -> Result<u64, UploadError> {
         let object = Object::default();
 
+        // buffer the reader since SlabReader reads 64 bytes at a time
+        let r = BufReader::new(r);
         let start = self.upload.length();
-        let n = self.upload.read(&mut object.reader(r, 0)).await?;
+        let n = self.upload.read(object.data_key.clone(), r).await?;
         let end = self.upload.length();
         self.objects.push(ObjectUpload { start, end, object });
         Ok(n)
@@ -733,22 +720,24 @@ impl PackedUpload {
                     // empty object: nothing to splice in, leave it with zero slabs
                     return Ok(object);
                 }
-                let slabs = object.slabs_mut();
                 let slabs_start = (upload.start / optimal_data_size) as usize;
                 let slabs_end = upload.end.div_ceil(optimal_data_size) as usize;
                 let n = slabs_end - slabs_start;
-                slabs.extend_from_slice(&uploaded_slabs[slabs_start..slabs_end]);
+                object
+                    .slabs
+                    .extend_from_slice(&uploaded_slabs[slabs_start..slabs_end]);
 
-                slabs[0].offset = (upload.start % optimal_data_size) as u32;
-                if slabs.len() > 1 {
+                object.slabs[0].offset = (upload.start % optimal_data_size) as u32;
+                if object.slabs.len() > 1 {
                     // if spanning multiple slabs, adjust first slab's length
-                    slabs[0].length = (optimal_data_size - slabs[0].offset as u64) as u32;
+                    object.slabs[0].length =
+                        (optimal_data_size - object.slabs[0].offset as u64) as u32;
                 }
                 let last_slab_index = n - 1;
-                let last_slab_offset = slabs[last_slab_index].offset as u64;
-                slabs[last_slab_index].length = (upload.end
-                    - ((slabs_end as u64 - 1) * optimal_data_size)
-                    - last_slab_offset) as u32;
+                let last_slab_offset = object.slabs[last_slab_index].offset as u64;
+                object.slabs[last_slab_index].length =
+                    (upload.end - ((slabs_end as u64 - 1) * optimal_data_size) - last_slab_offset)
+                        as u32;
 
                 Ok(object)
             })
@@ -770,9 +759,12 @@ pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
     reader: R,
     options: UploadOptions,
 ) -> Result<Object, UploadError> {
-    let reader = object.reader(reader, object.size());
-    let new_slabs = upload_slabs(hosts, app_key, reader, options).await?;
-    object.slabs_mut().extend(new_slabs);
+    let mut upload = Upload::new(hosts, app_key, options)?;
+    // buffer the reader since SlabReader reads 64 bytes at a time
+    upload
+        .read(object.data_key.clone(), BufReader::new(reader))
+        .await?;
+    object.slabs.extend(upload.finish().await?);
     Ok(object)
 }
 

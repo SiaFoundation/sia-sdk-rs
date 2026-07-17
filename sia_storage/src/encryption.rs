@@ -1,13 +1,9 @@
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use chacha20::XChaCha20;
-use chacha20::cipher::inout::InOutBuf;
-use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherError, StreamCipherSeek};
+use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use serde::{Deserialize, Serialize};
 use sia_core::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use tokio::io::AsyncRead;
 use zeroize::ZeroizeOnDrop;
 
 /// A 256-bit symmetric encryption key used to encrypt and decrypt slab data.
@@ -88,108 +84,75 @@ pub(crate) fn encrypt_recovered_shards(
     });
 }
 
-pub(crate) struct CipherReader<R: AsyncRead> {
-    inner: R,
-    cipher: Chacha20Cipher,
-}
-
-impl<R: AsyncRead> CipherReader<R> {
-    pub fn new(inner: R, key: EncryptionKey, offset: u64) -> Self {
-        Self {
-            inner,
-            cipher: Chacha20Cipher::new(key, offset),
-        }
-    }
-}
-
-impl<R: AsyncRead + Unpin> AsyncRead for CipherReader<R> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let initial_filled = buf.filled().len();
-        let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
-
-        // apply the cipher to the newly read bytes
-        self.cipher
-            .apply_keystream(&mut buf.filled_mut()[initial_filled..]);
-        poll
-    }
-}
-
 pub(crate) struct Chacha20Cipher {
     inner: XChaCha20,
     key: EncryptionKey,
-    nonce: [u8; 24],
     offset: u64,
+    nonce: [u8; 24],
 }
 
 impl Chacha20Cipher {
     const MAX_BYTES_PER_NONCE: u64 = u32::MAX as u64 * 64;
 
-    fn nonce_for_offset(offset: u64) -> [u8; 24] {
-        let mut nonce: [u8; 24] = [0u8; 24];
+    fn rekey_cipher(key: &EncryptionKey, offset: u64, mut nonce: [u8; 24]) -> XChaCha20 {
         nonce[16..24].copy_from_slice(&(offset / Self::MAX_BYTES_PER_NONCE).to_le_bytes());
-        nonce
+        XChaCha20::new_from_slices(key.as_ref(), &nonce).unwrap()
     }
 
-    pub fn new(key: EncryptionKey, offset: u64) -> Self {
-        let nonce = Self::nonce_for_offset(offset);
-        let mut cipher = XChaCha20::new(key.as_ref().into(), &nonce.into());
+    /// Apply keystream to `buf` in place rekeying as necessary
+    pub fn apply_keystream(&mut self, buf: &mut [u8]) {
+        let remaining_keystream =
+            Self::MAX_BYTES_PER_NONCE - (self.offset % Self::MAX_BYTES_PER_NONCE);
+        if buf.len() as u64 <= remaining_keystream {
+            self.offset += buf.len() as u64;
+            self.inner.apply_keystream(buf);
+            return;
+        }
+
+        let (first, second) = buf.split_at_mut(remaining_keystream as usize);
+        self.offset += remaining_keystream;
+        self.inner.apply_keystream(first);
+
+        // unreachable in practice with V1 rekeying per slab, but left for compatibility
+        // with V0
+        self.inner = Self::rekey_cipher(&self.key, self.offset, self.nonce);
+        self.offset += second.len() as u64;
+        self.inner.apply_keystream(second);
+    }
+
+    /// Initalizes the cipher with an empty nonce.
+    ///
+    /// Keys should never be re-used.
+    pub fn new_v0(key: EncryptionKey, offset: u64) -> Self {
+        let mut cipher = Self::rekey_cipher(&key, offset, [0u8; 24]);
         cipher.seek(offset % Self::MAX_BYTES_PER_NONCE);
         Self {
             inner: cipher,
             key,
-            nonce,
             offset,
+            nonce: [0u8; 24],
         }
     }
-}
 
-impl StreamCipher for Chacha20Cipher {
-    fn check_remaining(&self, _data_len: usize) -> Result<(), StreamCipherError> {
-        // we handle nonce rotation, so we can always process more data.
-        Ok(())
-    }
-
-    fn unchecked_apply_keystream_inout(&mut self, buf: InOutBuf<'_, '_, u8>) {
-        let remaining_keystream =
-            Self::MAX_BYTES_PER_NONCE - (self.offset % Self::MAX_BYTES_PER_NONCE);
-
-        if buf.len() as u64 <= remaining_keystream {
-            self.offset += buf.len() as u64;
-            self.inner.apply_keystream_inout(buf);
-            return;
+    /// Initializes the cipher using the slab key as a nonce.
+    ///
+    /// Key re-use is safe, but not recommended.
+    pub fn new_v1(data_key: EncryptionKey, offset: u64, slab_key: &EncryptionKey) -> Self {
+        let nonce: [u8; 24] = slab_key.as_ref()[..24].try_into().unwrap();
+        // this purposefully does not call rekey so we do not clobber the nonce
+        let mut cipher = XChaCha20::new(data_key.as_ref().into(), &nonce.into());
+        cipher.seek(offset % Self::MAX_BYTES_PER_NONCE);
+        Self {
+            inner: cipher,
+            key: data_key,
+            offset,
+            nonce,
         }
-
-        // we can't process the entire buffer with the current nonce, so we need
-        // to split it
-        let (first, second) = buf.split_at(remaining_keystream as usize);
-
-        // the first part can be processed with the current nonce
-        self.offset += first.len() as u64;
-        self.inner.apply_keystream_inout(first);
-
-        // update nonce and reinitialize cipher
-        self.nonce = Self::nonce_for_offset(self.offset);
-        self.inner = XChaCha20::new(self.key.as_ref().into(), &self.nonce.into());
-
-        // encrypt the second part
-        self.offset += second.len() as u64;
-        self.inner.apply_keystream_inout(second);
-    }
-
-    fn unchecked_write_keystream(&mut self, buf: &mut [u8]) {
-        buf.fill(0);
-        self.unchecked_apply_keystream(buf);
     }
 }
 
 #[cfg(test)]
 mod test {
-    use tokio::io::AsyncReadExt;
-
     use sia_core::rhp4::SECTOR_SIZE;
 
     use super::*;
@@ -250,27 +213,9 @@ mod test {
         assert_eq!(shards[1], vec![4, 5, 6]);
     }
 
-    #[sia_core_derive::cross_target_test]
-    async fn test_cipher_reader_roundtrip() {
-        let key = EncryptionKey::from([1u8; 32]);
-        let data = b"lorem ipsum dolor sit amet, consectetur adipiscing elit";
-
-        for offset in [0, 10, u32::MAX as u64 * 64 - 10, u32::MAX as u64 * 64] {
-            let mut reader = CipherReader::new(data.as_ref(), key.clone(), offset);
-            let mut cipher_text = vec![0u8; data.len()];
-            reader.read_exact(&mut cipher_text).await.unwrap();
-            assert_ne!(cipher_text, data);
-
-            let mut reader = CipherReader::new(cipher_text.as_slice(), key.clone(), offset);
-            let mut plaintext = vec![0u8; data.len()];
-            reader.read_exact(&mut plaintext).await.unwrap();
-            assert_eq!(plaintext, data);
-        }
-    }
-
     // Direct port of Go SDK's sdk/encrypt_test.go:TestEncryptRoundtrip
     #[sia_core_derive::cross_target_test]
-    async fn test_encrypt_roundtrip() {
+    fn test_encrypt_roundtrip() {
         const MAX_BYTES_PER_NONCE: u64 = u32::MAX as u64 * 64;
 
         let mut data = [0u8; 4096];
@@ -295,13 +240,50 @@ mod test {
             MAX_BYTES_PER_NONCE,
             2 * MAX_BYTES_PER_NONCE,
         ] {
-            let mut reader = CipherReader::new(data.as_ref(), key.clone(), offset);
-            let mut ciphertext = vec![0u8; data.len()];
-            reader.read_exact(&mut ciphertext).await.unwrap();
+            let mut ciphertext = data.to_vec();
+            Chacha20Cipher::new_v0(key.clone(), offset).apply_keystream(&mut ciphertext);
 
-            let mut reader = CipherReader::new(ciphertext.as_slice(), key.clone(), offset);
-            let mut plaintext = vec![0u8; data.len()];
-            reader.read_exact(&mut plaintext).await.unwrap();
+            let mut plaintext = ciphertext.clone();
+            Chacha20Cipher::new_v0(key.clone(), offset).apply_keystream(&mut plaintext);
+
+            assert_eq!(plaintext, data, "roundtrip failed at offset {offset}");
+        }
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_v1_encrypt_roundtrip() {
+        const MAX_BYTES_PER_NONCE: u64 = u32::MAX as u64 * 64;
+
+        let mut data = [0u8; 4096];
+        random_bytes(&mut data);
+
+        let data_key = random_key();
+
+        for offset in [
+            0,
+            16,
+            31,
+            63,
+            64,
+            96,
+            128,
+            2048,
+            4096,
+            MAX_BYTES_PER_NONCE - 127,
+            MAX_BYTES_PER_NONCE - 128,
+            MAX_BYTES_PER_NONCE - 63,
+            MAX_BYTES_PER_NONCE - 64,
+            MAX_BYTES_PER_NONCE,
+            2 * MAX_BYTES_PER_NONCE,
+        ] {
+            let mut ciphertext = data.to_vec();
+            let slab_key = random_key();
+            Chacha20Cipher::new_v1(data_key.clone(), offset, &slab_key)
+                .apply_keystream(&mut ciphertext);
+
+            let mut plaintext = ciphertext.clone();
+            Chacha20Cipher::new_v1(data_key.clone(), offset, &slab_key)
+                .apply_keystream(&mut plaintext);
 
             assert_eq!(plaintext, data, "roundtrip failed at offset {offset}");
         }
