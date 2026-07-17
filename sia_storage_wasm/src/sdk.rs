@@ -268,6 +268,6 @@ const _: &str = r#"
 interface Sdk {
     download(object: PinnedObject, options?: DownloadOptions): ReadableStream;
     upload(object: PinnedObject, source: ReadableStream, options?: UploadOptions): Promise<PinnedObject>;
-    uploadPacked(options?: UploadOptions): PackedUpload;
+    uploadPacked(options?: PackedUploadOptions): PackedUpload;
 }
 "#;
