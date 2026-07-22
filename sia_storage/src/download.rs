@@ -927,9 +927,9 @@ mod test {
             });
         }
 
-        let obj = Object::new(
+        let obj = Object {
             data_key,
-            vec![Slab {
+            slabs: vec![Slab {
                 version: V0,
                 encryption_key: slab_key,
                 min_shards: data_shards as u8,
@@ -937,8 +937,8 @@ mod test {
                 offset: 0,
                 length: plaintext.len() as u32,
             }],
-            Vec::new(),
-        );
+            ..Default::default()
+        };
         assert_eq!(obj.slabs()[0].version, V0);
 
         let mut recovered = Vec::with_capacity(plaintext.len());
