@@ -581,13 +581,13 @@ impl PinnedObject {
     /// Returns the time the object was created (ms since epoch).
     #[napi]
     pub fn created_at(&self) -> DateTime<Utc> {
-        *self.inner.lock().unwrap().created_at()
+        self.inner.lock().unwrap().created_at
     }
 
     /// Returns the time the object was last updated (ms since epoch).
     #[napi]
     pub fn updated_at(&self) -> DateTime<Utc> {
-        *self.inner.lock().unwrap().updated_at()
+        self.inner.lock().unwrap().updated_at
     }
 }
 

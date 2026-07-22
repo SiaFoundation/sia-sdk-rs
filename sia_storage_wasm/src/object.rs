@@ -51,13 +51,13 @@ impl PinnedObject {
     /// Returns the creation time.
     #[wasm_bindgen(js_name = "createdAt")]
     pub fn created_at(&self) -> js_sys::Date {
-        js_sys::Date::new(&JsValue::from(self.0.created_at().timestamp_millis() as f64))
+        js_sys::Date::new(&JsValue::from(self.0.created_at.timestamp_millis() as f64))
     }
 
     /// Returns the last updated time.
     #[wasm_bindgen(js_name = "updatedAt")]
     pub fn updated_at(&self) -> js_sys::Date {
-        js_sys::Date::new(&JsValue::from(self.0.updated_at().timestamp_millis() as f64))
+        js_sys::Date::new(&JsValue::from(self.0.updated_at.timestamp_millis() as f64))
     }
 
     /// Returns the slabs that make up the object.
