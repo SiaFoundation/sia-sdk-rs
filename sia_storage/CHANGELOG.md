@@ -1,3 +1,25 @@
+## 0.11.0 (2026-07-22)
+
+### Breaking Changes
+
+- Add a version field to slabs.
+- Added `PackedUploadoptions` for packed uploads.
+
+### Features
+
+- Encrypt object data per slab so each slab can be re-encrypted independently without reusing the object's data key.
+- Switch sector root and range proof verifier to optimized SIMD backends.
+
+#### Added `start_offset` to `UploadOptions`.
+
+This allows objects to be rewritten without reuploading the entire object. The original object is not replaced, so both versions can be pinned simultaneously.
+
+### Fixes
+
+#### Reject malformed share-link encryption keys.
+
+The error for a bad share-link key now states it must be base64url-encoded rather than hex (the fragment was already decoded as base64url), and a fragment that does not decode to exactly 32 bytes is rejected instead of being silently zero-padded into a bogus key.
+
 ## 0.10.0 (2026-06-23)
 
 ### Breaking Changes
