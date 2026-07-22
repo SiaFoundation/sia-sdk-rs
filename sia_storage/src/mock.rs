@@ -8,7 +8,9 @@ use crate::hosts::Hosts;
 use crate::rhp4::Client;
 use crate::time::Duration;
 use crate::upload::{PackedUpload, upload_object};
-use crate::{AppKey, DownloadError, DownloadOptions, Object, UploadError, UploadOptions};
+use crate::{
+    AppKey, DownloadError, DownloadOptions, Object, PackedUploadOptions, UploadError, UploadOptions,
+};
 
 pub struct MockUploader {
     hosts: Hosts<Client>,
@@ -32,7 +34,7 @@ impl MockUploader {
         upload_object(self.hosts.clone(), self.app_key.clone(), object, r, options).await
     }
 
-    pub fn upload_packed(&self, options: UploadOptions) -> Result<PackedUpload, UploadError> {
+    pub fn upload_packed(&self, options: PackedUploadOptions) -> Result<PackedUpload, UploadError> {
         PackedUpload::new(self.hosts.clone(), self.app_key.clone(), options)
     }
 }

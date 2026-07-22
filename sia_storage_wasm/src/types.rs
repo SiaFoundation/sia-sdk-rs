@@ -106,6 +106,14 @@ export interface UploadOptions {
     dataShards?: number;
     parityShards?: number;
     maxBufferedSlabs?: number;
+    startOffset?: bigint;
+    onShardUploaded?: (progress: ShardProgress) => void;
+}
+
+export interface PackedUploadOptions {
+    dataShards?: number;
+    parityShards?: number;
+    maxBufferedSlabs?: number;
     onShardUploaded?: (progress: ShardProgress) => void;
 }
 "#;
@@ -130,22 +138,51 @@ fn get_function(obj: &js_sys::Object, key: &str) -> Option<js_sys::Function> {
         .and_then(|v| v.dyn_into::<js_sys::Function>().ok())
 }
 
-pub(crate) fn upload_options_from_js(val: JsValue) -> sia_storage::UploadOptions {
-    let obj = js_sys::Object::from(val);
-    let mut options = sia_storage::UploadOptions::default();
-    if let Some(v) = get_f64(&obj, "dataShards") {
+fn get_bigint_u64(obj: &js_sys::Object, key: &str) -> Result<Option<u64>, JsError> {
+    let Ok(v) = js_sys::Reflect::get(obj, &key.into()) else {
+        return Ok(None);
+    };
+    if v.is_undefined() || v.is_null() {
+        return Ok(None);
+    }
+    if !v.is_bigint() {
+        return Err(JsError::new(&format!("{key} must be a bigint")));
+    }
+    u64::try_from(v.unchecked_into::<js_sys::BigInt>())
+        .map(Some)
+        .map_err(|_| {
+            JsError::new(&format!(
+                "{key} must be a non-negative integer that fits in u64"
+            ))
+        })
+}
+
+fn packed_options_from_obj(obj: &js_sys::Object) -> sia_storage::PackedUploadOptions {
+    let mut options = sia_storage::PackedUploadOptions::default();
+    if let Some(v) = get_f64(obj, "dataShards") {
         options.data_shards = v as u8;
     }
-    if let Some(v) = get_f64(&obj, "parityShards") {
+    if let Some(v) = get_f64(obj, "parityShards") {
         options.parity_shards = v as u8;
     }
-    if let Some(v) = get_f64(&obj, "maxBufferedSlabs") {
+    if let Some(v) = get_f64(obj, "maxBufferedSlabs") {
         options.max_buffered_slabs = Some(v as usize);
     }
-    if let Some(cb) = get_function(&obj, "onShardUploaded") {
+    if let Some(cb) = get_function(obj, "onShardUploaded") {
         options.shard_uploaded = Some(shard_progress_callback(cb));
     }
     options
+}
+
+pub(crate) fn packed_upload_options_from_js(val: JsValue) -> sia_storage::PackedUploadOptions {
+    packed_options_from_obj(&js_sys::Object::from(val))
+}
+
+pub(crate) fn upload_options_from_js(val: JsValue) -> Result<sia_storage::UploadOptions, JsError> {
+    let obj = js_sys::Object::from(val);
+    let mut options: sia_storage::UploadOptions = packed_options_from_obj(&obj).into();
+    options.start_offset = get_bigint_u64(&obj, "startOffset")?;
+    Ok(options)
 }
 
 #[wasm_bindgen(typescript_custom_section)]
