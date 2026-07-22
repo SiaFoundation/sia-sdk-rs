@@ -1,6 +1,6 @@
 [package]
 name = "sia_core"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 repository = "https://github.com/SiaFoundation/sia-sdk-rs"
 license = "MIT"

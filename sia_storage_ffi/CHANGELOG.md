@@ -1,3 +1,19 @@
+## 0.10.0 (2026-07-22)
+
+### Breaking Changes
+
+- Add a version field to slabs.
+- Added `PackedUploadoptions` for packed uploads.
+
+### Features
+
+- Encrypt object data per slab so each slab can be re-encrypted independently without reusing the object's data key.
+- Switch sector root and range proof verifier to optimized SIMD backends.
+
+#### Added `start_offset` to `UploadOptions`.
+
+This allows objects to be rewritten without reuploading the entire object. The original object is not replaced, so both versions can be pinned simultaneously.
+
 ## 0.9.0 (2026-06-23)
 
 ### Breaking Changes
