@@ -14,21 +14,21 @@ publish = false
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
-async-trait = "0.1.89"
+async-trait = "0.1.91"
 sia_storage = { version = "0.10.0", path = "../sia_storage" }
-log = "0.4.30"
-rand = "0.10.1"
+log = "0.4.33"
+rand = "0.10.2"
 sia_core = { version = "0.4.1", path = "../sia_core" }
-thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync"] }
-tokio-util = "0.7.18"
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync"] }
+tokio-util = "0.7.19"
 uniffi = { version = "0.31.0", features = ["cli", "tokio"] } # be careful updating as it may break uniffi-react-native-bindgen
-zeroize = "1.8.1"
+zeroize = "1.9.0"
 
 
 [build-dependencies]
 uniffi = { version = "0.31.0", features = ["build"] }
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync", "io-util"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "io-util"] }
 
 [[bin]]
 name = "uniffi-bindgen"
