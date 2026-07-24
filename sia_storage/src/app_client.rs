@@ -503,7 +503,7 @@ impl Client {
                 "invalid url scheme: expected {SHARE_URL_SCHEME}"
             )));
         }
-        let encryption_key = match share_url.fragment() {
+        let data_key = match share_url.fragment() {
             Some(fragment) => {
                 let fragment = match fragment.strip_prefix("encryption_key=") {
                     Some(fragment) => Ok(fragment),
@@ -537,11 +537,11 @@ impl Client {
         )
         .await?;
 
-        Ok(Object::new(
-            encryption_key,
-            shared_object.slabs.clone(),
-            Vec::new(),
-        ))
+        Ok(Object {
+            data_key,
+            slabs: shared_object.slabs,
+            ..Default::default()
+        })
     }
 }
 
@@ -910,7 +910,11 @@ mod tests {
             offset: 0,
             length: 256,
         }];
-        let object = Object::new(data_key.clone(), slabs.clone(), Vec::new());
+        let object = Object {
+            data_key: data_key.clone(),
+            slabs: slabs.clone(),
+            ..Default::default()
+        };
         let object_id = object.id();
 
         let server = Server::run();

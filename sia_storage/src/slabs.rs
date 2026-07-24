@@ -335,22 +335,68 @@ pub struct ObjectEvent {
 /// Objects can be sealed with [Object::seal] for storage on the indexer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Object {
-    pub(crate) data_key: EncryptionKey, // not public to avoid accidental exposure
-
+    pub(crate) data_key: EncryptionKey,
     pub(crate) slabs: Vec<Slab>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-
     /// Application-defined metadata stored alongside the object. Encrypted when sealed.
     pub metadata: Vec<u8>,
+    /// The creation timestamp of the object. Overwritten by the indexer.
+    pub created_at: DateTime<Utc>,
+    /// The last updated timestamp of the object. Overwritten by the indexer.
+    pub updated_at: DateTime<Utc>,
 }
 
 impl Object {
-    pub(crate) fn new(data_key: EncryptionKey, slabs: Vec<Slab>, metadata: Vec<u8>) -> Self {
+    /// Creates a new empty object with a unique data key and optional
+    /// application-defined metadata.
+    ///
+    /// Objects can be passed to [Sdk::upload](crate::Sdk::upload) to add data
+    /// to them and [Sdk::download](crate::Sdk::download) to retrieve the data
+    /// from the network.
+    ///
+    /// After uploading, objects should be pinned with
+    /// [Sdk::pin_object](crate::Sdk::pin_object) so the object is tracked and
+    /// remains available.
+    pub fn new(metadata: Option<Vec<u8>>) -> Self {
+        Object {
+            data_key: EncryptionKey::from(rand::random::<[u8; 32]>()),
+            slabs: Vec::new(),
+            metadata: metadata.unwrap_or_default(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// Creates an [Object] directly from an existing data key and slabs,
+    /// bypassing the SDK's upload pipeline. Prefer [Object::new] or [Object::default].
+    ///
+    /// This is useful for interoperability with systems such as IPFS or LBRY,
+    /// where an object's components are persisted separately and the object
+    /// must be reconstructed from them.
+    ///
+    /// Objects produced by
+    /// [Sdk::upload](crate::Sdk::upload) are guaranteed to be safe to
+    /// reconstruct. Others, not so much. Here be dragons.
+    ///
+    /// **Invariants:**
+    /// - The data key must be the one that encrypted the slabs. A mismatched
+    ///   key fails silently: downloads succeed but return garbage.
+    /// - Slab keys must never be reused. Reuse compromises encryption.
+    /// - Each slab's `version` must match the version it was encrypted with.
+    ///   A mislabeled slab decrypts to garbage without error.
+    /// - Each slab's `offset` and `length` must match how the data was
+    ///   encrypted: `offset` seeks the keystream, and slab order defines the
+    ///   object's byte stream. Wrong values silently corrupt or reorder the
+    ///   data.
+    #[cfg(feature = "less-safe-crypto")]
+    pub fn less_safe_new(
+        data_key: EncryptionKey,
+        slabs: Vec<Slab>,
+        metadata: Option<Vec<u8>>,
+    ) -> Self {
         Object {
             data_key,
             slabs,
-            metadata,
+            metadata: metadata.unwrap_or_default(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -361,19 +407,21 @@ impl Object {
         object_id(&self.slabs)
     }
 
+    /// Returns the data key so it can be exported and later re-imported
+    /// with [Object::less_safe_new].
+    ///
+    /// The data key alone decrypts the object's data. Never store it in
+    /// plaintext and do not reuse it for new objects.
+    ///
+    /// Prefer sealing the object with [Object::seal] instead.
+    #[cfg(feature = "less-safe-crypto")]
+    pub fn data_key(&self) -> &EncryptionKey {
+        &self.data_key
+    }
+
     /// Returns the slabs that make up the object.
     pub fn slabs(&self) -> &[Slab] {
         &self.slabs
-    }
-
-    /// Returns the creation time of the object.
-    pub fn created_at(&self) -> &DateTime<Utc> {
-        &self.created_at
-    }
-
-    /// Returns the last updated time of the object.
-    pub fn updated_at(&self) -> &DateTime<Utc> {
-        &self.updated_at
     }
 
     /// Returns the total size of the object by summing the lengths of its slabs.
@@ -435,13 +483,7 @@ impl Object {
 
 impl Default for Object {
     fn default() -> Self {
-        Object {
-            data_key: EncryptionKey::from(rand::random::<[u8; 32]>()),
-            slabs: Vec::new(),
-            metadata: Vec::new(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
+        Self::new(None)
     }
 }
 
@@ -638,6 +680,47 @@ mod test {
 
         assert_eq!(opened.slabs, slabs);
         assert_eq!(opened.metadata, meta);
+    }
+
+    #[cfg(feature = "less-safe-crypto")]
+    #[sia_core_derive::cross_target_test]
+    fn test_less_safe_new_roundtrip() {
+        let data_key = EncryptionKey::from(random_bytes_32());
+        let slabs = vec![Slab {
+            version: SlabVersion::V1,
+            encryption_key: random_bytes_32().into(),
+            min_shards: 10,
+            sectors: (0..30)
+                .map(|_| Sector {
+                    root: random_bytes_32().into(),
+                    host_key: PublicKey::new(random_bytes_32()),
+                })
+                .collect(),
+            offset: 0,
+            length: 100,
+        }];
+        let meta = b"hello, world!".to_vec();
+
+        let reconstructed =
+            Object::less_safe_new(data_key.clone(), slabs.clone(), Some(meta.clone()));
+        let original = Object {
+            data_key,
+            slabs,
+            metadata: meta,
+            created_at: reconstructed.created_at,
+            updated_at: reconstructed.updated_at,
+        };
+        assert_eq!(original, reconstructed);
+        assert_eq!(original.id(), reconstructed.id());
+
+        let app_key = AppKey::import(random_bytes_32());
+        let opened_original = original.seal(&app_key).open(&app_key).expect("should open");
+        let opened_reconstructed = reconstructed
+            .seal(&app_key)
+            .open(&app_key)
+            .expect("should open");
+        assert_eq!(opened_original, original);
+        assert_eq!(opened_original, opened_reconstructed);
     }
 
     /// tests that the SealedObject struct is compatible with the Go implementation

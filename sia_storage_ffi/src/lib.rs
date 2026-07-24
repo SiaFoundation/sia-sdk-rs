@@ -266,13 +266,13 @@ impl PinnedObject {
     /// Returns the time the object was created.
     pub fn created_at(&self) -> SystemTime {
         let inner = self.inner.lock().unwrap();
-        (*inner.created_at()).into()
+        inner.created_at.into()
     }
 
     /// Returns the time the object was last updated.
     pub fn updated_at(&self) -> SystemTime {
         let inner = self.inner.lock().unwrap();
-        (*inner.updated_at()).into()
+        inner.updated_at.into()
     }
 }
 

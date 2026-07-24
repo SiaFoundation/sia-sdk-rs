@@ -49,6 +49,11 @@ jobs:
         run: cargo build --benches --features=mock
       - name: Test
         run: cargo test --all-features
+      - name: Check feature combinations
+        run: |
+          cargo check -p sia_storage --all-targets
+          cargo check -p sia_storage --all-targets --features=mock
+          cargo check -p sia_storage --all-targets --features=less-safe-crypto
 
   test-wasm:
     name: Test WASM (${{ matrix.runtime }})
