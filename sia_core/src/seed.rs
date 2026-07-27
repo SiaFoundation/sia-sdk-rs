@@ -1,9 +1,8 @@
 use std::fmt::Display;
 
-use crate::blake2::Blake2b256;
+use crate::blake2::{Blake2b256, Digest};
 use crate::signing::PrivateKey;
 use bip39::{Error as MnemonicError, Language, Mnemonic};
-use sha2::Digest;
 use thiserror::Error;
 use zeroize::ZeroizeOnDrop;
 
