@@ -214,7 +214,7 @@ pub(crate) async fn initiate_handshake<T: AsyncRead + AsyncWrite + Unpin>(
     their_key: &VerifyingKey,
     our_settings: ConnSettings,
 ) -> Result<(HandshakeResult, ConnSettings), HandshakeError> {
-    let our_secret = EphemeralSecret::random_from_rng(rand_core::OsRng);
+    let our_secret = EphemeralSecret::random();
     let our_xpk = PublicKey::from(&our_secret);
 
     // write our X25519 public key
@@ -296,7 +296,7 @@ pub(crate) async fn accept_handshake<T: AsyncRead + AsyncWrite + Unpin>(
     our_key: &SigningKey,
     our_settings: ConnSettings,
 ) -> Result<(HandshakeResult, ConnSettings), HandshakeError> {
-    let our_secret = EphemeralSecret::random_from_rng(rand_core::OsRng);
+    let our_secret = EphemeralSecret::random();
     let our_xpk = PublicKey::from(&our_secret);
 
     // read initiator's X25519 public key
@@ -390,6 +390,8 @@ pub(crate) fn merge_settings(
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::Signer;
+    use getrandom::SysRng;
+    use getrandom::rand_core::UnwrapErr;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use x25519_dalek::StaticSecret;
 
@@ -540,7 +542,7 @@ mod tests {
         let initiator_xpk = PublicKey::from(initiator_xpk_bytes);
 
         // generate responder X25519 keypair and derive shared secret
-        let responder_secret = EphemeralSecret::random_from_rng(rand_core::OsRng);
+        let responder_secret = EphemeralSecret::random();
         let responder_xpk = PublicKey::from(&responder_secret);
         let shared_secret = responder_secret.diffie_hellman(&initiator_xpk);
 
@@ -587,7 +589,7 @@ mod tests {
 
     #[tokio::test]
     async fn initiate_handshake_success() {
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut UnwrapErr(SysRng));
         let verifying_key = signing_key.verifying_key();
         let (mut client, mut server) = tokio::io::duplex(1024);
 
@@ -606,7 +608,7 @@ mod tests {
 
     #[tokio::test]
     async fn initiate_handshake_merges_settings() {
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut UnwrapErr(SysRng));
         let verifying_key = signing_key.verifying_key();
         let (mut client, mut server) = tokio::io::duplex(1024);
 
@@ -629,9 +631,9 @@ mod tests {
 
     #[tokio::test]
     async fn initiate_handshake_invalid_signature() {
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut UnwrapErr(SysRng));
         // use a *different* verifying key so signature verification fails
-        let wrong_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        let wrong_key = ed25519_dalek::SigningKey::generate(&mut UnwrapErr(SysRng));
         let wrong_verifying_key = wrong_key.verifying_key();
         let (mut client, mut server) = tokio::io::duplex(1024);
 
@@ -648,7 +650,7 @@ mod tests {
 
     #[tokio::test]
     async fn initiate_handshake_rejects_bad_settings() {
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut UnwrapErr(SysRng));
         let verifying_key = signing_key.verifying_key();
         let (mut client, mut server) = tokio::io::duplex(1024);
 

@@ -33,8 +33,5 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "io-util"] 
 [[bin]]
 name = "uniffi-bindgen"
 
-[dev-dependencies]
-pretty_env_logger = "0.5.0"
-
 [features]
 mock = []

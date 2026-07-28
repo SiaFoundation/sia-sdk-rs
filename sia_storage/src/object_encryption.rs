@@ -1,6 +1,6 @@
 use crate::encryption::EncryptionKey;
-use chacha20poly1305::aead::{Aead, OsRng};
-use chacha20poly1305::{AeadCore, KeyInit, XChaCha20Poly1305};
+use chacha20poly1305::aead::{Aead, Generate};
+use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use sia_core::blake2::Blake2b256;
 use sia_core::signing::PrivateKey;
 use sia_core::types::Hash256;
@@ -36,7 +36,7 @@ pub(crate) fn seal_data_key(
     let data_encryption_key =
         derive_encryption_key(app_key.as_ref(), object_id.as_ref(), b"dataKey");
     let encryption_key_cipher = XChaCha20Poly1305::new(data_encryption_key.as_ref().into());
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let nonce = XNonce::generate();
     let encrypted_data_key = encryption_key_cipher
         .encrypt(&nonce, encryption_key.as_ref().as_ref())
         .expect("encryption failed");
@@ -51,7 +51,7 @@ pub(crate) fn seal_metadata_key(
     let meta_encryption_key =
         derive_encryption_key(app_key.as_ref(), object_id.as_ref(), b"metadataKey");
     let encryption_key_cipher = XChaCha20Poly1305::new(meta_encryption_key.as_ref().into());
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let nonce = XNonce::generate();
     let encrypted_meta_key = encryption_key_cipher
         .encrypt(&nonce, encryption_key.as_ref().as_ref())
         .expect("encryption failed");
@@ -71,7 +71,7 @@ pub(crate) fn open_data_key(
     let encryption_key_cipher = XChaCha20Poly1305::new(data_encryption_key.as_ref().into());
     let (nonce_bytes, ciphertext) = encrypted_data_key.split_at(NONCE_SIZE);
     let nonce_bytes: [u8; 24] = nonce_bytes.try_into().unwrap(); // safe due to length check above
-    let nonce = chacha20poly1305::XNonce::from(nonce_bytes);
+    let nonce = XNonce::from(nonce_bytes);
     let decrypted_data_key = encryption_key_cipher
         .decrypt(&nonce, ciphertext)
         .map_err(|_| DecryptError::Decryption)?;
@@ -91,7 +91,7 @@ pub(crate) fn open_metadata_key(
     let encryption_key_cipher = XChaCha20Poly1305::new(meta_encryption_key.as_ref().into());
     let (nonce_bytes, ciphertext) = encrypted_meta_key.split_at(NONCE_SIZE);
     let nonce_bytes: [u8; 24] = nonce_bytes.try_into().unwrap(); // safe due to length check above
-    let nonce = chacha20poly1305::XNonce::from(nonce_bytes);
+    let nonce = XNonce::from(nonce_bytes);
     let decrypted_meta_key = encryption_key_cipher
         .decrypt(&nonce, ciphertext)
         .map_err(|_| DecryptError::Decryption)?;
@@ -100,7 +100,7 @@ pub(crate) fn open_metadata_key(
 
 pub(crate) fn seal_metadata(meta_key: &EncryptionKey, metadata: &[u8]) -> Vec<u8> {
     let metadata_cipher = XChaCha20Poly1305::new(meta_key.as_ref().into());
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let nonce = XNonce::generate();
     let encrypted_metadata = metadata_cipher
         .encrypt(&nonce, metadata)
         .expect("encryption failed");
@@ -117,7 +117,7 @@ pub(crate) fn open_metadata(
     let metadata_cipher = XChaCha20Poly1305::new(meta_key.as_ref().into());
     let (nonce_bytes, ciphertext) = encrypted_metadata.split_at(NONCE_SIZE);
     let nonce_bytes: [u8; 24] = nonce_bytes.try_into().unwrap(); // safe due to length check above
-    let nonce = chacha20poly1305::XNonce::from(nonce_bytes);
+    let nonce = XNonce::from(nonce_bytes);
     let decrypted_metadata = metadata_cipher
         .decrypt(&nonce, ciphertext)
         .map_err(|_| DecryptError::Decryption)?;
