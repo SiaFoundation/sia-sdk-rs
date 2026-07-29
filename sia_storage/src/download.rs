@@ -9,7 +9,6 @@ use crate::congestion::InflightController;
 use crate::encryption::{Chacha20Cipher, EncryptionKey, encrypt_recovered_shards};
 use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::{Hosts, InflightGuard, RPCError};
-use crate::rhp4::{Client, Transport};
 use crate::slabs::SlabVersion::{V0, V1};
 use crate::time::{Duration, Elapsed, Instant, sleep};
 use crate::{AppKey, DownloadOptions, Object, Sector, ShardProgress, ShardProgressCallback, Slab};
@@ -121,8 +120,8 @@ struct SlabDecoded {
 /// benefit is if we want to maintain a version of the download logic
 /// for WASM, we can reuse the state machine and its await points and swap
 /// out the async primitives.
-struct SlabRecovery<State, T: Transport> {
-    client: Hosts<T>,
+struct SlabRecovery<State> {
+    client: Hosts,
     controller: Arc<InflightController>,
     account_key: Arc<AppKey>,
 
@@ -135,9 +134,9 @@ struct SlabRecovery<State, T: Transport> {
     state: State,
 }
 
-impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
+impl SlabRecovery<AwaitingRecovery> {
     fn new(
-        client: Hosts<T>,
+        client: Hosts,
         controller: Arc<InflightController>,
         account_key: Arc<AppKey>,
         slab: ChunkSlab,
@@ -263,7 +262,7 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
     async fn recover_shards(
         mut self,
         shard_downloaded: Option<ShardProgressCallback>,
-    ) -> Result<SlabRecovery<ShardsRecovered, T>, DownloadError> {
+    ) -> Result<SlabRecovery<ShardsRecovered>, DownloadError> {
         let mut shard_tasks = JoinSet::new();
         let mut shards = vec![None; self.state.sectors.len()];
         let mut sectors = VecDeque::from(std::mem::take(&mut self.state.sectors));
@@ -352,8 +351,8 @@ impl<T: Transport> SlabRecovery<AwaitingRecovery, T> {
     }
 }
 
-impl<T: Transport> SlabRecovery<ShardsRecovered, T> {
-    fn decode(self) -> Result<SlabRecovery<SlabDecoded, T>, DownloadError> {
+impl SlabRecovery<ShardsRecovered> {
+    fn decode(self) -> Result<SlabRecovery<SlabDecoded>, DownloadError> {
         let parity_shards = self.state.shards.len() - self.min_shards;
         let rs = ErasureCoder::new(self.min_shards, parity_shards)?;
         let mut shards = self.state.shards;
@@ -384,7 +383,7 @@ impl<T: Transport> SlabRecovery<ShardsRecovered, T> {
     }
 }
 
-impl<T: Transport> SlabRecovery<SlabDecoded, T> {
+impl SlabRecovery<SlabDecoded> {
     async fn write<W: AsyncWrite + Unpin>(self, w: &mut W) -> Result<(), DownloadError> {
         let skip = self.offset % (SEGMENT_SIZE * self.state.data_shards.len());
         ErasureCoder::write_data_shards(w, &self.state.data_shards, skip, self.length).await?;
@@ -483,7 +482,7 @@ impl Iterator for ChunkIter {
 /// Initial per-chunk size. Kept small so the first chunk — and therefore the
 /// first byte — lands in roughly one round trip.
 pub struct Download {
-    hosts: Hosts<Client>,
+    hosts: Hosts,
     account_key: Arc<AppKey>,
     data_key: EncryptionKey,
 
@@ -654,7 +653,7 @@ impl Download {
 
     pub(crate) fn new(
         object: &Object,
-        hosts: Hosts<Client>,
+        hosts: Hosts,
         account_key: Arc<AppKey>,
         options: DownloadOptions,
     ) -> Result<Self, DownloadError> {
@@ -710,6 +709,7 @@ mod test {
     use sia_core::types::v2::NetAddress;
 
     use crate::hosts::Hosts;
+    use crate::rhp4::{Client, mock};
     use crate::upload::upload_object;
     use crate::{Host, ShardProgress, UploadOptions};
 
@@ -718,8 +718,8 @@ mod test {
         let upload_options = UploadOptions::default();
         let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
-        let transport = Client::new();
-        let hosts = Hosts::new(transport.clone());
+        let transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -779,8 +779,8 @@ mod test {
         let upload_options = UploadOptions::default();
         let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
-        let transport = Client::new();
-        let hosts = Hosts::new(transport.clone());
+        let transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -864,8 +864,8 @@ mod test {
         let parity_shards = upload_options.parity_shards as usize;
         let total_shards = data_shards + parity_shards;
 
-        let transport = Client::new();
-        let hosts = Hosts::new(transport.clone());
+        let transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(transport.clone()));
         let host_keys: Vec<_> = (0..total_shards)
             .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
             .collect();
@@ -980,8 +980,8 @@ mod test {
         let upload_options = UploadOptions::default();
         let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
-        let transport = Client::new();
-        let hosts = Hosts::new(transport.clone());
+        let transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -1082,8 +1082,8 @@ mod test {
         let optimal_data_size = upload_options.optimal_data_size();
         let num_slabs = 3;
 
-        let transport = Client::new();
-        let hosts = Hosts::new(transport.clone());
+        let transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -1177,12 +1177,12 @@ mod test {
     /// (the rest only have write samples from the upload) and the read median
     /// sits at its floor, and finally makes those 15 hosts slow. Racers
     /// (when allowed) come from the remaining fast hosts.
-    async fn racing_setup(slow_delay: Duration) -> (Hosts<Client>, Arc<AppKey>, Slab) {
+    async fn racing_setup(slow_delay: Duration) -> (Hosts, Arc<AppKey>, Slab) {
         let upload_options = UploadOptions::default();
         let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
-        let transport = Client::new();
-        let hosts = Hosts::new(transport.clone());
+        let transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| Host {
