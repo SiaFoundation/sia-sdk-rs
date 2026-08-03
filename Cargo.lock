@@ -2572,6 +2572,7 @@ dependencies = [
  "sia_mux",
  "sia_reed_solomon",
  "sysinfo",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
