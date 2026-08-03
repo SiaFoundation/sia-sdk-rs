@@ -640,7 +640,9 @@ impl PackedUpload {
     ///
     /// If the reader errors part-way, it's safe to continue calling
     /// [add](Self::add); no object is registered for the failed call. Or call
-    /// [finalize](Self::finalize) to collect the objects added so far.
+    /// [finalize](Self::finalize) to collect the objects added so far. Bytes
+    /// read before the error remain in the current slab as padding and stay
+    /// counted in [length](Self::length) and [remaining](Self::remaining).
     ///
     /// ```js
     /// const packed = sdk.uploadPacked();
@@ -664,6 +666,43 @@ impl PackedUpload {
                 // slab uploads (they're held as AbortOnDropHandles inside pu).
                 let mut pu = guard.take().ok_or_else(|| Error::from_reason("upload closed"))?;
                 let res = pu.add(stream.0).await.map_err(|e| Error::from_reason(e.to_string()));
+                let total = pu.length();
+                *guard = Some(pu);
+                length.store(total, Ordering::Release);
+                res
+            } => r,
+        };
+        let size = result?;
+        Ok(BigInt::from(size))
+    }
+
+    /// Adds a new object to the upload by opening the file at `path`. Behaves
+    /// like [add](Self::add) otherwise.
+    ///
+    /// Prefer this to [add](Self::add) for files on disk: the read stays in
+    /// Rust instead of streaming each chunk through JS.
+    ///
+    /// ```js
+    /// const packed = sdk.uploadPacked();
+    /// await packed.addPath("/tmp/photo.jpg");
+    /// const objects = await packed.finalize();
+    /// ```
+    #[napi]
+    pub async fn add_path(&self, path: String) -> Result<BigInt> {
+        if self.cancel.is_cancelled() {
+            return Err(Error::from_reason("upload closed"));
+        }
+        let inner = self.inner.clone();
+        let cancel = self.cancel.clone();
+        let length = self.length.clone();
+        let result: Result<u64> = tokio::select! {
+            _ = cancel.cancelled() => Err(Error::from_reason("upload closed")),
+            r = async {
+                let mut guard = inner.lock().await;
+                // Take ownership so cancel's drop-cascade can abort in-flight
+                // slab uploads (they're held as AbortOnDropHandles inside pu).
+                let mut pu = guard.take().ok_or_else(|| Error::from_reason("upload closed"))?;
+                let res = pu.add_path(path).await.map_err(|e| Error::from_reason(e.to_string()));
                 let total = pu.length();
                 *guard = Some(pu);
                 length.store(total, Ordering::Release);
@@ -765,6 +804,31 @@ impl Sdk {
             .inner
             .clone()
             .upload(inner, stream.0, options)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(PinnedObject {
+            inner: Mutex::new(obj),
+        })
+    }
+
+    /// Uploads the file at `path`. Behaves like [upload](Self::upload)
+    /// otherwise.
+    ///
+    /// Prefer this to [upload](Self::upload) for files on disk: the read stays
+    /// in Rust instead of streaming each chunk through JS.
+    #[napi(ts_args_type = "object: PinnedObject, path: string, options?: UploadOptions")]
+    pub async fn upload_path(
+        &self,
+        object: &PinnedObject,
+        path: String,
+        options: Option<SendableUploadOptions>,
+    ) -> Result<PinnedObject> {
+        let options = options.map(|o| o.0).unwrap_or_default();
+        let inner = object.inner.lock().unwrap().clone();
+        let obj = self
+            .inner
+            .clone()
+            .upload_path(inner, path, options)
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
         Ok(PinnedObject {

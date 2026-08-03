@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 use std::io;
+#[cfg(feature = "fs")]
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::congestion::{InflightController, SamplePermit};
@@ -723,7 +725,9 @@ impl PackedUpload {
     ///
     /// If the reader errors part-way, it's safe to continue calling
     /// [add](Self::add); no object is registered for the failed call. Or call
-    /// [finalize](Self::finalize) to collect the objects added so far.
+    /// [finalize](Self::finalize) to collect the objects added so far. Bytes
+    /// read before the error remain in the current slab as padding and stay
+    /// counted in [length](Self::length) and [remaining](Self::remaining).
     pub async fn add<R: AsyncRead + Unpin>(&mut self, r: R) -> Result<u64, UploadError> {
         let object = Object::default();
         // buffer the reader since SlabReader reads 64 bytes at a time
@@ -733,6 +737,13 @@ impl PackedUpload {
         let end = self.upload.length();
         self.objects.push(ObjectUpload { start, end, object });
         Ok(n)
+    }
+
+    /// Adds a new object to the upload by opening the file at `path` and
+    /// reading it to EOF. Behaves like [add](Self::add) otherwise.
+    #[cfg(feature = "fs")]
+    pub async fn add_path<P: AsRef<Path>>(&mut self, path: P) -> Result<u64, UploadError> {
+        self.add(tokio::fs::File::open(path).await?).await
     }
 
     /// Finalizes the upload and returns the resulting objects. This will wait for all readers

@@ -1,3 +1,5 @@
+#[cfg(feature = "fs")]
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -177,6 +179,28 @@ impl Sdk {
             options,
         )
         .await
+    }
+
+    /// Uploads the file at `path`. Behaves like [upload](Self::upload)
+    /// otherwise.
+    ///
+    /// # Arguments
+    /// * `object` - The object to upload into. Use `Object::default()` for new uploads.
+    /// * `path` - The path of the file to upload. It will be read until EOF.
+    /// * `options` - The [UploadOptions] to use for the upload.
+    ///
+    /// # Returns
+    /// The object containing the metadata needed to download. The caller must
+    /// pin the object to the indexer after uploading.
+    #[cfg(feature = "fs")]
+    pub async fn upload_path<P: AsRef<Path>>(
+        &self,
+        object: Object,
+        path: P,
+        options: UploadOptions,
+    ) -> Result<Object, UploadError> {
+        let file = tokio::fs::File::open(path).await?;
+        self.upload(object, file, options).await
     }
 
     /// Creates a new packed upload. This allows multiple objects to be packed together
