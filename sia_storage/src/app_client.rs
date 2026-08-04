@@ -2127,12 +2127,14 @@ mod tests {
         })
         .unwrap();
         server.expect(
-            Expectation::matching(move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
-                let pk = validate_url_signature_request(req);
-                pk == step2_ephemeral_pk
-                    && req.method() == "GET"
-                    && req.uri().path() == format!("/auth/connect/{request_id}/status")
-            })
+            Expectation::matching(
+                move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                    let pk = validate_url_signature_request(req);
+                    pk == step2_ephemeral_pk
+                        && req.method() == "GET"
+                        && req.uri().path() == format!("/auth/connect/{request_id}/status")
+                },
+            )
             .respond_with(
                 Response::builder()
                     .status(StatusCode::OK)
@@ -2145,22 +2147,24 @@ mod tests {
         let step3_ephemeral_pk = ephemeral_pk;
         let step3_app_pk = app_pk;
         server.expect(
-            Expectation::matching(move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
-                let pk = validate_url_signature_request(req);
-                if pk != step3_ephemeral_pk || req.method() != "POST" {
-                    return false;
-                }
-                if req.uri().path() != format!("/auth/connect/{request_id}/register") {
-                    return false;
-                }
-                let body: RegisterAppRequest =
-                    serde_json::from_slice(req.body().as_ref()).expect("invalid body");
-                if body.app_key != step3_app_pk {
-                    return false;
-                }
-                let sig_hash = register_app_sig_hash(request_id, &step3_ephemeral_pk);
-                step3_app_pk.verify(sig_hash.as_ref(), &body.signature)
-            })
+            Expectation::matching(
+                move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                    let pk = validate_url_signature_request(req);
+                    if pk != step3_ephemeral_pk || req.method() != "POST" {
+                        return false;
+                    }
+                    if req.uri().path() != format!("/auth/connect/{request_id}/register") {
+                        return false;
+                    }
+                    let body: RegisterAppRequest =
+                        serde_json::from_slice(req.body().as_ref()).expect("invalid body");
+                    if body.app_key != step3_app_pk {
+                        return false;
+                    }
+                    let sig_hash = register_app_sig_hash(request_id, &step3_ephemeral_pk);
+                    step3_app_pk.verify(sig_hash.as_ref(), &body.signature)
+                },
+            )
             .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
         );
 
