@@ -134,6 +134,17 @@ struct RegisterAppRequest {
     pub signature: Signature,
 }
 
+/// The body of a pre-authorized `auth/connect` request.
+#[derive(Serialize)]
+struct AppConnectRequest<'a> {
+    #[serde(flatten)]
+    metadata: &'a AppMetadata,
+    #[serde(rename = "preAuthorizedKey")]
+    pre_authorized_key: PublicKey,
+    #[serde(rename = "preAuthorizationSignature")]
+    pre_authorization_signature: Signature,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ObjectSlab {
