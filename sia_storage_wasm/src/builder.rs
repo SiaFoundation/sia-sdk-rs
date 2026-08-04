@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 
+use sia_core::signing::PrivateKey;
 use sia_storage::{
     ApprovedState, Builder as StorageBuilder, DisconnectedState, RequestingApprovalState,
 };
@@ -50,6 +51,45 @@ impl Builder {
                     Ok(None) => (Some(BuilderState::Disconnected(builder)), Ok(None)),
                     Err(e) => (Some(BuilderState::Disconnected(builder)), Err(to_js_err(e))),
                 },
+                other => (other, Err(JsError::new("must be in disconnected state"))),
+            }
+        })
+        .await;
+
+        *self.state.borrow_mut() = next_state;
+        result
+    }
+
+    /// Connects using a pre-authorized key, bypassing the interactive approval
+    /// flow, and returns a Sdk. `preAuthorizedKeySeed` is the 32-byte
+    /// pre-authorized private key (Uint8Array); `mnemonic` derives the app key.
+    #[wasm_bindgen(js_name = "connectPreAuthorized")]
+    pub async fn connect_pre_authorized(
+        &self,
+        pre_authorized_key_seed: &[u8],
+        mnemonic: &str,
+    ) -> Result<Sdk, JsError> {
+        if pre_authorized_key_seed.len() != 32 {
+            return Err(JsError::new("pre-authorized key seed must be 32 bytes"));
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(pre_authorized_key_seed);
+        let pre_authorized_key = PrivateKey::from_seed(&seed);
+        let mnemonic = mnemonic.to_string();
+
+        let state = self.state.borrow_mut().take();
+
+        let (next_state, result) = run_local(async move {
+            match state {
+                Some(BuilderState::Disconnected(builder)) => {
+                    match builder
+                        .connect_pre_authorized(&pre_authorized_key, &mnemonic)
+                        .await
+                    {
+                        Ok(sdk) => (Some(BuilderState::Finalized), Ok(Sdk::new(sdk))),
+                        Err(e) => (None, Err(to_js_err(e))),
+                    }
+                }
                 other => (other, Err(JsError::new("must be in disconnected state"))),
             }
         })

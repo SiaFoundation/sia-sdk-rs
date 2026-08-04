@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use sia_core::seed::{self, Seed};
-use sia_core::signing::Signature;
+use sia_core::signing::{PrivateKey, Signature};
 use sia_storage::{self, Hash256};
 use thiserror::Error;
 
@@ -306,6 +306,40 @@ impl Builder {
             match state {
                 BuilderState::Approved(builder) => {
                     let sdk = builder.register(&mnemonic).await?;
+                    Ok((BuilderState::Finalized, Arc::new(Sdk { inner: sdk })))
+                }
+                _ => Err(BuilderError::InvalidState),
+            }
+        })
+        .await
+    }
+
+    /// Connects using a pre-authorized key, bypassing the interactive approval
+    /// flow, and returns an [Sdk] directly.
+    ///
+    /// # Arguments
+    /// * `pre_authorized_key` - The 32-byte pre-authorized private key seed.
+    /// * `mnemonic` - The user's mnemonic phrase used to derive the app key.
+    pub async fn connect_pre_authorized(
+        &self,
+        pre_authorized_key: Vec<u8>,
+        mnemonic: String,
+    ) -> Result<Arc<Sdk>, BuilderError> {
+        if pre_authorized_key.len() != 32 {
+            return Err(BuilderError::Custom(
+                "pre-authorized key seed must be 32 bytes".to_string(),
+            ));
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&pre_authorized_key);
+        let pre_authorized_key = PrivateKey::from_seed(&seed);
+
+        self.with_state_transition(|state| async move {
+            match state {
+                BuilderState::Disconnected(builder) => {
+                    let sdk = builder
+                        .connect_pre_authorized(&pre_authorized_key, &mnemonic)
+                        .await?;
                     Ok((BuilderState::Finalized, Arc::new(Sdk { inner: sdk })))
                 }
                 _ => Err(BuilderError::InvalidState),

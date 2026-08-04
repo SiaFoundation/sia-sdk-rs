@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use sia_core::signing::Signature;
+use sia_core::signing::{PrivateKey, Signature};
 use sia_storage::Hash256;
 
 use crate::{AppMetadata, Sdk};
@@ -225,6 +225,39 @@ impl Builder {
                 BuilderState::Approved(builder) => {
                     let sdk = builder
                         .register(&mnemonic)
+                        .await
+                        .map_err(|e| Error::from_reason(e.to_string()))?;
+                    Ok((BuilderState::Finalized, Sdk { inner: sdk }))
+                }
+                _ => Err(Error::from_reason("invalid state")),
+            }
+        })
+        .await
+    }
+
+    /// Connects using a pre-authorized key, bypassing the interactive approval
+    /// flow, and returns the SDK directly. `preAuthorizedKey` is the 32-byte
+    /// pre-authorized private key seed; `mnemonic` derives the application key.
+    #[napi]
+    pub async fn connect_pre_authorized(
+        &self,
+        pre_authorized_key: Buffer,
+        mnemonic: String,
+    ) -> Result<Sdk> {
+        if pre_authorized_key.len() != 32 {
+            return Err(Error::from_reason(
+                "pre-authorized key seed must be 32 bytes",
+            ));
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&pre_authorized_key);
+        let pre_authorized_key = PrivateKey::from_seed(&seed);
+
+        self.with_state_transition(|state| async move {
+            match state {
+                BuilderState::Disconnected(builder) => {
+                    let sdk = builder
+                        .connect_pre_authorized(&pre_authorized_key, &mnemonic)
                         .await
                         .map_err(|e| Error::from_reason(e.to_string()))?;
                     Ok((BuilderState::Finalized, Sdk { inner: sdk }))
