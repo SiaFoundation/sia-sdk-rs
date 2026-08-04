@@ -2051,4 +2051,138 @@ mod tests {
             .await
             .unwrap();
     }
+
+    #[tokio::test]
+    async fn test_pre_authorized_connect_flow() {
+        let ephemeral_key = PrivateKey::from_seed(&rand::random());
+        let ephemeral_pk = ephemeral_key.public_key();
+        let pre_auth_key = PrivateKey::from_seed(&rand::random());
+        let pre_auth_pk = pre_auth_key.public_key();
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let app_pk = app_key.public_key();
+
+        let app_id = AppID::from(rand::random::<[u8; 32]>());
+        let metadata = AppMetadata {
+            id: app_id,
+            name: "test-app",
+            description: "A test application",
+            service_url: "https://test-app.com",
+            logo_url: Some("https://test-app.com/logo.png"),
+            callback_url: Some("https://test-app.com/callback"),
+        };
+
+        // the exact hash the pre-authorized key must sign for this request
+        let expected_sig_hash = pre_authorization_sig_hash(&ephemeral_pk, &metadata, &pre_auth_pk);
+
+        let server = Server::run();
+        let request_id = "preauth123";
+
+        #[derive(serde::Deserialize)]
+        struct PreAuthBody {
+            #[serde(rename = "preAuthorizedKey")]
+            pre_authorized_key: PublicKey,
+            #[serde(rename = "preAuthorizationSignature")]
+            pre_authorization_signature: Signature,
+        }
+
+        // step 1: the connect body must carry the pre-authorized public key and a
+        // signature that verifies over the proof hash (i.e. the client signed the
+        // right hash with the right key).
+        let step1_ephemeral_pk = ephemeral_pk;
+        let step1_pre_auth_pk = pre_auth_pk;
+        server.expect(
+            Expectation::matching(move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                let pk = validate_url_signature_request(req);
+                if pk != step1_ephemeral_pk
+                    || req.method() != "POST"
+                    || req.uri().path() != "/auth/connect"
+                {
+                    return false;
+                }
+                let body: PreAuthBody =
+                    serde_json::from_slice(req.body().as_ref()).expect("invalid body");
+                body.pre_authorized_key == step1_pre_auth_pk
+                    && step1_pre_auth_pk
+                        .verify(expected_sig_hash.as_ref(), &body.pre_authorization_signature)
+            })
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(format!(
+                        r#"{{"responseURL":"http://example.com/auth/connect/{request_id}","statusURL":"{}","registerURL":"{}","expiration":"2030-01-01T00:00:00Z"}}"#,
+                        server.url(&format!("/auth/connect/{request_id}/status")),
+                        server.url(&format!("/auth/connect/{request_id}/register"))
+                    ))
+                    .unwrap(),
+            ),
+        );
+
+        // step 2: a pre-authorized request is approved synchronously, so status
+        // returns the user secret on the first check.
+        let step2_ephemeral_pk = ephemeral_pk;
+        let user_secret = Hash256::new(rand::random());
+        let status_response = serde_json::to_string(&AuthConnectStatusResponse {
+            approved: true,
+            user_secret: Some(user_secret),
+        })
+        .unwrap();
+        server.expect(
+            Expectation::matching(move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                let pk = validate_url_signature_request(req);
+                pk == step2_ephemeral_pk
+                    && req.method() == "GET"
+                    && req.uri().path() == format!("/auth/connect/{request_id}/status")
+            })
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(status_response)
+                    .unwrap(),
+            ),
+        );
+
+        // step 3: register the app key (identical to the interactive flow).
+        let step3_ephemeral_pk = ephemeral_pk;
+        let step3_app_pk = app_pk;
+        server.expect(
+            Expectation::matching(move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                let pk = validate_url_signature_request(req);
+                if pk != step3_ephemeral_pk || req.method() != "POST" {
+                    return false;
+                }
+                if req.uri().path() != format!("/auth/connect/{request_id}/register") {
+                    return false;
+                }
+                let body: RegisterAppRequest =
+                    serde_json::from_slice(req.body().as_ref()).expect("invalid body");
+                if body.app_key != step3_app_pk {
+                    return false;
+                }
+                let sig_hash = register_app_sig_hash(request_id, &step3_ephemeral_pk);
+                step3_app_pk.verify(sig_hash.as_ref(), &body.signature)
+            })
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        // run the pre-authorized flow at the client level
+        let client = Client::new(server.url("/").to_string()).unwrap();
+
+        let resp = client
+            .request_app_connection_pre_authorized(&ephemeral_key, &metadata, &pre_auth_key)
+            .await
+            .unwrap();
+
+        let status_url: Url = resp.status_url.parse().unwrap();
+        let secret = client
+            .check_request_status(&ephemeral_key, status_url)
+            .await
+            .unwrap();
+        assert_eq!(secret, Some(user_secret));
+
+        let register_url: Url = resp.register_url.parse().unwrap();
+        client
+            .register_app(&ephemeral_key, &app_key, register_url)
+            .await
+            .unwrap();
+    }
 }
