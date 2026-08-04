@@ -259,6 +259,25 @@ impl Client {
             .await
     }
 
+    /// Requests an application connection using a pre-authorized key, bypassing
+    /// the interactive approval flow.
+    pub(crate) async fn request_app_connection_pre_authorized(
+        &self,
+        ephemeral_key: &PrivateKey,
+        opts: &AppMetadata,
+        pre_authorized_key: &PrivateKey,
+    ) -> Result<RegisterAppResponse, Error> {
+        let public_key = pre_authorized_key.public_key();
+        let sig_hash = pre_authorization_sig_hash(&ephemeral_key.public_key(), opts, &public_key);
+        let request = AppConnectRequest {
+            metadata: opts,
+            pre_authorized_key: public_key,
+            pre_authorization_signature: pre_authorized_key.sign(sig_hash.as_ref()),
+        };
+        self.post_json("auth/connect", ephemeral_key, Some(&request))
+            .await
+    }
+
     /// Checks if an auth request has been approved.
     ///
     /// If approved, it returns the user secret used
