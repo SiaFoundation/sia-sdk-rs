@@ -10,7 +10,8 @@ use sia_core::signing::PrivateKey;
 use sia_core::types::Hash256;
 
 use super::{
-    Error, RegisterAppResponse, SHARE_URL_SCHEME, SealedObjectEvent, SlabPinParams, Url, sign,
+    ERROR_OBJECT_UNPINNED_SLAB, Error, RegisterAppResponse, SHARE_URL_SCHEME, SealedObjectEvent,
+    SlabPinParams, Url, sign,
 };
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
@@ -36,6 +37,8 @@ struct State {
     objects: HashMap<Hash256, StoredObject>,
     slabs: HashMap<Hash256, PinnedSlab>,
     user_secret: Hash256,
+    pin_slabs_calls: usize,
+    pin_slabs_failures: usize,
 }
 
 /// An in-memory stand-in for the indexer API.
@@ -62,6 +65,18 @@ impl Client {
     /// Returns the number of slabs currently pinned.
     pub(crate) fn pinned_slabs(&self) -> usize {
         self.state.read().unwrap().slabs.len()
+    }
+
+    /// Makes the next `failures` calls to [`Client::pin_slabs`] fail with an
+    /// [`Error::Api`] before they resume succeeding.
+    pub(crate) fn set_pin_slabs_failures(&self, failures: usize) {
+        self.state.write().unwrap().pin_slabs_failures = failures;
+    }
+
+    /// Returns the number of times [`Client::pin_slabs`] has been called,
+    /// including the calls made to fail.
+    pub(crate) fn pin_slabs_calls(&self) -> usize {
+        self.state.read().unwrap().pin_slabs_calls
     }
 
     pub(crate) async fn check_app_authenticated(&self, _: &PrivateKey) -> Result<bool, Error> {
@@ -168,6 +183,13 @@ impl Client {
         object: &SealedObject,
     ) -> Result<(), Error> {
         let mut state = self.state.write().unwrap();
+        if object
+            .slabs
+            .iter()
+            .any(|slab| !state.slabs.contains_key(&slab.digest()))
+        {
+            return Err(Error::Api(ERROR_OBJECT_UNPINNED_SLAB.to_string()));
+        }
         state.objects.insert(
             object.id(),
             StoredObject {
@@ -216,6 +238,11 @@ impl Client {
         slabs: &[SlabPinParams],
     ) -> Result<Vec<Hash256>, Error> {
         let mut state = self.state.write().unwrap();
+        state.pin_slabs_calls += 1;
+        if state.pin_slabs_failures > 0 {
+            state.pin_slabs_failures -= 1;
+            return Err(Error::Api("temporary pin failure".to_string()));
+        }
         Ok(slabs
             .iter()
             .map(|params| {

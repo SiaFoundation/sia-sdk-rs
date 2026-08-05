@@ -4,6 +4,7 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use crate::app_client::{self, SlabPinParams};
 use crate::congestion::{InflightController, SamplePermit};
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
@@ -399,10 +400,53 @@ pub enum UploadError {
     Cancelled,
 }
 
-struct UploadedSlab {
-    encryption_key: EncryptionKey,
-    length: u32,
-    shards: Vec<Option<Sector>>,
+/// Maximum number of attempts to pin a single slab — initial request plus
+/// retries. The sectors are already on the network by this point, so a
+/// transient indexer error should not cost the whole upload.
+const MAX_PIN_RETRIES: usize = 3;
+
+/// Delay before the first pin retry. It doubles on each subsequent attempt.
+const PIN_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+/// Pins a freshly uploaded slab to the indexer, retrying transient errors.
+async fn pin_uploaded_slab(
+    api_client: &app_client::Client,
+    app_key: &AppKey,
+    slab: &Slab,
+    slab_index: usize,
+) -> Result<(), UploadError> {
+    let params = SlabPinParams {
+        version: slab.version,
+        encryption_key: slab.encryption_key.clone(),
+        min_shards: slab.min_shards,
+        sectors: slab.sectors.clone(),
+    };
+    let expected_id = slab.digest();
+
+    let mut attempt = 0;
+    loop {
+        match api_client
+            .pin_slabs(&app_key.0, std::slice::from_ref(&params))
+            .await
+        {
+            Ok(ids) => {
+                if ids.len() != 1 || ids[0] != expected_id {
+                    return Err(UploadError::InvalidSlabId);
+                }
+                return Ok(());
+            }
+            Err(e) if attempt + 1 < MAX_PIN_RETRIES && e.is_retryable() => {
+                let delay = PIN_RETRY_DELAY * (1 << attempt);
+                debug!(
+                    "failed to pin slab {slab_index} on attempt {}: {e}; retrying in {delay:?}",
+                    attempt + 1,
+                );
+                sleep(delay).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
 }
 
 /// A single-use streaming upload pipeline. Feed data into it by calling
@@ -410,6 +454,7 @@ struct UploadedSlab {
 /// [finish](Upload::finish) to recover the uploaded slabs.
 pub(crate) struct Upload {
     client: Hosts,
+    api_client: app_client::Client,
     app_key: Arc<AppKey>,
     erasure_coder: Arc<ErasureCoder>,
     slab_buffer: Option<SlabReader>,
@@ -419,13 +464,14 @@ pub(crate) struct Upload {
     /// Shard tasks only race slow hosts while this is zero, so racers never
     /// take permits that a primary shard is waiting for.
     waiting: watch::Sender<usize>,
-    slab_tasks: VecDeque<AbortOnDropHandle<Result<UploadedSlab, UploadError>>>,
+    slab_tasks: VecDeque<AbortOnDropHandle<Result<Slab, UploadError>>>,
     shard_uploaded: Option<ShardProgressCallback>,
 }
 
 impl Upload {
     pub(crate) fn new(
         client: Hosts,
+        api_client: app_client::Client,
         app_key: Arc<AppKey>,
         options: UploadOptions,
     ) -> Result<Self, UploadError> {
@@ -445,6 +491,7 @@ impl Upload {
             .unwrap_or_else(|| default_slabs_in_memory(options.slab_size()));
         Ok(Self {
             client,
+            api_client,
             app_key,
             slab_buffer: Some(SlabReader::new(
                 options.data_shards as usize,
@@ -467,6 +514,7 @@ impl Upload {
         let rs = self.erasure_coder.clone();
         let limiter = self.limiter.clone();
         let app_key = self.app_key.clone();
+        let min_shards = self.erasure_coder.data_shards() as u8;
         let progress_callback = self.shard_uploaded.clone();
         let slab_index = self.slab_tasks.len();
         let shard_permits = limiter.reserve(slab.shards.len()).await;
@@ -541,11 +589,7 @@ impl Upload {
                 });
             }
 
-            let mut slab_out = UploadedSlab {
-                encryption_key: slab.encryption_key,
-                length: slab.length as u32,
-                shards: vec![None; total_shards],
-            };
+            let mut sectors: Vec<Option<Sector>> = vec![None; total_shards];
             while let Some(res) = shard_tasks.join_next().await {
                 let result: SectorUploadResult = res??;
                 if let Some(callback) = &progress_callback {
@@ -557,9 +601,17 @@ impl Upload {
                         elapsed: result.elapsed,
                     });
                 }
-                slab_out.shards[result.shard_index] = Some(result.sector);
+                sectors[result.shard_index] = Some(result.sector);
             }
-            Ok(slab_out)
+
+            Ok(Slab {
+                version: SlabVersion::V1,
+                encryption_key: slab.encryption_key,
+                offset: 0,
+                min_shards,
+                length: slab.length as u32,
+                sectors: sectors.into_iter().map(|s| s.unwrap()).collect(),
+            })
         }));
         self.slab_tasks.push_back(handle);
         Ok(())
@@ -603,24 +655,20 @@ impl Upload {
     }
 
     /// Finalizes the pipeline, flushing any trailing partial slab and awaiting
-    /// all in-flight uploads. Returns the uploaded slabs in order.
+    /// all in-flight uploads. Each slab is pinned as it is drained, so the
+    /// indexer knows about the data even if a later slab fails. Returns the
+    /// uploaded slabs in order.
     pub(crate) async fn finish(mut self) -> Result<Vec<Slab>, UploadError> {
         let last_slab = self.slab_buffer.take().unwrap().finish();
         if let Some(slab) = last_slab {
             self.spawn_slab(slab).await?;
         }
-        let min_shards = self.erasure_coder.data_shards() as u8;
         let mut slabs = Vec::with_capacity(self.slab_tasks.len());
         while let Some(handle) = self.slab_tasks.pop_front() {
             let slab = handle.await??;
-            slabs.push(Slab {
-                version: SlabVersion::V1,
-                encryption_key: slab.encryption_key,
-                offset: 0,
-                min_shards,
-                length: slab.length,
-                sectors: slab.shards.into_iter().map(|s| s.unwrap()).collect(),
-            });
+            pin_uploaded_slab(&self.api_client, self.app_key.as_ref(), &slab, slabs.len()).await?;
+            debug!("slab {} pinned", slabs.len());
+            slabs.push(slab);
         }
         Ok(slabs)
     }
@@ -685,11 +733,12 @@ pub struct PackedUpload {
 impl PackedUpload {
     pub(crate) fn new(
         client: Hosts,
+        api_client: app_client::Client,
         app_key: Arc<AppKey>,
         options: PackedUploadOptions,
     ) -> Result<Self, UploadError> {
         Ok(Self {
-            upload: Upload::new(client, app_key, options.into())?,
+            upload: Upload::new(client, api_client, app_key, options.into())?,
             objects: Vec::new(),
         })
     }
@@ -748,7 +797,8 @@ impl PackedUpload {
     /// Finalizes the upload and returns the resulting objects. This will wait for all readers
     /// to finish and all slabs to be uploaded before returning. The resulting objects will contain the metadata needed to download the objects.
     ///
-    /// The caller must pin the resulting objects to the indexer when ready.
+    /// The slabs are pinned as they are uploaded, but the caller must pin the
+    /// resulting objects to the indexer when ready.
     pub async fn finalize(self) -> Result<Vec<Object>, UploadError> {
         let optimal_data_size = self.optimal_data_size() as u64;
         let uploaded_slabs = self.upload.finish().await?;
@@ -786,7 +836,8 @@ impl PackedUpload {
 }
 
 /// Reads until EOF and uploads all slabs. The data will be erasure coded,
-/// encrypted, and uploaded.
+/// encrypted, and uploaded. Each slab is pinned to the indexer as soon as it
+/// has been uploaded.
 ///
 /// Pass [`Object::default()`] for new uploads. To resume a previous upload,
 /// pass the object returned from the earlier call. Appending data changes
@@ -794,6 +845,7 @@ impl PackedUpload {
 /// the previous ID must be updated.
 pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
     hosts: Hosts,
+    api_client: app_client::Client,
     app_key: Arc<AppKey>,
     mut object: Object,
     reader: R,
@@ -802,7 +854,7 @@ pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
     // buffer the reader since SlabReader reads 64 bytes at a time
     let reader = BufReader::new(reader);
     let Some(start_offset) = options.start_offset else {
-        let mut upload = Upload::new(hosts, app_key, options)?;
+        let mut upload = Upload::new(hosts, api_client, app_key, options)?;
         upload.read(object.data_key.clone(), reader).await?;
         object.slabs.extend(upload.finish().await?);
         return Ok(object);
@@ -820,7 +872,7 @@ pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
     // bytes into the pipeline; it re-chunks the whole stream into fresh slabs.
     let data_key = object.data_key.clone();
     let (head_index, head_start) = slab_at_offset(&object.slabs, start_offset);
-    let mut upload = Upload::new(hosts, app_key, options)?;
+    let mut upload = Upload::new(hosts, api_client, app_key, options)?;
     upload
         .feed_range(&object, &data_key, head_start, start_offset - head_start)
         .await?;
@@ -890,6 +942,17 @@ mod tests {
             latitude: 0.0,
             longitude: 0.0,
             good_for_upload: true,
+        }
+    }
+
+    fn test_slab() -> Slab {
+        Slab {
+            version: SlabVersion::V1,
+            encryption_key: rand::random::<[u8; 32]>().into(),
+            min_shards: 1,
+            sectors: Vec::new(),
+            offset: 0,
+            length: 1,
         }
     }
 
@@ -1141,6 +1204,7 @@ mod tests {
 
         let base = upload_object(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             Object::default(),
             Cursor::new(data.clone()),
@@ -1151,6 +1215,7 @@ mod tests {
 
         let new = upload_object(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             base.clone(),
             Cursor::new(vec![patch_byte; patch_len]),
@@ -1270,5 +1335,36 @@ mod tests {
         for (new_slab, base_slab) in new.slabs().iter().zip(base.slabs()) {
             assert_eq!(new_slab.encryption_key, base_slab.encryption_key);
         }
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_pin_uploaded_slab_retries_api_errors() {
+        let api = app_client::mock::Client::new();
+        api.set_pin_slabs_failures(MAX_PIN_RETRIES - 1);
+        let client = app_client::Client::Mock(api.clone());
+        let app_key = AppKey::import(rand::random());
+
+        pin_uploaded_slab(&client, &app_key, &test_slab(), 0)
+            .await
+            .unwrap();
+
+        assert_eq!(api.pin_slabs_calls(), MAX_PIN_RETRIES);
+        assert_eq!(api.pinned_slabs(), 1);
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_pin_uploaded_slab_stops_after_max_attempts() {
+        let api = app_client::mock::Client::new();
+        api.set_pin_slabs_failures(MAX_PIN_RETRIES);
+        let client = app_client::Client::Mock(api.clone());
+        let app_key = AppKey::import(rand::random());
+
+        let err = pin_uploaded_slab(&client, &app_key, &test_slab(), 0)
+            .await
+            .expect_err("pin to fail");
+
+        assert!(matches!(err, UploadError::ApiError(_)));
+        assert_eq!(api.pin_slabs_calls(), MAX_PIN_RETRIES);
+        assert_eq!(api.pinned_slabs(), 0);
     }
 }

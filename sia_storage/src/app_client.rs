@@ -34,6 +34,7 @@ const QUERY_PARAM_CREDENTIAL: &str = "sc";
 const QUERY_PARAM_SIGNATURE: &str = "ss";
 
 const SHARE_URL_SCHEME: &str = "sia";
+const ERROR_OBJECT_UNPINNED_SLAB: &str = "object contains unpinned slab";
 
 #[cfg(not(test))]
 const SHARE_URL_FETCH_SCHEME: &str = "https";
@@ -78,6 +79,21 @@ pub enum Error {
     /// A custom error.
     #[error("custom error: {0}")]
     Custom(String),
+}
+
+impl Error {
+    /// Returns whether repeating the request may succeed. HTTP status codes are
+    /// currently flattened into [`Error::Api`], so API responses must be
+    /// treated as retryable alongside transport errors.
+    pub(crate) fn is_retryable(&self) -> bool {
+        matches!(self, Self::Api(_) | Self::Reqwest(_))
+    }
+
+    /// Returns whether the indexer rejected an object because one or more of
+    /// its slabs have not been pinned by the calling account.
+    pub(crate) fn has_unpinned_slab(&self) -> bool {
+        matches!(self, Self::Api(message) if message.contains(ERROR_OBJECT_UNPINNED_SLAB))
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -199,6 +215,14 @@ impl Client {
     /// Creates a client that talks to a real indexer over HTTP.
     pub(crate) fn new<U: IntoUrl>(base_url: U) -> Result<Self, Error> {
         Ok(Self::Http(http::Client::new(base_url)?))
+    }
+
+    /// Creates a client backed by the in-memory mock indexer. Use
+    /// [`Client::Mock`] directly when the test needs to keep the
+    /// [`mock::Client`] handle to inspect what was pinned.
+    #[cfg(test)]
+    pub(crate) fn mock() -> Self {
+        Self::Mock(mock::Client::new())
     }
 
     /// Checks if the application is authenticated with the indexer. It returns
