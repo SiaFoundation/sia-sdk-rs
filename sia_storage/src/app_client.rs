@@ -124,6 +124,20 @@ pub(crate) struct SlabPinParams {
     pub sectors: Vec<Sector>,
 }
 
+/// Maximum number of slabs to send in a single [`Client::pin_slabs`] request.
+pub(crate) const SLAB_PIN_BATCH_SIZE: usize = 50;
+
+impl From<&Slab> for SlabPinParams {
+    fn from(slab: &Slab) -> Self {
+        SlabPinParams {
+            version: slab.version,
+            encryption_key: slab.encryption_key.clone(),
+            min_shards: slab.min_shards,
+            sectors: slab.sectors.clone(),
+        }
+    }
+}
+
 /// An SealedObjectEvent represents an object and whether it was deleted or not.
 #[serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
