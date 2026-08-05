@@ -70,6 +70,18 @@ impl MockNetwork {
         self.api.pinned_slabs()
     }
 
+    /// Makes the next `failures` slab pin requests fail, so callers can
+    /// exercise the retries the upload path performs around pinning.
+    pub fn set_pin_slabs_failures(&self, failures: usize) {
+        self.api.set_pin_slabs_failures(failures);
+    }
+
+    /// The number of slab pin requests the mock indexer has received,
+    /// including the ones made to fail.
+    pub fn pin_slabs_calls(&self) -> usize {
+        self.api.pin_slabs_calls()
+    }
+
     /// Builds an [`Sdk`] backed by this network.
     pub async fn sdk(&self, app_key: AppKey) -> Result<Sdk, BuilderError> {
         Sdk::with_backends(
