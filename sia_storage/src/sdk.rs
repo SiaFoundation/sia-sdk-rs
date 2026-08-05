@@ -10,7 +10,7 @@ use thiserror::Error;
 use tokio::io::AsyncRead;
 use url::Url;
 
-use crate::app_client::{self, SlabPinParams};
+use crate::app_client::{self, SLAB_PIN_BATCH_SIZE, SlabPinParams};
 use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
 use crate::task::AbortOnDropHandle;
@@ -391,17 +391,8 @@ impl Sdk {
             Err(e) => return Err(Error::App(format!("{e:?}"))),
         }
 
-        const BATCH_SIZE: usize = 50;
-        for slabs in object.slabs().chunks(BATCH_SIZE) {
-            let params: Vec<SlabPinParams> = slabs
-                .iter()
-                .map(|slab| SlabPinParams {
-                    version: slab.version,
-                    encryption_key: slab.encryption_key.clone(),
-                    min_shards: slab.min_shards,
-                    sectors: slab.sectors.clone(),
-                })
-                .collect();
+        for slabs in object.slabs().chunks(SLAB_PIN_BATCH_SIZE) {
+            let params: Vec<SlabPinParams> = slabs.iter().map(SlabPinParams::from).collect();
             let ids = self
                 .api_client
                 .pin_slabs(&self.app_key.0, &params)

@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::app_client::{self, SlabPinParams};
+use crate::app_client::{self, SLAB_PIN_BATCH_SIZE, SlabPinParams};
 use crate::congestion::{InflightController, SamplePermit};
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
@@ -408,29 +408,22 @@ const MAX_PIN_RETRIES: usize = 3;
 /// Delay before the first pin retry. It doubles on each subsequent attempt.
 const PIN_RETRY_DELAY: Duration = Duration::from_millis(250);
 
-/// Pins a freshly uploaded slab to the indexer, retrying transient errors.
-async fn pin_uploaded_slab(
+/// Pins freshly uploaded slabs to the indexer, retrying transient errors.
+/// `slabs` must be no longer than [`SLAB_PIN_BATCH_SIZE`].
+async fn pin_uploaded_slabs(
     api_client: &app_client::Client,
     app_key: &AppKey,
-    slab: &Slab,
-    slab_index: usize,
+    slabs: &[Slab],
 ) -> Result<(), UploadError> {
-    let params = SlabPinParams {
-        version: slab.version,
-        encryption_key: slab.encryption_key.clone(),
-        min_shards: slab.min_shards,
-        sectors: slab.sectors.clone(),
-    };
-    let expected_id = slab.digest();
+    let params: Vec<SlabPinParams> = slabs.iter().map(SlabPinParams::from).collect();
 
     let mut attempt = 0;
     loop {
-        match api_client
-            .pin_slabs(&app_key.0, std::slice::from_ref(&params))
-            .await
-        {
+        match api_client.pin_slabs(&app_key.0, &params).await {
             Ok(ids) => {
-                if ids.len() != 1 || ids[0] != expected_id {
+                if ids.len() != slabs.len()
+                    || ids.iter().zip(slabs).any(|(id, slab)| id != &slab.digest())
+                {
                     return Err(UploadError::InvalidSlabId);
                 }
                 return Ok(());
@@ -438,7 +431,8 @@ async fn pin_uploaded_slab(
             Err(e) if attempt + 1 < MAX_PIN_RETRIES && e.is_retryable() => {
                 let delay = PIN_RETRY_DELAY * (1 << attempt);
                 debug!(
-                    "failed to pin slab {slab_index} on attempt {}: {e}; retrying in {delay:?}",
+                    "failed to pin {} slabs on attempt {}: {e}; retrying in {delay:?}",
+                    slabs.len(),
                     attempt + 1,
                 );
                 sleep(delay).await;
@@ -655,20 +649,26 @@ impl Upload {
     }
 
     /// Finalizes the pipeline, flushing any trailing partial slab and awaiting
-    /// all in-flight uploads. Each slab is pinned as it is drained, so the
-    /// indexer knows about the data even if a later slab fails. Returns the
-    /// uploaded slabs in order.
+    /// all in-flight uploads. Drained slabs are pinned in batches of
+    /// [`SLAB_PIN_BATCH_SIZE`], flushed as the queue drains so a batch is
+    /// pinned while later slabs are still uploading. Returns the uploaded
+    /// slabs in order.
     pub(crate) async fn finish(mut self) -> Result<Vec<Slab>, UploadError> {
         let last_slab = self.slab_buffer.take().unwrap().finish();
         if let Some(slab) = last_slab {
             self.spawn_slab(slab).await?;
         }
         let mut slabs = Vec::with_capacity(self.slab_tasks.len());
+        let mut pinned = 0;
         while let Some(handle) = self.slab_tasks.pop_front() {
-            let slab = handle.await??;
-            pin_uploaded_slab(&self.api_client, self.app_key.as_ref(), &slab, slabs.len()).await?;
-            debug!("slab {} pinned", slabs.len());
-            slabs.push(slab);
+            slabs.push(handle.await??);
+            // Flush a full batch, or the remainder once the queue is empty.
+            if slabs.len() - pinned >= SLAB_PIN_BATCH_SIZE || self.slab_tasks.is_empty() {
+                pin_uploaded_slabs(&self.api_client, self.app_key.as_ref(), &slabs[pinned..])
+                    .await?;
+                debug!("pinned slabs {pinned}..{}", slabs.len());
+                pinned = slabs.len();
+            }
         }
         Ok(slabs)
     }
@@ -836,8 +836,8 @@ impl PackedUpload {
 }
 
 /// Reads until EOF and uploads all slabs. The data will be erasure coded,
-/// encrypted, and uploaded. Each slab is pinned to the indexer as soon as it
-/// has been uploaded.
+/// encrypted, and uploaded. Slabs are pinned to the indexer in batches as they
+/// finish uploading.
 ///
 /// Pass [`Object::default()`] for new uploads. To resume a previous upload,
 /// pass the object returned from the earlier call. Appending data changes
@@ -1338,33 +1338,67 @@ mod tests {
     }
 
     #[sia_core_derive::cross_target_test]
-    async fn test_pin_uploaded_slab_retries_api_errors() {
+    async fn test_pin_uploaded_slabs_retries_api_errors() {
         let api = app_client::mock::Client::new();
         api.set_pin_slabs_failures(MAX_PIN_RETRIES - 1);
         let client = app_client::Client::Mock(api.clone());
         let app_key = AppKey::import(rand::random());
 
-        pin_uploaded_slab(&client, &app_key, &test_slab(), 0)
+        // a batch of two, so the returned ids are matched pairwise
+        pin_uploaded_slabs(&client, &app_key, &[test_slab(), test_slab()])
             .await
             .unwrap();
 
+        // the whole batch is retried as one request
         assert_eq!(api.pin_slabs_calls(), MAX_PIN_RETRIES);
-        assert_eq!(api.pinned_slabs(), 1);
+        assert_eq!(api.pinned_slabs(), 2);
     }
 
     #[sia_core_derive::cross_target_test]
-    async fn test_pin_uploaded_slab_stops_after_max_attempts() {
+    async fn test_pin_uploaded_slabs_stops_after_max_attempts() {
         let api = app_client::mock::Client::new();
         api.set_pin_slabs_failures(MAX_PIN_RETRIES);
         let client = app_client::Client::Mock(api.clone());
         let app_key = AppKey::import(rand::random());
 
-        let err = pin_uploaded_slab(&client, &app_key, &test_slab(), 0)
+        let err = pin_uploaded_slabs(&client, &app_key, &[test_slab()])
             .await
             .expect_err("pin to fail");
 
         assert!(matches!(err, UploadError::ApiError(_)));
         assert_eq!(api.pin_slabs_calls(), MAX_PIN_RETRIES);
         assert_eq!(api.pinned_slabs(), 0);
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_upload_pins_slabs_in_one_batch() {
+        let transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        hosts.update(
+            (0..60)
+                .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
+                .collect(),
+            true,
+        );
+        let api = app_client::mock::Client::new();
+        let options = UploadOptions::default();
+        let mut data = BytesMut::zeroed(options.optimal_data_size() * 2 + 4096);
+        rand::rng().fill_bytes(&mut data);
+
+        let object = upload_object(
+            hosts,
+            app_client::Client::Mock(api.clone()),
+            Arc::new(AppKey::import(rand::random())),
+            Object::default(),
+            Cursor::new(data.freeze()),
+            options,
+        )
+        .await
+        .unwrap();
+
+        // a multi-slab upload pins every slab, but in one batched request
+        assert_eq!(object.slabs().len(), 3);
+        assert_eq!(api.pinned_slabs(), 3);
+        assert_eq!(api.pin_slabs_calls(), 1);
     }
 }
