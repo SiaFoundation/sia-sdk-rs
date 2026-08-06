@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::app_client::{self, SLAB_PIN_BATCH_SIZE, SlabPinParams};
+use crate::app_client::{self, SlabPinParams};
 use crate::congestion::{InflightController, SamplePermit};
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
@@ -408,22 +408,19 @@ const MAX_PIN_RETRIES: usize = 3;
 /// Delay before the first pin retry. It doubles on each subsequent attempt.
 const PIN_RETRY_DELAY: Duration = Duration::from_millis(250);
 
-/// Pins freshly uploaded slabs to the indexer, retrying transient errors.
-/// `slabs` must be no longer than [`SLAB_PIN_BATCH_SIZE`].
-async fn pin_uploaded_slabs(
+/// Pins a freshly uploaded slab to the indexer, retrying transient errors.
+async fn pin_uploaded_slab(
     api_client: &app_client::Client,
     app_key: &AppKey,
-    slabs: &[Slab],
+    slab: &Slab,
 ) -> Result<(), UploadError> {
-    let params: Vec<SlabPinParams> = slabs.iter().map(SlabPinParams::from).collect();
+    let params = [SlabPinParams::from(slab)];
 
     let mut attempt = 0;
     loop {
         match api_client.pin_slabs(&app_key.0, &params).await {
             Ok(ids) => {
-                if ids.len() != slabs.len()
-                    || ids.iter().zip(slabs).any(|(id, slab)| id != &slab.digest())
-                {
+                if ids.len() != 1 || ids[0] != slab.digest() {
                     return Err(UploadError::InvalidSlabId);
                 }
                 return Ok(());
@@ -431,8 +428,7 @@ async fn pin_uploaded_slabs(
             Err(e) if attempt + 1 < MAX_PIN_RETRIES && e.is_retryable() => {
                 let delay = PIN_RETRY_DELAY * (1 << attempt);
                 debug!(
-                    "failed to pin {} slabs on attempt {}: {e}; retrying in {delay:?}",
-                    slabs.len(),
+                    "failed to pin slab on attempt {}: {e}; retrying in {delay:?}",
                     attempt + 1,
                 );
                 sleep(delay).await;
@@ -505,6 +501,7 @@ impl Upload {
 
     async fn spawn_slab(&mut self, slab: ReadSlab) -> Result<(), UploadError> {
         let client = self.client.clone();
+        let api_client = self.api_client.clone();
         let rs = self.erasure_coder.clone();
         let limiter = self.limiter.clone();
         let app_key = self.app_key.clone();
@@ -598,14 +595,16 @@ impl Upload {
                 sectors[result.shard_index] = Some(result.sector);
             }
 
-            Ok(Slab {
+            let slab = Slab {
                 version: SlabVersion::V1,
                 encryption_key: slab.encryption_key,
                 offset: 0,
                 min_shards,
                 length: slab.length as u32,
                 sectors: sectors.into_iter().map(|s| s.unwrap()).collect(),
-            })
+            };
+            pin_uploaded_slab(&api_client, &app_key, &slab).await?;
+            Ok(slab)
         }));
         self.slab_tasks.push_back(handle);
         Ok(())
@@ -649,26 +648,15 @@ impl Upload {
     }
 
     /// Finalizes the pipeline, flushing any trailing partial slab and awaiting
-    /// all in-flight uploads. Drained slabs are pinned in batches of
-    /// [`SLAB_PIN_BATCH_SIZE`], flushed as the queue drains so a batch is
-    /// pinned while later slabs are still uploading. Returns the uploaded
-    /// slabs in order.
+    /// all in-flight uploads. Returns the uploaded slabs in order.
     pub(crate) async fn finish(mut self) -> Result<Vec<Slab>, UploadError> {
         let last_slab = self.slab_buffer.take().unwrap().finish();
         if let Some(slab) = last_slab {
             self.spawn_slab(slab).await?;
         }
         let mut slabs = Vec::with_capacity(self.slab_tasks.len());
-        let mut pinned = 0;
         while let Some(handle) = self.slab_tasks.pop_front() {
             slabs.push(handle.await??);
-            // Flush a full batch, or the remainder once the queue is empty.
-            if slabs.len() - pinned >= SLAB_PIN_BATCH_SIZE || self.slab_tasks.is_empty() {
-                pin_uploaded_slabs(&self.api_client, self.app_key.as_ref(), &slabs[pinned..])
-                    .await?;
-                debug!("pinned slabs {pinned}..{}", slabs.len());
-                pinned = slabs.len();
-            }
         }
         Ok(slabs)
     }
@@ -1338,30 +1326,28 @@ mod tests {
     }
 
     #[sia_core_derive::cross_target_test]
-    async fn test_pin_uploaded_slabs_retries_api_errors() {
+    async fn test_pin_uploaded_slab_retries_api_errors() {
         let api = app_client::mock::Client::new();
         api.set_pin_slabs_failures(MAX_PIN_RETRIES - 1);
         let client = app_client::Client::Mock(api.clone());
         let app_key = AppKey::import(rand::random());
 
-        // a batch of two, so the returned ids are matched pairwise
-        pin_uploaded_slabs(&client, &app_key, &[test_slab(), test_slab()])
+        pin_uploaded_slab(&client, &app_key, &test_slab())
             .await
             .unwrap();
 
-        // the whole batch is retried as one request
         assert_eq!(api.pin_slabs_calls(), MAX_PIN_RETRIES);
-        assert_eq!(api.pinned_slabs(), 2);
+        assert_eq!(api.pinned_slabs(), 1);
     }
 
     #[sia_core_derive::cross_target_test]
-    async fn test_pin_uploaded_slabs_stops_after_max_attempts() {
+    async fn test_pin_uploaded_slab_stops_after_max_attempts() {
         let api = app_client::mock::Client::new();
         api.set_pin_slabs_failures(MAX_PIN_RETRIES);
         let client = app_client::Client::Mock(api.clone());
         let app_key = AppKey::import(rand::random());
 
-        let err = pin_uploaded_slabs(&client, &app_key, &[test_slab()])
+        let err = pin_uploaded_slab(&client, &app_key, &test_slab())
             .await
             .expect_err("pin to fail");
 
@@ -1371,7 +1357,7 @@ mod tests {
     }
 
     #[sia_core_derive::cross_target_test]
-    async fn test_upload_pins_slabs_in_one_batch() {
+    async fn test_upload_pins_every_slab() {
         let transport = mock::Client::new();
         let hosts = Hosts::new(Client::Mock(transport.clone()));
         hosts.update(
@@ -1396,9 +1382,9 @@ mod tests {
         .await
         .unwrap();
 
-        // a multi-slab upload pins every slab, but in one batched request
+        // each slab is pinned by its own upload task
         assert_eq!(object.slabs().len(), 3);
         assert_eq!(api.pinned_slabs(), 3);
-        assert_eq!(api.pin_slabs_calls(), 1);
+        assert_eq!(api.pin_slabs_calls(), 3);
     }
 }
