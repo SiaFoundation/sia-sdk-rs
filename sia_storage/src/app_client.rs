@@ -134,6 +134,17 @@ struct RegisterAppRequest {
     pub signature: Signature,
 }
 
+/// The body of a pre-authorized `auth/connect` request.
+#[derive(Serialize)]
+struct AppConnectRequest<'a> {
+    #[serde(flatten)]
+    metadata: &'a AppMetadata,
+    #[serde(rename = "preAuthorizedKey")]
+    pre_authorized_key: PublicKey,
+    #[serde(rename = "preAuthorizationSignature")]
+    pre_authorization_signature: Signature,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ObjectSlab {
@@ -245,6 +256,25 @@ impl Client {
         opts: &AppMetadata,
     ) -> Result<RegisterAppResponse, Error> {
         self.post_json("auth/connect", ephemeral_key, Some(opts))
+            .await
+    }
+
+    /// Requests an application connection using a pre-authorized key, bypassing
+    /// the interactive approval flow.
+    pub(crate) async fn request_app_connection_pre_authorized(
+        &self,
+        ephemeral_key: &PrivateKey,
+        opts: &AppMetadata,
+        pre_authorized_key: &PrivateKey,
+    ) -> Result<RegisterAppResponse, Error> {
+        let public_key = pre_authorized_key.public_key();
+        let sig_hash = pre_authorization_sig_hash(&ephemeral_key.public_key(), opts, &public_key);
+        let request = AppConnectRequest {
+            metadata: opts,
+            pre_authorized_key: public_key,
+            pre_authorization_signature: pre_authorized_key.sign(sig_hash.as_ref()),
+        };
+        self.post_json("auth/connect", ephemeral_key, Some(&request))
             .await
     }
 
@@ -663,6 +693,37 @@ fn register_app_sig_hash(request_id: &str, ephemeral_key: &PublicKey) -> Hash256
         .into()
 }
 
+/// Computes the hash a pre-authorized key signs to approve a connection
+/// request. It mirrors indexd's `preAuthorizationHash` and binds the proof to
+/// this request's ephemeral key so a captured signature cannot be replayed with
+/// a different one.
+///
+/// Strings are length-prefixed (matching sia core's `Encoder::WriteString`) and
+/// keys and hashes are written as their raw 32 bytes. The field order follows
+/// indexd's `Info` struct, which differs from the JSON serialization order.
+fn pre_authorization_sig_hash(
+    ephemeral_key: &PublicKey,
+    meta: &AppMetadata,
+    pre_authorized_key: &PublicKey,
+) -> Hash256 {
+    fn write_string(h: &mut Blake2b256, s: &str) {
+        h.update((s.len() as u64).to_le_bytes());
+        h.update(s.as_bytes());
+    }
+
+    let mut h = Blake2b256::default();
+    write_string(&mut h, "indexd/preauthorize-app/v1");
+    h.update(ephemeral_key);
+    h.update(meta.id);
+    write_string(&mut h, meta.name);
+    write_string(&mut h, meta.description);
+    write_string(&mut h, meta.logo_url.unwrap_or(""));
+    write_string(&mut h, meta.service_url);
+    write_string(&mut h, meta.callback_url.unwrap_or(""));
+    h.update(pre_authorized_key);
+    h.finalize().into()
+}
+
 /// Pure computation tests (signing, hashing, encoding) — run on both native and WASM.
 #[cfg(test)]
 mod cross_target_test {
@@ -687,6 +748,60 @@ mod cross_target_test {
             register_app_sig_hash(REQUEST_ID, &EPHEMERAL_KEY),
             EXPECTED_SIG_HASH,
             "expected sig hash did not match"
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_pre_authorization_sig_hash_golden() {
+        // Generated from indexd's api/app.preAuthorizationHash against
+        // go.sia.tech/core v0.21.7. ephemeral seed = [1; 32], pre-auth seed = [2; 32].
+        const EPHEMERAL: PublicKey =
+            public_key!("ed25519:8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c");
+        let pre_auth_key = PrivateKey::from_seed(&[0x02u8; 32]);
+        assert_eq!(
+            pre_auth_key.public_key(),
+            public_key!("ed25519:8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"),
+            "pre-auth public key derivation mismatch"
+        );
+
+        // Case 1: every URL populated.
+        const META_FULL: AppMetadata = AppMetadata {
+            id: hash_256!("0e90d697f5045a6593f1c43ebf79a369e2bc72cc5c7b6282f3b5aeb0de6e4005"),
+            name: "My App",
+            description: "My App Description",
+            service_url: "https://myapp.com",
+            logo_url: Some("https://myapp.com/logo.png"),
+            callback_url: Some("https://myapp.com/callback"),
+        };
+        let hash_full =
+            pre_authorization_sig_hash(&EPHEMERAL, &META_FULL, &pre_auth_key.public_key());
+        assert_eq!(
+            hash_full,
+            hash_256!("eeaf84c91b1cb3b12112eb70f3153f5444472c6626ac6713172e9ea882a9f992"),
+            "full-metadata pre-auth hash mismatch"
+        );
+        // Full client path: signing the hash must reproduce Go's signature exactly.
+        assert_eq!(
+            pre_auth_key.sign(hash_full.as_ref()),
+            signature!(
+                "0f70578e17619e53f3a5ba16bacfd105d3b730eb8e02aa543d5f6f4340bca67d4b4c61de4d47641aff64a9955b4b4367de8c51448f1f48cbdb575bfb1d63a302"
+            ),
+            "pre-auth signature mismatch"
+        );
+
+        // Case 2: logo_url/callback_url = None must hash as empty strings.
+        const META_EMPTY: AppMetadata = AppMetadata {
+            id: hash_256!("0e90d697f5045a6593f1c43ebf79a369e2bc72cc5c7b6282f3b5aeb0de6e4005"),
+            name: "My App",
+            description: "My App Description",
+            service_url: "https://myapp.com",
+            logo_url: None,
+            callback_url: None,
+        };
+        assert_eq!(
+            pre_authorization_sig_hash(&EPHEMERAL, &META_EMPTY, &pre_auth_key.public_key()),
+            hash_256!("e7b052984db5a3669a75339a665bfe085b4613d11e71728bb7efd31b877dbd76"),
+            "empty-url pre-auth hash mismatch"
         );
     }
 
@@ -1930,6 +2045,144 @@ mod tests {
         assert_eq!(secret, Some(user_secret));
 
         // step 3
+        let register_url: Url = resp.register_url.parse().unwrap();
+        client
+            .register_app(&ephemeral_key, &app_key, register_url)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pre_authorized_connect_flow() {
+        let ephemeral_key = PrivateKey::from_seed(&rand::random());
+        let ephemeral_pk = ephemeral_key.public_key();
+        let pre_auth_key = PrivateKey::from_seed(&rand::random());
+        let pre_auth_pk = pre_auth_key.public_key();
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let app_pk = app_key.public_key();
+
+        let app_id = AppID::from(rand::random::<[u8; 32]>());
+        let metadata = AppMetadata {
+            id: app_id,
+            name: "test-app",
+            description: "A test application",
+            service_url: "https://test-app.com",
+            logo_url: Some("https://test-app.com/logo.png"),
+            callback_url: Some("https://test-app.com/callback"),
+        };
+
+        // the exact hash the pre-authorized key must sign for this request
+        let expected_sig_hash = pre_authorization_sig_hash(&ephemeral_pk, &metadata, &pre_auth_pk);
+
+        let server = Server::run();
+        let request_id = "preauth123";
+
+        #[derive(serde::Deserialize)]
+        struct PreAuthBody {
+            #[serde(rename = "preAuthorizedKey")]
+            pre_authorized_key: PublicKey,
+            #[serde(rename = "preAuthorizationSignature")]
+            pre_authorization_signature: Signature,
+        }
+
+        // step 1: the connect body must carry the pre-authorized public key and a
+        // signature that verifies over the proof hash (i.e. the client signed the
+        // right hash with the right key).
+        let step1_ephemeral_pk = ephemeral_pk;
+        let step1_pre_auth_pk = pre_auth_pk;
+        server.expect(
+            Expectation::matching(move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                let pk = validate_url_signature_request(req);
+                if pk != step1_ephemeral_pk
+                    || req.method() != "POST"
+                    || req.uri().path() != "/auth/connect"
+                {
+                    return false;
+                }
+                let body: PreAuthBody =
+                    serde_json::from_slice(req.body().as_ref()).expect("invalid body");
+                body.pre_authorized_key == step1_pre_auth_pk
+                    && step1_pre_auth_pk
+                        .verify(expected_sig_hash.as_ref(), &body.pre_authorization_signature)
+            })
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(format!(
+                        r#"{{"responseURL":"http://example.com/auth/connect/{request_id}","statusURL":"{}","registerURL":"{}","expiration":"2030-01-01T00:00:00Z"}}"#,
+                        server.url(&format!("/auth/connect/{request_id}/status")),
+                        server.url(&format!("/auth/connect/{request_id}/register"))
+                    ))
+                    .unwrap(),
+            ),
+        );
+
+        // step 2: a pre-authorized request is approved synchronously, so status
+        // returns the user secret on the first check.
+        let step2_ephemeral_pk = ephemeral_pk;
+        let user_secret = Hash256::new(rand::random());
+        let status_response = serde_json::to_string(&AuthConnectStatusResponse {
+            approved: true,
+            user_secret: Some(user_secret),
+        })
+        .unwrap();
+        server.expect(
+            Expectation::matching(
+                move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                    let pk = validate_url_signature_request(req);
+                    pk == step2_ephemeral_pk
+                        && req.method() == "GET"
+                        && req.uri().path() == format!("/auth/connect/{request_id}/status")
+                },
+            )
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(status_response)
+                    .unwrap(),
+            ),
+        );
+
+        // step 3: register the app key (identical to the interactive flow).
+        let step3_ephemeral_pk = ephemeral_pk;
+        let step3_app_pk = app_pk;
+        server.expect(
+            Expectation::matching(
+                move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                    let pk = validate_url_signature_request(req);
+                    if pk != step3_ephemeral_pk || req.method() != "POST" {
+                        return false;
+                    }
+                    if req.uri().path() != format!("/auth/connect/{request_id}/register") {
+                        return false;
+                    }
+                    let body: RegisterAppRequest =
+                        serde_json::from_slice(req.body().as_ref()).expect("invalid body");
+                    if body.app_key != step3_app_pk {
+                        return false;
+                    }
+                    let sig_hash = register_app_sig_hash(request_id, &step3_ephemeral_pk);
+                    step3_app_pk.verify(sig_hash.as_ref(), &body.signature)
+                },
+            )
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        // run the pre-authorized flow at the client level
+        let client = Client::new(server.url("/").to_string()).unwrap();
+
+        let resp = client
+            .request_app_connection_pre_authorized(&ephemeral_key, &metadata, &pre_auth_key)
+            .await
+            .unwrap();
+
+        let status_url: Url = resp.status_url.parse().unwrap();
+        let secret = client
+            .check_request_status(&ephemeral_key, status_url)
+            .await
+            .unwrap();
+        assert_eq!(secret, Some(user_secret));
+
         let register_url: Url = resp.register_url.parse().unwrap();
         client
             .register_app(&ephemeral_key, &app_key, register_url)
