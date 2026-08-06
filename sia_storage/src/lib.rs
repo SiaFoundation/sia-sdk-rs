@@ -1042,6 +1042,7 @@ mod test {
 
         let mut packed_upload = PackedUpload::new(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             PackedUploadOptions::default(),
         )
