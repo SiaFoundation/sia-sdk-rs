@@ -378,11 +378,8 @@ impl Sdk {
             .map_err(|e| Error::App(format!("{e:?}")))
     }
 
-    /// Pins an object to the indexer. Slabs uploaded by this SDK are already
-    /// pinned. If the object contains unpinned slabs, they are pinned and the
-    /// object request is retried. This supports objects that were imported or
-    /// uploaded before slabs were pinned inline, without adding slab requests
-    /// to the normal upload path.
+    /// Pins an object to the indexer, pinning any of its slabs that are not
+    /// already pinned.
     pub async fn pin_object(&self, object: &Object) -> Result<(), Error> {
         let sealed = object.seal(self.app_key.as_ref());
         match self.api_client.pin_object(&self.app_key.0, &sealed).await {
