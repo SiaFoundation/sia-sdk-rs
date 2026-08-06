@@ -19,6 +19,7 @@ pub struct Client {
     /// simulate out-of-order chunk completion.
     read_delays: Arc<RwLock<HashMap<Hash256, Duration>>>,
     initial_read_delay: Arc<RwLock<Option<Duration>>>,
+    read_failures: Arc<RwLock<HashMap<PublicKey, usize>>>,
 }
 
 impl Default for Client {
@@ -35,15 +36,8 @@ impl Client {
             slow_delay: Arc::new(RwLock::new(Duration::ZERO)),
             read_delays: Arc::new(RwLock::new(HashMap::new())),
             initial_read_delay: Arc::new(RwLock::new(None)),
+            read_failures: Arc::new(RwLock::new(HashMap::new())),
         }
-    }
-
-    /// Sets an initial per-sector read delay. After each read, the per-sector
-    /// delay is halved. Used to simulate out-of-order chunk completion.
-    /// Sectors written after this is set will start with `delay`.
-    #[allow(dead_code)] // used in tests
-    pub fn set_initial_read_delay(&self, delay: Duration) {
-        *self.initial_read_delay.write().unwrap() = Some(delay);
     }
 
     pub fn clear(&self) {
@@ -63,6 +57,24 @@ impl Client {
     pub fn reset_slow_hosts(&self) {
         self.slow_hosts.write().unwrap().clear();
         *self.slow_delay.write().unwrap() = Duration::ZERO;
+    }
+}
+
+#[cfg(test)]
+impl Client {
+    /// Fails the next `count` `read_sector` calls to each of the given hosts,
+    /// after which reads are served normally.
+    pub fn set_read_failures(&self, hosts: impl IntoIterator<Item = PublicKey>, count: usize) {
+        let mut failures = self.read_failures.write().unwrap();
+        failures.clear();
+        failures.extend(hosts.into_iter().map(|host| (host, count)));
+    }
+
+    /// Sets an initial per-sector read delay. After each read, the per-sector
+    /// delay is halved. Used to simulate out-of-order chunk completion.
+    /// Sectors written after this is set will start with `delay`.
+    pub fn set_initial_read_delay(&self, delay: Duration) {
+        *self.initial_read_delay.write().unwrap() = Some(delay);
     }
 }
 
@@ -142,6 +154,20 @@ impl Transport for Client {
         };
         if let Some(delay) = slow_delay {
             sleep(delay).await;
+        }
+
+        let fail = {
+            let mut failures = self.read_failures.write().unwrap();
+            match failures.get_mut(&host.public_key) {
+                Some(remaining) if *remaining > 0 => {
+                    *remaining -= 1;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if fail {
+            return Err(RHP4Error::Transport("injected read failure".to_string()));
         }
 
         // per-sector decreasing delay (used to simulate out-of-order chunk completion)
