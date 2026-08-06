@@ -54,6 +54,7 @@ jobs:
           cargo check -p sia_storage --all-targets
           cargo check -p sia_storage --all-targets --features=mock
           cargo check -p sia_storage --all-targets --features=less-safe-crypto
+          cargo check -p sia_storage --all-targets --features=fs
 
   test-wasm:
     name: Test WASM (${{ matrix.runtime }})

@@ -82,7 +82,9 @@ impl PackedUpload {
     ///
     /// If the reader errors part-way, it's safe to continue calling
     /// [add](Self::add); no object is registered for the failed call. Or call
-    /// [finalize](Self::finalize) to collect the objects added so far.
+    /// [finalize](Self::finalize) to collect the objects added so far. Bytes
+    /// read before the error remain in the current slab as padding and stay
+    /// counted in [length](Self::length) and [remaining](Self::remaining).
     ///
     /// ```js
     /// const packed = sdk.uploadPacked();

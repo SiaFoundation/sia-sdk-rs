@@ -1006,6 +1006,72 @@ mod test {
         assert_eq!(output.freeze(), good);
     }
 
+    #[cfg(feature = "fs")]
+    #[tokio::test]
+    async fn test_upload_packed_add_path() {
+        let app_key = Arc::new(AppKey::import(random_seed()));
+        let hosts = Hosts::new(Client::new());
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: sia_core::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                })
+                .collect(),
+            true,
+        );
+
+        let mut input = BytesMut::zeroed(4096);
+        random_bytes(&mut input);
+        let input = input.freeze();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("object.bin");
+        std::fs::write(&path, &input).expect("write temp file");
+
+        let mut packed_upload = PackedUpload::new(
+            hosts.clone(),
+            app_key.clone(),
+            PackedUploadOptions::default(),
+        )
+        .unwrap();
+        packed_upload
+            .add_path(dir.path().join("missing.bin"))
+            .await
+            .expect_err("missing file should fail the add");
+        // nothing was read, so the failed add left no padding behind
+        assert_eq!(packed_upload.length(), 0);
+
+        let n = packed_upload
+            .add_path(&path)
+            .await
+            .expect("add_path to complete");
+        assert_eq!(n, input.len() as u64);
+
+        let objects = packed_upload.finalize().await.expect("upload to finish");
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].size(), input.len() as u64);
+
+        let mut output = BytesMut::zeroed(input.len());
+        let mut download = Download::new(
+            &objects[0],
+            hosts.clone(),
+            app_key.clone(),
+            DownloadOptions::default(),
+        )
+        .unwrap();
+        copy(&mut download, &mut Cursor::new(&mut output[..]))
+            .await
+            .expect("download to complete");
+        assert_eq!(output.freeze(), input);
+    }
+
     #[sia_core_derive::cross_target_test]
     async fn test_upload_download() {
         let app_key = Arc::new(AppKey::import(random_seed()));

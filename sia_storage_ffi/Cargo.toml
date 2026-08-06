@@ -15,7 +15,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 async-trait = "0.1.91"
-sia_storage = { version = "0.10.0", path = "../sia_storage" }
+sia_storage = { version = "0.10.0", path = "../sia_storage", features = ["fs"] }
 log = "0.4.33"
 rand = "0.10.2"
 sia_core = { version = "0.4.1", path = "../sia_core" }
