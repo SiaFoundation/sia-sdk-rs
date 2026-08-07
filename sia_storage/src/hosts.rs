@@ -15,7 +15,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::hosts::metrics::{HostMetric, HostScore, RPCAverage, Transfer};
-use crate::rhp4::{HostEndpoint, Transport};
+use crate::rhp4::{Client, HostEndpoint, Transport};
 use crate::time::{Duration, Elapsed, Instant, timeout};
 
 mod metrics;
@@ -275,8 +275,8 @@ pub enum RPCError {
 ///
 /// This is public for criterion benchmarks, but not intended for general use
 #[derive(Clone)]
-pub(crate) struct Hosts<T: Transport> {
-    transport: T,
+pub(crate) struct Hosts {
+    transport: Client,
     price_cache: Arc<HostCache<HostPrices>>,
     hosts: Arc<HostList>,
 
@@ -284,8 +284,8 @@ pub(crate) struct Hosts<T: Transport> {
     global_read_avg: Arc<RwLock<RPCAverage>>,
 }
 
-impl<T: Transport> Hosts<T> {
-    pub fn new(transport: T) -> Self {
+impl Hosts {
+    pub fn new(transport: Client) -> Self {
         Self {
             transport,
             hosts: Arc::new(HostList::new()),
@@ -454,7 +454,7 @@ impl<T: Transport> Hosts<T> {
     }
 
     async fn fetch_prices(
-        transport: T,
+        transport: Client,
         cache: &HostCache<HostPrices>,
         hosts: &HostList,
         host_endpoint: &HostEndpoint,
@@ -662,7 +662,7 @@ mod test {
 
     #[sia_core_derive::cross_target_test]
     fn test_host_queue_pick() {
-        let hosts_manager = Hosts::new(Client::new());
+        let hosts_manager = Hosts::new(Client::mock());
         let hk1 = random_pubkey();
         let hk2 = random_pubkey();
         let hk3 = random_pubkey();
@@ -723,7 +723,7 @@ mod test {
     fn test_host_queue_retry_cap() {
         // `retry` lets a host be re-picked, but MAX_RETRIES caps the total
         // attempts per host across the slab.
-        let hosts_manager = Hosts::new(Client::new());
+        let hosts_manager = Hosts::new(Client::mock());
         let hk = random_pubkey();
         hosts_manager.update(
             vec![Host {
@@ -796,7 +796,7 @@ mod test {
         // download inflight counter should push it down in the sorted
         // order. Mirrors the upload-side `next_upload_host` behavior so
         // concurrent slab downloads spread across less-busy hosts.
-        let hosts_manager = Hosts::new(Client::new());
+        let hosts_manager = Hosts::new(Client::mock());
         let hk1 = random_pubkey();
         let hk2 = random_pubkey();
         hosts_manager.update(

@@ -9,23 +9,112 @@ use thiserror::Error;
 
 use crate::time::{Duration, Elapsed};
 
-#[cfg(not(any(test, feature = "mock", target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 mod siamux;
 
-#[cfg(not(any(test, feature = "mock", target_arch = "wasm32")))]
-pub use siamux::Client;
-
-#[cfg(all(not(test), not(feature = "mock"), target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 mod web_transport;
 
-#[cfg(all(not(test), not(feature = "mock"), target_arch = "wasm32"))]
-pub use web_transport::Client;
-
 #[cfg(any(test, feature = "mock"))]
-mod mock;
+pub(crate) mod mock;
 
-#[cfg(any(test, feature = "mock"))]
-pub use mock::Client;
+/// The transport used to talk to hosts. One real backend exists per
+/// target. The `mock` feature adds an in-memory backend alongside it.
+#[derive(Clone)]
+pub(crate) enum Client {
+    #[cfg(not(target_arch = "wasm32"))]
+    SiaMux(siamux::Client),
+    #[cfg(target_arch = "wasm32")]
+    WebTransport(web_transport::Client),
+    #[cfg(any(test, feature = "mock"))]
+    Mock(mock::Client),
+}
+
+impl Default for Client {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Client {
+    /// Creates a client using the real transport for this target.
+    pub(crate) fn new() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self::SiaMux(siamux::Client::new())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::WebTransport(web_transport::Client::new())
+        }
+    }
+
+    /// Creates a client backed by the in-memory mock transport. Use
+    /// [`Client::Mock`] directly when the test needs to keep the
+    /// [`mock::Client`] handle to seed sectors or add latency.
+    #[cfg(test)]
+    pub(crate) fn mock() -> Self {
+        Self::Mock(mock::Client::new())
+    }
+}
+
+impl Transport for Client {
+    async fn host_prices(&self, host: &HostEndpoint) -> Result<(HostPrices, Duration), Error> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::SiaMux(c) => c.host_prices(host).await,
+            #[cfg(target_arch = "wasm32")]
+            Self::WebTransport(c) => c.host_prices(host).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.host_prices(host).await,
+        }
+    }
+
+    async fn write_sector(
+        &self,
+        host: &HostEndpoint,
+        prices: HostPrices,
+        account_key: &PrivateKey,
+        sector: Bytes,
+    ) -> Result<(Hash256, Duration), Error> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::SiaMux(c) => c.write_sector(host, prices, account_key, sector).await,
+            #[cfg(target_arch = "wasm32")]
+            Self::WebTransport(c) => c.write_sector(host, prices, account_key, sector).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.write_sector(host, prices, account_key, sector).await,
+        }
+    }
+
+    async fn read_sector(
+        &self,
+        host: &HostEndpoint,
+        prices: HostPrices,
+        account_key: &PrivateKey,
+        root: Hash256,
+        offset: usize,
+        length: usize,
+    ) -> Result<(Bytes, Duration), Error> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::SiaMux(c) => {
+                c.read_sector(host, prices, account_key, root, offset, length)
+                    .await
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::WebTransport(c) => {
+                c.read_sector(host, prices, account_key, root, offset, length)
+                    .await
+            }
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => {
+                c.read_sector(host, prices, account_key, root, offset, length)
+                    .await
+            }
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum Error {

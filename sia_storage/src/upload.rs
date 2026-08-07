@@ -8,7 +8,6 @@ use crate::congestion::{InflightController, SamplePermit};
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
 use crate::hosts::{HostQueue, InflightGuard, QueueError, RPCError};
-use crate::rhp4::Client;
 use crate::slabs::SlabVersion;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Elapsed, Instant, sleep};
@@ -53,7 +52,7 @@ impl Drop for WaitingGuard {
 
 struct ShardUpload {
     limiter: Arc<UploadLimiter>,
-    client: Hosts<Client>,
+    client: Hosts,
     hosts: Arc<Mutex<HostQueue>>,
     account_key: Arc<AppKey>,
     data: Bytes,
@@ -410,7 +409,7 @@ struct UploadedSlab {
 /// [read](Upload::read) repeatedly, then complete the upload with
 /// [finish](Upload::finish) to recover the uploaded slabs.
 pub(crate) struct Upload {
-    client: Hosts<Client>,
+    client: Hosts,
     app_key: Arc<AppKey>,
     erasure_coder: Arc<ErasureCoder>,
     slab_buffer: Option<SlabReader>,
@@ -426,7 +425,7 @@ pub(crate) struct Upload {
 
 impl Upload {
     pub(crate) fn new(
-        client: Hosts<Client>,
+        client: Hosts,
         app_key: Arc<AppKey>,
         options: UploadOptions,
     ) -> Result<Self, UploadError> {
@@ -685,7 +684,7 @@ pub struct PackedUpload {
 
 impl PackedUpload {
     pub(crate) fn new(
-        client: Hosts<Client>,
+        client: Hosts,
         app_key: Arc<AppKey>,
         options: PackedUploadOptions,
     ) -> Result<Self, UploadError> {
@@ -794,7 +793,7 @@ impl PackedUpload {
 /// an object's ID. It must be re-pinned afterward and any references to
 /// the previous ID must be updated.
 pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
-    hosts: Hosts<Client>,
+    hosts: Hosts,
     app_key: Arc<AppKey>,
     mut object: Object,
     reader: R,
@@ -865,6 +864,7 @@ fn slab_at_offset(slabs: &[Slab], offset: u64) -> (usize, u64) {
 mod tests {
     use super::*;
     use crate::Host;
+    use crate::rhp4::{Client, mock};
     use bytes::BytesMut;
     use rand::Rng;
     use sia_core::signing::PrivateKey;
@@ -897,9 +897,9 @@ mod tests {
     /// slow host. The discovery preference guarantees the slow host wins the
     /// initial pick, and the seeded p95 keeps the race timer near its 50ms
     /// floor so a racer (when allowed) beats the slow host comfortably.
-    fn racing_setup(slow_delay: Duration) -> (Hosts<Client>, Arc<AppKey>, PublicKey) {
-        let transport = Client::new();
-        let hosts_manager = Hosts::new(transport.clone());
+    fn racing_setup(slow_delay: Duration) -> (Hosts, Arc<AppKey>, PublicKey) {
+        let transport = mock::Client::new();
+        let hosts_manager = Hosts::new(Client::Mock(transport.clone()));
         let app_key = Arc::new(AppKey::import(rand::random()));
         let fast: Vec<PublicKey> = (0..5)
             .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
@@ -920,7 +920,7 @@ mod tests {
     }
 
     fn shard_upload(
-        hosts_manager: &Hosts<Client>,
+        hosts_manager: &Hosts,
         app_key: &Arc<AppKey>,
         waiting: &watch::Sender<usize>,
     ) -> ShardUpload {
@@ -1119,8 +1119,8 @@ mod tests {
         patch_len: usize,
     ) -> (Object, Object) {
         let options = UploadOptions::default();
-        let transport = Client::new();
-        let hosts = Hosts::new(transport.clone());
+        let transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| Host {
