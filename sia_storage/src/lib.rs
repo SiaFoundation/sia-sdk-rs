@@ -1010,7 +1010,7 @@ mod test {
     #[tokio::test]
     async fn test_upload_packed_add_path() {
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let hosts = Hosts::new(Client::new());
+        let hosts = Hosts::new(Client::mock());
         hosts.update(
             (0..60)
                 .map(|_| Host {
