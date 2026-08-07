@@ -10,7 +10,7 @@ use thiserror::Error;
 use tokio::io::AsyncRead;
 use url::Url;
 
-use crate::app_client::{self, SlabPinParams};
+use crate::app_client::{self, SLAB_PIN_BATCH_SIZE, SlabPinParams};
 use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
 use crate::task::AbortOnDropHandle;
@@ -172,8 +172,9 @@ impl Sdk {
     /// * `options` - The [UploadOptions] to use for the upload.
     ///
     /// # Returns
-    /// The object containing the metadata needed to download. The caller must
-    /// pin the object to the indexer after uploading.
+    /// The object containing the metadata needed to download. The slabs are
+    /// pinned as they are uploaded, but the caller must pin the object to the
+    /// indexer after uploading.
     pub async fn upload<R: AsyncRead + Unpin + 'static>(
         &self,
         object: Object,
@@ -182,6 +183,7 @@ impl Sdk {
     ) -> Result<Object, UploadError> {
         upload_object(
             self.hosts.clone(),
+            self.api_client.clone(),
             self.app_key.clone(),
             object,
             reader,
@@ -221,7 +223,12 @@ impl Sdk {
     /// # Returns
     /// A [PackedUpload] that can be used to add objects and finalize the upload.
     pub fn upload_packed(&self, options: PackedUploadOptions) -> Result<PackedUpload, UploadError> {
-        PackedUpload::new(self.hosts.clone(), self.app_key.clone(), options)
+        PackedUpload::new(
+            self.hosts.clone(),
+            self.api_client.clone(),
+            self.app_key.clone(),
+            options,
+        )
     }
 
     /// Returns a [Download] handle that streams the object's data. The handle
@@ -371,29 +378,32 @@ impl Sdk {
             .map_err(|e| Error::App(format!("{e:?}")))
     }
 
-    /// Pins an object to the indexer
+    /// Pins an object to the indexer, pinning any of its slabs that are not
+    /// already pinned.
     pub async fn pin_object(&self, object: &Object) -> Result<(), Error> {
-        let slabs: Vec<SlabPinParams> = object
-            .slabs()
-            .iter()
-            .map(|s| SlabPinParams {
-                version: s.version,
-                encryption_key: s.encryption_key.clone(),
-                min_shards: s.min_shards,
-                sectors: s.sectors.clone(),
-            })
-            .collect();
+        let sealed = object.seal(self.app_key.as_ref());
+        match self.api_client.pin_object(&self.app_key.0, &sealed).await {
+            Ok(()) => return Ok(()),
+            Err(e) if e.has_unpinned_slab() => {}
+            Err(e) => return Err(Error::App(format!("{e:?}"))),
+        }
 
-        const BATCH_SIZE: usize = 50;
-        for batch in slabs.chunks(BATCH_SIZE) {
-            self.api_client
-                .pin_slabs(&self.app_key.0, batch)
+        for slabs in object.slabs().chunks(SLAB_PIN_BATCH_SIZE) {
+            let params: Vec<SlabPinParams> = slabs.iter().map(SlabPinParams::from).collect();
+            let ids = self
+                .api_client
+                .pin_slabs(&self.app_key.0, &params)
                 .await
                 .map_err(|e| Error::App(format!("{e:?}")))?;
+            if ids.len() != slabs.len()
+                || ids.iter().zip(slabs).any(|(id, slab)| id != &slab.digest())
+            {
+                return Err(Error::App("slab id mismatch".to_string()));
+            }
         }
 
         self.api_client
-            .pin_object(&self.app_key.0, &object.seal(self.app_key.as_ref()))
+            .pin_object(&self.app_key.0, &sealed)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())
@@ -444,7 +454,13 @@ mod test {
             .await
             .expect("upload failed");
         assert!(!object.slabs().is_empty());
+        // The slabs are pinned as they are uploaded, before the object is pinned.
+        assert_eq!(network.pinned_slabs(), object.slabs().len());
 
+        // Simulate an imported object whose slabs have not been pinned by this
+        // account. pin_object should pin them and retry.
+        sdk.prune_slabs().await.expect("prune failed");
+        assert_eq!(network.pinned_slabs(), 0);
         sdk.pin_object(&object).await.expect("pin failed");
         assert_eq!(network.pinned_slabs(), object.slabs().len());
 

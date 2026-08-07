@@ -629,6 +629,7 @@ mod test {
 
         let mut packed_upload = PackedUpload::new(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             PackedUploadOptions::default(),
         )
@@ -722,6 +723,7 @@ mod test {
 
         let mut packed_upload = PackedUpload::new(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             PackedUploadOptions::default(),
         )
@@ -813,6 +815,7 @@ mod test {
 
         let mut packed_upload = PackedUpload::new(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             PackedUploadOptions::default(),
         )
@@ -871,6 +874,7 @@ mod test {
 
         let mut packed_upload = PackedUpload::new(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             PackedUploadOptions::default(),
         )
@@ -962,6 +966,7 @@ mod test {
 
         let mut packed_upload = PackedUpload::new(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             PackedUploadOptions::default(),
         )
@@ -1037,6 +1042,7 @@ mod test {
 
         let mut packed_upload = PackedUpload::new(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             PackedUploadOptions::default(),
         )
@@ -1096,6 +1102,7 @@ mod test {
 
         let object = upload_object(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             Object::default(),
             Cursor::new(input.clone()),
@@ -1169,6 +1176,7 @@ mod test {
         // first upload
         let object = upload_object(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             Object::default(),
             Cursor::new(part1.clone()),
@@ -1181,6 +1189,7 @@ mod test {
         // resume with second part
         let object = upload_object(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             object,
             Cursor::new(part2.clone()),
@@ -1240,6 +1249,7 @@ mod test {
 
         let object = upload_object(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             Object::default(),
             Cursor::new(data.clone()),
@@ -1335,6 +1345,7 @@ mod test {
 
         let object = upload_object(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             Object::default(),
             Cursor::new(input.clone()),
@@ -1369,6 +1380,7 @@ mod test {
 
         let err = upload_object(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             Object::default(),
             Cursor::new(input.clone()),
@@ -1421,6 +1433,7 @@ mod test {
 
         let object = upload_object(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             Object::default(),
             Cursor::new(input.clone()),
@@ -1468,6 +1481,7 @@ mod test {
 
         let _ = upload_object(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             Object::default(),
             Cursor::new(input.clone()),
@@ -1508,6 +1522,7 @@ mod test {
 
         let err = upload_object(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             Object::default(),
             Cursor::new(input.clone()),
@@ -1573,6 +1588,7 @@ mod test {
         });
         let obj = upload_object(
             hosts.clone(),
+            app_client::Client::mock(),
             app_key.clone(),
             Object::default(),
             Cursor::new(data.clone()),
