@@ -1,3 +1,37 @@
+## 0.10.0 (2026-08-07)
+
+### Breaking Changes
+
+- Add a version field to slabs.
+- Added `PackedUploadoptions` for packed uploads.
+
+### Features
+
+- Encrypt object data per slab so each slab can be re-encrypted independently without reusing the object's data key.
+- Switch sector root and range proof verifier to optimized SIMD backends.
+
+#### Added path-based uploads behind the `fs` feature.
+
+`Sdk::upload_path` and `PackedUpload::add_path` open a file and read it to EOF, so callers uploading from disk no longer stream every chunk across the language boundary. The feature is unavailable on wasm32; the FFI and Node bindings enable it and expose `uploadPath`/`addPath`.
+
+#### Added `start_offset` to `UploadOptions`.
+
+This allows objects to be rewritten without reuploading the entire object. The original object is not replaced, so both versions can be pinned simultaneously.
+
+#### Uploads will no longer block indefinitely until completion.
+
+Removed the progressive upload timeout and hosts are now retried a maximum of 3 times before giving up. The default 
+timeout is now 1.5m per shard per attempt. This should give enough time on slow connections. Racing and prioritization
+will still prioritize faster hosts after warming up.
+
+Users can still manually timeout
+
+### Fixes
+
+#### Reject malformed share-link encryption keys.
+
+The error for a bad share-link key now states it must be base64url-encoded rather than hex (the fragment was already decoded as base64url), and a fragment that does not decode to exactly 32 bytes is rejected instead of being silently zero-padded into a bogus key.
+
 ## 0.9.0 (2026-06-23)
 
 ### Breaking Changes
