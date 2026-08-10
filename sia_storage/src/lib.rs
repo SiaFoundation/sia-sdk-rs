@@ -572,7 +572,7 @@ pub fn validate_recovery_phrase(phrase: &str) -> Result<(), SeedError> {
 mod test {
     use crate::download::Download;
     use crate::hosts::QueueError;
-    use crate::rhp4::Client;
+    use crate::rhp4::{Client, mock};
     use crate::upload::{PackedUpload, upload_object};
     use bytes::{Bytes, BytesMut};
     use sia_core::rhp4::SECTOR_SIZE;
@@ -608,7 +608,7 @@ mod test {
     #[sia_core_derive::cross_target_test]
     async fn test_upload_download_packed() {
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let hosts = Hosts::new(Client::new());
+        let hosts = Hosts::new(Client::mock());
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -697,7 +697,7 @@ mod test {
     #[sia_core_derive::cross_target_test]
     async fn test_upload_download_packed_spanning() {
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let hosts = Hosts::new(Client::new());
+        let hosts = Hosts::new(Client::mock());
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -790,7 +790,7 @@ mod test {
     #[sia_core_derive::cross_target_test]
     async fn test_upload_download_packed_exact() {
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let hosts = Hosts::new(Client::new());
+        let hosts = Hosts::new(Client::mock());
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -850,7 +850,7 @@ mod test {
     #[sia_core_derive::cross_target_test]
     async fn test_upload_download_packed_empty() {
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let hosts = Hosts::new(Client::new());
+        let hosts = Hosts::new(Client::mock());
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -918,7 +918,7 @@ mod test {
     #[sia_core_derive::cross_target_test]
     async fn test_upload_packed_add_error_is_recoverable() {
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let hosts = Hosts::new(Client::new());
+        let hosts = Hosts::new(Client::mock());
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -1010,7 +1010,7 @@ mod test {
     #[tokio::test]
     async fn test_upload_packed_add_path() {
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let hosts = Hosts::new(Client::new());
+        let hosts = Hosts::new(Client::mock());
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -1075,7 +1075,7 @@ mod test {
     #[sia_core_derive::cross_target_test]
     async fn test_upload_download() {
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let hosts = Hosts::new(Client::new());
+        let hosts = Hosts::new(Client::mock());
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -1145,7 +1145,7 @@ mod test {
     #[sia_core_derive::cross_target_test]
     async fn test_upload_append() {
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let hosts = Hosts::new(Client::new());
+        let hosts = Hosts::new(Client::mock());
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -1213,7 +1213,7 @@ mod test {
         const SEGMENT_SIZE: u64 = 64; // leaf size
 
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let hosts = Hosts::new(Client::new());
+        let hosts = Hosts::new(Client::mock());
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -1306,8 +1306,8 @@ mod test {
     #[sia_core_derive::cross_target_test]
     async fn test_download_slow_hosts() {
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let mock_transport = Client::new();
-        let hosts = Hosts::new(mock_transport.clone());
+        let mock_transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(mock_transport.clone()));
 
         // Create 30 hosts and track their public keys
         let host_keys: Vec<_> = (0..30)
@@ -1364,7 +1364,7 @@ mod test {
     #[sia_core_derive::cross_target_test]
     async fn test_upload_no_hosts() {
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let hosts = Hosts::new(Client::new());
+        let hosts = Hosts::new(Client::mock());
         let input: Bytes = Bytes::from("Hello, world!");
 
         let err = upload_object(
@@ -1389,8 +1389,8 @@ mod test {
     #[sia_core_derive::cross_target_test]
     async fn test_upload_slow_host() {
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let mock_transport = Client::new();
-        let hosts = Hosts::new(mock_transport.clone());
+        let mock_transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(mock_transport.clone()));
 
         // Create 30 hosts and track their public keys
         let host_keys: Vec<_> = (0..30)
@@ -1436,8 +1436,8 @@ mod test {
     #[sia_core_derive::cross_target_test]
     async fn test_upload_all_hosts_slow() {
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let mock_transport = Client::new();
-        let hosts = Hosts::new(mock_transport.clone());
+        let mock_transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(mock_transport.clone()));
 
         // Create 30 hosts and track their public keys
         let host_keys: Vec<_> = (0..30)
@@ -1480,7 +1480,7 @@ mod test {
     #[sia_core_derive::cross_target_test]
     async fn test_upload_not_enough_hosts_good_for_upload() {
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let hosts = Hosts::new(Client::new());
+        let hosts = Hosts::new(Client::mock());
         // Create 30 hosts: 10 good for upload, 20 not good for upload
         let host_keys: Vec<_> = (0..30)
             .map(|_| PrivateKey::from_seed(&random_seed()).public_key())
@@ -1529,7 +1529,7 @@ mod test {
         let num_slabs = 3;
 
         let app_key = Arc::new(AppKey::import(random_seed()));
-        let hosts = Hosts::new(Client::new());
+        let hosts = Hosts::new(Client::mock());
         hosts.update(
             (0..60)
                 .map(|_| Host {

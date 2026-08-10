@@ -51,7 +51,7 @@ pub enum Error {
 pub struct Sdk {
     app_key: Arc<AppKey>,
     api_client: app_client::Client,
-    hosts: Hosts<Client>,
+    hosts: Hosts,
     _refresh_task: Arc<AbortOnDropHandle<()>>,
 }
 
@@ -59,7 +59,7 @@ impl Sdk {
     async fn refresh_hosts(
         app_key: &AppKey,
         api_client: &app_client::Client,
-        hosts: &Hosts<Client>,
+        hosts: &Hosts,
     ) -> Result<(), app_client::Error> {
         const PAGE_SIZE: usize = 100;
         let mut all_hosts = Vec::new();
@@ -108,7 +108,16 @@ impl Sdk {
         api_client: app_client::Client,
         app_key: Arc<AppKey>,
     ) -> Result<Self, BuilderError> {
-        let hosts = Hosts::new(Client::new());
+        Self::with_backends(api_client, Client::new(), app_key).await
+    }
+
+    /// Creates a new SDK instance with the provided backends
+    pub(crate) async fn with_backends(
+        api_client: app_client::Client,
+        transport: Client,
+        app_key: Arc<AppKey>,
+    ) -> Result<Self, BuilderError> {
+        let hosts = Hosts::new(transport);
         Self::refresh_hosts(&app_key, &api_client, &hosts).await?;
         let refresh_task = Self::spawn_refresh_task(
             app_key.clone(),
@@ -128,7 +137,7 @@ impl Sdk {
     fn spawn_refresh_task(
         app_key: Arc<AppKey>,
         api_client: app_client::Client,
-        hosts: Hosts<Client>,
+        hosts: Hosts,
         interval: Duration,
     ) -> AbortOnDropHandle<()> {
         AbortOnDropHandle::new(maybe_spawn!(async move {
@@ -411,6 +420,60 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_mock_network_object_roundtrip() {
+        use std::io::Cursor;
+        use tokio::io::AsyncReadExt;
+
+        use crate::mock::MockNetwork;
+
+        let network = MockNetwork::new();
+        network.add_hosts(40);
+
+        let sdk = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("sdk creation failed");
+
+        let data: Vec<u8> = (0..(1 << 20)).map(|i| i as u8).collect();
+        let object = sdk
+            .upload(
+                Object::new(Some(b"metadata".to_vec())),
+                Cursor::new(data.clone()),
+                UploadOptions::default(),
+            )
+            .await
+            .expect("upload failed");
+        assert!(!object.slabs().is_empty());
+
+        sdk.pin_object(&object).await.expect("pin failed");
+        assert_eq!(network.pinned_slabs(), object.slabs().len());
+
+        // the indexer stores the sealed object, so this round-trips through
+        // seal/open rather than handing back what was pinned
+        let fetched = sdk.object(&object.id()).await.expect("object fetch failed");
+        assert_eq!(fetched.slabs(), object.slabs());
+        assert_eq!(fetched.metadata, b"metadata".to_vec());
+
+        let mut reader = sdk
+            .download(&fetched, DownloadOptions::default())
+            .expect("download failed");
+        let mut downloaded = Vec::new();
+        reader
+            .read_to_end(&mut downloaded)
+            .await
+            .expect("read failed");
+        assert_eq!(downloaded, data);
+
+        sdk.delete_object(&object.id())
+            .await
+            .expect("delete failed");
+        assert!(sdk.object(&object.id()).await.is_err());
+
+        sdk.prune_slabs().await.expect("prune failed");
+        assert_eq!(network.pinned_slabs(), 0);
+    }
+
+    #[tokio::test]
     async fn test_refresh_task_periodic_and_abort() {
         use std::sync::Arc;
 
@@ -455,10 +518,10 @@ mod test {
 
         let app_key = Arc::new(AppKey::import(random_seed()));
         let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();
-        let hosts = Hosts::new(crate::rhp4::Client::new());
+        let hosts = Hosts::new(crate::rhp4::Client::mock());
 
         // helper: seed one good-for-upload host so available_for_upload() == 1
-        let add_upload_host = |hosts: &Hosts<crate::rhp4::Client>| {
+        let add_upload_host = |hosts: &Hosts| {
             hosts.update(
                 vec![Host {
                     public_key: PrivateKey::from_seed(&random_seed()).public_key(),

@@ -2,19 +2,16 @@ use bytes::{Bytes, BytesMut};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rand::Rng;
 use sia_core::rhp4::SECTOR_SIZE;
-use sia_core::signing::PrivateKey;
-use sia_core::types::v2::NetAddress;
-use sia_storage::mock::{MockDownloader, MockHosts, MockUploader};
-use sia_storage::{AppKey, DownloadOptions, Host, Object, UploadOptions};
+use sia_storage::mock::MockNetwork;
+use sia_storage::{AppKey, DownloadOptions, Object, Sdk, UploadOptions};
 use std::io::Cursor;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, sink};
 use tokio::runtime;
 
-async fn upload_object(uploader: Arc<MockUploader>, input: Bytes, opts: UploadOptions) -> Object {
+async fn upload_object(sdk: Arc<Sdk>, input: Bytes, opts: UploadOptions) -> Object {
     let r = Cursor::new(input);
-    uploader
-        .upload(Object::default(), r, opts)
+    sdk.upload(Object::default(), r, opts)
         .await
         .expect("upload failed")
 }
@@ -26,27 +23,14 @@ fn upload_benchmark(c: &mut Criterion) {
         .build()
         .expect("failed to create global runtime");
 
-    let hosts = MockHosts::new();
-    hosts.update(
-        (0..90)
-            .map(|_| Host {
-                public_key: PrivateKey::from_seed(&rand::random()).public_key(),
-                addresses: vec![NetAddress {
-                    protocol: sia_core::types::v2::Protocol::QUIC,
-                    address: "localhost:1234".to_string(),
-                }],
-                country_code: "US".to_string(),
-                latitude: 0.0,
-                longitude: 0.0,
-                good_for_upload: true,
-            })
-            .collect(),
-        true,
-    );
+    let network = MockNetwork::new();
+    network.add_hosts(90);
 
-    let app_key = Arc::new(AppKey::import(rand::random()));
-    let uploader = Arc::new(MockUploader::new(hosts.clone(), app_key.clone()));
-    let downloader = Arc::new(MockDownloader::new(hosts.clone(), app_key.clone()));
+    let sdk = Arc::new(
+        runtime
+            .block_on(network.sdk(AppKey::import(rand::random())))
+            .expect("failed to create sdk"),
+    );
     let mut input = BytesMut::zeroed(SECTOR_SIZE * 30); // 3 full slabs
     rand::rng().fill_bytes(&mut input);
     let input = input.freeze();
@@ -61,7 +45,7 @@ fn upload_benchmark(c: &mut Criterion) {
         |b, input| {
             b.to_async(&runtime).iter(|| async {
                 upload_object(
-                    uploader.clone(),
+                    sdk.clone(),
                     input.clone(),
                     UploadOptions {
                         max_buffered_slabs: Some(90),
@@ -70,7 +54,7 @@ fn upload_benchmark(c: &mut Criterion) {
                 )
                 .await;
             });
-            hosts.clear();
+            network.clear_sectors();
         },
     );
 
@@ -80,7 +64,7 @@ fn upload_benchmark(c: &mut Criterion) {
         |b, input| {
             b.to_async(&runtime).iter(|| async {
                 upload_object(
-                    uploader.clone(),
+                    sdk.clone(),
                     input.clone(),
                     UploadOptions {
                         max_buffered_slabs: Some(10),
@@ -89,19 +73,19 @@ fn upload_benchmark(c: &mut Criterion) {
                 )
                 .await;
             });
-            hosts.clear();
+            network.clear_sectors();
         },
     );
 
     large_group.bench_with_input(BenchmarkId::new("upload", "default"), &input, |b, input| {
         b.to_async(&runtime).iter(|| async {
-            upload_object(uploader.clone(), input.clone(), UploadOptions::default()).await;
+            upload_object(sdk.clone(), input.clone(), UploadOptions::default()).await;
         });
-        hosts.clear();
+        network.clear_sectors();
     });
 
     let object = runtime.block_on(async {
-        upload_object(uploader.clone(), input.clone(), UploadOptions::default()).await
+        upload_object(sdk.clone(), input.clone(), UploadOptions::default()).await
     });
 
     large_group.bench_with_input(
@@ -109,7 +93,7 @@ fn upload_benchmark(c: &mut Criterion) {
         &object,
         |b, object| {
             b.to_async(&runtime).iter(|| async {
-                let mut reader = downloader
+                let mut reader = sdk
                     .download(
                         object,
                         DownloadOptions {
@@ -130,7 +114,7 @@ fn upload_benchmark(c: &mut Criterion) {
         &object,
         |b, object| {
             b.to_async(&runtime).iter(|| async {
-                let mut reader = downloader
+                let mut reader = sdk
                     .download(
                         object,
                         DownloadOptions {
@@ -151,9 +135,7 @@ fn upload_benchmark(c: &mut Criterion) {
         &object,
         |b, object| {
             b.to_async(&runtime).iter(|| async {
-                let mut reader = downloader
-                    .download(object, DownloadOptions::default())
-                    .unwrap();
+                let mut reader = sdk.download(object, DownloadOptions::default()).unwrap();
                 tokio::io::copy(&mut reader, &mut sink())
                     .await
                     .expect("download to complete");
@@ -167,15 +149,13 @@ fn upload_benchmark(c: &mut Criterion) {
 
     ttfb_group.bench_function("120MiB", |b| {
         b.to_async(&runtime).iter_custom(|iters| {
-            let downloader = downloader.clone();
+            let sdk = sdk.clone();
             let object = object.clone();
             async move {
                 let mut total = std::time::Duration::ZERO;
                 for _ in 0..iters {
                     let start = std::time::Instant::now();
-                    let mut reader = downloader
-                        .download(&object, DownloadOptions::default())
-                        .unwrap();
+                    let mut reader = sdk.download(&object, DownloadOptions::default()).unwrap();
                     let mut buf = [0u8; 1];
                     reader.read_exact(&mut buf).await.expect("read to succeed");
                     total += start.elapsed();
@@ -187,13 +167,13 @@ fn upload_benchmark(c: &mut Criterion) {
 
     ttfb_group.bench_function("64B", |b| {
         b.to_async(&runtime).iter_custom(|iters| {
-            let downloader = downloader.clone();
+            let sdk = sdk.clone();
             let object = object.clone();
             async move {
                 let mut total = std::time::Duration::ZERO;
                 for _ in 0..iters {
                     let start = std::time::Instant::now();
-                    let mut reader = downloader
+                    let mut reader = sdk
                         .download(
                             &object,
                             DownloadOptions {
