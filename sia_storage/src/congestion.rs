@@ -8,9 +8,6 @@ use crate::time::Duration;
 /// operations dispatched at the current limit so a probe observes its own load
 /// before increasing the limit again.
 const MIN_WINDOW: usize = 16;
-/// While probing, keep doubling only while goodput rises at least this much;
-/// once a doubling buys less, probing stops.
-const RISE_MARGIN: f64 = 0.1;
 /// In steady state, goodput must fall more than this below its smoothed peak to
 /// count as real congestion and trigger a back-off.
 const DECLINE_MARGIN: f64 = 0.25;
@@ -138,7 +135,7 @@ impl InflightController {
 
         let adverse = state.prev_goodput > 0.0 && {
             if state.probing {
-                goodput < state.prev_goodput * (1.0 + RISE_MARGIN)
+                goodput <= state.prev_goodput
             } else {
                 old == state.prev_limit && goodput < state.goodput_ema * (1.0 - DECLINE_MARGIN)
             }
@@ -221,6 +218,13 @@ mod tests {
         assert_eq!(step(&c, 1.0), 32);
         assert_eq!(step(&c, 1.0), 64);
         assert_eq!(step(&c, 1.0), 128);
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_probe_continues_on_small_goodput_increase() {
+        let c = InflightController::new(8, 2, 1000, 1);
+        assert_eq!(step(&c, 1.0), 16);
+        assert_eq!(step(&c, 1.9), 32);
     }
 
     #[sia_core_derive::cross_target_test]
