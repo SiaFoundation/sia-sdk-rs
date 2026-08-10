@@ -1,13 +1,14 @@
 use std::mem;
 
-use bytes::Bytes;
 use sia_core::rhp4::{SECTOR_SIZE, SEGMENT_SIZE};
 use sia_reed_solomon::ReedSolomon;
 use thiserror::Error;
-use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{self, AsyncRead, AsyncReadExt};
 
 use crate::EncryptionKey;
 use crate::encryption::Chacha20Cipher;
+
+const SLAB_READ_SIZE: usize = 1 << 18; // 256 KiB
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -45,39 +46,6 @@ impl ErasureCoder {
     /// reconstructs the missing datashards from the available ones.
     pub fn reconstruct_data_shards(&self, shards: &mut [Option<Vec<u8>>]) -> Result<()> {
         self.encoder.reconstruct_data(shards)?;
-        Ok(())
-    }
-
-    /// write_data_shards writes up to 'n' bytes from the given reconstructed shards
-    /// to the provided writer, skipping the first `skip` bytes.
-    pub async fn write_data_shards<W: AsyncWrite + Unpin>(
-        w: &mut W,
-        shards: &[Bytes],
-        mut skip: usize,
-        mut n: usize,
-    ) -> Result<()> {
-        let row_bytes = shards.len() * SEGMENT_SIZE;
-        let rows = skip / row_bytes;
-        let mut offset = rows * SEGMENT_SIZE;
-        skip %= row_bytes;
-        while n > 0 {
-            for shard in shards {
-                if n == 0 {
-                    return Ok(());
-                } else if skip > SEGMENT_SIZE {
-                    skip -= SEGMENT_SIZE;
-                    continue;
-                }
-
-                let start = offset + skip;
-                let length = n.min(SEGMENT_SIZE - skip);
-
-                w.write_all(&shard[start..start + length]).await?;
-                n -= length;
-                skip = 0;
-            }
-            offset += SEGMENT_SIZE;
-        }
         Ok(())
     }
 }
@@ -160,26 +128,37 @@ impl SlabReader {
             return Ok((0, None));
         }
         let mut cipher = Chacha20Cipher::new_v1(data_key, self.length as u64, &self.encryption_key);
-        let mut r = r.take(remaining as u64);
+        let mut buf = vec![0u8; SLAB_READ_SIZE.min(remaining)];
         let mut total_read = 0;
         loop {
             if self.length == self.optimal_data_size() {
                 break;
             }
 
-            // calculate current position in the interleaved layout
-            let stripe_size = SEGMENT_SIZE * self.data_shards;
-            let shard_index = (self.length % stripe_size) / SEGMENT_SIZE;
-            let byte_in_seg = self.length % SEGMENT_SIZE;
-            let seg_start = (self.length / stripe_size) * SEGMENT_SIZE;
-
-            let segment =
-                &mut self.shards[shard_index][seg_start + byte_in_seg..seg_start + SEGMENT_SIZE];
-            let n = r.read(segment).await?;
+            let remaining = self.optimal_data_size() - self.length;
+            let read_size = remaining.min(buf.len());
+            let n = r.read(&mut buf[..read_size]).await?;
             if n == 0 {
                 break;
             }
-            cipher.apply_keystream(&mut segment[..n]);
+
+            cipher.apply_keystream(&mut buf[..n]);
+
+            // Interleave the encrypted stream across 64-byte shard segments.
+            let stripe_size = SEGMENT_SIZE * self.data_shards;
+            let mut copied = 0;
+            while copied < n {
+                let position = self.length + copied;
+                let shard_index = (position % stripe_size) / SEGMENT_SIZE;
+                let byte_in_segment = position % SEGMENT_SIZE;
+                let segment_start = (position / stripe_size) * SEGMENT_SIZE;
+                let copy_len = (SEGMENT_SIZE - byte_in_segment).min(n - copied);
+                let destination = &mut self.shards[shard_index]
+                    [segment_start + byte_in_segment..segment_start + byte_in_segment + copy_len];
+                destination.copy_from_slice(&buf[copied..copied + copy_len]);
+                copied += copy_len;
+            }
+
             self.length += n;
             self.total_length += n as u64;
             total_read += n;
@@ -205,6 +184,8 @@ impl SlabReader {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
+
+    use bytes::Bytes;
 
     use super::*;
 
@@ -401,38 +382,6 @@ mod tests {
         // parity shard to be filled
         coder.encode_shards(&mut shards).unwrap();
         assert_ne!(shards[4], vec![0u8; SECTOR_SIZE]);
-
-        // joining the shards back together should result in the original data
-        let shards: Vec<Bytes> = shards.into_iter().map(Bytes::from).collect();
-        let mut joined_data = Vec::new();
-        ErasureCoder::write_data_shards(&mut joined_data, &shards[..DATA_SHARDS], 0, data.len())
-            .await
-            .unwrap();
-        assert_eq!(joined_data, data);
-
-        // join only the first half
-        let mut joined_data = Vec::new();
-        ErasureCoder::write_data_shards(
-            &mut joined_data,
-            &shards[..DATA_SHARDS],
-            0,
-            data.len() / 2,
-        )
-        .await
-        .unwrap();
-        assert_eq!(joined_data, data[..data.len() / 2]);
-
-        // join only the second half
-        let mut joined_data = Vec::new();
-        ErasureCoder::write_data_shards(
-            &mut joined_data,
-            &shards[..DATA_SHARDS],
-            data.len() / 2,
-            data.len() / 2,
-        )
-        .await
-        .unwrap();
-        assert_eq!(joined_data, data[data.len() / 2..]);
     }
 
     #[sia_core_derive::cross_target_test]

@@ -21,7 +21,7 @@ use log::debug;
 use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::PublicKey;
 use thiserror::Error;
-use tokio::io::{AsyncRead, BufReader};
+use tokio::io::AsyncRead;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinSet;
 
@@ -778,8 +778,6 @@ impl PackedUpload {
     /// counted in [length](Self::length) and [remaining](Self::remaining).
     pub async fn add<R: AsyncRead + Unpin>(&mut self, r: R) -> Result<u64, UploadError> {
         let object = Object::default();
-        // buffer the reader since SlabReader reads 64 bytes at a time
-        let r = BufReader::new(r);
         let start = self.upload.length();
         let n = self.upload.read(object.data_key.clone(), r).await?;
         let end = self.upload.length();
@@ -851,8 +849,6 @@ pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
     reader: R,
     options: UploadOptions,
 ) -> Result<Object, UploadError> {
-    // buffer the reader since SlabReader reads 64 bytes at a time
-    let reader = BufReader::new(reader);
     let Some(start_offset) = options.start_offset else {
         let mut upload = Upload::new(hosts, api_client, app_key, options)?;
         upload.read(object.data_key.clone(), reader).await?;

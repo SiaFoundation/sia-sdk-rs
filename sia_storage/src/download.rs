@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Poll, ready};
 
 use crate::congestion::InflightController;
@@ -16,7 +16,7 @@ use bytes::{Buf, Bytes};
 use log::{debug, warn};
 use sia_core::rhp4::SEGMENT_SIZE;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::AsyncRead;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
@@ -138,6 +138,7 @@ struct SlabRecovery<State> {
     client: Hosts,
     controller: Arc<InflightController>,
     account_key: Arc<AppKey>,
+    erasure_coder: Arc<ErasureCoder>,
 
     slab_index: usize,
     min_shards: usize,
@@ -153,6 +154,7 @@ impl SlabRecovery<AwaitingRecovery> {
         client: Hosts,
         controller: Arc<InflightController>,
         account_key: Arc<AppKey>,
+        erasure_coder: Arc<ErasureCoder>,
         slab: ChunkSlab,
         seq: usize,
         popped: watch::Sender<usize>,
@@ -166,6 +168,13 @@ impl SlabRecovery<AwaitingRecovery> {
                 "min_shards {} cannot be greater than number of sectors {}",
                 slab.slab.min_shards,
                 slab.slab.sectors.len()
+            )));
+        }
+        let min_shards = slab.slab.min_shards as usize;
+        if erasure_coder.data_shards() != min_shards {
+            return Err(DownloadError::InvalidSlab(format!(
+                "min_shards {min_shards} does not match erasure coder data shards {}",
+                erasure_coder.data_shards()
             )));
         }
 
@@ -189,7 +198,6 @@ impl SlabRecovery<AwaitingRecovery> {
         // snapshot and pile onto the same fastest hosts. The guards travel
         // into the spawned read tasks via `recover_shards` and drop with
         // them; failure/timeout retries reserve on demand from `remaining`.
-        let min_shards = slab.slab.min_shards as usize;
         let sectors = sectors
             .into_iter()
             .enumerate()
@@ -207,6 +215,7 @@ impl SlabRecovery<AwaitingRecovery> {
             client,
             controller,
             account_key,
+            erasure_coder,
             slab_index: slab.index,
             min_shards,
             encryption_key: slab.slab.encryption_key,
@@ -331,6 +340,7 @@ impl SlabRecovery<AwaitingRecovery> {
                                     client: self.client,
                                     controller: self.controller,
                                     account_key: self.account_key,
+                                    erasure_coder: self.erasure_coder,
                                     min_shards,
                                     slab_index: self.slab_index,
                                     encryption_key: self.encryption_key,
@@ -381,8 +391,6 @@ impl SlabRecovery<AwaitingRecovery> {
 
 impl SlabRecovery<ShardsRecovered> {
     fn decode(self) -> Result<SlabRecovery<SlabDecoded>, DownloadError> {
-        let parity_shards = self.state.shards.len() - self.min_shards;
-        let rs = ErasureCoder::new(self.min_shards, parity_shards)?;
         let mut shards = self.state.shards;
         // decrypt the downloaded shards in place and recover the data shards
         encrypt_recovered_shards(
@@ -391,7 +399,7 @@ impl SlabRecovery<ShardsRecovered> {
             self.state.shard_offset,
             &mut shards,
         );
-        rs.reconstruct_data_shards(&mut shards)?;
+        self.erasure_coder.reconstruct_data_shards(&mut shards)?;
         let data_shards = shards
             .into_iter()
             .take(self.min_shards)
@@ -401,6 +409,7 @@ impl SlabRecovery<ShardsRecovered> {
             client: self.client,
             controller: self.controller,
             account_key: self.account_key,
+            erasure_coder: self.erasure_coder,
             min_shards: self.min_shards,
             slab_index: self.slab_index,
             encryption_key: self.encryption_key,
@@ -412,10 +421,32 @@ impl SlabRecovery<ShardsRecovered> {
 }
 
 impl SlabRecovery<SlabDecoded> {
-    async fn write<W: AsyncWrite + Unpin>(self, w: &mut W) -> Result<(), DownloadError> {
-        let skip = self.offset % (SEGMENT_SIZE * self.state.data_shards.len());
-        ErasureCoder::write_data_shards(w, &self.state.data_shards, skip, self.length).await?;
-        Ok(())
+    fn data(self) -> Vec<u8> {
+        let shards = self.state.data_shards;
+        let row_bytes = shards.len() * SEGMENT_SIZE;
+        let mut skip = self.offset % row_bytes;
+        let mut offset = 0;
+
+        let mut remaining = self.length;
+        let mut data = Vec::with_capacity(remaining);
+        while remaining > 0 {
+            for shard in &shards {
+                if remaining == 0 {
+                    return data;
+                } else if skip > SEGMENT_SIZE {
+                    skip -= SEGMENT_SIZE;
+                    continue;
+                }
+
+                let start = offset + skip;
+                let length = remaining.min(SEGMENT_SIZE - skip);
+                data.extend_from_slice(&shard[start..start + length]);
+                remaining -= length;
+                skip = 0;
+            }
+            offset += SEGMENT_SIZE;
+        }
+        data
     }
 }
 
@@ -513,6 +544,7 @@ pub struct Download {
     hosts: Hosts,
     account_key: Arc<AppKey>,
     data_key: EncryptionKey,
+    erasure_coders: Vec<OnceLock<Arc<ErasureCoder>>>,
 
     // download state
     controller: Arc<InflightController>,
@@ -595,11 +627,24 @@ impl Download {
         let hosts = self.hosts.clone();
         let account_key = self.account_key.clone();
         let shard_progress_callback = self.shard_downloaded.clone();
+        let erasure_coder = if let Some(erasure_coder) = self.erasure_coders[chunk_slab.index].get()
+        {
+            Ok(erasure_coder.clone())
+        } else {
+            let data_shards = chunk_slab.slab.min_shards as usize;
+            let parity_shards = chunk_slab.slab.sectors.len().saturating_sub(data_shards);
+            ErasureCoder::new(data_shards, parity_shards).map(|erasure_coder| {
+                let erasure_coder = Arc::new(erasure_coder);
+                self.erasure_coders[chunk_slab.index]
+                    .set(erasure_coder.clone())
+                    .ok();
+                erasure_coder
+            })
+        };
         // Build the SlabRecovery synchronously so prioritization and top-K
         // inflight reservations land before this method returns; each
         // successive spawn must see the previous chunk's reservations to
         // disperse picks across hosts.
-        let len = chunk_slab.slab.length as usize;
         let seq = self.next_seq;
         self.next_seq += 1;
         let mut cipher = match chunk_slab.slab.version {
@@ -610,25 +655,28 @@ impl Download {
                 &chunk_slab.slab.encryption_key,
             ),
         };
-        let recovery = SlabRecovery::new(
-            hosts,
-            self.controller.clone(),
-            account_key,
-            chunk_slab,
-            seq,
-            self.popped.clone(),
-        );
+        let recovery = erasure_coder
+            .map_err(DownloadError::from)
+            .and_then(|erasure_coder| {
+                SlabRecovery::new(
+                    hosts,
+                    self.controller.clone(),
+                    account_key,
+                    erasure_coder,
+                    chunk_slab,
+                    seq,
+                    self.popped.clone(),
+                )
+            });
         self.queue
             .push_back(AbortOnDropHandle::new(maybe_spawn!(async move {
                 let recovery = recovery?;
-                let mut buf = Vec::with_capacity(len);
-                recovery
-                    .recover_shards(shard_progress_callback)
-                    .await?
-                    .decode()?
-                    .write(&mut buf)
-                    .await?;
-                cipher.apply_keystream(&mut buf);
+                let recovery = recovery.recover_shards(shard_progress_callback).await?;
+                let buf = maybe_spawn_blocking!({
+                    let mut buf = recovery.decode()?.data();
+                    cipher.apply_keystream(&mut buf);
+                    Ok::<_, DownloadError>(buf)
+                })?;
                 Ok(buf)
             })));
         true
@@ -695,6 +743,7 @@ impl Download {
         let available = object_size.saturating_sub(options.offset);
         let remaining = options.length.unwrap_or(available).min(available);
         let slabs = object.slabs().to_vec();
+        let erasure_coders = (0..slabs.len()).map(|_| OnceLock::new()).collect();
         let scale = slabs.first().map(|s| s.min_shards as usize).unwrap_or(1);
         let max_buffered_chunks = options
             .max_buffered_chunks
@@ -711,6 +760,7 @@ impl Download {
             account_key,
             controller,
             data_key,
+            erasure_coders,
             buf: Bytes::new(),
             queue: VecDeque::with_capacity(max_buffered_chunks),
             chunk_iter,
@@ -1044,6 +1094,9 @@ mod test {
         .await
         .unwrap();
         let slabs = obj.slabs();
+        let data_shards = slabs[0].min_shards as usize;
+        let parity_shards = slabs[0].sectors.len() - data_shards;
+        let erasure_coder = Arc::new(ErasureCoder::new(data_shards, parity_shards).unwrap());
 
         let test_cases: Vec<(&str, usize, usize)> = vec![
             ("full slab", 0, optimal_data_size),
@@ -1062,8 +1115,7 @@ mod test {
             slab.offset = offset as u32;
             slab.length = length as u32;
 
-            let mut recovered_data = Vec::with_capacity(length);
-            SlabRecovery::new(
+            let recovery = SlabRecovery::new(
                 hosts.clone(),
                 Arc::new(InflightController::new(
                     INITIAL_INFLIGHT,
@@ -1072,6 +1124,7 @@ mod test {
                     10,
                 )),
                 app_key.clone(),
+                erasure_coder.clone(),
                 ChunkSlab {
                     slab,
                     index: 0,
@@ -1085,10 +1138,8 @@ mod test {
             .await
             .unwrap()
             .decode()
-            .unwrap()
-            .write(&mut recovered_data)
-            .await
             .unwrap();
+            let mut recovered_data = recovery.data();
             // SlabRecovery only strips the per-shard layer; remove the object
             // data-key layer here.
             Chacha20Cipher::new_v1(
@@ -1337,6 +1388,13 @@ mod test {
                 10,
             )),
             app_key.clone(),
+            Arc::new(
+                ErasureCoder::new(
+                    slab.min_shards as usize,
+                    slab.sectors.len() - slab.min_shards as usize,
+                )
+                .unwrap(),
+            ),
             racing_chunk(&slab),
             RACE_WINDOW, // first chunk outside the window
             watch::channel(0).0,
@@ -1365,6 +1423,13 @@ mod test {
                 10,
             )),
             app_key.clone(),
+            Arc::new(
+                ErasureCoder::new(
+                    slab.min_shards as usize,
+                    slab.sectors.len() - slab.min_shards as usize,
+                )
+                .unwrap(),
+            ),
             racing_chunk(&slab),
             0,
             watch::channel(0).0,
@@ -1402,6 +1467,13 @@ mod test {
                 10,
             )),
             app_key.clone(),
+            Arc::new(
+                ErasureCoder::new(
+                    slab.min_shards as usize,
+                    slab.sectors.len() - slab.min_shards as usize,
+                )
+                .unwrap(),
+            ),
             racing_chunk(&slab),
             RACE_WINDOW,
             popped_tx,
