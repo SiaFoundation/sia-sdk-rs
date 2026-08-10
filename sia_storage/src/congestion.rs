@@ -4,10 +4,10 @@ use log::debug;
 
 use crate::time::Duration;
 
-/// Completions per decision while probing. The steady window scales with the
-/// limit, clamped, so the goodput estimate stays stable without going open-loop.
+/// Minimum completions per decision. The window scales with the number of
+/// operations dispatched at the current limit so a probe observes its own load
+/// before increasing the limit again.
 const MIN_WINDOW: usize = 16;
-const MAX_WINDOW: usize = 1024;
 /// While probing, keep doubling only while goodput rises at least this much;
 /// once a doubling buys less, probing stops.
 const RISE_MARGIN: f64 = 0.1;
@@ -55,11 +55,7 @@ struct State {
 
 impl State {
     fn window(&self) -> usize {
-        if self.probing {
-            MIN_WINDOW
-        } else {
-            (self.limit * self.scale).clamp(MIN_WINDOW, MAX_WINDOW)
-        }
+        self.limit.saturating_mul(self.scale).max(MIN_WINDOW)
     }
 }
 
@@ -225,6 +221,17 @@ mod tests {
         assert_eq!(step(&c, 1.0), 32);
         assert_eq!(step(&c, 1.0), 64);
         assert_eq!(step(&c, 1.0), 128);
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_probe_waits_for_current_load() {
+        let c = InflightController::new(8, 2, 1000, 10);
+        for _ in 0..79 {
+            assert_eq!(c.record(c.sample(), Duration::from_secs(1), true), 0);
+        }
+        assert_eq!(c.limit(), 8);
+        assert_eq!(c.record(c.sample(), Duration::from_secs(1), true), 8);
+        assert_eq!(c.limit(), 16);
     }
 
     #[sia_core_derive::cross_target_test]
