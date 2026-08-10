@@ -63,11 +63,11 @@ pub enum BuilderError {
     #[error("request expired")]
     RequestExpired,
 
-    /// The pre-authorized key was not accepted by the indexer, so the
-    /// connection was not approved. The key may be invalid, expired, exhausted,
-    /// or restricted to a different application.
-    #[error("pre-authorized key rejected")]
-    PreAuthorizedKeyRejected,
+    /// The indexer rejected the pre-authorized connection request. The key is
+    /// usually invalid, expired, exhausted, or restricted to a different
+    /// application; the indexer's response is included.
+    #[error("pre-authorized key rejected: {0}")]
+    PreAuthorizedKeyRejected(String),
 }
 
 impl Builder<DisconnectedState> {
@@ -146,7 +146,11 @@ impl Builder<DisconnectedState> {
                 &self.app_meta,
                 pre_authorized_key,
             )
-            .await?;
+            .await
+            .map_err(|e| match e {
+                app_client::Error::Unauthorized(msg) => BuilderError::PreAuthorizedKeyRejected(msg),
+                e => e.into(),
+            })?;
 
         // The indexer approves a valid pre-authorized request synchronously, so
         // the user secret is available on the first status check.
@@ -154,7 +158,11 @@ impl Builder<DisconnectedState> {
             .client
             .check_request_status(&self.ephemeral_key, Url::parse(&resp.status_url)?)
             .await?
-            .ok_or(BuilderError::PreAuthorizedKeyRejected)?;
+            .ok_or_else(|| {
+                BuilderError::PreAuthorizedKeyRejected(
+                    "the indexer did not approve the request".to_string(),
+                )
+            })?;
 
         let private_key = derive_app_key(mnemonic, &self.app_meta.id, &user_secret)?;
         self.client

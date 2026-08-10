@@ -45,6 +45,10 @@ pub enum Error {
     #[error("indexd responded with an error: {0}")]
     Api(String),
 
+    /// The indexer rejected the request as unauthorized.
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     /// An invalid HTTP header value was constructed.
     #[error("invalid header value: {0}")]
     InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),
@@ -465,6 +469,8 @@ impl Client {
     async fn handle_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
         if resp.status().is_success() {
             Ok(resp.json::<T>().await?)
+        } else if resp.status() == StatusCode::UNAUTHORIZED {
+            Err(Error::Unauthorized(resp.text().await?))
         } else {
             Err(Error::Api(resp.text().await?))
         }
