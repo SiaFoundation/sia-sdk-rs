@@ -625,7 +625,9 @@ impl PackedUpload {
     ///
     /// If the reader errors part-way, it's safe to continue calling
     /// [add](Self::add); no object is registered for the failed call. Or call
-    /// [finalize](Self::finalize) to collect the objects added so far.
+    /// [finalize](Self::finalize) to collect the objects added so far. Bytes
+    /// read before the error remain in the current slab as padding and stay
+    /// counted in [length](Self::length) and [remaining](Self::remaining).
     pub async fn add(&self, reader: Arc<dyn Reader>) -> Result<u64, UploadError> {
         if self.cancel.is_cancelled() {
             return Err(UploadError::Closed);
@@ -642,6 +644,37 @@ impl PackedUpload {
                     // will immediately drop.
                     let mut pu = guard.take().ok_or(UploadError::Closed)?;
                     let res = pu.add(FFIReader::new(reader)).await.map_err(UploadError::from);
+                    let total = pu.length();
+                    *guard = Some(pu);
+                    length.store(total, Ordering::Release);
+                    res
+                } => r,
+            }
+        })
+        .await?
+    }
+
+    /// Adds a new object to the upload by opening the file at `path`. Behaves
+    /// like [add](Self::add) otherwise.
+    ///
+    /// Prefer this to [add](Self::add) for files: the read stays on the runtime
+    /// instead of crossing the FFI boundary once per chunk.
+    pub async fn add_path(&self, path: String) -> Result<u64, UploadError> {
+        if self.cancel.is_cancelled() {
+            return Err(UploadError::Closed);
+        }
+        let inner = self.inner.clone();
+        let cancel = self.cancel.clone();
+        let length = self.length.clone();
+        spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => Err(UploadError::Closed),
+                r = async {
+                    let mut guard = inner.lock().await;
+                    // take ownership so cancelled in-flight adds
+                    // will immediately drop.
+                    let mut pu = guard.take().ok_or(UploadError::Closed)?;
+                    let res = pu.add_path(path).await.map_err(UploadError::from);
                     let total = pu.length();
                     *guard = Some(pu);
                     length.store(total, Ordering::Release);
@@ -934,6 +967,37 @@ impl Sdk {
         spawn(async move {
             let r = FFIReader::new(r);
             let obj = sdk.upload(obj, r, options.into()).await?;
+            Ok(Arc::new(PinnedObject {
+                inner: Arc::new(Mutex::new(obj)),
+            }))
+        })
+        .await?
+    }
+
+    /// Uploads the file at `path`. Behaves like [upload](Self::upload)
+    /// otherwise.
+    ///
+    /// Prefer this to [upload](Self::upload) for files: the read stays on the
+    /// runtime instead of crossing the FFI boundary once per chunk.
+    ///
+    /// # Arguments
+    /// * `object` - The object to upload into. Use [PinnedObject::new] for new uploads.
+    /// * `path` - The path of the file to upload.
+    /// * `options` - The [UploadOptions] to use for the upload.
+    ///
+    /// # Returns
+    /// A new object containing all slabs from the input object plus the newly
+    /// uploaded slabs. The caller must pin the object to the indexer afterward.
+    pub async fn upload_path(
+        &self,
+        object: &PinnedObject,
+        path: String,
+        options: UploadOptions,
+    ) -> Result<Arc<PinnedObject>, UploadError> {
+        let sdk = self.inner.clone();
+        let obj = object.object();
+        spawn(async move {
+            let obj = sdk.upload_path(obj, path, options.into()).await?;
             Ok(Arc::new(PinnedObject {
                 inner: Arc::new(Mutex::new(obj)),
             }))
