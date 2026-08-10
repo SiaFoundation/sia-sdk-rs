@@ -34,6 +34,7 @@ const QUERY_PARAM_CREDENTIAL: &str = "sc";
 const QUERY_PARAM_SIGNATURE: &str = "ss";
 
 const SHARE_URL_SCHEME: &str = "sia";
+
 const ERROR_OBJECT_UNPINNED_SLAB: &str = "object contains unpinned slab";
 
 #[cfg(not(test))]
@@ -81,18 +82,21 @@ pub enum Error {
     Custom(String),
 }
 
+#[derive(Debug, Error)]
+pub enum PinObjectError {
+    #[error("client error: {0}")]
+    Client(#[from] Error),
+
+    #[error("object contains unpinned slab")]
+    UnpinnedSlab,
+}
+
 impl Error {
     /// Returns whether repeating the request may succeed. HTTP status codes are
     /// currently flattened into [`Error::Api`], so API responses must be
     /// treated as retryable alongside transport errors.
     pub(crate) fn is_retryable(&self) -> bool {
         matches!(self, Self::Api(_) | Self::Reqwest(_))
-    }
-
-    /// Returns whether the indexer rejected an object because one or more of
-    /// its slabs have not been pinned by the calling account.
-    pub(crate) fn has_unpinned_slab(&self) -> bool {
-        matches!(self, Self::Api(message) if message.contains(ERROR_OBJECT_UNPINNED_SLAB))
     }
 }
 
@@ -347,7 +351,7 @@ impl Client {
         &self,
         app_key: &PrivateKey,
         object: &SealedObject,
-    ) -> Result<(), Error> {
+    ) -> Result<(), PinObjectError> {
         match self {
             Self::Http(c) => c.pin_object(app_key, object).await,
             #[cfg(any(test, feature = "mock"))]

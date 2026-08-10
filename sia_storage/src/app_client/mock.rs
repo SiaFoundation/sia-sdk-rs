@@ -10,8 +10,8 @@ use sia_core::signing::PrivateKey;
 use sia_core::types::Hash256;
 
 use super::{
-    ERROR_OBJECT_UNPINNED_SLAB, Error, RegisterAppResponse, SHARE_URL_SCHEME, SealedObjectEvent,
-    SlabPinParams, Url, sign,
+    Error, PinObjectError, RegisterAppResponse, SHARE_URL_SCHEME, SealedObjectEvent, SlabPinParams,
+    Url, sign,
 };
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
@@ -181,14 +181,14 @@ impl Client {
         &self,
         _: &PrivateKey,
         object: &SealedObject,
-    ) -> Result<(), Error> {
+    ) -> Result<(), PinObjectError> {
         let mut state = self.state.write().unwrap();
         if object
             .slabs
             .iter()
             .any(|slab| !state.slabs.contains_key(&slab.digest()))
         {
-            return Err(Error::Api(ERROR_OBJECT_UNPINNED_SLAB.to_string()));
+            return Err(PinObjectError::UnpinnedSlab);
         }
         state.objects.insert(
             object.id(),

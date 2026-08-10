@@ -10,6 +10,7 @@ use thiserror::Error;
 use tokio::io::AsyncRead;
 use url::Url;
 
+use crate::app_client::PinObjectError::UnpinnedSlab;
 use crate::app_client::{self, SLAB_PIN_BATCH_SIZE, SlabPinParams};
 use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
@@ -384,7 +385,7 @@ impl Sdk {
         let sealed = object.seal(self.app_key.as_ref());
         match self.api_client.pin_object(&self.app_key.0, &sealed).await {
             Ok(()) => return Ok(()),
-            Err(e) if e.has_unpinned_slab() => {}
+            Err(UnpinnedSlab) => {}
             Err(e) => return Err(Error::App(format!("{e:?}"))),
         }
 
