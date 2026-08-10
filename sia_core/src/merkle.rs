@@ -50,11 +50,6 @@ impl Accumulator {
         self.num_leaves += 1 << height;
     }
 
-    pub fn reset(&mut self) {
-        self.trees.fill(Default::default());
-        self.num_leaves = 0;
-    }
-
     pub fn root(&self) -> Hash256 {
         let mut i = self.num_leaves.trailing_zeros() as usize;
         if i == 64 {

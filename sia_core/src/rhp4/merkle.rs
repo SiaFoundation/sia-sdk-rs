@@ -43,6 +43,10 @@ pub enum ProofValidationError {
 pub struct RangeProof(Vec<Hash256>, Bytes);
 
 impl RangeProof {
+    pub fn new(proof: Vec<Hash256>, data: Bytes) -> Self {
+        Self(proof, data)
+    }
+
     pub fn verify(
         self,
         root: &Hash256,
@@ -98,17 +102,21 @@ impl RangeProof {
         merkle::hash_leaves_many(&mut leaf_hashes, merkle::as_blocks(data));
 
         let mut roots = VecDeque::new();
-        let mut acc = merkle::Accumulator::new();
-        let mut leaves = leaf_hashes.into_iter();
+        let mut offset = 0;
         let mut i = start;
         let j = end;
         while i < j {
-            acc.reset();
             let subtree_size = next_subtree_size(i, j);
-            for _ in 0..subtree_size {
-                acc.add_leaf(leaves.next().expect("leaf count matches range").into());
+
+            let mut nodes = leaf_hashes[offset..offset + subtree_size].to_vec();
+            while nodes.len() > 1 {
+                let mut parents = vec![[0u8; 32]; nodes.len() / 2];
+                merkle::hash_nodes_many(&mut parents, &nodes);
+                nodes = parents;
             }
-            roots.push_back(acc.root());
+
+            roots.push_back(nodes[0].into());
+            offset += subtree_size;
             i += subtree_size;
         }
         Ok(roots)

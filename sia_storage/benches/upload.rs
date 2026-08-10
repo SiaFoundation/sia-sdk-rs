@@ -36,7 +36,7 @@ fn upload_benchmark(c: &mut Criterion) {
     let input = input.freeze();
 
     let mut large_group = c.benchmark_group("120MiB");
-    large_group.throughput(Throughput::Bytes(input.len() as u64));
+    large_group.throughput(Throughput::Bits(input.len() as u64 * 8));
 
     // large in-memory slab budget
     large_group.bench_with_input(
