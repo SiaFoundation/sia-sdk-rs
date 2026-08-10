@@ -136,6 +136,9 @@ impl Builder<DisconnectedState> {
         pre_authorized_key: &PrivateKey,
         mnemonic: &str,
     ) -> Result<Sdk, BuilderError> {
+        // fail before the request consumes a use of the pre-authorized key
+        Seed::new(mnemonic)?;
+
         let resp = self
             .client
             .request_app_connection_pre_authorized(
