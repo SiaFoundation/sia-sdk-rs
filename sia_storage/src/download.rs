@@ -1,9 +1,8 @@
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
-use std::task::{Poll, ready};
+use std::task::Poll;
 
 use crate::congestion::InflightController;
 use crate::encryption::{Chacha20Cipher, EncryptionKey, encrypt_recovered_shards};
@@ -19,7 +18,6 @@ use thiserror::Error;
 use tokio::io::AsyncRead;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
-use tokio_util::task::AbortOnDropHandle;
 
 /// Errors that can occur during a download.
 #[derive(Debug, Error)]
@@ -549,7 +547,10 @@ pub struct Download {
     // download state
     controller: Arc<InflightController>,
     buf: Bytes,
-    queue: VecDeque<AbortOnDropHandle<Result<Vec<u8>, DownloadError>>>,
+    tasks: JoinSet<(usize, Result<Vec<u8>, DownloadError>)>,
+    completed: VecDeque<Option<Result<Vec<u8>, DownloadError>>>,
+    first_seq: usize,
+    max_buffered_chunks: usize,
     chunk_iter: ChunkIter,
     /// Sequence number assigned to the next spawned chunk.
     next_seq: usize,
@@ -581,25 +582,42 @@ impl AsyncRead for Download {
             return Poll::Ready(Ok(()));
         }
 
-        if let Some(chunk_handle) = self.queue.front_mut() {
-            let result = match ready!(Pin::new(chunk_handle).poll(cx)) {
-                Ok(Ok(data)) => data,
-                Ok(Err(e)) => {
+        loop {
+            if let Some(result) = self.take_next_completed() {
+                let result = match result {
+                    Ok(data) => data,
+                    Err(e) => {
+                        self.set_err();
+                        return Poll::Ready(Err(std::io::Error::other(e)));
+                    }
+                };
+                self.buf = Bytes::from(result);
+                self.drain_buf(buf);
+                return Poll::Ready(Ok(()));
+            }
+
+            match self.tasks.poll_join_next(cx) {
+                Poll::Ready(Some(Ok((seq, result)))) => {
+                    self.store_completed(seq, result);
+                    self.refill();
+                }
+                Poll::Ready(Some(Err(e))) => {
                     self.set_err();
                     return Poll::Ready(Err(std::io::Error::other(e)));
                 }
-                Err(e) => {
+                Poll::Ready(None) if self.completed.is_empty() => {
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(None) => {
+                    let e = DownloadError::Custom(
+                        "chunk task set is empty with pending chunks".to_string(),
+                    );
                     self.set_err();
                     return Poll::Ready(Err(std::io::Error::other(e)));
                 }
-            };
-            self.queue.pop_front();
-            self.popped.send_modify(|p| *p += 1);
-            self.refill();
-            self.buf = Bytes::from(result);
-            self.drain_buf(buf);
+                Poll::Pending => return Poll::Pending,
+            }
         }
-        Poll::Ready(Ok(()))
     }
 }
 
@@ -615,7 +633,26 @@ impl Download {
     fn set_err(&mut self) {
         self.errored = true;
         self.buf = Bytes::new();
-        self.queue.clear();
+        self.tasks.abort_all();
+        self.completed.clear();
+    }
+
+    fn store_completed(&mut self, seq: usize, result: Result<Vec<u8>, DownloadError>) {
+        let slot = self
+            .completed
+            .get_mut(seq - self.first_seq)
+            .expect("completed chunk must have a buffered slot");
+        debug_assert!(slot.is_none());
+        *slot = Some(result);
+    }
+
+    fn take_next_completed(&mut self) -> Option<Result<Vec<u8>, DownloadError>> {
+        let result = self.completed.front_mut()?.take()?;
+        self.completed.pop_front();
+        self.first_seq += 1;
+        self.popped.send_modify(|p| *p += 1);
+        self.refill();
+        Some(result)
     }
 
     /// Spawns the next chunk recovery. Returns `false` once the chunk iterator
@@ -668,8 +705,9 @@ impl Download {
                     self.popped.clone(),
                 )
             });
-        self.queue
-            .push_back(AbortOnDropHandle::new(maybe_spawn!(async move {
+        self.completed.push_back(None);
+        join_set_spawn!(&mut self.tasks, async move {
+            let result = async move {
                 let recovery = recovery?;
                 let recovery = recovery.recover_shards(shard_progress_callback).await?;
                 let buf = maybe_spawn_blocking!({
@@ -678,14 +716,19 @@ impl Download {
                     Ok::<_, DownloadError>(buf)
                 })?;
                 Ok(buf)
-            })));
+            }
+            .await;
+            (seq, result)
+        });
         true
     }
 
-    /// Tops the chunk queue up to the controller's current limit (bounded by
-    /// the memory budget), spawning chunks as the reader drains them.
+    /// Keeps the active recoveries at the controller's current limit without
+    /// exceeding the total buffered-chunk memory bound.
     fn refill(&mut self) {
-        while self.queue.len() < self.controller.limit() {
+        while self.tasks.len() < self.controller.limit()
+            && self.completed.len() < self.max_buffered_chunks
+        {
             if !self.spawn_next() {
                 break;
             }
@@ -708,23 +751,35 @@ impl Download {
         if !self.buf.is_empty() {
             return Ok(std::mem::take(&mut self.buf).to_vec());
         }
-        let Some(chunk_handle) = self.queue.pop_front() else {
-            return Ok(Vec::new()); // EOF
-        };
-        self.popped.send_modify(|p| *p += 1);
-        let result = match chunk_handle.await {
-            Ok(Ok(data)) => data,
-            Ok(Err(e)) => {
-                self.set_err();
-                return Err(e);
+        loop {
+            if let Some(result) = self.take_next_completed() {
+                return match result {
+                    Ok(data) => Ok(data),
+                    Err(e) => {
+                        self.set_err();
+                        Err(e)
+                    }
+                };
             }
-            Err(e) => {
-                self.set_err();
-                return Err(e.into());
+
+            match self.tasks.join_next().await {
+                Some(Ok((seq, result))) => {
+                    self.store_completed(seq, result);
+                    self.refill();
+                }
+                Some(Err(e)) => {
+                    self.set_err();
+                    return Err(e.into());
+                }
+                None if self.completed.is_empty() => return Ok(Vec::new()),
+                None => {
+                    self.set_err();
+                    return Err(DownloadError::Custom(
+                        "chunk task set is empty with pending chunks".to_string(),
+                    ));
+                }
             }
-        };
-        self.refill();
-        Ok(result)
+        }
     }
 
     pub(crate) fn new(
@@ -762,7 +817,10 @@ impl Download {
             data_key,
             erasure_coders,
             buf: Bytes::new(),
-            queue: VecDeque::with_capacity(max_buffered_chunks),
+            tasks: JoinSet::new(),
+            completed: VecDeque::with_capacity(max_buffered_chunks),
+            first_seq: 0,
+            max_buffered_chunks,
             chunk_iter,
             next_seq: 0,
             popped: watch::channel(0).0,
@@ -847,6 +905,82 @@ mod test {
             .unwrap();
 
         assert_eq!(data, recovered_data);
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_out_of_order_completion_refills_to_memory_bound() {
+        let upload_options = UploadOptions::default();
+        let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
+
+        let transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(transport));
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: sia_core::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                })
+                .collect(),
+            true,
+        );
+        let app_key = Arc::new(AppKey::import(rand::random()));
+        let obj = upload_object(
+            hosts.clone(),
+            crate::app_client::Client::mock(),
+            app_key.clone(),
+            Object::default(),
+            Cursor::new(vec![0; optimal_data_size]),
+            upload_options,
+        )
+        .await
+        .unwrap();
+        let max_buffered_chunks = INITIAL_INFLIGHT + 1;
+        let mut download = Download::new(
+            &obj,
+            hosts,
+            app_key,
+            DownloadOptions {
+                max_buffered_chunks: Some(max_buffered_chunks),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Replace the initial recoveries with deterministic completions: the
+        // first ordered chunk stays pending while a later chunk finishes.
+        download.tasks.abort_all();
+        while download.tasks.join_next().await.is_some() {}
+        for seq in 0..INITIAL_INFLIGHT {
+            join_set_spawn!(&mut download.tasks, async move {
+                if seq == 0 {
+                    sleep(Duration::from_secs(1)).await;
+                }
+                (seq, Ok(vec![seq as u8]))
+            });
+        }
+
+        let (seq, result) = download.tasks.join_next().await.unwrap().unwrap();
+        assert_ne!(seq, 0);
+        download.store_completed(seq, result);
+        download.refill();
+
+        assert_eq!(download.tasks.len(), INITIAL_INFLIGHT);
+        assert_eq!(download.completed.len(), max_buffered_chunks);
+        assert_eq!(download.next_seq, max_buffered_chunks);
+
+        let (seq, result) = download.tasks.join_next().await.unwrap().unwrap();
+        download.store_completed(seq, result);
+        download.refill();
+
+        assert_eq!(download.completed.len(), max_buffered_chunks);
+        assert_eq!(download.next_seq, max_buffered_chunks);
     }
 
     /// Regression: a V1 object (each slab encrypted with its own key used as
