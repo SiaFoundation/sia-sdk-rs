@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 use chrono::Utc;
 use log::debug;
 use serde::{Deserialize, Serialize};
-use sia_core::rhp4::{HostPrices, SECTOR_SIZE};
+use sia_core::rhp4::{AccountToken, HostPrices, SECTOR_SIZE};
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
@@ -256,6 +256,10 @@ pub enum RPCError {
     /// The host is not known to the SDK.
     #[error("unknown host: {0}")]
     UnknownHost(PublicKey),
+
+    /// No account token is available to pay the host.
+    #[error("no account token for host: {0}")]
+    NoToken(PublicKey),
 
     /// An error in the RHP4 protocol.
     #[error("RHP error: {0}")]
@@ -517,7 +521,7 @@ impl Hosts {
     pub async fn read_sector(
         &self,
         host_key: PublicKey,
-        account_key: &PrivateKey,
+        token: AccountToken,
         root: Hash256,
         offset: usize,
         length: usize,
@@ -537,7 +541,7 @@ impl Hosts {
             .await?;
             let (data, elapsed) = self
                 .transport
-                .read_sector(&host, prices, account_key, root, offset, length)
+                .read_sector(&host, prices, token, root, offset, length)
                 .await
                 .inspect_err(|_| self.hosts.add_failure(host_key))
                 .map_err(RPCError::Rhp)?;

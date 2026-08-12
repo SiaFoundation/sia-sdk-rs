@@ -61,6 +61,7 @@ mod object_encryption;
 mod rhp4;
 mod sdk;
 mod slabs;
+mod tokens;
 mod upload;
 
 #[cfg(any(test, feature = "mock"))]
