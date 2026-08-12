@@ -10,10 +10,6 @@ use crate::{AppKey, Error, Object, Sdk};
 /// Operations on a sharing key. Each takes the [`Sdk`] whose account owns the
 /// key, since the app key is what re-derives the sharing key from its nonce and
 /// authorizes the request.
-///
-/// The aggregate fields are a snapshot from when the key was fetched, so
-/// re-read the key with [`Sdk::sharing_key`] after mutating it to see updated
-/// totals.
 impl SharingKey {
     /// Returns the seed a recipient needs to read the key's objects. It is the
     /// whole credential; pair it with the indexer's url in
