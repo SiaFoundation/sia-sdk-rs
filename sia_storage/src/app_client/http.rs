@@ -5,20 +5,23 @@ use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::to_vec;
-use sia_core::signing::PrivateKey;
+use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 
 use super::{
     AppConnectRequest, AuthConnectStatusResponse, Error, IntoUrl, PinObjectRequest,
     RegisterAppRequest, RegisterAppResponse, SHARE_URL_FETCH_SCHEME, SHARE_URL_SCHEME,
-    SealedObjectEvent, SharedObjectResponse, SlabPinParams, Url, pre_authorization_sig_hash,
-    register_app_sig_hash, sign,
+    SealedObjectEvent, SharedHost, SharedObjectResponse, SlabPinParams, Url,
+    pre_authorization_sig_hash, register_app_sig_hash, sign,
 };
 use crate::app_client::{ERROR_OBJECT_UNPINNED_SLAB, PinObjectError};
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
+use crate::sharing::{KeyRequest, SharedObjectRequest, SharingKey};
 use crate::time::Duration;
-use crate::{Account, AppMetadata, HostQuery, Object, ObjectsCursor, PinnedSlab, SealedObject};
+use crate::{
+    Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, PinnedSlab, SealedObject,
+};
 
 const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -409,6 +412,131 @@ impl Client {
             ..Default::default()
         })
     }
+
+    /// Returns the sharing key's aggregate totals.
+    pub(crate) async fn shared_stats(&self, sharing_key: &PrivateKey) -> Result<KeyStats, Error> {
+        self.get_json::<_, ()>("shared", sharing_key, None).await
+    }
+
+    /// Lists the objects the sharing key grants access to.
+    pub(crate) async fn shared_objects(
+        &self,
+        sharing_key: &PrivateKey,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<SealedObject>, Error> {
+        let query = [("offset", offset.to_string()), ("limit", limit.to_string())];
+        self.get_json::<_, _>("shared/objects", sharing_key, Some(&query))
+            .await
+    }
+
+    /// Retrieves a single object the sharing key grants access to.
+    pub(crate) async fn shared_object_by_id(
+        &self,
+        sharing_key: &PrivateKey,
+        key: &Hash256,
+    ) -> Result<SealedObject, Error> {
+        self.get_json::<_, ()>(&format!("shared/objects/{key}"), sharing_key, None)
+            .await
+    }
+
+    /// Lists usable hosts, each paired with an account token the recipient uses
+    /// to pay for downloads from it.
+    pub(crate) async fn shared_hosts(
+        &self,
+        sharing_key: &PrivateKey,
+        query: HostQuery,
+    ) -> Result<Vec<SharedHost>, Error> {
+        self.get_json("shared/hosts", sharing_key, Some(&query))
+            .await
+    }
+
+    /// Creates a sharing key for the account.
+    pub(crate) async fn add_sharing_key(
+        &self,
+        app_key: &PrivateKey,
+        req: &KeyRequest,
+    ) -> Result<SharingKey, Error> {
+        self.post_json("sharing", app_key, Some(req)).await
+    }
+
+    /// Lists the account's sharing keys.
+    pub(crate) async fn sharing_keys(
+        &self,
+        app_key: &PrivateKey,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<SharingKey>, Error> {
+        let query = [("offset", offset.to_string()), ("limit", limit.to_string())];
+        self.get_json::<_, _>("sharing", app_key, Some(&query))
+            .await
+    }
+
+    /// Retrieves one of the account's sharing keys by its public key.
+    pub(crate) async fn sharing_key(
+        &self,
+        app_key: &PrivateKey,
+        public_key: &PublicKey,
+    ) -> Result<SharingKey, Error> {
+        self.get_json::<_, ()>(&format!("sharing/{public_key}"), app_key, None)
+            .await
+    }
+
+    /// Deletes one of the account's sharing keys.
+    pub(crate) async fn delete_sharing_key(
+        &self,
+        app_key: &PrivateKey,
+        public_key: &PublicKey,
+    ) -> Result<(), Error> {
+        self.delete(&format!("sharing/{public_key}"), app_key).await
+    }
+
+    /// Attaches an object the account owns to one of its sharing keys.
+    pub(crate) async fn add_shared_object(
+        &self,
+        app_key: &PrivateKey,
+        sharing_key: &PublicKey,
+        req: &SharedObjectRequest,
+    ) -> Result<(), Error> {
+        self.post_json::<_, EmptyResponse>(
+            &format!("sharing/{sharing_key}/objects"),
+            app_key,
+            Some(req),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Lists the objects attached to one of the account's sharing keys.
+    pub(crate) async fn sharing_key_objects(
+        &self,
+        app_key: &PrivateKey,
+        sharing_key: &PublicKey,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<SealedObject>, Error> {
+        let query = [("offset", offset.to_string()), ("limit", limit.to_string())];
+        self.get_json::<_, _>(
+            &format!("sharing/{sharing_key}/objects"),
+            app_key,
+            Some(&query),
+        )
+        .await
+    }
+
+    /// Detaches an object from one of the account's sharing keys.
+    pub(crate) async fn delete_shared_object(
+        &self,
+        app_key: &PrivateKey,
+        sharing_key: &PublicKey,
+        object_key: &Hash256,
+    ) -> Result<(), Error> {
+        self.delete(
+            &format!("sharing/{sharing_key}/objects/{object_key}"),
+            app_key,
+        )
+        .await
+    }
 }
 
 async fn get_json<D: DeserializeOwned, Q: Serialize + ?Sized>(
@@ -481,8 +609,12 @@ async fn delete(client: &reqwest::Client, url: Url, app_key: &PrivateKey) -> Res
 mod tests {
     use base64::engine::general_purpose::URL_SAFE;
     use chrono::FixedOffset;
+    use sia_core::rhp4::AccountToken;
     use sia_core::signing::{PublicKey, Signature};
     use sia_core::{hash_256, public_key};
+
+    use crate::AppKey;
+    use crate::sharing::Nonce;
 
     use crate::app_client::{
         QUERY_PARAM_CREDENTIAL, QUERY_PARAM_SIGNATURE, QUERY_PARAM_VALID_UNTIL, request_hash,
@@ -1754,5 +1886,247 @@ mod tests {
             .register_app(&ephemeral_key, &app_key, register_url)
             .await
             .unwrap();
+    }
+
+    /// Matches a GET to `path` whose url signature was made by `by`.
+    fn signed_get(
+        path: impl Into<String>,
+        by: PublicKey,
+    ) -> impl Fn(&httptest::http::Request<httptest::bytes::Bytes>) -> bool {
+        let path = path.into();
+        move |req| {
+            req.method() == "GET"
+                && req.uri().path() == path
+                && validate_url_signature_request(req) == by
+        }
+    }
+
+    fn ok_body(body: impl Into<String>) -> Response<String> {
+        Response::builder()
+            .status(StatusCode::OK)
+            .body(body.into())
+            .unwrap()
+    }
+
+    #[test]
+    fn test_key_stats_deserializes_go_wire_format() {
+        // A literal body pins the wire format (Go's camelCase JSON tags) rather
+        // than round-tripping our own struct.
+        const KEY_STATS_JSON: &str = r#"{
+            "objectCount": 3,
+            "objectSize": 1024,
+            "pinnedData": 2048,
+            "pinnedSize": 6144,
+            "expiresAt": "2027-01-02T03:04:05Z",
+            "createdAt": "2026-01-02T03:04:05Z",
+            "updatedAt": "2026-02-02T03:04:05Z"
+        }"#;
+
+        assert_eq!(
+            serde_json::from_str::<KeyStats>(KEY_STATS_JSON).unwrap(),
+            KeyStats {
+                object_count: 3,
+                object_size: 1024,
+                pinned_data: 2048,
+                pinned_size: 6144,
+                expires_at: Some("2027-01-02T03:04:05Z".parse().unwrap()),
+                created_at: "2026-01-02T03:04:05Z".parse().unwrap(),
+                updated_at: "2026-02-02T03:04:05Z".parse().unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_shared_host_flattens_host_fields() {
+        let shared_host = SharedHost {
+            host: Host {
+                public_key: PublicKey::new([4u8; 32]),
+                addresses: vec![],
+                country_code: "US".to_string(),
+                latitude: 1.5,
+                longitude: 2.5,
+                good_for_upload: true,
+            },
+            token: AccountToken::new(
+                &PrivateKey::from_seed(&[5u8; 32]),
+                PublicKey::new([4u8; 32]),
+            ),
+        };
+
+        // The host fields must flatten to the top level, matching Go's embedded
+        // HostInfo, not nest under a "host" key.
+        let json = serde_json::to_value(&shared_host).unwrap();
+        assert!(json.get("publicKey").is_some(), "host fields not flattened");
+        assert!(json.get("host").is_none(), "host fields wrongly nested");
+        assert!(json.get("token").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_shared_endpoints_signed_with_sharing_key() {
+        let sharing_key = PrivateKey::from_seed(&rand::random());
+        let pk = sharing_key.public_key();
+        let server = Server::run();
+
+        let object = Object {
+            data_key: [9u8; 32].into(),
+            slabs: vec![Slab {
+                version: V0,
+                encryption_key: [1u8; 32].into(),
+                min_shards: 1,
+                sectors: vec![Sector {
+                    root: Hash256::new([2u8; 32]),
+                    host_key: PublicKey::new([3u8; 32]),
+                }],
+                offset: 0,
+                length: 256,
+            }],
+            ..Default::default()
+        };
+        let sealed = object.seal(&AppKey::import([7u8; 32]));
+        let object_id = object.id();
+        let shared_host = SharedHost {
+            host: Host {
+                public_key: PublicKey::new([4u8; 32]),
+                addresses: vec![],
+                country_code: "US".to_string(),
+                latitude: 1.5,
+                longitude: 2.5,
+                good_for_upload: true,
+            },
+            token: AccountToken::new(
+                &PrivateKey::from_seed(&[5u8; 32]),
+                PublicKey::new([4u8; 32]),
+            ),
+        };
+
+        let stats = KeyStats {
+            object_count: 3,
+            object_size: 1024,
+            pinned_data: 2048,
+            pinned_size: 6144,
+            expires_at: None,
+            created_at: "2026-01-02T03:04:05Z".parse().unwrap(),
+            updated_at: "2026-02-02T03:04:05Z".parse().unwrap(),
+        };
+
+        for (path, body) in [
+            (
+                "/shared".to_string(),
+                serde_json::to_string(&stats).unwrap(),
+            ),
+            (
+                "/shared/objects".to_string(),
+                serde_json::to_string(&vec![sealed.clone()]).unwrap(),
+            ),
+            (
+                format!("/shared/objects/{object_id}"),
+                serde_json::to_string(&sealed).unwrap(),
+            ),
+            (
+                "/shared/hosts".to_string(),
+                serde_json::to_string(&vec![shared_host.clone()]).unwrap(),
+            ),
+        ] {
+            server.expect(Expectation::matching(signed_get(path, pk)).respond_with(ok_body(body)));
+        }
+
+        let client = Client::new(server.url("/").to_string()).unwrap();
+
+        assert_eq!(client.shared_stats(&sharing_key).await.unwrap(), stats);
+        assert_eq!(
+            client.shared_objects(&sharing_key, 0, 100).await.unwrap(),
+            vec![sealed.clone()]
+        );
+        assert_eq!(
+            client
+                .shared_object_by_id(&sharing_key, &object_id)
+                .await
+                .unwrap(),
+            sealed
+        );
+        assert_eq!(
+            client
+                .shared_hosts(&sharing_key, HostQuery::default())
+                .await
+                .unwrap(),
+            vec![shared_host]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_owner_create_and_attach() {
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let expected_pk = app_key.public_key();
+        let sharing_key = PrivateKey::from_seed(&[6u8; 32]);
+        let sharing_pub = sharing_key.public_key();
+        let server = Server::run();
+
+        let key = SharingKey {
+            account: expected_pk,
+            public_key: sharing_pub,
+            nonce: Nonce([7u8; 32]),
+            description: "photos".to_string(),
+            object_count: 0,
+            object_size: 0,
+            pinned_data: 0,
+            pinned_size: 0,
+            expires_at: None,
+            created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            updated_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        };
+
+        // POST /sharing -> the created SharingKey, signed by the app key.
+        let key_body = serde_json::to_string(&key).unwrap();
+        server.expect(
+            Expectation::matching(
+                move |req: &httptest::http::Request<httptest::bytes::Bytes>| {
+                    req.method() == "POST"
+                        && req.uri().path() == "/sharing"
+                        && validate_url_signature_request(req) == expected_pk
+                },
+            )
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(key_body)
+                    .unwrap(),
+            ),
+        );
+
+        // POST /sharing/<pub>/objects -> null (empty response).
+        server.expect(
+            Expectation::matching(request::method_path(
+                "POST",
+                format!("/sharing/{sharing_pub}/objects"),
+            ))
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let client = Client::new(server.url("/").to_string()).unwrap();
+
+        let req = KeyRequest::new(&sharing_key, key.nonce, "photos".to_string(), None);
+        let created = client.add_sharing_key(&app_key, &req).await.unwrap();
+        assert_eq!(created, key);
+
+        let object = Object {
+            data_key: [9u8; 32].into(),
+            slabs: vec![Slab {
+                version: V0,
+                encryption_key: [1u8; 32].into(),
+                min_shards: 1,
+                sectors: vec![Sector {
+                    root: Hash256::new([2u8; 32]),
+                    host_key: PublicKey::new([3u8; 32]),
+                }],
+                offset: 0,
+                length: 256,
+            }],
+            ..Default::default()
+        };
+        let shared_req = SharedObjectRequest::new(&object, &sharing_key);
+        client
+            .add_shared_object(&app_key, &sharing_pub, &shared_req)
+            .await
+            .expect("attach object failed");
     }
 }
