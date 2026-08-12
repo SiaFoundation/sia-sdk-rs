@@ -60,6 +60,7 @@ mod hosts;
 mod object_encryption;
 mod rhp4;
 mod sdk;
+mod sharing;
 mod slabs;
 mod tokens;
 mod upload;
@@ -68,6 +69,7 @@ mod upload;
 pub mod mock;
 
 pub use sdk::{Error, Sdk};
+pub use sharing::SharingKey;
 
 use std::sync::Arc;
 
@@ -285,6 +287,37 @@ pub struct Account {
     pub app: App,
     /// The last time the account was used.
     pub last_used: DateTime<Utc>,
+}
+
+/// Aggregate totals for a sharing key, as seen by a recipient.
+#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyStats {
+    /// The number of objects the sharing key grants access to.
+    pub object_count: u64,
+    /// The total logical size of those objects, in bytes.
+    pub object_size: u64,
+    /// The size of those objects stored on the network, excluding redundancy.
+    pub pinned_data: u64,
+    /// The size of those objects stored on the network, including redundancy.
+    pub pinned_size: u64,
+    /// When the sharing key expires, if it expires at all.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// When the sharing key was created.
+    pub created_at: DateTime<Utc>,
+    /// When the sharing key was last updated.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Options for creating a sharing key.
+#[derive(Clone, Default)]
+pub struct SharingKeyOptions {
+    /// A human-readable label for the key.
+    pub description: String,
+    /// When the key should expire, or `None` for no expiry.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Objects to attach as the key is created.
+    pub objects: Vec<Object>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
