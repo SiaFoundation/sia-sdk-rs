@@ -227,14 +227,23 @@ impl SlabRecovery<AwaitingRecovery> {
         let client = self.client.clone();
         let controller = self.controller.clone();
         let tokens = self.tokens.clone();
-        let slab_index = self.slab_index;
         async move {
             // Hold the inflight reservation for the duration of the RPC. The
             // guard was created by the caller before spawning so the load is
             // visible to concurrent `prioritize` calls, then dropped here on
             // either success or error.
             let _inflight = inflight;
-            let token = tokens.token(task.sector.host_key)?;
+            // No RPC is attempted without a token, so nothing has elapsed.
+            let token = match tokens.token(task.sector.host_key) {
+                Ok(token) => token,
+                Err(error) => {
+                    return DownloadResult {
+                        task,
+                        elapsed: Duration::ZERO,
+                        result: Err(error),
+                    };
+                }
+            };
             let permit = controller.sample();
             let start = Instant::now();
             let result = client
