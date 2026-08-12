@@ -22,7 +22,7 @@ mod metrics;
 
 /// Represents a host in the Sia network. The
 /// addresses can be used to connect to the host.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 /// A storage host on the Sia network.
 pub struct Host {
