@@ -5,7 +5,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use log::{debug, warn};
 use reqwest::IntoUrl;
-use sia_core::signing::{PrivateKey, PublicKey};
+use sia_core::signing::PrivateKey;
 use sia_core::types::Hash256;
 use thiserror::Error;
 use tokio::io::AsyncRead;
@@ -15,7 +15,7 @@ use crate::app_client::PinObjectError::UnpinnedSlab;
 use crate::app_client::{self, SLAB_PIN_BATCH_SIZE, SlabPinParams};
 use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
-use crate::sharing::{self, KeyRequest, Nonce, SharingKey};
+use crate::sharing::{self, KeyRequest, KeyResponse, Nonce, SharingKey};
 use crate::task::AbortOnDropHandle;
 use crate::time::Duration;
 use crate::upload::{PackedUpload, upload_object};
@@ -437,7 +437,7 @@ impl Sdk {
         let sharing_key =
             PrivateKey::from_seed(&sharing::derive_sharing_seed(&self.app_key.0, &nonce));
         let req = KeyRequest::new(&sharing_key, nonce, options.description, options.expires_at);
-        let key = self
+        let created = self
             .api_client
             .add_sharing_key(&self.app_key.0, &req)
             .await
@@ -446,40 +446,36 @@ impl Sdk {
         // Checked against the locally generated nonce so an indexer echoing a
         // different key of this account cannot make the caller seal objects
         // under it.
-        if key.nonce != nonce || key.public_key != sharing_key.public_key() {
+        if created.key.nonce != nonce || created.key.public_key != sharing_key.public_key() {
             return Err(Error::App(
                 "indexer returned a different sharing key than was created".into(),
             ));
         }
-        Ok(key)
+        Ok(created.key)
     }
 
     /// Lists the account's sharing keys.
-    pub async fn sharing_keys(&self, offset: u64, limit: u64) -> Result<Vec<SharingKey>, Error> {
+    pub async fn sharing_keys(&self, offset: u64, limit: u64) -> Result<Vec<KeyResponse>, Error> {
         self.api_client
             .sharing_keys(&self.app_key.0, offset, limit)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }
 
-    /// Retrieves one of the account's sharing keys by its public key.
-    pub async fn sharing_key(&self, public_key: &PublicKey) -> Result<SharingKey, Error> {
-        let key = self
+    /// Fetches the indexer's current record for `key`.
+    pub async fn sharing_key(&self, key: &SharingKey) -> Result<KeyResponse, Error> {
+        let record = self
             .api_client
-            .sharing_key(&self.app_key.0, public_key)
+            .sharing_key(&self.app_key.0, &key.public_key)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
 
-        // `SharingKey`'s own derivation check only proves the record is *some*
-        // genuine key of this account, since a real key's halves agree by
-        // construction. Binding it to the requested key is what rejects a
-        // substitute.
-        if key.public_key != *public_key {
+        if record.key != *key {
             return Err(Error::App(
                 "indexer returned a different sharing key than requested".into(),
             ));
         }
-        Ok(key)
+        Ok(record)
     }
 }
 
@@ -682,10 +678,12 @@ mod test {
         // so only comparing against the locally generated nonce catches it.
         let other_nonce = Nonce([9u8; 32]);
         let other_seed = derive_sharing_seed(&app_key.0, &other_nonce);
-        let substituted = SharingKey {
+        let substituted = KeyResponse {
+            key: SharingKey {
+                public_key: PrivateKey::from_seed(&other_seed).public_key(),
+                nonce: other_nonce,
+            },
             account: app_key.public_key(),
-            public_key: PrivateKey::from_seed(&other_seed).public_key(),
-            nonce: other_nonce,
             description: "photos".to_string(),
             object_count: 0,
             object_size: 0,
@@ -749,12 +747,18 @@ mod test {
         let account_key =
             |nonce| PrivateKey::from_seed(&derive_sharing_seed(&app_key.0, &nonce)).public_key();
 
-        let requested = account_key(Nonce([1u8; 32]));
+        let requested_nonce = Nonce([1u8; 32]);
+        let requested = SharingKey {
+            public_key: account_key(requested_nonce),
+            nonce: requested_nonce,
+        };
         let other_nonce = Nonce([9u8; 32]);
-        let substituted = SharingKey {
+        let substituted = KeyResponse {
+            key: SharingKey {
+                public_key: account_key(other_nonce),
+                nonce: other_nonce,
+            },
             account: app_key.public_key(),
-            public_key: account_key(other_nonce),
-            nonce: other_nonce,
             description: "photos".to_string(),
             object_count: 0,
             object_size: 0,
@@ -764,7 +768,7 @@ mod test {
             created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
             updated_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
         };
-        assert_ne!(substituted.public_key, requested);
+        assert_ne!(substituted.key.public_key, requested.public_key);
 
         let server = Server::run();
         server.expect(
@@ -778,13 +782,16 @@ mod test {
                 ),
         );
         server.expect(
-            Expectation::matching(request::method_path("GET", format!("/sharing/{requested}")))
-                .respond_with(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .body(serde_json::to_string(&substituted).unwrap())
-                        .unwrap(),
-                ),
+            Expectation::matching(request::method_path(
+                "GET",
+                format!("/sharing/{}", requested.public_key),
+            ))
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(serde_json::to_string(&substituted).unwrap())
+                    .unwrap(),
+            ),
         );
 
         let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();

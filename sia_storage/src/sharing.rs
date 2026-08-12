@@ -149,17 +149,26 @@ impl SharedObjectRequest {
     }
 }
 
-/// A sharing key owned by the account, as returned by the sharing key API.
-/// Mirrors indexd's `sharing.Key`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// A sharing key, granting read-only access to the objects attached to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharingKey {
-    /// The account that owns the key.
-    pub account: PublicKey,
     /// The key's public half. Recipients are identified by it.
     pub public_key: PublicKey,
-    /// The salt used to derive the key from the owner's app key.
     pub(crate) nonce: Nonce,
+}
+
+/// A sharing key record from the indexer, including how many objects the key
+/// grants access to and how much space they use. The counts are a snapshot, not
+/// a live view.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyResponse {
+    /// The key this record describes.
+    #[serde(flatten)]
+    pub key: SharingKey,
+    /// The account that owns the key.
+    pub account: PublicKey,
     /// A human-readable description.
     pub description: String,
     /// The number of objects the key grants access to.
