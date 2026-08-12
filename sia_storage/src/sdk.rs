@@ -5,6 +5,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use log::{debug, warn};
 use reqwest::IntoUrl;
+use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use thiserror::Error;
 use tokio::io::AsyncRead;
@@ -14,14 +15,19 @@ use crate::app_client::PinObjectError::UnpinnedSlab;
 use crate::app_client::{self, SLAB_PIN_BATCH_SIZE, SlabPinParams};
 use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
+use crate::sharing::{self, KeyRequest, Nonce, SharingKey};
 use crate::task::AbortOnDropHandle;
 use crate::time::Duration;
 use crate::upload::{PackedUpload, upload_object};
 use crate::{
     Account, AppKey, BuilderError, Download, DownloadError, DownloadOptions, Host, HostQuery,
     Object, ObjectEvent, ObjectsCursor, PackedUploadOptions, PinnedSlab, SealedObjectError,
-    UploadError, UploadOptions,
+    SharingKeyOptions, UploadError, UploadOptions,
 };
+
+/// `SharingKey`'s operations live here so they can reach this module's private
+/// fields. The type itself is defined in [`crate::sharing`].
+mod sharing_key;
 
 /// Errors that can occur when using the SDK.
 #[derive(Error, Debug)]
@@ -417,12 +423,71 @@ impl Sdk {
             .await
             .map_err(|e| Error::App(format!("{e:?}")))
     }
+
+    /// Creates a sharing key. Attach objects to it with
+    /// [`SharingKey::add_objects`].
+    ///
+    /// # Arguments
+    /// * `options` - The [SharingKeyOptions] to create the key with.
+    pub async fn create_sharing_key(
+        &self,
+        options: SharingKeyOptions,
+    ) -> Result<SharingKey, Error> {
+        let nonce = Nonce(rand::random());
+        let sharing_key =
+            PrivateKey::from_seed(&sharing::derive_sharing_seed(&self.app_key.0, &nonce));
+        let req = KeyRequest::new(&sharing_key, nonce, options.description, options.expires_at);
+        let key = self
+            .api_client
+            .add_sharing_key(&self.app_key.0, &req)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))?;
+
+        // Checked against the locally generated nonce so an indexer echoing a
+        // different key of this account cannot make the caller seal objects
+        // under it.
+        if key.nonce != nonce || key.public_key != sharing_key.public_key() {
+            return Err(Error::App(
+                "indexer returned a different sharing key than was created".into(),
+            ));
+        }
+        Ok(key)
+    }
+
+    /// Lists the account's sharing keys.
+    pub async fn sharing_keys(&self, offset: u64, limit: u64) -> Result<Vec<SharingKey>, Error> {
+        self.api_client
+            .sharing_keys(&self.app_key.0, offset, limit)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
+    }
+
+    /// Retrieves one of the account's sharing keys by its public key.
+    pub async fn sharing_key(&self, public_key: &PublicKey) -> Result<SharingKey, Error> {
+        let key = self
+            .api_client
+            .sharing_key(&self.app_key.0, public_key)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))?;
+
+        // `SharingKey`'s own derivation check only proves the record is *some*
+        // genuine key of this account, since a real key's halves agree by
+        // construction. Binding it to the requested key is what rejects a
+        // substitute.
+        if key.public_key != *public_key {
+            return Err(Error::App(
+                "indexer returned a different sharing key than requested".into(),
+            ));
+        }
+        Ok(key)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod test {
     use super::*;
+    use sia_core::signing::PrivateKey;
 
     fn random_seed() -> [u8; 32] {
         let mut seed = [0u8; 32];
@@ -596,6 +661,144 @@ mod test {
             hosts.available_for_upload(),
             1,
             "refresh task should be aborted"
+        );
+    }
+
+    // An indexer that echoes a different sharing key than the one created must
+    // be rejected before anything is sealed under it, and without deleting the
+    // key it named, which may be a real key of the account.
+    #[tokio::test]
+    async fn test_create_sharing_key_rejects_substituted_key() {
+        use httptest::http::{Response, StatusCode};
+        use httptest::matchers::*;
+        use httptest::{Expectation, Server};
+
+        use crate::sharing::derive_sharing_seed;
+        use crate::{AppKey, Host};
+
+        let app_key = Arc::new(AppKey::import(random_seed()));
+
+        // A *genuine* other key of this account: its nonce and public key agree,
+        // so only comparing against the locally generated nonce catches it.
+        let other_nonce = Nonce([9u8; 32]);
+        let other_seed = derive_sharing_seed(&app_key.0, &other_nonce);
+        let substituted = SharingKey {
+            account: app_key.public_key(),
+            public_key: PrivateKey::from_seed(&other_seed).public_key(),
+            nonce: other_nonce,
+            description: "photos".to_string(),
+            object_count: 0,
+            object_size: 0,
+            pinned_data: 0,
+            pinned_size: 0,
+            expires_at: None,
+            created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            updated_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        };
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/hosts"))
+                .times(..)
+                .respond_with(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(serde_json::to_string(&Vec::<Host>::new()).unwrap())
+                        .unwrap(),
+                ),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/sharing")).respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(serde_json::to_string(&substituted).unwrap())
+                    .unwrap(),
+            ),
+        );
+        // No attach and no delete must be issued. httptest panics on any request
+        // it has no expectation for, so the absence of stubs is the assertion.
+        let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();
+        let sdk = Sdk::new(client, app_key)
+            .await
+            .expect("failed to build sdk");
+
+        let err = sdk
+            .create_sharing_key(SharingKeyOptions {
+                description: "photos".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("a substituted key must be rejected");
+        assert!(format!("{err}").contains("different sharing key"), "{err}");
+    }
+
+    // Fetching a key by its public key must reject a record for a *different*
+    // key. The substitute here is a genuine key of the same account, so its
+    // nonce and public key agree and `SharingKey`'s own derivation check passes;
+    // only comparing against the requested key catches it.
+    #[tokio::test]
+    async fn test_sharing_key_rejects_another_key_of_the_account() {
+        use httptest::http::{Response, StatusCode};
+        use httptest::matchers::*;
+        use httptest::{Expectation, Server};
+
+        use crate::sharing::derive_sharing_seed;
+        use crate::{AppKey, Host};
+
+        let app_key = Arc::new(AppKey::import(random_seed()));
+        let account_key =
+            |nonce| PrivateKey::from_seed(&derive_sharing_seed(&app_key.0, &nonce)).public_key();
+
+        let requested = account_key(Nonce([1u8; 32]));
+        let other_nonce = Nonce([9u8; 32]);
+        let substituted = SharingKey {
+            account: app_key.public_key(),
+            public_key: account_key(other_nonce),
+            nonce: other_nonce,
+            description: "photos".to_string(),
+            object_count: 0,
+            object_size: 0,
+            pinned_data: 0,
+            pinned_size: 0,
+            expires_at: None,
+            created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            updated_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        };
+        assert_ne!(substituted.public_key, requested);
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/hosts"))
+                .times(..)
+                .respond_with(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(serde_json::to_string(&Vec::<Host>::new()).unwrap())
+                        .unwrap(),
+                ),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", format!("/sharing/{requested}")))
+                .respond_with(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(serde_json::to_string(&substituted).unwrap())
+                        .unwrap(),
+                ),
+        );
+
+        let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();
+        let sdk = Sdk::new(client, app_key)
+            .await
+            .expect("failed to build sdk");
+
+        let err = sdk
+            .sharing_key(&requested)
+            .await
+            .expect_err("a record for another key must be rejected");
+        assert!(
+            format!("{err}").contains("different sharing key than requested"),
+            "{err}"
         );
     }
 }

@@ -316,8 +316,6 @@ pub struct SharingKeyOptions {
     pub description: String,
     /// When the key should expire, or `None` for no expiry.
     pub expires_at: Option<DateTime<Utc>>,
-    /// Objects to attach as the key is created.
-    pub objects: Vec<Object>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
