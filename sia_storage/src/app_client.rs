@@ -15,10 +15,13 @@ use thiserror::Error;
 use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::DecryptError;
+use crate::sharing::{KeyRequest, SharedObjectRequest, SharingKey};
 use crate::slabs::{Sector, SlabVersion};
 use crate::{
-    Account, AppMetadata, HostQuery, Object, ObjectsCursor, PinnedSlab, SealedObject, Slab,
+    Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, PinnedSlab, SealedObject,
+    Slab,
 };
+use sia_core::rhp4::AccountToken;
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;
 
@@ -161,6 +164,17 @@ struct SharedObjectResponse {
     pub slabs: Vec<Slab>,
     #[serde_as(as = "Option<Base64>")]
     pub encrypted_metadata: Option<Vec<u8>>,
+}
+
+/// A host and the account token that pays it, as returned by `GET /shared/hosts`.
+/// The token is signed by the owner's sharing account, so downloads are charged
+/// to the owner rather than the recipient.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SharedHost {
+    #[serde(flatten)]
+    pub host: Host,
+    pub token: AccountToken,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -450,6 +464,169 @@ impl Client {
             Self::Mock(c) => c.shared_object(share_url).await,
         }
     }
+
+    /// Returns the sharing key's aggregate totals.
+    pub(crate) async fn shared_stats(&self, sharing_key: &PrivateKey) -> Result<KeyStats, Error> {
+        match self {
+            Self::Http(c) => c.shared_stats(sharing_key).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(_) => Err(unsupported_by_mock()),
+        }
+    }
+
+    /// Lists the objects the sharing key grants access to.
+    pub(crate) async fn shared_objects(
+        &self,
+        sharing_key: &PrivateKey,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<SealedObject>, Error> {
+        match self {
+            Self::Http(c) => c.shared_objects(sharing_key, offset, limit).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(_) => Err(unsupported_by_mock()),
+        }
+    }
+
+    /// Retrieves a single object the sharing key grants access to.
+    pub(crate) async fn shared_object_by_id(
+        &self,
+        sharing_key: &PrivateKey,
+        key: &Hash256,
+    ) -> Result<SealedObject, Error> {
+        match self {
+            Self::Http(c) => c.shared_object_by_id(sharing_key, key).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(_) => Err(unsupported_by_mock()),
+        }
+    }
+
+    /// Lists usable hosts, each paired with an account token the recipient uses
+    /// to pay for downloads from it.
+    pub(crate) async fn shared_hosts(
+        &self,
+        sharing_key: &PrivateKey,
+        query: HostQuery,
+    ) -> Result<Vec<SharedHost>, Error> {
+        match self {
+            Self::Http(c) => c.shared_hosts(sharing_key, query).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(_) => Err(unsupported_by_mock()),
+        }
+    }
+
+    /// Creates a sharing key for the account.
+    pub(crate) async fn add_sharing_key(
+        &self,
+        app_key: &PrivateKey,
+        req: &KeyRequest,
+    ) -> Result<SharingKey, Error> {
+        match self {
+            Self::Http(c) => c.add_sharing_key(app_key, req).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(_) => Err(unsupported_by_mock()),
+        }
+    }
+
+    /// Lists the account's sharing keys.
+    pub(crate) async fn sharing_keys(
+        &self,
+        app_key: &PrivateKey,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<SharingKey>, Error> {
+        match self {
+            Self::Http(c) => c.sharing_keys(app_key, offset, limit).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(_) => Err(unsupported_by_mock()),
+        }
+    }
+
+    /// Retrieves one of the account's sharing keys by its public key.
+    pub(crate) async fn sharing_key(
+        &self,
+        app_key: &PrivateKey,
+        public_key: &PublicKey,
+    ) -> Result<SharingKey, Error> {
+        match self {
+            Self::Http(c) => c.sharing_key(app_key, public_key).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(_) => Err(unsupported_by_mock()),
+        }
+    }
+
+    /// Deletes one of the account's sharing keys.
+    pub(crate) async fn delete_sharing_key(
+        &self,
+        app_key: &PrivateKey,
+        public_key: &PublicKey,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Http(c) => c.delete_sharing_key(app_key, public_key).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(_) => Err(unsupported_by_mock()),
+        }
+    }
+
+    /// Attaches an object the account owns to one of its sharing keys.
+    pub(crate) async fn add_shared_object(
+        &self,
+        app_key: &PrivateKey,
+        sharing_key: &PublicKey,
+        req: &SharedObjectRequest,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Http(c) => c.add_shared_object(app_key, sharing_key, req).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(_) => Err(unsupported_by_mock()),
+        }
+    }
+
+    /// Lists the objects attached to one of the account's sharing keys.
+    pub(crate) async fn sharing_key_objects(
+        &self,
+        app_key: &PrivateKey,
+        sharing_key: &PublicKey,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<SealedObject>, Error> {
+        match self {
+            Self::Http(c) => {
+                c.sharing_key_objects(app_key, sharing_key, offset, limit)
+                    .await
+            }
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(_) => Err(unsupported_by_mock()),
+        }
+    }
+
+    /// Detaches an object from one of the account's sharing keys.
+    pub(crate) async fn delete_shared_object(
+        &self,
+        app_key: &PrivateKey,
+        sharing_key: &PublicKey,
+        object_key: &Hash256,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Http(c) => {
+                c.delete_shared_object(app_key, sharing_key, object_key)
+                    .await
+            }
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(_) => Err(unsupported_by_mock()),
+        }
+    }
+}
+
+/// Sharing keys are only reachable over HTTP; the mock client has no sharing
+/// state to serve. Failing loudly keeps a test that reaches for sharing through
+/// the mock from silently passing.
+#[cfg(any(test, feature = "mock"))]
+const MOCK_UNSUPPORTED: &str = "sharing is not supported by the mock indexer client";
+
+#[cfg(any(test, feature = "mock"))]
+fn unsupported_by_mock() -> Error {
+    Error::Api(MOCK_UNSUPPORTED.to_string())
 }
 
 fn request_hash(
