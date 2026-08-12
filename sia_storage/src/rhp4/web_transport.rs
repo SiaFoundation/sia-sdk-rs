@@ -385,12 +385,11 @@ impl Transport for Client {
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
-        account_key: &PrivateKey,
+        token: AccountToken,
         root: Hash256,
         offset: usize,
         length: usize,
     ) -> Result<(Bytes, Duration), Error> {
-        let token = AccountToken::new(account_key, host.public_key);
         let conn = self.connection(host).await?;
         let result: Result<(Bytes, Duration), Error> = async {
             let mut stream = conn.open_stream().await?;
