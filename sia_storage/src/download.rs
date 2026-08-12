@@ -243,7 +243,17 @@ impl SlabRecovery<AwaitingRecovery> {
             // visible to concurrent `prioritize` calls, then dropped here on
             // either success or error.
             let _inflight = inflight;
-            let token = tokens.token(task.sector.host_key)?;
+            // No RPC is attempted without a token, so nothing has elapsed.
+            let token = match tokens.token(task.sector.host_key) {
+                Ok(token) => token,
+                Err(error) => {
+                    return Err(ShardFailed {
+                        task,
+                        elapsed: Duration::ZERO,
+                        error,
+                    });
+                }
+            };
             let permit = controller.sample();
             let start = Instant::now();
             let result = client
