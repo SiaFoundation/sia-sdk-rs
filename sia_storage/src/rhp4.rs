@@ -142,6 +142,7 @@ pub enum Error {
 
 /// A host endpoint contains the information needed to connect to a host.
 // dead code until WebTransport client is implemented
+#[derive(Clone)]
 pub(crate) struct HostEndpoint {
     pub public_key: PublicKey,
     pub addresses: Vec<NetAddress>,
