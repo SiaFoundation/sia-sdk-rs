@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use chrono::Utc;
-use sia_core::rhp4::HostPrices;
+use sia_core::rhp4::{AccountToken, HostPrices};
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::{Currency, Hash256};
 
@@ -151,7 +151,7 @@ impl Transport for Client {
         &self,
         host: &HostEndpoint,
         _: HostPrices,
-        _: &PrivateKey,
+        _: AccountToken,
         root: Hash256,
         offset: usize,
         length: usize,
