@@ -60,6 +60,7 @@ mod hosts;
 mod object_encryption;
 mod rhp4;
 mod sdk;
+mod shared_sdk;
 mod sharing;
 mod slabs;
 mod tokens;
@@ -69,6 +70,7 @@ mod upload;
 pub mod mock;
 
 pub use sdk::{Error, Sdk};
+pub use shared_sdk::SharedSdk;
 pub use sharing::SharingKey;
 
 use std::sync::Arc;
