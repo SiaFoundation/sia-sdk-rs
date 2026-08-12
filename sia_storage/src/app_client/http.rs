@@ -17,7 +17,7 @@ use super::{
 use crate::app_client::{ERROR_OBJECT_UNPINNED_SLAB, PinObjectError};
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
-use crate::sharing::{KeyRequest, SharedObjectRequest, SharingKey};
+use crate::sharing::{KeyRequest, KeyResponse, SharedObjectRequest};
 use crate::time::Duration;
 use crate::{
     Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, PinnedSlab, SealedObject,
@@ -413,7 +413,7 @@ impl Client {
         })
     }
 
-    /// Returns the sharing key's aggregate totals.
+    /// Fetches the sharing key's stats from the indexer.
     pub(crate) async fn shared_stats(&self, sharing_key: &PrivateKey) -> Result<KeyStats, Error> {
         self.get_json::<_, ()>("shared", sharing_key, None).await
     }
@@ -456,7 +456,7 @@ impl Client {
         &self,
         app_key: &PrivateKey,
         req: &KeyRequest,
-    ) -> Result<SharingKey, Error> {
+    ) -> Result<KeyResponse, Error> {
         self.post_json("sharing", app_key, Some(req)).await
     }
 
@@ -466,7 +466,7 @@ impl Client {
         app_key: &PrivateKey,
         offset: u64,
         limit: u64,
-    ) -> Result<Vec<SharingKey>, Error> {
+    ) -> Result<Vec<KeyResponse>, Error> {
         let query = [("offset", offset.to_string()), ("limit", limit.to_string())];
         self.get_json::<_, _>("sharing", app_key, Some(&query))
             .await
@@ -477,7 +477,7 @@ impl Client {
         &self,
         app_key: &PrivateKey,
         public_key: &PublicKey,
-    ) -> Result<SharingKey, Error> {
+    ) -> Result<KeyResponse, Error> {
         self.get_json::<_, ()>(&format!("sharing/{public_key}"), app_key, None)
             .await
     }
@@ -614,7 +614,7 @@ mod tests {
     use sia_core::{hash_256, public_key};
 
     use crate::AppKey;
-    use crate::sharing::Nonce;
+    use crate::sharing::{Nonce, SharingKey};
 
     use crate::app_client::{
         QUERY_PARAM_CREDENTIAL, QUERY_PARAM_SIGNATURE, QUERY_PARAM_VALID_UNTIL, request_hash,
@@ -2061,10 +2061,12 @@ mod tests {
         let sharing_pub = sharing_key.public_key();
         let server = Server::run();
 
-        let key = SharingKey {
+        let key = KeyResponse {
+            key: SharingKey {
+                public_key: sharing_pub,
+                nonce: Nonce([7u8; 32]),
+            },
             account: expected_pk,
-            public_key: sharing_pub,
-            nonce: Nonce([7u8; 32]),
             description: "photos".to_string(),
             object_count: 0,
             object_size: 0,
@@ -2075,7 +2077,7 @@ mod tests {
             updated_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
         };
 
-        // POST /sharing -> the created SharingKey, signed by the app key.
+        // POST /sharing -> the created key record, signed by the app key.
         let key_body = serde_json::to_string(&key).unwrap();
         server.expect(
             Expectation::matching(
@@ -2104,7 +2106,7 @@ mod tests {
 
         let client = Client::new(server.url("/").to_string()).unwrap();
 
-        let req = KeyRequest::new(&sharing_key, key.nonce, "photos".to_string(), None);
+        let req = KeyRequest::new(&sharing_key, key.key.nonce, "photos".to_string(), None);
         let created = client.add_sharing_key(&app_key, &req).await.unwrap();
         assert_eq!(created, key);
 

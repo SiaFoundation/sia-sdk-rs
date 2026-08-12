@@ -15,7 +15,7 @@ use thiserror::Error;
 use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::DecryptError;
-use crate::sharing::{KeyRequest, SharedObjectRequest, SharingKey};
+use crate::sharing::{KeyRequest, KeyResponse, SharedObjectRequest};
 use crate::slabs::{Sector, SlabVersion};
 use crate::{
     Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, PinnedSlab, SealedObject,
@@ -501,7 +501,7 @@ impl Client {
         }
     }
 
-    /// Returns the sharing key's aggregate totals.
+    /// Fetches the sharing key's stats from the indexer.
     pub(crate) async fn shared_stats(&self, sharing_key: &PrivateKey) -> Result<KeyStats, Error> {
         match self {
             Self::Http(c) => c.shared_stats(sharing_key).await,
@@ -556,7 +556,7 @@ impl Client {
         &self,
         app_key: &PrivateKey,
         req: &KeyRequest,
-    ) -> Result<SharingKey, Error> {
+    ) -> Result<KeyResponse, Error> {
         match self {
             Self::Http(c) => c.add_sharing_key(app_key, req).await,
             #[cfg(any(test, feature = "mock"))]
@@ -570,7 +570,7 @@ impl Client {
         app_key: &PrivateKey,
         offset: u64,
         limit: u64,
-    ) -> Result<Vec<SharingKey>, Error> {
+    ) -> Result<Vec<KeyResponse>, Error> {
         match self {
             Self::Http(c) => c.sharing_keys(app_key, offset, limit).await,
             #[cfg(any(test, feature = "mock"))]
@@ -583,7 +583,7 @@ impl Client {
         &self,
         app_key: &PrivateKey,
         public_key: &PublicKey,
-    ) -> Result<SharingKey, Error> {
+    ) -> Result<KeyResponse, Error> {
         match self {
             Self::Http(c) => c.sharing_key(app_key, public_key).await,
             #[cfg(any(test, feature = "mock"))]

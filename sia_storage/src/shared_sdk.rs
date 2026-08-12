@@ -160,7 +160,7 @@ impl SharedSdk {
         }))
     }
 
-    /// Returns the sharing key's aggregate totals.
+    /// Fetches the sharing key's stats from the indexer.
     pub async fn stats(&self) -> Result<KeyStats, Error> {
         self.api_client
             .shared_stats(&self.sharing_key.0)

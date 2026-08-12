@@ -71,7 +71,7 @@ pub mod mock;
 
 pub use sdk::{Error, Sdk};
 pub use shared_sdk::SharedSdk;
-pub use sharing::SharingKey;
+pub use sharing::{KeyResponse, SharingKey};
 
 use std::sync::Arc;
 
@@ -291,7 +291,9 @@ pub struct Account {
     pub last_used: DateTime<Utc>,
 }
 
-/// Aggregate totals for a sharing key, as seen by a recipient.
+/// What a recipient can see about the sharing key they hold: how many objects
+/// it grants access to, how much space they use, and when the key expires. The
+/// counts are a snapshot, not a live view.
 #[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyStats {
