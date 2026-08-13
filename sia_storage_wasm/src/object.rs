@@ -31,6 +31,11 @@ impl PinnedObject {
         self.0.size() as f64
     }
 
+    /// Returns a new object truncated to the requested length.
+    pub fn truncate(&self, length: u64) -> PinnedObject {
+        PinnedObject(self.0.truncate(length))
+    }
+
     /// Returns the encoded (on-network) size after erasure coding.
     #[wasm_bindgen(js_name = "encodedSize")]
     pub fn encoded_size(&self) -> f64 {

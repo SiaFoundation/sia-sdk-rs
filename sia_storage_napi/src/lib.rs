@@ -547,6 +547,20 @@ impl PinnedObject {
         BigInt::from(self.inner.lock().unwrap().size())
     }
 
+    /// Returns a new object truncated to the requested length.
+    #[napi]
+    pub fn truncate(&self, length: BigInt) -> Result<PinnedObject> {
+        let (signed, length, lossless) = length.get_u64();
+        if signed {
+            return Err(Error::from_reason("length must be non-negative"));
+        } else if !lossless {
+            return Err(Error::from_reason("length too large"));
+        }
+        Ok(PinnedObject {
+            inner: Mutex::new(self.inner.lock().unwrap().truncate(length)),
+        })
+    }
+
     /// Returns the total encoded size after erasure coding.
     #[napi]
     pub fn encoded_size(&self) -> BigInt {
