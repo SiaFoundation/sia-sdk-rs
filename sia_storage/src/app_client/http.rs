@@ -13,6 +13,7 @@ use super::{
     RegisterAppResponse, SHARE_URL_FETCH_SCHEME, SHARE_URL_SCHEME, SealedObjectEvent,
     SharedObjectResponse, SlabPinParams, Url, register_app_sig_hash, sign,
 };
+use crate::app_client::{ERROR_OBJECT_UNPINNED_SLAB, PinObjectError};
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
 use crate::time::Duration;
@@ -200,11 +201,17 @@ impl Client {
         &self,
         app_key: &PrivateKey,
         object: &SealedObject,
-    ) -> Result<(), Error> {
+    ) -> Result<(), PinObjectError> {
         let req = PinObjectRequest::from(object);
         self.post_json::<_, EmptyResponse>("objects", app_key, Some(&req))
             .await
             .map(|_| ())
+            .map_err(|e| match &e {
+                Error::Api(message) if message.contains(ERROR_OBJECT_UNPINNED_SLAB) => {
+                    PinObjectError::UnpinnedSlab
+                }
+                _ => PinObjectError::Client(e),
+            })
     }
 
     /// Deletes an object from the indexer by its key.

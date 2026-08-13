@@ -35,6 +35,8 @@ const QUERY_PARAM_SIGNATURE: &str = "ss";
 
 const SHARE_URL_SCHEME: &str = "sia";
 
+const ERROR_OBJECT_UNPINNED_SLAB: &str = "object contains unpinned slab";
+
 #[cfg(not(test))]
 const SHARE_URL_FETCH_SCHEME: &str = "https";
 #[cfg(test)]
@@ -80,6 +82,24 @@ pub enum Error {
     Custom(String),
 }
 
+#[derive(Debug, Error)]
+pub enum PinObjectError {
+    #[error("client error: {0}")]
+    Client(#[from] Error),
+
+    #[error("object contains unpinned slab")]
+    UnpinnedSlab,
+}
+
+impl Error {
+    /// Returns whether repeating the request may succeed. HTTP status codes are
+    /// currently flattened into [`Error::Api`], so API responses must be
+    /// treated as retryable alongside transport errors.
+    pub(crate) fn is_retryable(&self) -> bool {
+        matches!(self, Self::Api(_) | Self::Reqwest(_))
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AuthConnectStatusResponse {
@@ -106,6 +126,20 @@ pub(crate) struct SlabPinParams {
     pub encryption_key: EncryptionKey,
     pub min_shards: u8,
     pub sectors: Vec<Sector>,
+}
+
+/// Maximum number of slabs to send in a single [`Client::pin_slabs`] request.
+pub(crate) const SLAB_PIN_BATCH_SIZE: usize = 50;
+
+impl From<&Slab> for SlabPinParams {
+    fn from(slab: &Slab) -> Self {
+        SlabPinParams {
+            version: slab.version,
+            encryption_key: slab.encryption_key.clone(),
+            min_shards: slab.min_shards,
+            sectors: slab.sectors.clone(),
+        }
+    }
 }
 
 /// An SealedObjectEvent represents an object and whether it was deleted or not.
@@ -199,6 +233,14 @@ impl Client {
     /// Creates a client that talks to a real indexer over HTTP.
     pub(crate) fn new<U: IntoUrl>(base_url: U) -> Result<Self, Error> {
         Ok(Self::Http(http::Client::new(base_url)?))
+    }
+
+    /// Creates a client backed by the in-memory mock indexer. Use
+    /// [`Client::Mock`] directly when the test needs to keep the
+    /// [`mock::Client`] handle to inspect what was pinned.
+    #[cfg(test)]
+    pub(crate) fn mock() -> Self {
+        Self::Mock(mock::Client::new())
     }
 
     /// Checks if the application is authenticated with the indexer. It returns
@@ -309,7 +351,7 @@ impl Client {
         &self,
         app_key: &PrivateKey,
         object: &SealedObject,
-    ) -> Result<(), Error> {
+    ) -> Result<(), PinObjectError> {
         match self {
             Self::Http(c) => c.pin_object(app_key, object).await,
             #[cfg(any(test, feature = "mock"))]
