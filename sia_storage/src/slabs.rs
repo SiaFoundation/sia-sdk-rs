@@ -429,6 +429,42 @@ impl Object {
         self.slabs.iter().fold(0_u64, |v, s| v + s.length as u64)
     }
 
+    /// Returns a new object truncated to `length` bytes.
+    ///
+    /// The final retained slab is shortened to end at `length`, and any slabs
+    /// beyond it are removed. If `length` is greater than the object's size,
+    /// the returned object is unchanged.
+    ///
+    /// The object should be repinned afterwards
+    #[must_use]
+    pub fn truncate(&self, length: u64) -> Self {
+        let mut size = 0_u64;
+        let mut slabs = self
+            .slabs
+            .iter()
+            .take_while(|slab| {
+                if size >= length {
+                    return false;
+                }
+                size += slab.length as u64;
+                true
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if let Some(last) = slabs.last_mut() {
+            last.length -= size.saturating_sub(length) as u32;
+        }
+
+        Self {
+            data_key: self.data_key.clone(),
+            slabs,
+            metadata: self.metadata.clone(),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+
     /// Returns the total encoded size of the object after erasure coding
     /// by summing the sizes of its slabs.
     pub fn encoded_size(&self) -> u64 {
@@ -559,6 +595,51 @@ mod test {
             id.to_string(),
             "1b13d5dd22605af0573cae7fe9242c1ee83727c29798308b2b170864677b46d0"
         );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_object_truncate() {
+        let slabs = [100, 200, 300]
+            .into_iter()
+            .map(|length| Slab {
+                version: SlabVersion::V1,
+                encryption_key: random_bytes_32().into(),
+                min_shards: 1,
+                sectors: vec![],
+                offset: 10,
+                length,
+            })
+            .collect::<Vec<_>>();
+        let object = Object {
+            slabs: slabs.clone(),
+            metadata: b"metadata".to_vec(),
+            ..Default::default()
+        };
+
+        let empty = object.truncate(0);
+        assert_eq!(empty.size(), 0);
+        assert!(empty.slabs().is_empty());
+
+        let partial_first = object.truncate(40);
+        assert_eq!(partial_first.size(), 40);
+        assert_eq!(partial_first.slabs().len(), 1);
+        assert_eq!(partial_first.slabs()[0].offset, slabs[0].offset);
+        assert_eq!(partial_first.slabs()[0].length, 40);
+
+        let exact_boundary = object.truncate(100);
+        assert_eq!(exact_boundary.size(), 100);
+        assert_eq!(exact_boundary.slabs(), &slabs[..1]);
+
+        let partial_second = object.truncate(250);
+        assert_eq!(partial_second.size(), 250);
+        assert_eq!(partial_second.slabs().len(), 2);
+        assert_eq!(partial_second.slabs()[0], slabs[0]);
+        assert_eq!(partial_second.slabs()[1].offset, slabs[1].offset);
+        assert_eq!(partial_second.slabs()[1].length, 150);
+
+        let oversized = object.truncate(object.size() + 1);
+        assert_eq!(oversized, object);
+        assert_eq!(object.slabs(), slabs);
     }
 
     /// Tests ObjectID of a SealedObject
