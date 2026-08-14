@@ -6,6 +6,7 @@ mod object;
 mod packed;
 mod sdk;
 mod sealed;
+mod sharing;
 mod stream_reader;
 mod types;
 
