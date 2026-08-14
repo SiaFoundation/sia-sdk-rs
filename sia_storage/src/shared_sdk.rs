@@ -104,8 +104,18 @@ impl SharedSdk {
         api_client: app_client::Client,
         sharing_key: PrivateKey,
     ) -> Result<Self, BuilderError> {
+        Self::with_backends(api_client, Client::new(), sharing_key).await
+    }
+
+    /// Connects using the given transport, so tests can drive an in-memory
+    /// network instead of real hosts.
+    pub(crate) async fn with_backends(
+        api_client: app_client::Client,
+        transport: Client,
+        sharing_key: PrivateKey,
+    ) -> Result<Self, BuilderError> {
         let sharing_key = Arc::new(AppKey(sharing_key));
-        let hosts = Hosts::new(Client::new());
+        let hosts = Hosts::new(transport);
         let tokens = Arc::new(RwLock::new(HashMap::new()));
         let earliest = Self::refresh(&sharing_key, &api_client, &hosts, &tokens).await?;
         let refresh_task = Self::spawn_refresh_task(
