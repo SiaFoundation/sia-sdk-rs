@@ -5,7 +5,7 @@ use sia_core::types::v2::{NetAddress, Protocol};
 
 use crate::rhp4::{Client, mock};
 use crate::time::Duration;
-use crate::{AppKey, BuilderError, Host, Sdk, app_client};
+use crate::{AppKey, BuilderError, Host, Sdk, SharedSdk, SharingKey, app_client};
 
 /// An in-memory Sia network: a mock indexer paired with a mock host transport.
 ///
@@ -88,6 +88,17 @@ impl MockNetwork {
             app_client::Client::Mock(self.api.clone()),
             Client::Mock(self.transport.clone()),
             Arc::new(app_key),
+        )
+        .await
+    }
+
+    /// Builds a [`SharedSdk`] backed by this network, as a recipient holding
+    /// `seed`. The key must already exist on the mock indexer.
+    pub async fn shared_sdk(&self, seed: [u8; 32]) -> Result<SharedSdk, BuilderError> {
+        SharedSdk::with_backends(
+            app_client::Client::Mock(self.api.clone()),
+            Client::Mock(self.transport.clone()),
+            SharingKey::import(seed),
         )
         .await
     }
