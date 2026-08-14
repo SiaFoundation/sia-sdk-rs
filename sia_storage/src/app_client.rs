@@ -552,7 +552,7 @@ impl Client {
         match self {
             Self::Http(c) => c.shared_stats(sharing_key).await,
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(_) => Err(unsupported_by_mock()),
+            Self::Mock(c) => c.shared_stats(sharing_key).await,
         }
     }
 
@@ -566,7 +566,7 @@ impl Client {
         match self {
             Self::Http(c) => c.shared_objects(sharing_key, offset, limit).await,
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(_) => Err(unsupported_by_mock()),
+            Self::Mock(c) => c.shared_objects(sharing_key, offset, limit).await,
         }
     }
 
@@ -579,7 +579,7 @@ impl Client {
         match self {
             Self::Http(c) => c.shared_object_by_id(sharing_key, key).await,
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(_) => Err(unsupported_by_mock()),
+            Self::Mock(c) => c.shared_object_by_id(sharing_key, key).await,
         }
     }
 
@@ -593,7 +593,7 @@ impl Client {
         match self {
             Self::Http(c) => c.shared_hosts(sharing_key, query).await,
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(_) => Err(unsupported_by_mock()),
+            Self::Mock(c) => c.shared_hosts(sharing_key, query).await,
         }
     }
 
@@ -606,7 +606,7 @@ impl Client {
         match self {
             Self::Http(c) => c.add_sharing_key(app_key, req).await,
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(_) => Err(unsupported_by_mock()),
+            Self::Mock(c) => c.add_sharing_key(app_key, req).await,
         }
     }
 
@@ -620,7 +620,7 @@ impl Client {
         match self {
             Self::Http(c) => c.sharing_keys(app_key, offset, limit).await,
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(_) => Err(unsupported_by_mock()),
+            Self::Mock(c) => c.sharing_keys(app_key, offset, limit).await,
         }
     }
 
@@ -633,7 +633,7 @@ impl Client {
         match self {
             Self::Http(c) => c.sharing_key(app_key, public_key).await,
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(_) => Err(unsupported_by_mock()),
+            Self::Mock(c) => c.sharing_key(app_key, public_key).await,
         }
     }
 
@@ -646,7 +646,7 @@ impl Client {
         match self {
             Self::Http(c) => c.delete_sharing_key(app_key, public_key).await,
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(_) => Err(unsupported_by_mock()),
+            Self::Mock(c) => c.delete_sharing_key(app_key, public_key).await,
         }
     }
 
@@ -660,7 +660,7 @@ impl Client {
         match self {
             Self::Http(c) => c.add_shared_object(app_key, sharing_key, req).await,
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(_) => Err(unsupported_by_mock()),
+            Self::Mock(c) => c.add_shared_object(app_key, sharing_key, req).await,
         }
     }
 
@@ -678,7 +678,10 @@ impl Client {
                     .await
             }
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(_) => Err(unsupported_by_mock()),
+            Self::Mock(c) => {
+                c.sharing_key_objects(app_key, sharing_key, offset, limit)
+                    .await
+            }
         }
     }
 
@@ -695,20 +698,12 @@ impl Client {
                     .await
             }
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(_) => Err(unsupported_by_mock()),
+            Self::Mock(c) => {
+                c.delete_shared_object(app_key, sharing_key, object_key)
+                    .await
+            }
         }
     }
-}
-
-/// Sharing keys are only reachable over HTTP; the mock client has no sharing
-/// state to serve. Failing loudly keeps a test that reaches for sharing through
-/// the mock from silently passing.
-#[cfg(any(test, feature = "mock"))]
-const MOCK_UNSUPPORTED: &str = "sharing is not supported by the mock indexer client";
-
-#[cfg(any(test, feature = "mock"))]
-fn unsupported_by_mock() -> Error {
-    Error::Api(MOCK_UNSUPPORTED.to_string())
 }
 
 fn request_hash(
