@@ -92,20 +92,14 @@ impl SharedSdk {
     /// recipient is up to the caller.
     pub async fn connect<U: IntoUrl>(indexer_url: U, seed: [u8; 32]) -> Result<Self, BuilderError> {
         let api_client = app_client::Client::new(indexer_url)?;
-        Self::new(api_client, SharingKey::import(seed)).await
+        Self::with_backends(api_client, Client::new(), SharingKey::import(seed)).await
     }
 
-    /// Connects as the recipient of a sharing key. Seeds the host list and token
-    /// cache and spawns a task that refreshes them before the tokens expire.
-    pub(crate) async fn new(
-        api_client: app_client::Client,
-        sharing_key: SharingKey,
-    ) -> Result<Self, BuilderError> {
-        Self::with_backends(api_client, Client::new(), sharing_key).await
-    }
-
-    /// Connects using the given transport, so tests can drive an in-memory
-    /// network instead of real hosts.
+    /// Connects as the recipient of a sharing key, seeding the host list and
+    /// token cache and spawning a task that refreshes them before they expire.
+    ///
+    /// Takes the transport so tests can drive an in-memory network instead of
+    /// real hosts.
     pub(crate) async fn with_backends(
         api_client: app_client::Client,
         transport: Client,
