@@ -3,6 +3,7 @@ import init, {
   generateRecoveryPhrase,
   PinnedObject,
   setLogger,
+  SharedSdk,
 } from './pkg/sia_storage_wasm.js';
 
 const INDEXER_URL = 'https://sia.storage';
@@ -97,6 +98,38 @@ async function main() {
     downloaded.every((b, i) => b === uploadData[i]);
   log(`Download complete: ${downloaded.length} bytes in ${dlElapsed.toFixed(2)}s (${dlRate.toFixed(2)} MiB/s)`);
   log('Data integrity check:', match ? 'PASSED' : 'FAILED');
+
+  // -- share --
+  log('\nCreating a sharing key for that object...');
+  const key = await sdk.createSharingKey('example', null);
+  await key.addObject(obj);
+  // The object is still usable here; addObject borrows it rather than
+  // consuming the handle.
+  log(`Shared object ${obj.id()} under key ${key.publicKey}`);
+
+  const record = await sdk.sharingKey(key);
+  log(`The key now grants access to ${record.objectCount} object(s), ${record.objectSize} bytes`);
+
+  // -- read it back as a recipient --
+  // The seed is the whole credential. Everything below runs without the app
+  // key, as a recipient who was handed nothing else.
+  const seed = key.seed();
+  log(`\nConnecting as a recipient with seed ${seed.slice(0, 16)}...`);
+  const shared = await SharedSdk.connect(INDEXER_URL, seed);
+
+  const stats = await shared.stats();
+  log(`Recipient sees ${stats.objectCount} object(s), ${stats.objectSize} bytes`);
+
+  const sharedObj = await shared.object(obj.id());
+  const sharedBytes = new Uint8Array(
+    await new Response(shared.download(sharedObj)).arrayBuffer(),
+  );
+  const sharedMatch = sharedBytes.length === uploadData.length &&
+    sharedBytes.every((b, i) => b === uploadData[i]);
+  log('Recipient download check:', sharedMatch ? 'PASSED' : 'FAILED');
+
+  await key.delete();
+  log('Deleted the sharing key');
 }
 
 main().catch(err => {
