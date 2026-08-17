@@ -39,6 +39,8 @@ The FFI API mirrors `sia_storage` with adaptations for cross-language compatibil
 - **`SDK`** -- Upload, download, and manage objects.
 - **`AppKey`** -- Import, export, and use application keys.
 - **`Object` / `SealedObject`** -- Represent stored data and its encrypted form.
+- **`SharingKey`** -- Grant and revoke read-only access to a set of objects.
+- **`SharedSdk`** -- Read the objects a sharing key grants access to.
 
 Async methods are automatically dispatched on a Tokio runtime managed by the library.
 
