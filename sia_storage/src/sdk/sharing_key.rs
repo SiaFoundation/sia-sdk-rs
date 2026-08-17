@@ -55,19 +55,14 @@ impl SharingKey {
             .collect()
     }
 
-    /// Detaches objects from the key.
+    /// Detaches an object from the key.
     ///
-    /// Detaching an object that is not attached is an error, so a call that
-    /// fails partway cannot simply be retried with the same keys. Re-read the
-    /// attachments with [`Self::objects`] and retry with what remains.
-    pub async fn delete_objects(&self, sdk: &Sdk, object_keys: &[Hash256]) -> Result<(), Error> {
-        for object_key in object_keys {
-            sdk.api_client
-                .delete_shared_object(&sdk.app_key.0, &self.public_key, object_key)
-                .await
-                .map_err(|e| Error::App(format!("{e:?}")))?;
-        }
-        Ok(())
+    /// Detaching an object that is not attached is an error
+    pub async fn delete_object(&self, sdk: &Sdk, object_key: &Hash256) -> Result<(), Error> {
+        sdk.api_client
+            .delete_shared_object(&sdk.app_key.0, &self.public_key, object_key)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
     }
 
     /// Deletes the key along with all of its object attachments, revoking
