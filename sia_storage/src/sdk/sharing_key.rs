@@ -27,21 +27,18 @@ impl SharingKey {
         Ok(seed)
     }
 
-    /// Attaches objects the account owns to the key, re-sealing their
-    /// encryption keys under the sharing key so recipients can decrypt them.
+    /// Attaches an object the account owns to the key, re-sealing its
+    /// encryption keys under the sharing key so recipients can decrypt it.
     ///
     /// Attaching an object that is already attached replaces its re-sealed
-    /// keys, so a call that fails partway can be retried with the same objects.
-    pub async fn add_objects(&self, sdk: &Sdk, objects: &[Object]) -> Result<(), Error> {
+    /// keys, so a failed call can be retried with the same object.
+    pub async fn add_object(&self, sdk: &Sdk, object: &Object) -> Result<(), Error> {
         let sharing_key = PrivateKey::from_seed(&self.seed(sdk)?);
-        for object in objects {
-            let req = SharedObjectRequest::new(object, &sharing_key);
-            sdk.api_client
-                .add_shared_object(&sdk.app_key.0, &self.public_key, &req)
-                .await
-                .map_err(|e| Error::App(format!("{e:?}")))?;
-        }
-        Ok(())
+        let req = SharedObjectRequest::new(object, &sharing_key);
+        sdk.api_client
+            .add_shared_object(&sdk.app_key.0, &self.public_key, &req)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))
     }
 
     /// Lists and decrypts the objects attached to the key.
