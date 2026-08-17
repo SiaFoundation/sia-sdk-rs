@@ -425,7 +425,7 @@ impl Sdk {
     }
 
     /// Creates a sharing key. Attach objects to it with
-    /// [`SharingKey::add_objects`].
+    /// [`SharingKey::add_object`].
     ///
     /// # Arguments
     /// * `options` - The [SharingKeyOptions] to create the key with.
