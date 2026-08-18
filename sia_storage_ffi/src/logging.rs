@@ -43,7 +43,13 @@ pub fn set_logger(logger: Arc<dyn Logger>, level: String) {
         // lazy init the logger
         log::set_logger(&FORWARDER).unwrap();
     });
-    LOGGER.lock().unwrap().replace(logger.clone());
+    // The replaced logger is a handle into the foreign runtime that installed
+    // it, and dropping it calls back into that runtime to release the handle.
+    // A caller that rebuilds its runtime and sets a logger again from the new
+    // one (a React Native dev reload) leaves that drop reading freed memory,
+    // taking the process down. Leak one handle per swap instead.
+    let previous = LOGGER.lock().unwrap().replace(logger);
+    std::mem::forget(previous);
     if let Ok(level) = level.parse::<log::LevelFilter>() {
         log::set_max_level(level);
     }
