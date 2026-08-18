@@ -770,6 +770,31 @@ impl Download {
         .await?
     }
 
+    /// Writes the whole download to the file at `path`, creating or truncating
+    /// it, and returns the number of bytes written.
+    ///
+    /// Prefer this to [Download::read] when the destination is a local file:
+    /// the data never crosses the FFI boundary. Use [Download::read] if you
+    /// need the bytes themselves. Progress is still reported through the
+    /// `shard_downloaded` callback on [DownloadOptions].
+    pub async fn write_to_path(&self, path: String) -> Result<u64, DownloadError> {
+        let inner = self.inner.clone();
+        let cancel = self.cancel.clone();
+        spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+                result = async {
+                    let mut guard = inner.lock().await;
+                    let Some(reader) = guard.as_mut() else {
+                        return Err(DownloadError::Cancelled);
+                    };
+                    Ok::<_, DownloadError>(reader.write_to_path(path).await?)
+                } => result,
+            }
+        })
+        .await?
+    }
+
     /// Cancels the download and aborts any in-flight chunk recovery tasks.
     /// Interrupts an in-flight [Download::read] immediately. Subsequent reads
     /// return [DownloadError::Cancelled].

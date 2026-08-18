@@ -90,8 +90,9 @@ wasm-bindgen-test = "0.3"
 [features]
 mock = []
 less-safe-crypto = []
-# Adds `Sdk::upload_path` and `PackedUpload::add_path`. Not usable on wasm32:
-# tokio rejects its `fs` feature there.
+# Adds `Sdk::upload_path`, `PackedUpload::add_path`, and
+# `Download::write_to_path`. Not usable on wasm32: tokio rejects its `fs`
+# feature there.
 fs = ["tokio/fs"]
 
 [[bench]]

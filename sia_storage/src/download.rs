@@ -410,11 +410,13 @@ pub(crate) struct ChunkSlab {
 
 const INITIAL_CHUNK_SIZE: usize = 1 << 15; // 32 KiB
 const MAX_CHUNK_SIZE: usize = 1 << 20; // 1 MiB
+#[cfg(feature = "fs")]
+const WRITE_BUFFER_BYTES: usize = 4 << 20; // 4 MiB
 
 /// Iterator-like state for splitting slabs into chunks. The chunk size starts
 /// at [`INITIAL_CHUNK_SIZE`] for a fast first byte and doubles per chunk up to
-/// `SECTOR_SIZE`, so a long transfer settles into large reads without paying
-/// that latency up front.
+/// [`MAX_CHUNK_SIZE`], so a long transfer settles into large reads without
+/// paying that latency up front.
 pub(crate) struct ChunkIter {
     slabs: Vec<Slab>,
     slab_idx: usize,
@@ -627,8 +629,27 @@ impl Download {
         }
     }
 
+    /// Writes the whole download to the file at `path`, creating or truncating
+    /// it, and returns the number of bytes written.
+    #[cfg(feature = "fs")]
+    pub async fn write_to_path<P: AsRef<std::path::Path>>(
+        &mut self,
+        path: P,
+    ) -> Result<u64, DownloadError> {
+        let file = tokio::fs::File::create(path).await?;
+        // buffer the writes since copy moves 8 KiB at a time and every
+        // tokio::fs write is a hop to the blocking pool
+        let mut writer = tokio::io::BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
+        // the AsyncRead impl boxes the download error in an io::Error; unwrap
+        // it so callers still get the variant
+        tokio::io::copy(self, &mut writer).await.map_err(|e| {
+            e.downcast::<DownloadError>()
+                .unwrap_or_else(DownloadError::Io)
+        })
+    }
+
     /// Returns the next decoded chunk of data. Returns an empty `Vec` on EOF.
-    /// Chunks are up to 256 KiB.
+    /// Chunks are up to [`MAX_CHUNK_SIZE`].
     ///
     /// This is primarily intended for FFI bindings to enable zero-copy
     /// transfer of an owned `Vec<u8>`. For general use, prefer the
@@ -1143,6 +1164,72 @@ mod test {
             .await
             .unwrap();
         assert_eq!(data, recovered_data);
+    }
+
+    /// `write_to_path` drives the [AsyncRead] impl, which erases the download
+    /// error into an `io::Error`. Callers still need the variant.
+    #[cfg(feature = "fs")]
+    #[tokio::test]
+    async fn test_download_write_to_path_reports_download_error() {
+        let upload_options = UploadOptions::default();
+        let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
+
+        let transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: sia_core::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                })
+                .collect(),
+            true,
+        );
+        let mut data = BytesMut::zeroed(optimal_data_size);
+        rand::rng().fill_bytes(&mut data);
+        let data = data.freeze();
+        let app_key = Arc::new(AppKey::import(rand::random()));
+
+        let obj = upload_object(
+            hosts.clone(),
+            crate::app_client::Client::mock(),
+            app_key.clone(),
+            Object::default(),
+            Cursor::new(data.clone()),
+            upload_options,
+        )
+        .await
+        .unwrap();
+        // every read from the slab's hosts fails, so no recovery reaches
+        // min_shards however many times it retries
+        transport.set_read_failures(
+            obj.slabs()[0].sectors.iter().map(|s| s.host_key),
+            usize::MAX,
+        );
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut download = Download::new(
+            &obj,
+            hosts.clone(),
+            app_key.clone(),
+            DownloadOptions::default(),
+        )
+        .unwrap();
+        let err = download
+            .write_to_path(dir.path().join("object.bin"))
+            .await
+            .expect_err("download to fail");
+        assert!(
+            matches!(err, DownloadError::NotEnoughShards(..)),
+            "expected NotEnoughShards, got {err:?}"
+        );
     }
 
     #[sia_core_derive::cross_target_test]
