@@ -62,6 +62,12 @@ pub enum BuilderError {
     /// The connection approval request expired before the user approved it.
     #[error("request expired")]
     RequestExpired,
+
+    /// The indexer rejected the pre-authorized connection request. The key is
+    /// usually invalid, expired, exhausted, or restricted to a different
+    /// application; the indexer's response is included.
+    #[error("pre-authorized key rejected: {0}")]
+    PreAuthorizedKeyRejected(String),
 }
 
 impl Builder<DisconnectedState> {
@@ -110,6 +116,63 @@ impl Builder<DisconnectedState> {
         }
         let sdk = Sdk::new(self.client.clone(), Arc::new(app_key.clone())).await?;
         Ok(Some(sdk))
+    }
+
+    /// Connects using a pre-authorized key, bypassing the interactive approval
+    /// flow, and returns a ready [Sdk].
+    ///
+    /// The pre-authorized key must have been registered with the indexer and
+    /// still be valid. Because the indexer approves the request immediately,
+    /// this performs the entire connect, approve, and register flow in one call.
+    /// The application key is derived from `mnemonic` exactly as in the
+    /// interactive flow, so a later [Builder::connected] call reconnects to the
+    /// same account.
+    ///
+    /// # Arguments
+    /// * `pre_authorized_key` - The pre-authorized key used to approve the connection.
+    /// * `mnemonic` - The user's mnemonic phrase used to derive the application key.
+    pub async fn connect_pre_authorized(
+        self,
+        pre_authorized_key: &PrivateKey,
+        mnemonic: &str,
+    ) -> Result<Sdk, BuilderError> {
+        // fail before the request consumes a use of the pre-authorized key
+        Seed::new(mnemonic)?;
+
+        let resp = self
+            .client
+            .request_app_connection_pre_authorized(
+                &self.ephemeral_key,
+                &self.app_meta,
+                pre_authorized_key,
+            )
+            .await
+            .map_err(|e| match e {
+                app_client::Error::Unauthorized(msg) => BuilderError::PreAuthorizedKeyRejected(msg),
+                e => e.into(),
+            })?;
+
+        // The indexer approves a valid pre-authorized request synchronously, so
+        // the user secret is available on the first status check.
+        let user_secret = self
+            .client
+            .check_request_status(&self.ephemeral_key, Url::parse(&resp.status_url)?)
+            .await?
+            .ok_or_else(|| {
+                BuilderError::PreAuthorizedKeyRejected(
+                    "the indexer did not approve the request".to_string(),
+                )
+            })?;
+
+        let private_key = derive_app_key(mnemonic, &self.app_meta.id, &user_secret)?;
+        self.client
+            .register_app(
+                &self.ephemeral_key,
+                &private_key,
+                Url::parse(&resp.register_url)?,
+            )
+            .await?;
+        Sdk::new(self.client, Arc::new(AppKey(private_key))).await
     }
 
     /// Requests a new connection for the application.

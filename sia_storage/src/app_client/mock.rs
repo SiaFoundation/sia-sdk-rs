@@ -97,6 +97,15 @@ impl Client {
         })
     }
 
+    pub(crate) async fn request_app_connection_pre_authorized(
+        &self,
+        ephemeral_key: &PrivateKey,
+        opts: &AppMetadata,
+        _: &PrivateKey,
+    ) -> Result<RegisterAppResponse, Error> {
+        self.request_app_connection(ephemeral_key, opts).await
+    }
+
     pub(crate) async fn check_request_status(
         &self,
         _: &PrivateKey,
