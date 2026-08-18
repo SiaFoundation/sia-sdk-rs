@@ -238,6 +238,14 @@ impl PinnedObject {
         inner.size()
     }
 
+    /// Returns a new object truncated to the requested length.
+    pub fn truncate(&self, length: u64) -> PinnedObject {
+        let inner = self.inner.lock().unwrap();
+        PinnedObject {
+            inner: Arc::new(Mutex::new(inner.truncate(length))),
+        }
+    }
+
     /// Returns the total encoded size of the object after erasure coding
     /// by summing the sizes of its slabs.
     pub fn encoded_size(&self) -> u64 {
