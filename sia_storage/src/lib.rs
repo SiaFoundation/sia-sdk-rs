@@ -1078,6 +1078,68 @@ mod test {
         assert_eq!(output.freeze(), input);
     }
 
+    #[cfg(feature = "fs")]
+    #[tokio::test]
+    async fn test_download_write_to_path() {
+        let app_key = Arc::new(AppKey::import(random_seed()));
+        let hosts = Hosts::new(Client::mock());
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: sia_core::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                })
+                .collect(),
+            true,
+        );
+
+        // larger than WRITE_BUFFER_BYTES so the transfer crosses a mid-stream
+        // flush, and not a multiple of it so the tail relies on the final one
+        let mut input = BytesMut::zeroed((5 << 20) + 12_345);
+        random_bytes(&mut input);
+        let input = input.freeze();
+
+        let mut packed_upload = PackedUpload::new(
+            hosts.clone(),
+            app_client::Client::mock(),
+            app_key.clone(),
+            PackedUploadOptions::default(),
+        )
+        .unwrap();
+        packed_upload
+            .add(Cursor::new(input.clone()))
+            .await
+            .expect("add to complete");
+        let objects = packed_upload.finalize().await.expect("upload to finish");
+        assert_eq!(objects.len(), 1);
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("object.bin");
+        let mut download = Download::new(
+            &objects[0],
+            hosts.clone(),
+            app_key.clone(),
+            DownloadOptions::default(),
+        )
+        .unwrap();
+        let n = download
+            .write_to_path(&path)
+            .await
+            .expect("write_to_path to complete");
+
+        assert_eq!(n, input.len() as u64);
+        let written = tokio::fs::read(&path).await.expect("read written file");
+        assert_eq!(written.len(), input.len());
+        assert_eq!(Bytes::from(written), input);
+    }
+
     #[sia_core_derive::cross_target_test]
     async fn test_upload_download() {
         let app_key = Arc::new(AppKey::import(random_seed()));
