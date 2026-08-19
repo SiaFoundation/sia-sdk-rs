@@ -75,6 +75,18 @@ impl HostList {
         hosts.get(host_key).map(|h| h.addresses.clone())
     }
 
+    fn endpoints(&self) -> Vec<HostEndpoint> {
+        self.hosts
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(public_key, info)| HostEndpoint {
+                public_key: *public_key,
+                addresses: info.addresses.clone(),
+            })
+            .collect()
+    }
+
     /// Sorts a list of items by their host's download score (descending).
     /// Score is `throughput / (inflight_downloads + 1)`, lower failure_rate
     /// wins first, and unsampled hosts get discovery priority. Used by the
@@ -309,6 +321,11 @@ impl Hosts {
             }),
             None => Err(RPCError::UnknownHost(host_key)),
         }
+    }
+
+    /// Returns an endpoint (public key and addresses) for every known host.
+    pub fn endpoints(&self) -> Vec<HostEndpoint> {
+        self.hosts.endpoints()
     }
 
     /// Sorts a list of hosts according to their priority in the client's

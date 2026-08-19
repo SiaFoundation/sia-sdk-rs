@@ -9,7 +9,7 @@ use sia_core::types::Hash256;
 
 use crate::app_client::IntoUrl;
 use crate::hosts::Hosts;
-use crate::rhp4::{Client, HostEndpoint};
+use crate::rhp4::Client;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, sleep};
 use crate::tokens::AccountTokenSource;
@@ -52,7 +52,6 @@ impl SharedSdk {
         api_client: &app_client::Client,
         hosts: &Hosts,
         tokens: &RwLock<HashMap<PublicKey, AccountToken>>,
-        endpoints: &RwLock<Vec<HostEndpoint>>,
     ) -> Result<Option<DateTime<Utc>>, app_client::Error> {
         const PAGE_SIZE: usize = 100;
         let mut shared = Vec::new();
@@ -76,22 +75,16 @@ impl SharedSdk {
 
         let mut host_list = Vec::with_capacity(shared.len());
         let mut token_map = HashMap::with_capacity(shared.len());
-        let mut endpoint_list = Vec::with_capacity(shared.len());
         let mut earliest: Option<DateTime<Utc>> = None;
         for h in shared {
             let expiry = h.token.valid_until;
             earliest = Some(earliest.map_or(expiry, |e| e.min(expiry)));
             token_map.insert(h.host.public_key, h.token);
-            endpoint_list.push(HostEndpoint {
-                public_key: h.host.public_key,
-                addresses: h.host.addresses.clone(),
-            });
             host_list.push(h.host);
         }
 
         hosts.update(host_list, true);
         *tokens.write().unwrap() = token_map;
-        *endpoints.write().unwrap() = endpoint_list;
         Ok(earliest)
     }
 
@@ -114,18 +107,15 @@ impl SharedSdk {
         let sharing_key = Arc::new(AppKey(sharing_key));
         let hosts = Hosts::new(Client::new());
         let tokens = Arc::new(RwLock::new(HashMap::new()));
-        let endpoints = Arc::new(RwLock::new(Vec::new()));
-        let earliest =
-            Self::refresh(&sharing_key, &api_client, &hosts, &tokens, &endpoints).await?;
+        let earliest = Self::refresh(&sharing_key, &api_client, &hosts, &tokens).await?;
         let refresh_task = Self::spawn_refresh_task(
             sharing_key.clone(),
             api_client.clone(),
             hosts.clone(),
             tokens.clone(),
-            endpoints.clone(),
             earliest,
         );
-        let warm_task = Self::spawn_warm_task(hosts.clone(), endpoints);
+        let warm_task = Self::spawn_warm_task(hosts.clone());
         Ok(Self {
             sharing_key,
             api_client,
@@ -157,14 +147,13 @@ impl SharedSdk {
         api_client: app_client::Client,
         hosts: Hosts,
         tokens: Arc<RwLock<HashMap<PublicKey, AccountToken>>>,
-        endpoints: Arc<RwLock<Vec<HostEndpoint>>>,
         initial_earliest: Option<DateTime<Utc>>,
     ) -> AbortOnDropHandle<()> {
         AbortOnDropHandle::new(maybe_spawn!(async move {
             let mut earliest = initial_earliest;
             loop {
                 sleep(Self::refresh_delay(earliest)).await;
-                match Self::refresh(&sharing_key, &api_client, &hosts, &tokens, &endpoints).await {
+                match Self::refresh(&sharing_key, &api_client, &hosts, &tokens).await {
                     Ok(next) => earliest = next,
                     Err(err) => {
                         warn!("failed to refresh shared hosts: {err}");
@@ -179,14 +168,10 @@ impl SharedSdk {
     /// Warms connections to the current hosts now and every
     /// [`WARM_INTERVAL_SECS`] after. Every host is warmed, not just those
     /// `good_for_upload`, since a recipient only ever reads.
-    fn spawn_warm_task(
-        hosts: Hosts,
-        endpoints: Arc<RwLock<Vec<HostEndpoint>>>,
-    ) -> AbortOnDropHandle<()> {
+    fn spawn_warm_task(hosts: Hosts) -> AbortOnDropHandle<()> {
         AbortOnDropHandle::new(maybe_spawn!(async move {
             loop {
-                let current = endpoints.read().unwrap().clone();
-                hosts.warm_connections(current).await;
+                hosts.warm_connections(hosts.endpoints()).await;
                 sleep(Duration::from_secs(WARM_INTERVAL_SECS)).await;
             }
         }))
