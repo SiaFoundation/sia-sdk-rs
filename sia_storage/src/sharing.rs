@@ -23,10 +23,7 @@ pub(crate) struct Nonce(pub(crate) [u8; NONCE_SIZE]);
 
 impl fmt::Display for Nonce {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for b in self.0 {
-            write!(f, "{b:02x}")?;
-        }
-        Ok(())
+        write!(f, "{}", hex::encode(self.0))
     }
 }
 
