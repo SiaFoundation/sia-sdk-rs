@@ -531,9 +531,7 @@ mod test {
             })
             .await
             .expect("create failed");
-        key.add_object(&sdk, &object)
-            .await
-            .expect("attach failed");
+        key.add_object(&sdk, &object).await.expect("attach failed");
 
         // the owner's view of what is attached
         let attached = key.objects(&sdk, 0, 10).await.expect("owner list failed");
