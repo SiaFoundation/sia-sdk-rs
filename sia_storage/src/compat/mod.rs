@@ -9,7 +9,7 @@ mod wasm_time;
 
 /// Unified time types for native and WASM targets.
 pub mod time {
-    pub use web_time::{Duration, Instant, SystemTime};
+    pub use web_time::{Duration, Instant};
 
     #[cfg(not(target_arch = "wasm32"))]
     pub use tokio::time::{error::Elapsed, sleep, timeout};
