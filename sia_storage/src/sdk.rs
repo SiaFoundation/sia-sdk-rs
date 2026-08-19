@@ -15,14 +15,14 @@ use crate::app_client::PinObjectError::UnpinnedSlab;
 use crate::app_client::{self, SLAB_PIN_BATCH_SIZE, SlabPinParams};
 use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
-use crate::sharing::{self, KeyRequest, KeyResponse, Nonce, SharingKey};
+use crate::sharing::{self, KeyRequest, Nonce, SharingKey};
 use crate::task::AbortOnDropHandle;
 use crate::time::Duration;
 use crate::upload::{PackedUpload, upload_object};
 use crate::{
     Account, AppKey, BuilderError, Download, DownloadError, DownloadOptions, Host, HostQuery,
-    Object, ObjectEvent, ObjectsCursor, PackedUploadOptions, PinnedSlab, SealedObjectError,
-    SharingKeyOptions, UploadError, UploadOptions,
+    KeyResponse, Object, ObjectEvent, ObjectsCursor, PackedUploadOptions, PinnedSlab,
+    SealedObjectError, SharingKeyOptions, UploadError, UploadOptions,
 };
 
 /// `SharingKey`'s operations live here so they can reach this module's private
