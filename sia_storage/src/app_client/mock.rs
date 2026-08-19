@@ -15,7 +15,7 @@ use super::{
 };
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
-use crate::sharing::{KeyRequest, SharedObjectRequest, SharingKey};
+use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
 use crate::slabs::Slab;
 use crate::time::Duration;
 use crate::{
@@ -35,7 +35,8 @@ struct StoredObject {
 /// A sharing key and the objects attached to it.
 #[derive(Debug)]
 struct StoredSharingKey {
-    key: SharingKey,
+    public_key: PublicKey,
+    nonce: Nonce,
     description: String,
     expires_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
@@ -415,10 +416,8 @@ impl Client {
             return Err(Error::Api("sharing key already exists".into()));
         }
         let stored = StoredSharingKey {
-            key: SharingKey {
-                public_key: req.public_key,
-                nonce: req.nonce,
-            },
+            public_key: req.public_key,
+            nonce: req.nonce,
             description: req.description.clone(),
             expires_at: req.expires_at,
             created_at: Utc::now(),
@@ -432,18 +431,18 @@ impl Client {
     pub(crate) async fn sharing_keys(
         &self,
         _: &PrivateKey,
-        offset: u64,
-        limit: u64,
+        offset: Option<u64>,
+        limit: Option<u64>,
     ) -> Result<Vec<KeyResponse>, Error> {
         let state = self.state.read().unwrap();
         let mut keys: Vec<_> = state.sharing_keys.values().collect();
         // Newest first, matching indexd, with the key's bytes breaking ties.
-        keys.sort_by_key(|k| (k.created_at, k.key.public_key.as_ref().to_vec()));
+        keys.sort_by_key(|k| (k.created_at, k.public_key.as_ref().to_vec()));
         keys.reverse();
         Ok(keys
             .into_iter()
-            .skip(offset as usize)
-            .take(limit as usize)
+            .skip(offset.unwrap_or(0) as usize)
+            .take(limit.map_or(usize::MAX, |l| l as usize))
             .map(StoredSharingKey::response)
             .collect())
     }
@@ -514,8 +513,8 @@ impl Client {
         &self,
         _: &PrivateKey,
         sharing_key: &PublicKey,
-        offset: u64,
-        limit: u64,
+        offset: Option<u64>,
+        limit: Option<u64>,
     ) -> Result<Vec<SealedObject>, Error> {
         let state = self.state.read().unwrap();
         state
@@ -541,22 +540,14 @@ impl Client {
     pub(crate) async fn shared_stats(&self, sharing_key: &PrivateKey) -> Result<KeyStats, Error> {
         let state = self.state.read().unwrap();
         let record = Self::shared(&state, sharing_key)?.response();
-        Ok(KeyStats {
-            object_count: record.object_count,
-            object_size: record.object_size,
-            pinned_data: record.pinned_data,
-            pinned_size: record.pinned_size,
-            expires_at: record.expires_at,
-            created_at: record.created_at,
-            updated_at: record.updated_at,
-        })
+        Ok(record.stats)
     }
 
     pub(crate) async fn shared_objects(
         &self,
         sharing_key: &PrivateKey,
-        offset: u64,
-        limit: u64,
+        offset: Option<u64>,
+        limit: Option<u64>,
     ) -> Result<Vec<SealedObject>, Error> {
         let state = self.state.read().unwrap();
         Ok(Self::shared(&state, sharing_key)?.page(offset, limit))
@@ -642,26 +633,29 @@ impl StoredSharingKey {
             .map(|s| s.length as u64)
             .sum();
         KeyResponse {
-            key: self.key,
+            public_key: self.public_key,
+            nonce: self.nonce,
             account: PublicKey::new([0u8; 32]),
             description: self.description.clone(),
-            object_count: self.attached.len() as u64,
-            object_size,
-            pinned_data: object_size,
-            pinned_size: object_size,
-            expires_at: self.expires_at,
-            created_at: self.created_at,
-            updated_at: self.created_at,
+            stats: KeyStats {
+                object_count: self.attached.len() as u64,
+                object_size,
+                pinned_data: object_size,
+                pinned_size: object_size,
+                expires_at: self.expires_at,
+                created_at: self.created_at,
+                updated_at: self.created_at,
+            },
         }
     }
 
     /// Returns a stable page of the attached objects, ordered by id.
-    fn page(&self, offset: u64, limit: u64) -> Vec<SealedObject> {
+    fn page(&self, offset: Option<u64>, limit: Option<u64>) -> Vec<SealedObject> {
         let mut ids: Vec<_> = self.attached.keys().copied().collect();
         ids.sort_by_key(|id| *AsRef::<[u8; 32]>::as_ref(id));
         ids.into_iter()
-            .skip(offset as usize)
-            .take(limit as usize)
+            .skip(offset.unwrap_or(0) as usize)
+            .take(limit.map_or(usize::MAX, |l| l as usize))
             .filter_map(|id| self.attached.get(&id).cloned())
             .collect()
     }

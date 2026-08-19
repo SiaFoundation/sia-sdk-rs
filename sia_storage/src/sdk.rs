@@ -559,27 +559,33 @@ mod test {
             })
             .await
             .expect("create failed");
-        key.add_objects(&sdk, std::slice::from_ref(&object))
+        sdk.share_object(&key, &object)
             .await
             .expect("attach failed");
 
         // the owner's view of what is attached
-        let attached = key.objects(&sdk, 0, 10).await.expect("owner list failed");
+        let attached = sdk
+            .shared_objects(&key, Some(0), Some(10))
+            .await
+            .expect("owner list failed");
         assert_eq!(attached.len(), 1);
         assert_eq!(attached[0].id(), object.id());
 
         let record = sdk.sharing_key(&key).await.expect("re-read failed");
-        assert_eq!(record.object_count, 1);
+        assert_eq!(record.stats.object_count, 1);
         assert_eq!(record.description, "photos");
 
         // the recipient holds nothing but the seed
-        let seed = key.seed(&sdk).expect("seed failed");
+        let seed = key.export();
         let shared = network.shared_sdk(seed).await.expect("connect failed");
 
         let stats = shared.stats().await.expect("stats failed");
         assert_eq!(stats.object_count, 1);
 
-        let listed = shared.objects(0, 10).await.expect("list failed");
+        let listed = shared
+            .objects(Some(0), Some(10))
+            .await
+            .expect("list failed");
         assert_eq!(listed.len(), 1);
 
         // re-sealing under the sharing key must round-trip, or a recipient can
@@ -599,7 +605,7 @@ mod test {
         assert_eq!(downloaded, data);
 
         // detaching leaves the key in place with nothing attached
-        key.delete_objects(&sdk, &[object.id()])
+        sdk.unshare_object(&key, &object.id())
             .await
             .expect("detach failed");
         assert_eq!(shared.stats().await.expect("stats failed").object_count, 0);
