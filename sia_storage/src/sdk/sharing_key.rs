@@ -5,7 +5,7 @@ use sia_core::signing::PrivateKey;
 use sia_core::types::Hash256;
 
 use crate::sharing::{SharedObjectRequest, SharingKey, derive_sharing_seed};
-use crate::{AppKey, Error, Object, Sdk};
+use crate::{AppKey, Error, Object, Sdk, app_client};
 
 /// Operations on a sharing key. Each takes the [`Sdk`] whose account owns the
 /// key, since the app key is what re-derives the sharing key from its nonce and
@@ -56,13 +56,14 @@ impl SharingKey {
     }
 
     /// Detaches an object from the key.
-    ///
-    /// Detaching an object that is not attached is an error
     pub async fn delete_object(&self, sdk: &Sdk, object_key: &Hash256) -> Result<(), Error> {
         sdk.api_client
             .delete_shared_object(&sdk.app_key.0, &self.public_key, object_key)
             .await
-            .map_err(|e| Error::App(format!("{e:?}")))
+            .map_err(|e| match e {
+                app_client::Error::NotFound(_) => Error::ObjectNotAttached,
+                e => Error::App(format!("{e:?}")),
+            })
     }
 
     /// Deletes the key along with all of its object attachments, revoking

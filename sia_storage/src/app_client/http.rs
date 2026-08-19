@@ -304,6 +304,8 @@ impl Client {
             Ok(resp.json::<T>().await?)
         } else if resp.status() == StatusCode::UNAUTHORIZED {
             Err(Error::Unauthorized(resp.text().await?))
+        } else if resp.status() == StatusCode::NOT_FOUND {
+            Err(Error::NotFound(resp.text().await?))
         } else {
             Err(Error::Api(resp.text().await?))
         }
@@ -987,6 +989,36 @@ mod tests {
         assert_eq!(post_error.to_string(), expected_error.to_string());
         let delete_error = client.delete("", &app_key).await.unwrap_err();
         assert_eq!(delete_error.to_string(), expected_error.to_string());
+    }
+
+    #[tokio::test]
+    async fn test_handle_response_typed_statuses() {
+        let server = Server::run();
+        for (path, status) in [
+            ("/missing", StatusCode::NOT_FOUND),
+            ("/denied", StatusCode::UNAUTHORIZED),
+            ("/broken", StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
+            server.expect(
+                Expectation::matching(request::path(path))
+                    .times(1)
+                    .respond_with(Response::builder().status(status).body("the body").unwrap()),
+            );
+        }
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string()).unwrap();
+
+        let not_found = client.delete("missing", &app_key).await.unwrap_err();
+        assert!(matches!(not_found, Error::NotFound(ref m) if m == "the body"));
+        let denied = client.delete("denied", &app_key).await.unwrap_err();
+        assert!(matches!(denied, Error::Unauthorized(ref m) if m == "the body"));
+        let other = client.delete("broken", &app_key).await.unwrap_err();
+        assert!(matches!(other, Error::Api(ref m) if m == "the body"));
+
+        // 404 cannot become a success on retry, so it stays out of the
+        // retryable set.
+        assert!(!not_found.is_retryable());
     }
 
     #[tokio::test]
