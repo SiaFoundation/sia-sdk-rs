@@ -15,7 +15,7 @@ use thiserror::Error;
 use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::DecryptError;
-use crate::sharing::{KeyRequest, KeyResponse, SharedObjectRequest};
+use crate::sharing::{KeyRequest, SharedObjectRequest, SharingKey};
 use crate::slabs::{Sector, SlabVersion};
 use crate::{
     Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, PinnedSlab, SealedObject,
@@ -183,6 +183,35 @@ pub(crate) struct SharedHost {
     #[serde(flatten)]
     pub host: Host,
     pub token: AccountToken,
+}
+
+/// A sharing key record from the indexer, including how many objects the key
+/// grants access to and how much space they use. The counts are a snapshot, not
+/// a live view.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyResponse {
+    /// The key this record describes.
+    #[serde(flatten)]
+    pub key: SharingKey,
+    /// The account that owns the key.
+    pub account: PublicKey,
+    /// A human-readable description.
+    pub description: String,
+    /// The number of objects the key grants access to.
+    pub object_count: u64,
+    /// The total logical size of those objects, in bytes.
+    pub object_size: u64,
+    /// The size of those objects on the network, excluding redundancy.
+    pub pinned_data: u64,
+    /// The size of those objects on the network, including redundancy.
+    pub pinned_size: u64,
+    /// When the key expires, if it expires at all.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// When the key was created.
+    pub created_at: DateTime<Utc>,
+    /// When the key was last updated.
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

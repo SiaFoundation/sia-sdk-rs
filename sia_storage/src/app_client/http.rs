@@ -9,7 +9,7 @@ use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 
 use super::{
-    AppConnectRequest, AuthConnectStatusResponse, Error, IntoUrl, PinObjectRequest,
+    AppConnectRequest, AuthConnectStatusResponse, Error, IntoUrl, KeyResponse, PinObjectRequest,
     RegisterAppRequest, RegisterAppResponse, SHARE_URL_FETCH_SCHEME, SHARE_URL_SCHEME,
     SealedObjectEvent, SharedHost, SharedObjectResponse, SlabPinParams, Url,
     pre_authorization_sig_hash, register_app_sig_hash, sign,
@@ -17,7 +17,7 @@ use super::{
 use crate::app_client::{ERROR_OBJECT_UNPINNED_SLAB, PinObjectError};
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
-use crate::sharing::{KeyRequest, KeyResponse, SharedObjectRequest};
+use crate::sharing::{KeyRequest, SharedObjectRequest};
 use crate::time::Duration;
 use crate::{
     Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, PinnedSlab, SealedObject,
