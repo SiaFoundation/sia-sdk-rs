@@ -18,8 +18,7 @@ use crate::object_encryption::DecryptError;
 use crate::sharing::{KeyRequest, SharedObjectRequest, SharingKey};
 use crate::slabs::{Sector, SlabVersion};
 use crate::{
-    Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, PinnedSlab, SealedObject,
-    Slab,
+    Account, AppMetadata, HostQuery, Object, ObjectsCursor, PinnedSlab, SealedObject, Slab,
 };
 use sia_core::rhp4::AccountToken;
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
@@ -185,9 +184,30 @@ pub(crate) struct SharedHost {
     pub token: AccountToken,
 }
 
-/// A sharing key record from the indexer, including how many objects the key
-/// grants access to and how much space they use. The counts are a snapshot, not
-/// a live view.
+/// What a recipient can see about the sharing key they hold: how many objects
+/// it grants access to, how much space they use, and when the key expires. The
+/// counts are a snapshot, not a live view.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyStats {
+    /// The number of objects the sharing key grants access to.
+    pub object_count: u64,
+    /// The total logical size of those objects, in bytes.
+    pub object_size: u64,
+    /// The size of those objects stored on the network, excluding redundancy.
+    pub pinned_data: u64,
+    /// The size of those objects stored on the network, including redundancy.
+    pub pinned_size: u64,
+    /// When the sharing key expires, if it expires at all.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// When the sharing key was created.
+    pub created_at: DateTime<Utc>,
+    /// When the sharing key was last updated.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A sharing key record from the indexer: the key, who owns it, its description,
+/// and its [`KeyStats`]. The counts are a snapshot, not a live view.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyResponse {
@@ -198,20 +218,9 @@ pub struct KeyResponse {
     pub account: PublicKey,
     /// A human-readable description.
     pub description: String,
-    /// The number of objects the key grants access to.
-    pub object_count: u64,
-    /// The total logical size of those objects, in bytes.
-    pub object_size: u64,
-    /// The size of those objects on the network, excluding redundancy.
-    pub pinned_data: u64,
-    /// The size of those objects on the network, including redundancy.
-    pub pinned_size: u64,
-    /// When the key expires, if it expires at all.
-    pub expires_at: Option<DateTime<Utc>>,
-    /// When the key was created.
-    pub created_at: DateTime<Utc>,
-    /// When the key was last updated.
-    pub updated_at: DateTime<Utc>,
+    /// How many objects the key grants access to and how much space they use.
+    #[serde(flatten)]
+    pub stats: KeyStats,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -2101,13 +2101,15 @@ mod tests {
             },
             account: expected_pk,
             description: "photos".to_string(),
-            object_count: 0,
-            object_size: 0,
-            pinned_data: 0,
-            pinned_size: 0,
-            expires_at: None,
-            created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
-            updated_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            stats: KeyStats {
+                object_count: 0,
+                object_size: 0,
+                pinned_data: 0,
+                pinned_size: 0,
+                expires_at: None,
+                created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+                updated_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            },
         };
 
         // POST /sharing -> the created key record, signed by the app key.

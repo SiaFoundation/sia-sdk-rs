@@ -90,7 +90,7 @@ pub use sia_core::signing::{PublicKey, Signature};
 pub use sia_core::types::Hash256;
 pub use sia_core::types::v2::Protocol;
 
-pub use app_client::{Error as AppApiError, KeyResponse};
+pub use app_client::{Error as AppApiError, KeyResponse, KeyStats};
 pub use builder::{
     ApprovedState, Builder, BuilderError, DisconnectedState, RequestingApprovalState,
 };
@@ -289,28 +289,6 @@ pub struct Account {
     pub app: App,
     /// The last time the account was used.
     pub last_used: DateTime<Utc>,
-}
-
-/// What a recipient can see about the sharing key they hold: how many objects
-/// it grants access to, how much space they use, and when the key expires. The
-/// counts are a snapshot, not a live view.
-#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyStats {
-    /// The number of objects the sharing key grants access to.
-    pub object_count: u64,
-    /// The total logical size of those objects, in bytes.
-    pub object_size: u64,
-    /// The size of those objects stored on the network, excluding redundancy.
-    pub pinned_data: u64,
-    /// The size of those objects stored on the network, including redundancy.
-    pub pinned_size: u64,
-    /// When the sharing key expires, if it expires at all.
-    pub expires_at: Option<DateTime<Utc>>,
-    /// When the sharing key was created.
-    pub created_at: DateTime<Utc>,
-    /// When the sharing key was last updated.
-    pub updated_at: DateTime<Utc>,
 }
 
 /// Options for creating a sharing key.
