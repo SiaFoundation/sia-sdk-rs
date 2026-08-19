@@ -487,6 +487,7 @@ impl Sdk {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::KeyStats;
     use sia_core::signing::PrivateKey;
 
     fn random_seed() -> [u8; 32] {
@@ -689,13 +690,15 @@ mod test {
             },
             account: app_key.public_key(),
             description: "photos".to_string(),
-            object_count: 0,
-            object_size: 0,
-            pinned_data: 0,
-            pinned_size: 0,
-            expires_at: None,
-            created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
-            updated_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            stats: KeyStats {
+                object_count: 0,
+                object_size: 0,
+                pinned_data: 0,
+                pinned_size: 0,
+                expires_at: None,
+                created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+                updated_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            },
         };
 
         let server = Server::run();
@@ -764,13 +767,15 @@ mod test {
             },
             account: app_key.public_key(),
             description: "photos".to_string(),
-            object_count: 0,
-            object_size: 0,
-            pinned_data: 0,
-            pinned_size: 0,
-            expires_at: None,
-            created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
-            updated_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            stats: KeyStats {
+                object_count: 0,
+                object_size: 0,
+                pinned_data: 0,
+                pinned_size: 0,
+                expires_at: None,
+                created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+                updated_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            },
         };
         assert_ne!(substituted.key.public_key, requested.public_key);
 
