@@ -56,6 +56,10 @@ pub enum Error {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    /// The indexer did not have the requested resource.
+    #[error("not found: {0}")]
+    NotFound(String),
+
     /// An invalid HTTP header value was constructed.
     #[error("invalid header value: {0}")]
     InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),

@@ -36,6 +36,10 @@ pub enum Error {
     #[error("app error: {0}")]
     App(String),
 
+    /// The object is not attached to the sharing key.
+    #[error("object is not attached to the sharing key")]
+    ObjectNotAttached,
+
     /// An error during upload.
     #[error("upload error: {0}")]
     Upload(#[from] UploadError),
