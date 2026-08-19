@@ -71,7 +71,7 @@ pub mod mock;
 
 pub use sdk::{Error, Sdk};
 pub use shared_sdk::SharedSdk;
-pub use sharing::{KeyResponse, SharingKey};
+pub use sharing::SharingKey;
 
 use std::sync::Arc;
 
@@ -90,7 +90,7 @@ pub use sia_core::signing::{PublicKey, Signature};
 pub use sia_core::types::Hash256;
 pub use sia_core::types::v2::Protocol;
 
-pub use app_client::Error as AppApiError;
+pub use app_client::{Error as AppApiError, KeyResponse};
 pub use builder::{
     ApprovedState, Builder, BuilderError, DisconnectedState, RequestingApprovalState,
 };
