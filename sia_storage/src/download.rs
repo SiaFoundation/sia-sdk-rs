@@ -942,7 +942,7 @@ mod test {
         let mut sectors = Vec::with_capacity(total_shards);
         for (i, mut shard) in shards.into_iter().enumerate() {
             crate::encryption::encrypt_shard(&slab_key, i as u8, 0, &mut shard);
-            let root = hosts
+            let (root, _) = hosts
                 .write_sector(
                     host_keys[i],
                     &app_key.0,

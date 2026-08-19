@@ -11,14 +11,14 @@ use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
 use crate::hosts::{HostQueue, InflightGuard, QueueError, RPCError};
 use crate::slabs::SlabVersion;
 use crate::task::AbortOnDropHandle;
-use crate::time::{Duration, Elapsed, Instant, SystemTime, sleep};
+use crate::time::{Duration, Elapsed, Instant, sleep};
 use crate::{
     AppKey, Download, DownloadOptions, Hosts, Object, PackedUploadOptions, Sector, ShardProgress,
     ShardProgressCallback, Slab, UploadOptions,
 };
 use bytes::Bytes;
 use log::debug;
-use sia_core::rhp4::SECTOR_SIZE;
+use sia_core::rhp4::{SECTOR_SIZE, TEMP_SECTOR_DURATION};
 use sia_core::signing::PublicKey;
 use thiserror::Error;
 use tokio::io::{AsyncRead, BufReader};
@@ -66,6 +66,8 @@ struct SectorUploadResult {
     sector: Sector,
     shard_index: usize,
     elapsed: Duration,
+    /// Chain height the host reported when this sector was written.
+    tip_height: u64,
 }
 
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(90);
@@ -251,7 +253,7 @@ impl ShardUpload {
                 .await;
             let elapsed = start.elapsed();
             limiter.record(sample, elapsed, result.is_ok());
-            let root = result
+            let (root, tip_height) = result
                 .inspect_err(|e| {
                     debug!(
                         "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {elapsed:?} {e}",
@@ -266,6 +268,7 @@ impl ShardUpload {
                 sector: Sector { root, host_key },
                 shard_index,
                 elapsed,
+                tip_height,
             })
         });
     }
@@ -444,10 +447,6 @@ async fn pin_uploaded_slab(
     }
 }
 
-/// How long a host keeps a sector in temporary storage (432 blocks) before
-/// deleting it if it has not been appended to a contract.
-const MAX_SLAB_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
-
 /// Maximum number of times a slab is uploaded before failing with
 /// [`UploadError::StaleSlab`].
 const MAX_SLAB_ATTEMPTS: usize = 3;
@@ -469,9 +468,6 @@ pub(crate) struct Upload {
     waiting: watch::Sender<usize>,
     slab_tasks: VecDeque<AbortOnDropHandle<Result<Slab, UploadError>>>,
     shard_uploaded: Option<ShardProgressCallback>,
-    /// Age at which a slab is uploaded again. Always [`MAX_SLAB_AGE`] outside
-    /// of tests.
-    max_slab_age: Duration,
 }
 
 impl Upload {
@@ -512,7 +508,6 @@ impl Upload {
             waiting: watch::channel(0).0,
             slab_tasks: VecDeque::new(),
             shard_uploaded: options.shard_uploaded,
-            max_slab_age: MAX_SLAB_AGE,
         })
     }
 
@@ -525,7 +520,6 @@ impl Upload {
         let min_shards = self.erasure_coder.data_shards() as u8;
         let progress_callback = self.shard_uploaded.clone();
         let slab_index = self.slab_tasks.len();
-        let max_slab_age = self.max_slab_age;
         let shard_permits = limiter.reserve(slab.shards.len()).await;
         // Count this slab's shards as waiting before the task spawns so the
         // racing gate can't open between buffering and encode.
@@ -570,8 +564,6 @@ impl Upload {
             }
 
             for attempt in 1..=MAX_SLAB_ATTEMPTS {
-                let start = Instant::now();
-                let wall_start = SystemTime::now();
                 // No pre-assignment of hosts: each shard picks its host
                 // just-in-time via the slab's `HostQueue`, which scores by
                 // `throughput / (inflight + 1)`. This disperses load across
@@ -612,6 +604,10 @@ impl Upload {
                 }
 
                 let mut sectors: Vec<Option<Sector>> = vec![None; total_shards];
+                // the slab dies with its first shard, so the oldest write
+                // bounds it; the newest is the latest view of the chain
+                let mut oldest_write = u64::MAX;
+                let mut newest_write = 0;
                 while let Some(res) = shard_tasks.join_next().await {
                     let result: SectorUploadResult = res??;
                     if let Some(callback) = &progress_callback {
@@ -623,20 +619,19 @@ impl Upload {
                             elapsed: result.elapsed,
                         });
                     }
+                    oldest_write = oldest_write.min(result.tip_height);
+                    newest_write = newest_write.max(result.tip_height);
                     sectors[result.shard_index] = Some(result.sector);
                 }
 
                 // Checked before pinning: the indexer cannot unpin a single
                 // slab, so pinning one whose sectors were already deleted
-                // would orphan it. `Instant` ignores time spent suspended and
-                // `SystemTime` can jump backward, so take the larger of the
-                // two.
-                let elapsed = start
-                    .elapsed()
-                    .max(wall_start.elapsed().unwrap_or(Duration::ZERO));
-                if elapsed >= max_slab_age {
+                // would orphan it. Hosts expire on block height against their
+                // own chain tip, so the spread between the first and last
+                // write is this attempt's age in the units they delete on.
+                if newest_write.saturating_sub(oldest_write) >= TEMP_SECTOR_DURATION {
                     debug!(
-                        "slab {slab_index} upload attempt {attempt}/{MAX_SLAB_ATTEMPTS} stale after {elapsed:?}"
+                        "slab {slab_index} upload attempt {attempt}/{MAX_SLAB_ATTEMPTS} stale: written from height {oldest_write} to {newest_write}"
                     );
                     waiting_guards = (0..total_shards)
                         .map(|_| WaitingGuard::new(waiting.clone()))
@@ -1440,30 +1435,33 @@ mod tests {
     }
 
     /// A slab whose upload outlives its sectors' temporary storage is uploaded
-    /// again from the shards kept in memory.
+    /// A slab is reuploaded when the chain passes the hosts' temp sector
+    /// expiry while the first attempt is still running.
     #[sia_core_derive::cross_target_test]
-    async fn test_upload_reuploads_stale_slab() {
+    async fn test_upload_reuploads_when_chain_advances() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        use crate::time::timeout;
-
-        const MAX_AGE: Duration = Duration::from_secs(2);
+        const START_HEIGHT: u64 = 1000;
 
         let transport = mock::Client::new();
+        // each price fetch advances the chain a full expiry window, so the
+        // first shards written are expired before the last one lands
+        transport.set_tip_height(START_HEIGHT, TEMP_SECTOR_DURATION);
         let hosts = Hosts::new(Client::Mock(transport.clone()));
-        let host_keys: Vec<PublicKey> = (0..60)
-            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
-            .collect();
-        hosts.update(host_keys.iter().map(|pk| test_host(*pk)).collect(), true);
-        // Stall every host so the first attempt outlives MAX_AGE. The delay
-        // is cleared once that attempt's last shard lands, so the second
-        // attempt runs fast.
-        transport.set_slow_hosts(host_keys, Duration::from_secs(1));
+        // twice as many hosts as shards; the queue prefers unsampled hosts,
+        // so the retry lands on the untouched half
+        hosts.update(
+            (0..60)
+                .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
+                .collect(),
+            true,
+        );
 
         let options = UploadOptions::default();
         let total_shards = options.data_shards as usize + options.parity_shards as usize;
         let uploads = Arc::new(AtomicUsize::new(0));
         let counter = uploads.clone();
+        let chain = transport.clone();
         let api = app_client::mock::Client::new();
         let mut upload = Upload::new(
             hosts,
@@ -1471,15 +1469,16 @@ mod tests {
             Arc::new(AppKey::import(rand::random())),
             UploadOptions {
                 shard_uploaded: Some(Arc::new(move |_| {
+                    // stop the chain after the first attempt so the retry
+                    // lands inside one expiry window
                     if counter.fetch_add(1, Ordering::SeqCst) + 1 == total_shards {
-                        transport.reset_slow_hosts();
+                        chain.set_tip_height(START_HEIGHT, 0);
                     }
                 })),
                 ..options
             },
         )
         .unwrap();
-        upload.max_slab_age = MAX_AGE;
 
         let mut data = BytesMut::zeroed(4096);
         rand::rng().fill_bytes(&mut data);
@@ -1490,11 +1489,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // bound the wait so a regression doesn't hang the test
-        let slabs = timeout(Duration::from_secs(60), upload.finish())
-            .await
-            .expect("upload to finish")
-            .unwrap();
+        let slabs = upload.finish().await.unwrap();
 
         assert_eq!(slabs.len(), 1);
         assert_eq!(slabs[0].sectors.len(), total_shards);
@@ -1508,7 +1503,10 @@ mod tests {
     /// stale.
     #[sia_core_derive::cross_target_test]
     async fn test_upload_fails_after_max_stale_attempts() {
-        let hosts = Hosts::new(Client::mock());
+        let transport = mock::Client::new();
+        // the chain never stops outrunning the upload, so no attempt survives
+        transport.set_tip_height(1000, TEMP_SECTOR_DURATION);
+        let hosts = Hosts::new(Client::Mock(transport));
         hosts.update(
             (0..60)
                 .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
@@ -1524,8 +1522,6 @@ mod tests {
             UploadOptions::default(),
         )
         .unwrap();
-        // zero max age: every attempt is stale
-        upload.max_slab_age = Duration::ZERO;
 
         let mut data = BytesMut::zeroed(4096);
         rand::rng().fill_bytes(&mut data);
