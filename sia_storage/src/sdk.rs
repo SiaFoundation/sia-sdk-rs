@@ -531,7 +531,7 @@ mod test {
             })
             .await
             .expect("create failed");
-        key.add_objects(&sdk, std::slice::from_ref(&object))
+        key.add_object(&sdk, &object)
             .await
             .expect("attach failed");
 
@@ -541,7 +541,7 @@ mod test {
         assert_eq!(attached[0].id(), object.id());
 
         let record = sdk.sharing_key(&key).await.expect("re-read failed");
-        assert_eq!(record.object_count, 1);
+        assert_eq!(record.stats.object_count, 1);
         assert_eq!(record.description, "photos");
 
         // the recipient holds nothing but the seed
@@ -571,7 +571,7 @@ mod test {
         assert_eq!(downloaded, data);
 
         // detaching leaves the key in place with nothing attached
-        key.delete_objects(&sdk, &[object.id()])
+        key.delete_object(&sdk, &object.id())
             .await
             .expect("detach failed");
         assert_eq!(shared.stats().await.expect("stats failed").object_count, 0);

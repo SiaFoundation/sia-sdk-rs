@@ -538,15 +538,7 @@ impl Client {
     pub(crate) async fn shared_stats(&self, sharing_key: &PrivateKey) -> Result<KeyStats, Error> {
         let state = self.state.read().unwrap();
         let record = Self::shared(&state, sharing_key)?.response();
-        Ok(KeyStats {
-            object_count: record.object_count,
-            object_size: record.object_size,
-            pinned_data: record.pinned_data,
-            pinned_size: record.pinned_size,
-            expires_at: record.expires_at,
-            created_at: record.created_at,
-            updated_at: record.updated_at,
-        })
+        Ok(record.stats)
     }
 
     pub(crate) async fn shared_objects(
@@ -642,13 +634,15 @@ impl StoredSharingKey {
             key: self.key,
             account: PublicKey::new([0u8; 32]),
             description: self.description.clone(),
-            object_count: self.attached.len() as u64,
-            object_size,
-            pinned_data: object_size,
-            pinned_size: object_size,
-            expires_at: self.expires_at,
-            created_at: self.created_at,
-            updated_at: self.created_at,
+            stats: KeyStats {
+                object_count: self.attached.len() as u64,
+                object_size,
+                pinned_data: object_size,
+                pinned_size: object_size,
+                expires_at: self.expires_at,
+                created_at: self.created_at,
+                updated_at: self.created_at,
+            },
         }
     }
 
