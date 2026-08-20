@@ -71,17 +71,6 @@ struct SectorTask {
     attempts: usize,
 }
 
-struct ShardRecovered {
-    data: Vec<u8>,
-    progress: ShardProgress,
-}
-
-struct ShardFailed {
-    task: SectorTask,
-    elapsed: Duration,
-    error: RPCError,
-}
-
 const MAX_SECTOR_ATTEMPTS: usize = 3;
 
 /// A chunk may only race slow hosts while it is within `n` chunks of the read head.
@@ -127,6 +116,12 @@ struct ShardsRecovered {
 
 struct SlabDecoded {
     data_shards: Vec<Bytes>,
+}
+
+struct DownloadResult {
+    task: SectorTask,
+    elapsed: Duration,
+    result: Result<Bytes, RPCError>,
 }
 
 /// State machine for recovering a slab. This provides a more structured
@@ -220,21 +215,16 @@ impl SlabRecovery<AwaitingRecovery> {
         })
     }
 
-    // `ShardFailed` is over the `result_large_err` threshold because it carries
-    // `SectorTask` back for the retry. Its only caller destructures it
-    // immediately, so it never propagates.
-    #[allow(clippy::result_large_err)]
     fn recover_shard(
         &self,
         task: SectorTask,
         inflight: Option<InflightGuard>,
         sector_offset: usize,
         sector_length: usize,
-    ) -> impl Future<Output = Result<ShardRecovered, ShardFailed>> + 'static {
+    ) -> impl Future<Output = DownloadResult> + 'static {
         let client = self.client.clone();
         let controller = self.controller.clone();
         let account_key = self.account_key.clone();
-        let slab_index = self.slab_index;
         async move {
             // Hold the inflight reservation for the duration of the RPC. The
             // guard was created by the caller before spawning so the load is
@@ -256,32 +246,11 @@ impl SlabRecovery<AwaitingRecovery> {
                 .await;
             let elapsed = start.elapsed();
             controller.record(permit, elapsed, result.is_ok());
-            let data = match result {
-                Ok(data) => data,
-                Err(error) => {
-                    return Err(ShardFailed {
-                        task,
-                        elapsed,
-                        error,
-                    });
-                }
-            };
-            debug!(
-                "slab {} shard {} recovered from {} in {:?}",
-                slab_index, task.shard_index, task.sector.host_key, elapsed
-            );
-            // Bytes -> Vec<u8> is zero-copy when the Bytes is uniquely owned
-            // (true here — no other refs to the response yet).
-            Ok(ShardRecovered {
-                data: Vec::from(data),
-                progress: ShardProgress {
-                    host_key: task.sector.host_key,
-                    shard_size: sector_length,
-                    shard_index: task.shard_index,
-                    slab_index,
-                    elapsed,
-                },
-            })
+            DownloadResult {
+                task,
+                result,
+                elapsed,
+            }
         }
     }
 
@@ -323,13 +292,22 @@ impl SlabRecovery<AwaitingRecovery> {
             tokio::select! {
                 Some(res) = shard_tasks.join_next() => {
                     last_event = Instant::now();
-                    match res? {
-                        Ok(ShardRecovered { data, progress }) => {
-                            shards[progress.shard_index] = Some(data);
+                    let DownloadResult{ result, task, elapsed } = res?;
+                    match result {
+                        Ok(data) => {
                             recovered_shards += 1;
+                            let shard_size = data.len();
+                            shards[task.shard_index] = Some(Vec::from(data));
                             if recovered_shards <= min_shards && let Some(callback) = &shard_downloaded {
-                                callback(progress);
+                                callback(ShardProgress {
+                                    host_key: task.sector.host_key,
+                                    shard_index: task.shard_index,
+                                    slab_index: self.slab_index,
+                                    shard_size,
+                                    elapsed,
+                                });
                             }
+                            debug!("slab {} shard {} download from {} complete after {elapsed:?} ({recovered_shards}/{min_shards} shards)", self.slab_index, task.shard_index, task.sector.host_key);
                             if recovered_shards >= min_shards {
                                 return Ok(SlabRecovery {
                                     client: self.client,
@@ -347,10 +325,11 @@ impl SlabRecovery<AwaitingRecovery> {
                                 });
                             }
                         },
-                        Err(ShardFailed { mut task, elapsed, error }) => {
+                        Err(e) => {
+                            let mut task = task;
                             task.attempts += 1;
                             warn!(
-                                "slab {} shard {} download from {} failed after {elapsed:?} (attempt {}/{MAX_SECTOR_ATTEMPTS}): {error}",
+                                "slab {} shard {} download from {} failed after {elapsed:?} (attempt {}/{MAX_SECTOR_ATTEMPTS}) ({recovered_shards}/{min_shards} shards): {e}",
                                 self.slab_index, task.shard_index, task.sector.host_key, task.attempts,
                             );
                             if task.attempts < MAX_SECTOR_ATTEMPTS {
@@ -363,7 +342,7 @@ impl SlabRecovery<AwaitingRecovery> {
                                 let inflight = self.client.reserve_inflight_download(&task.sector.host_key);
                                 join_set_spawn!(&mut shard_tasks, self.recover_shard(task, inflight, shard_offset, shard_length));
                             }
-                        }
+                        },
                     }
                 },
                 // Fires once racing will not steal work from more important chunks and the race timeout has elapsed
