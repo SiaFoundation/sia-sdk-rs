@@ -801,12 +801,15 @@ impl RPCReadSector<RPCComplete> {
         let start = offset / SEGMENT_SIZE;
         let end = (offset + length).div_ceil(SEGMENT_SIZE);
 
+        let data_start = offset % SEGMENT_SIZE;
+        let data_end = data_start + length;
         let data = maybe_spawn_blocking!(
             response
                 .data
                 .verify(&root, start, end)
                 .map_err(Error::ProofValidation)
-        )?;
+        )?
+        .slice(data_start..data_end);
         Ok(RPCReadSectorResult {
             usage: self.usage,
             data,
@@ -1126,6 +1129,8 @@ impl<S: RenterContractSigner, B: TransactionBuilder> RPCFormContract<S, B, RPCCo
 mod test {
     use bytes::BytesMut;
     use chrono::DateTime;
+    use sia_core_derive::cross_target_test;
+    use std::assert_matches;
     use std::io::Cursor;
 
     use super::*;
@@ -1175,7 +1180,7 @@ mod test {
         buf
     }
 
-    #[tokio::test]
+    #[cross_target_test]
     async fn test_write_request() {
         const EXPECTED_HEX: &str = "52656164536563746f72000000000000000000a1edccce1bc2d300000000000000000042db999d3784a7010000000000000000e3c8666c53467b02000000000000000084b6333b6f084f03000000000000000025a4000a8bca22040000000000000000c691cdd8a68cf604000000000007000000000000000800000000000000090000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000b000000000000000000000000000000000000000000000000000000000000000c000000000000000d0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000f000000000000001000000000000000";
 
@@ -1214,7 +1219,7 @@ mod test {
         assert_eq!(buf, hex::decode(EXPECTED_HEX).unwrap());
     }
 
-    #[tokio::test]
+    #[cross_target_test]
     async fn test_read_response() {
         let expected = RPCFreeSectorsResponse {
             old_subtree_hashes: vec![
@@ -1264,7 +1269,7 @@ mod test {
         assert_eq!(resp, expected);
     }
 
-    #[tokio::test]
+    #[cross_target_test]
     async fn test_response_error() {
         let expected_err = RPCError {
             code: 1,
@@ -1285,7 +1290,7 @@ mod test {
         }
     }
 
-    #[tokio::test]
+    #[cross_target_test]
     async fn test_rpc_write_sector_complete() {
         let mut data = BytesMut::zeroed(SECTOR_SIZE);
         rand::fill(&mut data[..]);
@@ -1316,5 +1321,154 @@ mod test {
             assert_eq!(expected, root);
             assert_eq!(got, wrong_root);
         }
+    }
+    fn random_sector() -> Vec<u8> {
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        rand::fill(&mut sector[..]);
+        sector
+    }
+
+    /// Sends a read for `offset..offset + length` and answers it with the
+    /// proof and data the host is supposed to return, both derived from
+    /// `sector`. `corrupt` gets a chance to tamper with the response first.
+    async fn read_sector_rpc(
+        sector: &[u8],
+        offset: usize,
+        length: usize,
+        corrupt: impl FnOnce(&mut Vec<Hash256>, &mut Bytes, &mut Hash256),
+    ) -> Result<Bytes, Error> {
+        let start = offset / SEGMENT_SIZE;
+        let end = (offset + length).div_ceil(SEGMENT_SIZE);
+
+        let mut root = merkle::sector_root(sector);
+        let mut proof = merkle::build_proof(sector, start, end);
+        let mut data = Bytes::copy_from_slice(&sector[start * SEGMENT_SIZE..end * SEGMENT_SIZE]);
+        corrupt(&mut proof, &mut data, &mut root);
+
+        let mut request = Vec::new();
+        let rpc = RPCReadSector::send_request(
+            &mut request,
+            TEST_PRICES,
+            TEST_ACCOUNT_TOKEN,
+            root,
+            offset,
+            length,
+        )
+        .await
+        .expect("sending the request must succeed");
+        let response = encode_test_response(&RPCReadSectorResponse {
+            data: merkle::RangeProof::new(proof, data),
+        });
+        rpc.complete(&mut Cursor::new(response))
+            .await
+            .map(|result| result.data)
+    }
+
+    #[cross_target_test]
+    async fn test_rpc_read_sector_returns_requested_range() {
+        let sector = random_sector();
+        let cases = [
+            (0, SEGMENT_SIZE),                          // first segment
+            (SECTOR_SIZE - SEGMENT_SIZE, SEGMENT_SIZE), // last segment
+            (0, SECTOR_SIZE),                           // whole sector
+            (SEGMENT_SIZE, SEGMENT_SIZE),               // aligned, mid-sector
+            (SEGMENT_SIZE + 10, SEGMENT_SIZE),          // unaligned, crosses a boundary
+            (7, 5),                                     // wholly inside one segment
+        ];
+
+        for (offset, length) in cases {
+            let data = read_sector_rpc(&sector, offset, length, |_, _, _| {})
+                .await
+                .unwrap_or_else(|e| panic!("read at {offset}..{length} must verify: {e}"));
+
+            assert_eq!(data.len(), length, "wrong length at offset {offset}");
+            assert_eq!(
+                &data[..],
+                &sector[offset..offset + length],
+                "wrong bytes at offset {offset}"
+            );
+        }
+    }
+
+    #[cross_target_test]
+    async fn test_rpc_read_sector_discards_unproven_trailing_data() {
+        let sector = random_sector();
+        let offset = SEGMENT_SIZE;
+        let length = SEGMENT_SIZE;
+
+        // the proof only covers the requested range, so anything the host
+        // appends past it is unauthenticated and must not reach the caller
+        let data = read_sector_rpc(&sector, offset, length, |_, data, _| {
+            let mut oversized = Vec::from(data.clone());
+            oversized.extend_from_slice(&[0xAA; 4096]);
+            *data = Bytes::from(oversized);
+        })
+        .await
+        .expect("trailing data must not invalidate the proof");
+
+        assert_eq!(data.len(), length);
+        assert_eq!(&data[..], &sector[offset..offset + length]);
+    }
+
+    #[cross_target_test]
+    async fn test_rpc_read_sector_rejects_short_data() {
+        let sector = random_sector();
+        let err = read_sector_rpc(&sector, SEGMENT_SIZE, SEGMENT_SIZE, |_, data, _| {
+            *data = data.slice(..data.len() - SEGMENT_SIZE);
+        })
+        .await
+        .expect_err("a short response must be rejected");
+
+        assert_matches!(
+            err,
+            Error::ProofValidation(ProofValidationError::NotSegmentAligned)
+        );
+    }
+
+    #[cross_target_test]
+    async fn test_rpc_read_sector_rejects_tampered_data() {
+        let sector = random_sector();
+        let err = read_sector_rpc(&sector, SEGMENT_SIZE, SEGMENT_SIZE, |_, data, _| {
+            let mut tampered = Vec::from(data.clone());
+            tampered[0] ^= 0xFF;
+            *data = Bytes::from(tampered);
+        })
+        .await
+        .expect_err("tampered data must be rejected");
+
+        assert_matches!(
+            err,
+            Error::ProofValidation(ProofValidationError::InvalidProofRoot { .. })
+        );
+    }
+
+    #[cross_target_test]
+    async fn test_rpc_read_sector_rejects_wrong_root() {
+        let sector = random_sector();
+        let err = read_sector_rpc(&sector, SEGMENT_SIZE, SEGMENT_SIZE, |_, _, root| {
+            *root = Hash256::default();
+        })
+        .await
+        .expect_err("verification against the wrong root must fail");
+
+        assert_matches!(
+            err,
+            Error::ProofValidation(ProofValidationError::InvalidProofRoot { .. })
+        );
+    }
+
+    #[cross_target_test]
+    async fn test_rpc_read_sector_rejects_wrong_proof_length() {
+        let sector = random_sector();
+        let err = read_sector_rpc(&sector, SEGMENT_SIZE, SEGMENT_SIZE, |proof, _, _| {
+            proof.push(Hash256::default());
+        })
+        .await
+        .expect_err("a wrong-length proof must be rejected");
+
+        assert_matches!(
+            err,
+            Error::ProofValidation(ProofValidationError::InvalidProofLength { .. })
+        );
     }
 }
