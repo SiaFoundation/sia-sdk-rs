@@ -43,6 +43,11 @@ pub enum ProofValidationError {
 pub struct RangeProof(Vec<Hash256>, Bytes);
 
 impl RangeProof {
+    #[cfg(test)]
+    pub(crate) fn new(proof: Vec<Hash256>, data: Bytes) -> Self {
+        Self(proof, data)
+    }
+
     pub fn verify(
         self,
         root: &Hash256,
@@ -138,8 +143,38 @@ fn range_proof_size(leaves_per_sector: usize, start: usize, end: usize) -> usize
     let right_hashes = (!(end - 1) & path_mask).count_ones() as usize;
     left_hashes + right_hashes
 }
+
+/// Inverse of `RangeProof::roots`: emits the subtree roots covering
+/// `[0, start)` and `[end, LEAVES_PER_SECTOR)`, in the order `verify`
+/// consumes them.
 #[cfg(test)]
-mod tests {
+pub(crate) fn build_proof(sector: &[u8], start: usize, end: usize) -> Vec<Hash256> {
+    let subtree_root = |from: usize, to: usize| {
+        let mut leaf_hashes = vec![[0u8; 32]; to - from];
+        merkle::hash_leaves_many(
+            &mut leaf_hashes,
+            merkle::as_blocks(&sector[from * SEGMENT_SIZE..to * SEGMENT_SIZE]),
+        );
+        let mut acc = Accumulator::new();
+        for leaf in leaf_hashes {
+            acc.add_leaf(leaf.into());
+        }
+        acc.root()
+    };
+
+    let mut proof = Vec::new();
+    for (mut i, j) in [(0, start), (end, LEAVES_PER_SECTOR)] {
+        while i < j {
+            let subtree_size = next_subtree_size(i, j);
+            proof.push(subtree_root(i, i + subtree_size));
+            i += subtree_size;
+        }
+    }
+    proof
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
     use super::*;
     use crate::hash_256;
 
@@ -218,7 +253,7 @@ mod tests {
         assert_eq!(next_subtree_size(24, 42), 8);
     }
 
-    fn random_sector() -> Vec<u8> {
+    fn fill_sector() -> Vec<u8> {
         const SECTOR_SEED: u64 = 0x0123456789abcdef;
 
         let mut sector = vec![0u8; SECTOR_SIZE];
@@ -228,7 +263,7 @@ mod tests {
 
     // Proof vectors are golden, from go.sia.tech/core rhp/v2.BuildProof.
     fn sector_proof_24_42() -> (Vec<Hash256>, Bytes, Hash256) {
-        let sector = random_sector();
+        let sector = fill_sector();
         let root = sector_root(&sector);
         let data = Bytes::copy_from_slice(&sector[24 * SEGMENT_SIZE..42 * SEGMENT_SIZE]);
         let proof = vec![
@@ -307,7 +342,7 @@ mod tests {
 
     #[test]
     fn test_verify_range_proof_first_leaf() {
-        let sector = random_sector();
+        let sector = fill_sector();
         let root = sector_root(&sector);
         let leaf = Bytes::copy_from_slice(&sector[..SEGMENT_SIZE]);
         let proof = vec![
@@ -336,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_verify_range_proof_last_leaf() {
-        let sector = random_sector();
+        let sector = fill_sector();
         let root = sector_root(&sector);
         let leaf = Bytes::copy_from_slice(&sector[(LEAVES_PER_SECTOR - 1) * SEGMENT_SIZE..]);
         let proof = vec![
@@ -365,12 +400,19 @@ mod tests {
 
     #[test]
     fn test_verify_full_range_proof() {
-        let sector = random_sector();
+        let sector = fill_sector();
         let root = sector_root(&sector);
         let data = Bytes::from(sector);
         let verified_data = RangeProof(vec![], data.clone())
             .verify(&root, 0, LEAVES_PER_SECTOR)
             .expect("proof validation failed");
         assert_eq!(&data, &verified_data);
+    }
+
+    #[test]
+    fn test_build_proof_matches_golden() {
+        let sector = fill_sector();
+        let (golden, _, _) = sector_proof_24_42();
+        assert_eq!(build_proof(&sector, 24, 42), golden);
     }
 }
