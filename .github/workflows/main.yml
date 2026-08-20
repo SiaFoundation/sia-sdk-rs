@@ -71,7 +71,7 @@ jobs:
         run: |
           rustup update stable
           rustup target add wasm32-unknown-unknown
-          cargo install wasm-pack
+          cargo install wasm-pack --locked
       - name: Configure runtime
         run: |
           if [ "${{ matrix.runtime }}" = "node" ]; then

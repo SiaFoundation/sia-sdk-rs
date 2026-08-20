@@ -220,6 +220,10 @@ impl SlabRecovery<AwaitingRecovery> {
         })
     }
 
+    // `ShardFailed` is over the `result_large_err` threshold because it carries
+    // `SectorTask` back for the retry. Its only caller destructures it
+    // immediately, so it never propagates.
+    #[allow(clippy::result_large_err)]
     fn recover_shard(
         &self,
         task: SectorTask,

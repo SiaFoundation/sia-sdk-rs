@@ -483,7 +483,7 @@ mod tests {
 
         fn fill_shard(buf: &mut [u8], seed: u64) {
             let mut state = seed;
-            for chunk in buf.chunks_exact_mut(8) {
+            for chunk in buf.as_chunks_mut::<8>().0 {
                 state ^= state << 13;
                 state ^= state >> 7;
                 state ^= state << 17;
