@@ -140,6 +140,16 @@ impl SharedSdk {
         Duration::from_secs(secs)
     }
 
+    /// Whether a refresh error is terminal, meaning the sharing key is no
+    /// longer accepted (deleted, expired, or revoked) so retrying cannot
+    /// recover it. Transient errors fall back to the floor interval instead.
+    fn is_terminal(err: &app_client::Error) -> bool {
+        matches!(
+            err,
+            app_client::Error::Unauthorized(_) | app_client::Error::NotFound(_)
+        )
+    }
+
     /// Spawns a background task that refreshes the hosts and tokens, pacing
     /// itself off the tokens' expiry.
     fn spawn_refresh_task(
@@ -155,6 +165,10 @@ impl SharedSdk {
                 sleep(Self::refresh_delay(earliest)).await;
                 match Self::refresh(&sharing_key, &api_client, &hosts, &tokens).await {
                     Ok(next) => earliest = next,
+                    Err(err) if Self::is_terminal(&err) => {
+                        warn!("shared key no longer accessible, stopping refresh: {err}");
+                        break;
+                    }
                     Err(err) => {
                         warn!("failed to refresh shared hosts: {err}");
                         // fall back to the floor interval and retry
