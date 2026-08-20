@@ -26,11 +26,11 @@ pub fn sector_root(sector: &[u8]) -> Hash256 {
 
 #[derive(Debug, Error)]
 pub enum ProofValidationError {
-    #[error("Invalid proof length: expected {expected}, got {actual}")]
-    InvalidProofLength { expected: usize, actual: usize },
+    #[error("Invalid proof length")]
+    InvalidProofLength,
 
-    #[error("Invalid proof root: expected {expected}, got {actual}")]
-    InvalidProofRoot { expected: Hash256, actual: Hash256 },
+    #[error("Invalid proof root")]
+    InvalidProofRoot,
 
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
@@ -53,10 +53,7 @@ impl RangeProof {
         let mut proof: VecDeque<Hash256> = self.0.into();
 
         if proof.len() != range_proof_size(LEAVES_PER_SECTOR, start, end) {
-            return Err(ProofValidationError::InvalidProofLength {
-                expected: range_proof_size(LEAVES_PER_SECTOR, start, end),
-                actual: proof.len(),
-            });
+            return Err(ProofValidationError::InvalidProofLength);
         }
 
         let consume = |acc: &mut Accumulator, roots: &mut VecDeque<Hash256>, i: usize, j: usize| {
@@ -77,10 +74,7 @@ impl RangeProof {
         consume(&mut acc, &mut proof, end, LEAVES_PER_SECTOR);
 
         if acc.root() != *root {
-            return Err(ProofValidationError::InvalidProofRoot {
-                expected: *root,
-                actual: acc.root(),
-            });
+            return Err(ProofValidationError::InvalidProofRoot);
         }
         Ok(self.1)
     }
@@ -267,7 +261,7 @@ mod tests {
         let err = RangeProof(proof, data)
             .verify(&root, 24, 42)
             .expect_err("a tampered proof must be rejected");
-        assert!(matches!(err, ProofValidationError::InvalidProofRoot { .. }));
+        assert!(matches!(err, ProofValidationError::InvalidProofRoot));
     }
 
     #[test]
@@ -276,7 +270,7 @@ mod tests {
         let err = RangeProof(proof, data)
             .verify(&Hash256::default(), 24, 42)
             .expect_err("verification against the wrong root must fail");
-        assert!(matches!(err, ProofValidationError::InvalidProofRoot { .. }));
+        assert!(matches!(err, ProofValidationError::InvalidProofRoot));
     }
 
     #[test]
@@ -286,13 +280,7 @@ mod tests {
         let err = RangeProof(proof, data)
             .verify(&root, 24, 42)
             .expect_err("a wrong-length proof must be rejected");
-        assert!(matches!(
-            err,
-            ProofValidationError::InvalidProofLength {
-                expected: 15,
-                actual: 16
-            }
-        ));
+        assert!(matches!(err, ProofValidationError::InvalidProofLength));
     }
 
     #[test]

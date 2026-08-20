@@ -472,8 +472,8 @@ pub enum Error {
     #[error("RPC error: {0}")]
     RPC(#[from] RPCError),
 
-    #[error("not enough host funds {0} < {1}")]
-    NotEnoughHostFunds(Currency, Currency),
+    #[error("not enough host funds")]
+    NotEnoughHostFunds,
 
     #[error("invalid response: {0}")]
     InvalidResponse(String),
@@ -481,8 +481,8 @@ pub enum Error {
     #[error("invalid signature")]
     InvalidSignature,
 
-    #[error("expected single file contract in response, found {0}")]
-    ExpectedContractTransaction(usize),
+    #[error("expected single file contract in response")]
+    ExpectedContractTransaction,
 
     #[error("expected transaction set in response")]
     ExpectedTransactionSet,
@@ -490,10 +490,8 @@ pub enum Error {
     #[error("proof validation failed")]
     ProofValidation(#[from] ProofValidationError),
 
-    #[error(
-        "root of uploaded data doesn't match root returned by host: expected {expected}, got {got}"
-    )]
-    SectorRootMismatch { expected: Hash256, got: Hash256 },
+    #[error("root of uploaded data doesn't match root returned by host")]
+    SectorRootMismatch,
 }
 
 #[derive(Debug, Default, PartialEq, Clone, Copy, Serialize, Deserialize)]
@@ -709,10 +707,7 @@ impl RPCWriteSector<RPCComplete> {
         let response: RPCWriteSectorResponse = read_response(r).await?;
         let root = maybe_spawn_blocking!(merkle::sector_root(self.data.as_ref()));
         if response.root != root {
-            return Err(Error::SectorRootMismatch {
-                expected: root,
-                got: response.root,
-            });
+            return Err(Error::SectorRootMismatch);
         }
 
         Ok(RPCWriteSectorResult {
@@ -1032,7 +1027,7 @@ impl<S: RenterContractSigner, B: TransactionBuilder> RPCFormContract<S, B, RPCAw
             .map(|si| si.parent.siacoin_output.value)
             .sum();
         if host_sum < host_funding {
-            return Err(Error::NotEnoughHostFunds(host_sum, host_funding));
+            return Err(Error::NotEnoughHostFunds);
         } else if host_sum > host_funding {
             formation_txn.siacoin_outputs.push(SiacoinOutput {
                 address: self.contract.host_output.address.clone(),
@@ -1107,9 +1102,7 @@ impl<S: RenterContractSigner, B: TransactionBuilder> RPCFormContract<S, B, RPCCo
             .last()
             .ok_or(Error::ExpectedTransactionSet)?;
         if formation_txn.file_contracts.len() != 1 {
-            return Err(Error::ExpectedContractTransaction(
-                formation_txn.file_contracts.len(),
-            ));
+            return Err(Error::ExpectedContractTransaction);
         }
         let contract = formation_txn.file_contracts.first().unwrap().clone();
 
@@ -1311,10 +1304,7 @@ mod test {
         let err = rpc
             .complete(&mut Cursor::new(response_buf))
             .await
-            .expect_err("expected root mismatch error");
-        if let Error::SectorRootMismatch { expected, got } = err {
-            assert_eq!(expected, root);
-            assert_eq!(got, wrong_root);
-        }
+            .expect_err("expected error");
+        matches!(err, Error::SectorRootMismatch);
     }
 }

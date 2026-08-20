@@ -1,5 +1,6 @@
 ---
-sia_storage: patch
+sia_storage: major
+sia_core: major
 ---
 
-# Fixed Rust v1.98.0 lint errors.
+# Some error context was removed to reduce error size.

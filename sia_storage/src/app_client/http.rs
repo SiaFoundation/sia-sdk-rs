@@ -481,7 +481,7 @@ async fn delete(client: &reqwest::Client, url: Url, app_key: &PrivateKey) -> Res
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use base64::engine::general_purpose::URL_SAFE;
-    
+
     use chrono::FixedOffset;
     use sia_core::signing::{PublicKey, Signature};
     use sia_core::{hash_256, public_key};
