@@ -73,6 +73,9 @@ struct SectorUploadResult {
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(90);
 const RACE_FACTOR: f64 = 1.5;
 
+/// Blocks reserved for host syncing delays and cached prices.
+const TEMP_SECTOR_PIN_MARGIN: u64 = 40;
+
 const INITIAL_INFLIGHT: usize = 8;
 const MIN_INFLIGHT: usize = 2;
 
@@ -624,15 +627,21 @@ impl Upload {
                     sectors[result.shard_index] = Some(result.sector);
                 }
 
-                // Checked before pinning: the indexer cannot unpin a single
-                // slab, so pinning one whose sectors were already deleted
-                // would orphan it. Hosts expire on block height against their
-                // own chain tip, so the spread between the first and last
-                // write is this attempt's age in the units they delete on.
-                if newest_write.saturating_sub(oldest_write) >= TEMP_SECTOR_DURATION {
+                // Temporary sectors last `TEMP_SECTOR_DURATION` blocks. Reserve
+                // 40 blocks for stale or skewed host heights and for the indexer
+                // to attach the sectors to contracts after registration. Retry
+                // the whole slab if the reported span leaves no more than that.
+                if newest_write
+                    .saturating_sub(oldest_write)
+                    .saturating_add(TEMP_SECTOR_PIN_MARGIN)
+                    >= TEMP_SECTOR_DURATION
+                {
                     debug!(
                         "slab {slab_index} upload attempt {attempt}/{MAX_SLAB_ATTEMPTS} stale: written from height {oldest_write} to {newest_write}"
                     );
+                    if attempt == MAX_SLAB_ATTEMPTS {
+                        break;
+                    }
                     waiting_guards = (0..total_shards)
                         .map(|_| WaitingGuard::new(waiting.clone()))
                         .collect();
@@ -1434,9 +1443,8 @@ mod tests {
         assert_eq!(api.pin_slabs_calls(), 3);
     }
 
-    /// A slab whose upload outlives its sectors' temporary storage is uploaded
-    /// A slab is reuploaded when the chain passes the hosts' temp sector
-    /// expiry while the first attempt is still running.
+    /// A slab is reuploaded when the chain passes the hosts' safe temporary
+    /// sector window while the first attempt is still running.
     #[sia_core_derive::cross_target_test]
     async fn test_upload_reuploads_when_chain_advances() {
         use std::sync::atomic::{AtomicUsize, Ordering};
