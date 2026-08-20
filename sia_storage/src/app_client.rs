@@ -573,7 +573,7 @@ fn pre_authorization_sig_hash(
 #[cfg(test)]
 mod cross_target_test {
     use base64::engine::general_purpose::URL_SAFE;
-    use base64::prelude::*;
+    
     use sia_core::{hash_256, public_key, signature};
 
     use crate::slabs::SlabVersion::V0;
