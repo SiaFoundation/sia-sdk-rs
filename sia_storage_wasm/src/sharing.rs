@@ -57,7 +57,7 @@ impl SharingKey {
     #[wasm_bindgen(js_name = "addObject")]
     pub async fn add_object(&self, object: &PinnedObject) -> Result<(), JsError> {
         self.inner
-            .add_objects(&self.sdk, std::slice::from_ref(&object.0))
+            .add_object(&self.sdk, &object.0)
             .await
             .map_err(to_js_err)
     }
@@ -72,16 +72,13 @@ impl SharingKey {
         Ok(objects.into_iter().map(PinnedObject).collect())
     }
 
-    /// Detaches objects from the key, leaving it and its other attachments in
+    /// Detaches an object from the key, leaving it and its other attachments in
     /// place.
-    ///
-    /// Detaching an object that is not attached is an error, so a call that
-    /// fails partway cannot simply be retried with the same ids.
-    #[wasm_bindgen(js_name = "deleteObjects")]
-    pub async fn delete_objects(&self, ids: Vec<String>) -> Result<(), JsError> {
-        let ids: Result<Vec<Hash256>, _> = ids.iter().map(|id| Hash256::from_str(id)).collect();
+    #[wasm_bindgen(js_name = "deleteObject")]
+    pub async fn delete_object(&self, id: String) -> Result<(), JsError> {
+        let id = Hash256::from_str(&id).map_err(to_js_err)?;
         self.inner
-            .delete_objects(&self.sdk, &ids.map_err(to_js_err)?)
+            .delete_object(&self.sdk, &id)
             .await
             .map_err(to_js_err)
     }
@@ -133,38 +130,38 @@ impl KeyResponse {
 
     #[wasm_bindgen(getter, js_name = "objectCount")]
     pub fn object_count(&self) -> f64 {
-        self.inner.object_count as f64
+        self.inner.stats.object_count as f64
     }
 
     #[wasm_bindgen(getter, js_name = "objectSize")]
     pub fn object_size(&self) -> f64 {
-        self.inner.object_size as f64
+        self.inner.stats.object_size as f64
     }
 
     #[wasm_bindgen(getter, js_name = "pinnedData")]
     pub fn pinned_data(&self) -> f64 {
-        self.inner.pinned_data as f64
+        self.inner.stats.pinned_data as f64
     }
 
     #[wasm_bindgen(getter, js_name = "pinnedSize")]
     pub fn pinned_size(&self) -> f64 {
-        self.inner.pinned_size as f64
+        self.inner.stats.pinned_size as f64
     }
 
     /// When the key expires, or `undefined` if it never does.
     #[wasm_bindgen(getter, js_name = "expiresAt")]
     pub fn expires_at(&self) -> Option<js_sys::Date> {
-        self.inner.expires_at.map(types::to_js_date)
+        self.inner.stats.expires_at.map(types::to_js_date)
     }
 
     #[wasm_bindgen(getter, js_name = "createdAt")]
     pub fn created_at(&self) -> js_sys::Date {
-        types::to_js_date(self.inner.created_at)
+        types::to_js_date(self.inner.stats.created_at)
     }
 
     #[wasm_bindgen(getter, js_name = "updatedAt")]
     pub fn updated_at(&self) -> js_sys::Date {
-        types::to_js_date(self.inner.updated_at)
+        types::to_js_date(self.inner.stats.updated_at)
     }
 }
 
