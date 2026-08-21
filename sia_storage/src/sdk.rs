@@ -496,6 +496,85 @@ mod test {
         seed
     }
 
+    /// The whole sharing flow against the in-memory network: an owner creates a
+    /// key and attaches an object, and a recipient holding only the seed lists,
+    /// decrypts, and downloads it.
+    #[tokio::test]
+    async fn test_mock_network_sharing_roundtrip() {
+        use std::io::Cursor;
+        use tokio::io::AsyncReadExt;
+
+        use crate::mock::MockNetwork;
+
+        let network = MockNetwork::new();
+        network.add_hosts(40);
+        let sdk = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("sdk creation failed");
+
+        let data: Vec<u8> = (0..(1 << 20)).map(|i| i as u8).collect();
+        let object = sdk
+            .upload(
+                Object::new(Some(b"metadata".to_vec())),
+                Cursor::new(data.clone()),
+                UploadOptions::default(),
+            )
+            .await
+            .expect("upload failed");
+        sdk.pin_object(&object).await.expect("pin failed");
+
+        let key = sdk
+            .create_sharing_key(SharingKeyOptions {
+                description: "photos".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create failed");
+        key.add_object(&sdk, &object).await.expect("attach failed");
+
+        // the owner's view of what is attached
+        let attached = key.objects(&sdk, 0, 10).await.expect("owner list failed");
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].id(), object.id());
+
+        let record = sdk.sharing_key(&key).await.expect("re-read failed");
+        assert_eq!(record.stats.object_count, 1);
+        assert_eq!(record.description, "photos");
+
+        // the recipient holds nothing but the seed
+        let seed = key.seed(&sdk).expect("seed failed");
+        let shared = network.shared_sdk(seed).await.expect("connect failed");
+
+        let stats = shared.stats().await.expect("stats failed");
+        assert_eq!(stats.object_count, 1);
+
+        let listed = shared.objects(0, 10).await.expect("list failed");
+        assert_eq!(listed.len(), 1);
+
+        // re-sealing under the sharing key must round-trip, or a recipient can
+        // decrypt nothing at all
+        let fetched = shared.object(&object.id()).await.expect("fetch failed");
+        assert_eq!(fetched.slabs(), object.slabs());
+        assert_eq!(fetched.metadata, b"metadata".to_vec());
+
+        let mut reader = shared
+            .download(&fetched, DownloadOptions::default())
+            .expect("download failed");
+        let mut downloaded = Vec::new();
+        reader
+            .read_to_end(&mut downloaded)
+            .await
+            .expect("read failed");
+        assert_eq!(downloaded, data);
+
+        // detaching leaves the key in place with nothing attached
+        key.delete_object(&sdk, &object.id())
+            .await
+            .expect("detach failed");
+        assert_eq!(shared.stats().await.expect("stats failed").object_count, 0);
+    }
+
     #[tokio::test]
     async fn test_mock_network_object_roundtrip() {
         use std::io::Cursor;
