@@ -182,12 +182,11 @@ impl Transport for Client {
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
-        account_key: &PrivateKey,
+        token: AccountToken,
         root: Hash256,
         offset: usize,
         length: usize,
     ) -> Result<(Bytes, Duration), TransportError> {
-        let token = AccountToken::new(account_key, host.public_key);
         let mut stream = self
             .host_stream(host)
             .await

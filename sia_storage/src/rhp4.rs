@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use sia_core::encoding;
-use sia_core::rhp4::HostPrices;
 use sia_core::rhp4::protocol::Error as RHP4Error;
+use sia_core::rhp4::{AccountToken, HostPrices};
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
@@ -91,7 +91,7 @@ impl Transport for Client {
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
-        account_key: &PrivateKey,
+        token: AccountToken,
         root: Hash256,
         offset: usize,
         length: usize,
@@ -99,17 +99,17 @@ impl Transport for Client {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
             Self::SiaMux(c) => {
-                c.read_sector(host, prices, account_key, root, offset, length)
+                c.read_sector(host, prices, token, root, offset, length)
                     .await
             }
             #[cfg(target_arch = "wasm32")]
             Self::WebTransport(c) => {
-                c.read_sector(host, prices, account_key, root, offset, length)
+                c.read_sector(host, prices, token, root, offset, length)
                     .await
             }
             #[cfg(any(test, feature = "mock"))]
             Self::Mock(c) => {
-                c.read_sector(host, prices, account_key, root, offset, length)
+                c.read_sector(host, prices, token, root, offset, length)
                     .await
             }
         }
@@ -142,6 +142,7 @@ pub enum Error {
 
 /// A host endpoint contains the information needed to connect to a host.
 // dead code until WebTransport client is implemented
+#[derive(Clone)]
 pub(crate) struct HostEndpoint {
     pub public_key: PublicKey,
     pub addresses: Vec<NetAddress>,
@@ -169,7 +170,7 @@ pub(crate) trait Transport: Clone + Unpin + MaybeSendSync + 'static {
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
-        account_key: &PrivateKey,
+        token: AccountToken,
         root: Hash256,
         offset: usize,
         length: usize,

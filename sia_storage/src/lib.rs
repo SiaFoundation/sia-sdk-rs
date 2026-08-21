@@ -60,13 +60,18 @@ mod hosts;
 mod object_encryption;
 mod rhp4;
 mod sdk;
+mod shared_sdk;
+mod sharing;
 mod slabs;
+mod tokens;
 mod upload;
 
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 
 pub use sdk::{Error, Sdk};
+pub use shared_sdk::SharedSdk;
+pub use sharing::SharingKey;
 
 use std::sync::Arc;
 
@@ -85,7 +90,7 @@ pub use sia_core::signing::{PublicKey, Signature};
 pub use sia_core::types::Hash256;
 pub use sia_core::types::v2::Protocol;
 
-pub use app_client::Error as AppApiError;
+pub use app_client::{Error as AppApiError, KeyResponse, KeyStats};
 pub use builder::{
     ApprovedState, Builder, BuilderError, DisconnectedState, RequestingApprovalState,
 };
@@ -284,6 +289,15 @@ pub struct Account {
     pub app: App,
     /// The last time the account was used.
     pub last_used: DateTime<Utc>,
+}
+
+/// Options for creating a sharing key.
+#[derive(Clone, Default)]
+pub struct SharingKeyOptions {
+    /// A human-readable label for the key.
+    pub description: String,
+    /// When the key should expire, or `None` for no expiry.
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]

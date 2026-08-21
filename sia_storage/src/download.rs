@@ -11,7 +11,8 @@ use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::{Hosts, InflightGuard, RPCError};
 use crate::slabs::SlabVersion::{V0, V1};
 use crate::time::{Duration, Elapsed, Instant, sleep};
-use crate::{AppKey, DownloadOptions, Object, Sector, ShardProgress, ShardProgressCallback, Slab};
+use crate::tokens::AccountTokenSource;
+use crate::{DownloadOptions, Object, Sector, ShardProgress, ShardProgressCallback, Slab};
 use bytes::{Buf, Bytes};
 use log::{debug, warn};
 use sia_core::rhp4::SEGMENT_SIZE;
@@ -137,7 +138,7 @@ struct SlabDecoded {
 struct SlabRecovery<State> {
     client: Hosts,
     controller: Arc<InflightController>,
-    account_key: Arc<AppKey>,
+    tokens: AccountTokenSource,
 
     slab_index: usize,
     min_shards: usize,
@@ -149,14 +150,15 @@ struct SlabRecovery<State> {
 }
 
 impl SlabRecovery<AwaitingRecovery> {
-    fn new(
+    fn new<S: Into<AccountTokenSource>>(
         client: Hosts,
         controller: Arc<InflightController>,
-        account_key: Arc<AppKey>,
+        tokens: S,
         slab: ChunkSlab,
         seq: usize,
         popped: watch::Sender<usize>,
     ) -> Result<Self, DownloadError> {
+        let tokens = tokens.into();
         if slab.slab.min_shards == 0 {
             return Err(DownloadError::InvalidSlab(
                 "min_shards cannot be 0".to_string(),
@@ -206,7 +208,7 @@ impl SlabRecovery<AwaitingRecovery> {
         Ok(Self {
             client,
             controller,
-            account_key,
+            tokens,
             slab_index: slab.index,
             min_shards,
             encryption_key: slab.slab.encryption_key,
@@ -233,7 +235,7 @@ impl SlabRecovery<AwaitingRecovery> {
     ) -> impl Future<Output = Result<ShardRecovered, ShardFailed>> + 'static {
         let client = self.client.clone();
         let controller = self.controller.clone();
-        let account_key = self.account_key.clone();
+        let tokens = self.tokens.clone();
         let slab_index = self.slab_index;
         async move {
             // Hold the inflight reservation for the duration of the RPC. The
@@ -241,12 +243,23 @@ impl SlabRecovery<AwaitingRecovery> {
             // visible to concurrent `prioritize` calls, then dropped here on
             // either success or error.
             let _inflight = inflight;
+            // No RPC is attempted without a token, so nothing has elapsed.
+            let token = match tokens.token(task.sector.host_key) {
+                Ok(token) => token,
+                Err(error) => {
+                    return Err(ShardFailed {
+                        task,
+                        elapsed: Duration::ZERO,
+                        error,
+                    });
+                }
+            };
             let permit = controller.sample();
             let start = Instant::now();
             let result = client
                 .read_sector(
                     task.sector.host_key,
-                    &account_key.0,
+                    token,
                     task.sector.root,
                     sector_offset,
                     sector_length,
@@ -334,7 +347,7 @@ impl SlabRecovery<AwaitingRecovery> {
                                 return Ok(SlabRecovery {
                                     client: self.client,
                                     controller: self.controller,
-                                    account_key: self.account_key,
+                                    tokens: self.tokens,
                                     min_shards,
                                     slab_index: self.slab_index,
                                     encryption_key: self.encryption_key,
@@ -404,7 +417,7 @@ impl SlabRecovery<ShardsRecovered> {
         Ok(SlabRecovery {
             client: self.client,
             controller: self.controller,
-            account_key: self.account_key,
+            tokens: self.tokens,
             min_shards: self.min_shards,
             slab_index: self.slab_index,
             encryption_key: self.encryption_key,
@@ -515,7 +528,7 @@ impl Iterator for ChunkIter {
 /// first byte — lands in roughly one round trip.
 pub struct Download {
     hosts: Hosts,
-    account_key: Arc<AppKey>,
+    tokens: AccountTokenSource,
     data_key: EncryptionKey,
 
     // download state
@@ -597,7 +610,7 @@ impl Download {
             return false;
         };
         let hosts = self.hosts.clone();
-        let account_key = self.account_key.clone();
+        let tokens = self.tokens.clone();
         let shard_progress_callback = self.shard_downloaded.clone();
         // Build the SlabRecovery synchronously so prioritization and top-K
         // inflight reservations land before this method returns; each
@@ -617,7 +630,7 @@ impl Download {
         let recovery = SlabRecovery::new(
             hosts,
             self.controller.clone(),
-            account_key,
+            tokens,
             chunk_slab,
             seq,
             self.popped.clone(),
@@ -683,10 +696,10 @@ impl Download {
         Ok(result)
     }
 
-    pub(crate) fn new(
+    pub(crate) fn new<T: Into<AccountTokenSource>>(
         object: &Object,
         hosts: Hosts,
-        account_key: Arc<AppKey>,
+        tokens: T,
         options: DownloadOptions,
     ) -> Result<Self, DownloadError> {
         if options.max_buffered_chunks == Some(0) {
@@ -694,6 +707,7 @@ impl Download {
                 "max buffered chunks must be greater than 0".to_string(),
             ));
         }
+        let tokens = tokens.into();
         let object_size = object.size();
         let data_key = object.data_key.clone();
         let available = object_size.saturating_sub(options.offset);
@@ -712,7 +726,7 @@ impl Download {
         let chunk_iter = ChunkIter::new(slabs, options.offset, remaining);
         let mut download = Self {
             hosts,
-            account_key,
+            tokens,
             controller,
             data_key,
             buf: Bytes::new(),
@@ -743,7 +757,7 @@ mod test {
     use crate::hosts::Hosts;
     use crate::rhp4::{Client, mock};
     use crate::upload::upload_object;
-    use crate::{Host, ShardProgress, UploadOptions};
+    use crate::{AppKey, Host, ShardProgress, UploadOptions};
 
     #[sia_core_derive::cross_target_test]
     async fn test_out_of_order_download() {
