@@ -12,6 +12,7 @@ use crate::helpers::to_js_err;
 use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
 use crate::run_local;
+use crate::sharing::{KeyResponse, SharingKey};
 use crate::stream_reader::js_stream_reader;
 use crate::types::{
     self, HostQuery, ObjectEvent, download_options_from_js, ms_to_chrono,
@@ -33,6 +34,46 @@ impl Sdk {
 
 #[wasm_bindgen]
 impl Sdk {
+    /// Creates a sharing key. Attach objects to it with `SharingKey.addObject`.
+    #[wasm_bindgen(js_name = "createSharingKey")]
+    pub async fn create_sharing_key(
+        &self,
+        description: String,
+        expires_at: Option<js_sys::Date>,
+    ) -> Result<SharingKey, JsError> {
+        let expires_at = expires_at.map(|d| ms_to_chrono(d.get_time())).transpose()?;
+        let key = self
+            .inner
+            .create_sharing_key(sia_storage::SharingKeyOptions {
+                description,
+                expires_at,
+            })
+            .await
+            .map_err(to_js_err)?;
+        Ok(SharingKey::new(key, self.inner.clone()))
+    }
+
+    /// Lists the account's sharing keys, most recently created first.
+    #[wasm_bindgen(js_name = "sharingKeys")]
+    pub async fn sharing_keys(&self, offset: u32, limit: u32) -> Result<Vec<KeyResponse>, JsError> {
+        let keys = self
+            .inner
+            .sharing_keys(offset as u64, limit as u64)
+            .await
+            .map_err(to_js_err)?;
+        Ok(keys
+            .into_iter()
+            .map(|k| KeyResponse::new(k, self.inner.clone()))
+            .collect())
+    }
+
+    /// Fetches the indexer's record for a key, including its counts.
+    #[wasm_bindgen(js_name = "sharingKey")]
+    pub async fn sharing_key(&self, key: &SharingKey) -> Result<KeyResponse, JsError> {
+        let record = self.inner.sharing_key(key.key()).await.map_err(to_js_err)?;
+        Ok(KeyResponse::new(record, self.inner.clone()))
+    }
+
     /// Returns the AppKey used by this SDK instance.
     #[wasm_bindgen(js_name = "appKey")]
     pub fn app_key(&self) -> AppKey {

@@ -338,3 +338,57 @@ export interface Host {
 pub(crate) fn to_js<T: serde::Serialize + ?Sized>(val: &T) -> Result<JsValue, JsError> {
     serde_wasm_bindgen::to_value(val).map_err(to_js_err)
 }
+
+/// What a recipient can see about the sharing key they hold. The counts are a
+/// snapshot, not a live view.
+#[derive(serde::Serialize, tsify::Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyStats {
+    pub object_count: u64,
+    pub object_size: u64,
+    pub pinned_data: u64,
+    pub pinned_size: u64,
+    #[tsify(type = "Date | undefined")]
+    #[serde(with = "preserve_optional_date")]
+    pub expires_at: Option<js_sys::Date>,
+    #[tsify(type = "Date")]
+    #[serde(with = "serde_wasm_bindgen::preserve")]
+    pub created_at: js_sys::Date,
+    #[tsify(type = "Date")]
+    #[serde(with = "serde_wasm_bindgen::preserve")]
+    pub updated_at: js_sys::Date,
+}
+
+impl From<sia_storage::KeyStats> for KeyStats {
+    fn from(s: sia_storage::KeyStats) -> Self {
+        Self {
+            object_count: s.object_count,
+            object_size: s.object_size,
+            pinned_data: s.pinned_data,
+            pinned_size: s.pinned_size,
+            expires_at: s.expires_at.map(to_js_date),
+            created_at: to_js_date(s.created_at),
+            updated_at: to_js_date(s.updated_at),
+        }
+    }
+}
+
+pub(crate) fn to_js_date(t: chrono::DateTime<chrono::Utc>) -> js_sys::Date {
+    js_sys::Date::new(&JsValue::from(t.timestamp_millis() as f64))
+}
+
+/// `serde_wasm_bindgen::preserve` only accepts `JsCast` values, so an optional
+/// `Date` needs the `None` case handled separately. It serializes as
+/// `undefined`.
+mod preserve_optional_date {
+    pub(super) fn serialize<S: serde::Serializer>(
+        value: &Option<js_sys::Date>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(date) => serde_wasm_bindgen::preserve::serialize(date, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+}
