@@ -431,6 +431,11 @@ pub(crate) struct ChunkSlab {
 
 const INITIAL_CHUNK_SIZE: usize = 1 << 15; // 32 KiB
 const MAX_CHUNK_SIZE: usize = 1 << 20; // 1 MiB
+/// Write buffer for [`Download::write_to_path`]. Chunks ramp from
+/// [`INITIAL_CHUNK_SIZE`] to [`MAX_CHUNK_SIZE`], so buffering coalesces the
+/// small early ones into a single write.
+#[cfg(feature = "fs")]
+const WRITE_BUFFER_BYTES: usize = 4 << 20; // 4 MiB
 
 /// Iterator-like state for splitting slabs into chunks. The chunk size starts
 /// at [`INITIAL_CHUNK_SIZE`] for a fast first byte and doubles per chunk up to
@@ -646,6 +651,37 @@ impl Download {
                 break;
             }
         }
+    }
+
+    /// Writes the whole download to the file at `path`, creating or truncating
+    /// it, and returns the number of bytes written.
+    ///
+    /// Prefer this to copying the [AsyncRead] impl into a file yourself: chunks
+    /// reach the writer whole rather than through an 8 KiB intermediate buffer.
+    #[cfg(feature = "fs")]
+    pub async fn write_to_path<P: AsRef<std::path::Path>>(
+        &mut self,
+        path: P,
+    ) -> Result<u64, DownloadError> {
+        use tokio::io::AsyncWriteExt;
+
+        let file = tokio::fs::File::create(path).await?;
+        // Reads whole chunks rather than running `tokio::io::copy` over the
+        // AsyncRead impl, which drains it 8 KiB at a time. Every `tokio::fs`
+        // write is a hop to the blocking pool, so that would cost a hop per
+        // 8 KiB.
+        let mut writer = tokio::io::BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
+        let mut written = 0u64;
+        loop {
+            let chunk = self.read_chunk().await?;
+            if chunk.is_empty() {
+                break;
+            }
+            writer.write_all(&chunk).await?;
+            written += chunk.len() as u64;
+        }
+        writer.flush().await?;
+        Ok(written)
     }
 
     /// Returns the next decoded chunk of data. Returns an empty `Vec` on EOF.
