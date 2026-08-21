@@ -357,6 +357,8 @@ pub struct UploadOptions {
     pub max_buffered_slabs: Option<usize>,
 
     /// Optional callback to receive progress updates for each uploaded shard.
+    /// A shard may be reported more than once if its slab outlives the hosts'
+    /// temporary storage and is uploaded again.
     pub shard_uploaded: Option<ShardProgressCallback>,
 
     /// When set, the reader's data overwrites the object starting at this byte
@@ -495,6 +497,8 @@ pub struct PackedUploadOptions {
     pub max_buffered_slabs: Option<usize>,
 
     /// Optional callback to receive progress updates for each uploaded shard.
+    /// A shard may be reported more than once if its slab outlives the hosts'
+    /// temporary storage and is uploaded again.
     pub shard_uploaded: Option<ShardProgressCallback>,
 }
 

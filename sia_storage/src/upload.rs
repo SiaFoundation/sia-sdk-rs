@@ -18,7 +18,7 @@ use crate::{
 };
 use bytes::Bytes;
 use log::debug;
-use sia_core::rhp4::SECTOR_SIZE;
+use sia_core::rhp4::{SECTOR_SIZE, TEMP_SECTOR_DURATION};
 use sia_core::signing::PublicKey;
 use thiserror::Error;
 use tokio::io::{AsyncRead, BufReader};
@@ -66,10 +66,15 @@ struct SectorUploadResult {
     sector: Sector,
     shard_index: usize,
     elapsed: Duration,
+    /// Chain height the host reported when this sector was written.
+    tip_height: u64,
 }
 
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(90);
 const RACE_FACTOR: f64 = 1.5;
+
+/// Blocks reserved for host syncing delays and cached prices.
+const TEMP_SECTOR_PIN_MARGIN: u64 = 40;
 
 const INITIAL_INFLIGHT: usize = 8;
 const MIN_INFLIGHT: usize = 2;
@@ -89,7 +94,7 @@ fn default_slabs_in_memory(_slab_size: usize) -> usize {
 /// in flight.
 struct UploadLimiter {
     inflight: Mutex<usize>,
-    /// Shards whose memory is committed but whose upload hasn't finished yet.
+    /// Shards whose memory is committed but whose slab hasn't been pinned yet.
     /// Limits slab encoding so it can't runaway with memory that will sit idle.
     committed: Mutex<usize>,
     notify: Notify,
@@ -207,9 +212,10 @@ impl Drop for UploadPermit {
 }
 
 /// Reservation for one buffered shard's memory, issued by
-/// [`UploadLimiter::reserve`]. Held from encode until the shard's upload
-/// finishes; on drop — including a failed or cancelled shard — it frees the
-/// slot in the backlog and wakes the slab gate.
+/// [`UploadLimiter::reserve`]. Held from encode until the shard's slab is
+/// pinned, since the shard stays in memory for possible reupload. Dropping
+/// it, including when the slab fails or is cancelled, frees the slot in the
+/// backlog and wakes the slab gate.
 struct ShardPermit {
     limiter: Arc<UploadLimiter>,
 }
@@ -250,7 +256,7 @@ impl ShardUpload {
                 .await;
             let elapsed = start.elapsed();
             limiter.record(sample, elapsed, result.is_ok());
-            let root = result
+            let (root, tip_height) = result
                 .inspect_err(|e| {
                     debug!(
                         "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {elapsed:?} {e}",
@@ -265,6 +271,7 @@ impl ShardUpload {
                 sector: Sector { root, host_key },
                 shard_index,
                 elapsed,
+                tip_height,
             })
         });
     }
@@ -367,6 +374,10 @@ pub enum UploadError {
     #[error("not enough shards: {0}/{1}")]
     NotEnoughShards(u8, u8),
 
+    /// Every upload of the slab outlived the hosts' temporary storage.
+    #[error("slab stale after {0} upload attempts")]
+    StaleSlab(usize),
+
     /// The requested range is out of bounds.
     #[error("invalid range: {0}-{1}")]
     OutOfRange(usize, usize),
@@ -438,6 +449,10 @@ async fn pin_uploaded_slab(
         }
     }
 }
+
+/// Maximum number of times a slab is uploaded before failing with
+/// [`UploadError::StaleSlab`].
+const MAX_SLAB_ATTEMPTS: usize = 3;
 
 /// A single-use streaming upload pipeline. Feed data into it by calling
 /// [read](Upload::read) repeatedly, then complete the upload with
@@ -512,13 +527,16 @@ impl Upload {
         // Count this slab's shards as waiting before the task spawns so the
         // racing gate can't open between buffering and encode.
         let waiting = self.waiting.clone();
-        let waiting_guards: Vec<WaitingGuard> = slab
+        let mut waiting_guards: Vec<WaitingGuard> = slab
             .shards
             .iter()
             .map(|_| WaitingGuard::new(waiting.clone()))
             .collect();
         let handle = AbortOnDropHandle::new(maybe_spawn!(async move {
             let total_shards = slab.shards.len();
+            // The shards stay in memory for possible reupload, so hold their
+            // reservations just as long.
+            let _shard_permits = shard_permits;
 
             // Encode parity shards on a blocking thread; encryption runs
             // per-shard below so it parallelizes across the blocking pool.
@@ -530,81 +548,118 @@ impl Upload {
                 Ok::<_, UploadError>(shards)
             })?;
 
-            // No pre-assignment of hosts: each shard picks its host
-            // just-in-time via the slab's `HostQueue`, which scores by
-            // `throughput / (inflight + 1)`. This disperses load across
-            // hosts naturally — multiple slabs running in parallel won't
-            // all pile onto the same top-N hosts, because by the time
-            // slab N+1's shards pick, slab N's chosen hosts have higher
-            // inflight and lower score.
-            //
-            // `HostQueue` also enforces slab uniqueness — every shard
-            // within this slab must land on a distinct host (the indexer
-            // rejects duplicate sectors because they break redundancy) —
-            // while allowing failed hosts to be re-picked up to the slab's
-            // retry cap.
-            let hosts: Arc<Mutex<HostQueue>> = Arc::new(Mutex::new(client.upload_queue()));
             let owned_slab_key = Arc::new(slab.encryption_key.clone());
-            let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> = JoinSet::new();
-            for (((shard_index, mut shard), waiting_guard), shard_permit) in shards
-                .into_iter()
-                .enumerate()
-                .zip(waiting_guards)
-                .zip(shard_permits)
-            {
+            let mut encrypt_tasks: JoinSet<Result<(usize, Bytes), UploadError>> = JoinSet::new();
+            for (shard_index, mut shard) in shards.into_iter().enumerate() {
                 let owned_slab_key = owned_slab_key.clone();
-                let shard_client = client.clone();
-                let shard_account_key = app_key.clone();
-                let limiter = limiter.clone();
-                let hosts = hosts.clone();
-                let waiting = waiting.clone();
-                join_set_spawn!(shard_tasks, async move {
-                    // Hold the memory reservation until the upload finishes (or
-                    // this task is dropped), then release it on drop.
-                    let _shard_permit = shard_permit;
+                join_set_spawn!(encrypt_tasks, async move {
                     let shard = maybe_spawn_blocking!({
                         encrypt_shard(&owned_slab_key, shard_index as u8, 0, &mut shard);
                         shard
                     });
-                    let shard_upload = ShardUpload {
-                        limiter,
-                        client: shard_client,
-                        account_key: shard_account_key,
-                        data: Bytes::from(shard),
-                        slab_index,
-                        shard_index,
-                        hosts,
-                        waiting,
-                    };
-                    shard_upload.upload_shard(waiting_guard).await
+                    Ok((shard_index, Bytes::from(shard)))
                 });
             }
-
-            let mut sectors: Vec<Option<Sector>> = vec![None; total_shards];
-            while let Some(res) = shard_tasks.join_next().await {
-                let result: SectorUploadResult = res??;
-                if let Some(callback) = &progress_callback {
-                    callback(ShardProgress {
-                        host_key: result.sector.host_key,
-                        shard_index: result.shard_index,
-                        slab_index,
-                        shard_size: SECTOR_SIZE,
-                        elapsed: result.elapsed,
-                    });
-                }
-                sectors[result.shard_index] = Some(result.sector);
+            let mut shards = vec![Bytes::new(); total_shards];
+            while let Some(res) = encrypt_tasks.join_next().await {
+                let (shard_index, shard) = res??;
+                shards[shard_index] = shard;
             }
 
-            let slab = Slab {
-                version: SlabVersion::V1,
-                encryption_key: slab.encryption_key,
-                offset: 0,
-                min_shards,
-                length: slab.length as u32,
-                sectors: sectors.into_iter().map(|s| s.unwrap()).collect(),
-            };
-            pin_uploaded_slab(&api_client, &app_key, &slab).await?;
-            Ok(slab)
+            for attempt in 1..=MAX_SLAB_ATTEMPTS {
+                // No pre-assignment of hosts: each shard picks its host
+                // just-in-time via the slab's `HostQueue`, which scores by
+                // `throughput / (inflight + 1)`. This disperses load across
+                // hosts naturally. Multiple slabs running in parallel won't
+                // all pile onto the same top-N hosts, because by the time
+                // slab N+1's shards pick, slab N's chosen hosts have higher
+                // inflight and lower score.
+                //
+                // `HostQueue` also enforces slab uniqueness: every shard
+                // within this slab must land on a distinct host, because
+                // duplicate sectors break redundancy and the indexer rejects
+                // them. Failed hosts can still be re-picked, up to the slab's
+                // retry cap.
+                let hosts: Arc<Mutex<HostQueue>> = Arc::new(Mutex::new(client.upload_queue()));
+                let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> =
+                    JoinSet::new();
+                for ((shard_index, data), waiting_guard) in
+                    shards.iter().cloned().enumerate().zip(waiting_guards)
+                {
+                    let shard_client = client.clone();
+                    let shard_account_key = app_key.clone();
+                    let limiter = limiter.clone();
+                    let hosts = hosts.clone();
+                    let waiting = waiting.clone();
+                    join_set_spawn!(shard_tasks, async move {
+                        let shard_upload = ShardUpload {
+                            limiter,
+                            client: shard_client,
+                            account_key: shard_account_key,
+                            data,
+                            slab_index,
+                            shard_index,
+                            hosts,
+                            waiting,
+                        };
+                        shard_upload.upload_shard(waiting_guard).await
+                    });
+                }
+
+                let mut sectors: Vec<Option<Sector>> = vec![None; total_shards];
+                // the slab dies with its first shard, so the oldest write
+                // bounds it; the newest is the latest view of the chain
+                let mut oldest_write = u64::MAX;
+                let mut newest_write = 0;
+                while let Some(res) = shard_tasks.join_next().await {
+                    let result: SectorUploadResult = res??;
+                    if let Some(callback) = &progress_callback {
+                        callback(ShardProgress {
+                            host_key: result.sector.host_key,
+                            shard_index: result.shard_index,
+                            slab_index,
+                            shard_size: SECTOR_SIZE,
+                            elapsed: result.elapsed,
+                        });
+                    }
+                    oldest_write = oldest_write.min(result.tip_height);
+                    newest_write = newest_write.max(result.tip_height);
+                    sectors[result.shard_index] = Some(result.sector);
+                }
+
+                // Temporary sectors last `TEMP_SECTOR_DURATION` blocks. Reserve
+                // 40 blocks for stale or skewed host heights and for the indexer
+                // to attach the sectors to contracts after registration. Retry
+                // the whole slab if the reported span leaves no more than that.
+                if newest_write
+                    .saturating_sub(oldest_write)
+                    .saturating_add(TEMP_SECTOR_PIN_MARGIN)
+                    >= TEMP_SECTOR_DURATION
+                {
+                    debug!(
+                        "slab {slab_index} upload attempt {attempt}/{MAX_SLAB_ATTEMPTS} stale: written from height {oldest_write} to {newest_write}"
+                    );
+                    if attempt == MAX_SLAB_ATTEMPTS {
+                        break;
+                    }
+                    waiting_guards = (0..total_shards)
+                        .map(|_| WaitingGuard::new(waiting.clone()))
+                        .collect();
+                    continue;
+                }
+
+                let uploaded = Slab {
+                    version: SlabVersion::V1,
+                    encryption_key: slab.encryption_key.clone(),
+                    offset: 0,
+                    min_shards,
+                    length: slab.length as u32,
+                    sectors: sectors.into_iter().map(|s| s.unwrap()).collect(),
+                };
+                pin_uploaded_slab(&api_client, &app_key, &uploaded).await?;
+                return Ok(uploaded);
+            }
+            Err(UploadError::StaleSlab(MAX_SLAB_ATTEMPTS))
         }));
         self.slab_tasks.push_back(handle);
         Ok(())
@@ -1386,5 +1441,109 @@ mod tests {
         assert_eq!(object.slabs().len(), 3);
         assert_eq!(api.pinned_slabs(), 3);
         assert_eq!(api.pin_slabs_calls(), 3);
+    }
+
+    /// A slab is reuploaded when the chain passes the hosts' safe temporary
+    /// sector window while the first attempt is still running.
+    #[sia_core_derive::cross_target_test]
+    async fn test_upload_reuploads_when_chain_advances() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const START_HEIGHT: u64 = 1000;
+
+        let transport = mock::Client::new();
+        // each price fetch advances the chain a full expiry window, so the
+        // first shards written are expired before the last one lands
+        transport.set_tip_height(START_HEIGHT, TEMP_SECTOR_DURATION);
+        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        // twice as many hosts as shards; the queue prefers unsampled hosts,
+        // so the retry lands on the untouched half
+        hosts.update(
+            (0..60)
+                .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
+                .collect(),
+            true,
+        );
+
+        let options = UploadOptions::default();
+        let total_shards = options.data_shards as usize + options.parity_shards as usize;
+        let uploads = Arc::new(AtomicUsize::new(0));
+        let counter = uploads.clone();
+        let chain = transport.clone();
+        let api = app_client::mock::Client::new();
+        let mut upload = Upload::new(
+            hosts,
+            app_client::Client::Mock(api.clone()),
+            Arc::new(AppKey::import(rand::random())),
+            UploadOptions {
+                shard_uploaded: Some(Arc::new(move |_| {
+                    // stop the chain after the first attempt so the retry
+                    // lands inside one expiry window
+                    if counter.fetch_add(1, Ordering::SeqCst) + 1 == total_shards {
+                        chain.set_tip_height(START_HEIGHT, 0);
+                    }
+                })),
+                ..options
+            },
+        )
+        .unwrap();
+
+        let mut data = BytesMut::zeroed(4096);
+        rand::rng().fill_bytes(&mut data);
+        upload
+            .read(
+                rand::random::<[u8; 32]>().into(),
+                Cursor::new(data.freeze()),
+            )
+            .await
+            .unwrap();
+        let slabs = upload.finish().await.unwrap();
+
+        assert_eq!(slabs.len(), 1);
+        assert_eq!(slabs[0].sectors.len(), total_shards);
+        // every shard uploaded twice; only the second attempt was pinned
+        assert_eq!(uploads.load(Ordering::SeqCst), total_shards * 2);
+        assert_eq!(api.pin_slabs_calls(), 1);
+        assert_eq!(api.pinned_slabs(), 1);
+    }
+
+    /// An upload fails once [`MAX_SLAB_ATTEMPTS`] attempts have all gone
+    /// stale.
+    #[sia_core_derive::cross_target_test]
+    async fn test_upload_fails_after_max_stale_attempts() {
+        let transport = mock::Client::new();
+        // the chain never stops outrunning the upload, so no attempt survives
+        transport.set_tip_height(1000, TEMP_SECTOR_DURATION);
+        let hosts = Hosts::new(Client::Mock(transport));
+        hosts.update(
+            (0..60)
+                .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
+                .collect(),
+            true,
+        );
+
+        let api = app_client::mock::Client::new();
+        let mut upload = Upload::new(
+            hosts,
+            app_client::Client::Mock(api.clone()),
+            Arc::new(AppKey::import(rand::random())),
+            UploadOptions::default(),
+        )
+        .unwrap();
+
+        let mut data = BytesMut::zeroed(4096);
+        rand::rng().fill_bytes(&mut data);
+        upload
+            .read(
+                rand::random::<[u8; 32]>().into(),
+                Cursor::new(data.freeze()),
+            )
+            .await
+            .unwrap();
+        let err = upload.finish().await.unwrap_err();
+        assert!(matches!(err, UploadError::StaleSlab(attempts) if attempts == MAX_SLAB_ATTEMPTS));
+        // no stale attempt was pinned
+        assert_eq!(api.pin_slabs_calls(), 0);
+        assert_eq!(api.pinned_slabs(), 0);
     }
 }
