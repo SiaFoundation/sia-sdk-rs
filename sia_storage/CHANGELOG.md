@@ -1,3 +1,21 @@
+## 0.11.1 (2026-08-21)
+
+### Features
+
+#### Added `connect_pre_authorized` for connecting with a pre-authorized key.
+
+Applications can now bypass the interactive approval flow by connecting with a pre-authorized key that the indexer operator provisions out of band. `Builder::connect_pre_authorized(pre_authorized_key, mnemonic)` performs the connect, approval, and registration steps in one call and returns a ready SDK. The method is also exposed through the ffi, napi, and wasm bindings.
+
+### Fixes
+
+- Pin slabs immediately
+- Retry failed shards up to three times before failing the download.
+- Added a method for truncating objects.
+
+#### Fix clippy lints introduced by Rust 1.98.
+
+Rust 1.98 extended `clippy::result_large_err` to `impl Future` return positions, added `clippy::chunks_exact_to_as_chunks`, and tightened unused import detection. These are lint fixes only, with no behavior changes.
+
 ## 0.11.0 (2026-08-07)
 
 ### Breaking Changes

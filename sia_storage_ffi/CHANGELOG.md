@@ -1,3 +1,20 @@
+## 0.10.1 (2026-08-21)
+
+### Features
+
+#### Added `connect_pre_authorized` for connecting with a pre-authorized key.
+
+Applications can now bypass the interactive approval flow by connecting with a pre-authorized key that the indexer operator provisions out of band. `Builder::connect_pre_authorized(pre_authorized_key, mnemonic)` performs the connect, approval, and registration steps in one call and returns a ready SDK. The method is also exposed through the ffi, napi, and wasm bindings.
+
+### Fixes
+
+- Retry failed shards up to three times before failing the download.
+- Added a method for truncating objects.
+
+#### Fixed a crash when a logger is set again from a rebuilt foreign runtime.
+
+Setting a logger replaces the stored handle, and releasing the old one calls back into the runtime that created it. A host that tears its runtime down and sets a logger again from the new one, as a React Native dev server reload does, left that release reading freed memory and taking the process down. The previous handle is now kept instead.
+
 ## 0.10.0 (2026-08-07)
 
 ### Breaking Changes
