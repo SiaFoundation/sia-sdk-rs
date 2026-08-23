@@ -20,6 +20,8 @@ use crate::hosts::Host;
 use crate::time::Duration;
 use crate::{Account, AppMetadata, HostQuery, Object, ObjectsCursor, PinnedSlab, SealedObject};
 
+const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(45);
+
 #[derive(Clone)]
 pub(crate) struct Client {
     client: reqwest::Client,
@@ -64,7 +66,7 @@ impl Client {
         let resp = self
             .client
             .get(url)
-            .timeout(Duration::from_secs(15))
+            .timeout(DEFAULT_API_TIMEOUT)
             .query(&query_params)
             .send()
             .await?;
@@ -126,7 +128,7 @@ impl Client {
         let resp = self
             .client
             .get(status_url)
-            .timeout(Duration::from_secs(15))
+            .timeout(DEFAULT_API_TIMEOUT)
             .query(&query_params)
             .send()
             .await?;
@@ -395,7 +397,7 @@ impl Client {
         let shared_object: SharedObjectResponse = Self::handle_response(
             self.client
                 .get(share_url)
-                .timeout(Duration::from_secs(15))
+                .timeout(DEFAULT_API_TIMEOUT)
                 .send()
                 .await?,
         )
@@ -425,7 +427,7 @@ async fn get_json<D: DeserializeOwned, Q: Serialize + ?Sized>(
 
     let mut builder = client
         .get(url)
-        .timeout(Duration::from_secs(15))
+        .timeout(DEFAULT_API_TIMEOUT)
         .query(&signing_params);
     if let Some(q) = query_params {
         builder = builder.query(q);
@@ -447,10 +449,7 @@ async fn post_json<S: Serialize, D: DeserializeOwned>(
         body.as_deref(),
         Utc::now() + Duration::from_secs(60),
     );
-    let mut builder = client
-        .post(url)
-        .timeout(Duration::from_secs(15))
-        .query(params);
+    let mut builder = client.post(url).timeout(DEFAULT_API_TIMEOUT).query(params);
     if let Some(body) = body {
         builder = builder.body(body);
     }
@@ -468,7 +467,7 @@ async fn delete(client: &reqwest::Client, url: Url, app_key: &PrivateKey) -> Res
     Client::handle_response::<EmptyResponse>(
         client
             .delete(url)
-            .timeout(Duration::from_secs(15))
+            .timeout(DEFAULT_API_TIMEOUT)
             .query(&query_params)
             .send()
             .await?,
