@@ -30,6 +30,7 @@ pub struct RequestingApprovalState {
 pub struct ApprovedState {
     register_url: Url,
     user_secret: Hash256,
+    reconnecting: Option<bool>,
 }
 
 /// A builder for creating an SDK instance.
@@ -154,7 +155,7 @@ impl Builder<DisconnectedState> {
 
         // The indexer approves a valid pre-authorized request synchronously, so
         // the user secret is available on the first status check.
-        let user_secret = self
+        let status = self
             .client
             .check_request_status(&self.ephemeral_key, Url::parse(&resp.status_url)?)
             .await?
@@ -164,7 +165,7 @@ impl Builder<DisconnectedState> {
                 )
             })?;
 
-        let private_key = derive_app_key(mnemonic, &self.app_meta.id, &user_secret)?;
+        let private_key = derive_app_key(mnemonic, &self.app_meta.id, &status.user_secret)?;
         self.client
             .register_app(
                 &self.ephemeral_key,
@@ -220,7 +221,7 @@ impl Builder<RequestingApprovalState> {
                 return Err(BuilderError::RequestExpired);
             }
 
-            if let Some(user_secret) = self
+            if let Some(status) = self
                 .client
                 .check_request_status(&self.ephemeral_key, self.state.status_url.clone())
                 .await?
@@ -229,7 +230,8 @@ impl Builder<RequestingApprovalState> {
                     ephemeral_key: self.ephemeral_key,
                     state: ApprovedState {
                         register_url: self.state.register_url.clone(),
-                        user_secret,
+                        user_secret: status.user_secret,
+                        reconnecting: status.reconnecting,
                     },
                     app_meta: self.app_meta,
                     client: self.client,
@@ -241,6 +243,15 @@ impl Builder<RequestingApprovalState> {
 }
 
 impl Builder<ApprovedState> {
+    /// Returns whether the connect key the user approved with already has an
+    /// account for this application.
+    ///
+    /// A returning user must supply the same recovery phrase to
+    /// [Builder::register] to regain access to their data.
+    pub fn reconnecting(&self) -> Option<bool> {
+        self.state.reconnecting
+    }
+
     /// Completes the registration process and returns an SDK instance.
     ///
     /// # Arguments

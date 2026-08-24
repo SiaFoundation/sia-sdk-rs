@@ -158,6 +158,18 @@ impl Builder {
         result
     }
 
+    /// Returns whether the connect key the user approved with already has an
+    /// account for this application. Only valid after `waitForApproval` has
+    /// resolved.
+    #[wasm_bindgen]
+    pub fn reconnecting(&self) -> Result<Option<bool>, JsError> {
+        let state = self.state.borrow();
+        match state.as_ref() {
+            Some(BuilderState::Approved(builder)) => Ok(builder.reconnecting()),
+            _ => Err(JsError::new("must be in approved state")),
+        }
+    }
+
     /// Completes registration and returns a Sdk instance.
     pub async fn register(&self, mnemonic: &str) -> Result<Sdk, JsError> {
         let state = self.state.borrow_mut().take();
