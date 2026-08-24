@@ -18,6 +18,16 @@ if: >-
 permissions:
   contents: read
   copilot-requests: write
+# `opus` is a built-in catalog alias (copilot/*opus*). Pinned because Copilot's
+# default `auto` is absent from AWF's pricing table, and the API proxy rejects
+# every inference request with HTTP 400 for a model it cannot price.
+model: opus
+# Fallback pricing in case the alias ever resolves to an unpriced model.
+# Rates are gh-aw's conservative GPT-4-class defaults ($/1M tokens).
+models:
+  default-ai-credits-pricing:
+    input: 5.0
+    output: 25.0
 # A release burst publishes the napi and wasm releases seconds apart, and
 # release.yml dispatches again once cargo publish finishes. Only the last of
 # those matters, so let each new run cancel the one before it.
