@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 
 jobs:
@@ -41,3 +42,23 @@ jobs:
               fi
             }
           done
+
+      # The release event already starts this workflow when knope publishes the
+      # releases, but that is before the crates are on crates.io. Dispatching
+      # here cancels that earlier run (shared concurrency group) so the update
+      # is built against a fully published release.
+      - name: Update sia-storage-js
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --quiet
+          tag=$(git tag --points-at HEAD --list 'sia_storage_napi/v*' | sort -V | tail -1)
+          if [ -z "$tag" ]; then
+            tag=$(git tag --points-at HEAD --list 'sia_storage_wasm/v*' | sort -V | tail -1)
+          fi
+          if [ -z "$tag" ]; then
+            echo "No sia_storage_napi or sia_storage_wasm tag on this commit; nothing to update."
+            exit 0
+          fi
+          gh workflow run update-sia-storage-js.lock.yml --ref master -f release_tag="$tag"
