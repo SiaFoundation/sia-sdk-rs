@@ -63,11 +63,6 @@ steps:
       gradle-version: '8.10.2'
   - name: Install maturin
     run: pip install 'maturin>=1.8,<2.0'
-  - name: Cache Rust target + registry
-    uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-    with:
-      workspaces: sia-storage-sdk
-      shared-key: ffi-linux-x64
   - name: Repin sia_storage_ffi and prepare context
     working-directory: sia-storage-sdk
     env:
