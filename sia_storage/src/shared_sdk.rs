@@ -8,7 +8,7 @@ use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 
 use crate::app_client::IntoUrl;
-use crate::hosts::Hosts;
+use crate::hosts::{Host, Hosts};
 use crate::rhp4::Client;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, sleep};
@@ -206,6 +206,18 @@ impl SharedSdk {
             .collect()
     }
 
+    /// Retrieves the hosts serving this key's objects from the indexer,
+    /// matching the provided query. Mirrors [`Sdk::hosts`](crate::Sdk::hosts)
+    /// but is scoped to the sharing key.
+    pub async fn hosts(&self, query: HostQuery) -> Result<Vec<Host>, Error> {
+        let shared = self
+            .api_client
+            .shared_hosts(&self.sharing_key.0, query)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))?;
+        Ok(shared.into_iter().map(|h| h.host).collect())
+    }
+
     /// Returns a [Download] handle that streams a shared object's data, paying
     /// hosts with the cached account tokens.
     ///
@@ -338,6 +350,9 @@ mod tests {
         }
 
         assert_eq!(sdk.stats().await.unwrap(), stats);
+
+        let hosts = sdk.hosts(HostQuery::default()).await.unwrap();
+        assert_eq!(hosts, vec![host.clone()]);
 
         let fetched = sdk.object(&object_id).await.unwrap();
         assert_eq!(fetched.data_key, object.data_key);
