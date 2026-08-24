@@ -57,9 +57,9 @@ steps:
     with:
       node-version: 24
   - name: Setup Rust
-    uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-    with:
-      targets: wasm32-unknown-unknown
+    run: |
+      rustup update stable
+      rustup target add wasm32-unknown-unknown
   - name: Cache Rust target + registry
     uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
     with:

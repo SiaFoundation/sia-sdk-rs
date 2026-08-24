@@ -43,10 +43,6 @@ jobs:
             }
           done
 
-      # The release event already starts this workflow when knope publishes the
-      # releases, but that is before the crates are on crates.io. Dispatching
-      # here cancels that earlier run (shared concurrency group) so the update
-      # is built against a fully published release.
       - name: Update sia-storage-js
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -47,7 +47,7 @@ checkout:
     path: sia-storage-sdk
 steps:
   - name: Setup Rust
-    uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+    run: rustup update stable
   - name: Setup Python
     uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
     with:
@@ -73,6 +73,16 @@ steps:
     run: |
       set -euo pipefail
       mkdir -p /tmp/gh-aw
+
+      # gh-aw always checks this repository out at the workspace root, so the
+      # sia-storage-sdk checkout lands inside this repo's cargo workspace and
+      # cargo refuses to touch it as a non-member. Neither manifest is wrong —
+      # the nesting is purely an artifact of the runner layout — so move ours
+      # aside for the run rather than making either repo accommodate it.
+      # Nothing here builds sia-sdk-rs from the root checkout.
+      if [ -f "$GITHUB_WORKSPACE/Cargo.toml" ]; then
+        mv "$GITHUB_WORKSPACE/Cargo.toml" "$RUNNER_TEMP/sia-sdk-rs-root-Cargo.toml"
+      fi
 
       current_rev=$(sed -n 's/^sia_storage_ffi = {.*rev = "\([0-9a-f]\{40\}\)".*/\1/p' Cargo.toml)
       current_version=$(sed -n '0,/^version = /s/^version = "\(.*\)"/\1/p' Cargo.toml)
@@ -196,6 +206,9 @@ languages build again, and extend the wrappers to cover what the release added.
   and `swift/README.md`. Do not redo this by hand. Do not touch the `checksum:` in
   `Package.swift` — the Swift release job sets it when it publishes the xcframework.
 - Rust, Python 3.12, JDK 17, Gradle 8.10.2, and maturin are installed.
+- The workspace root holds a checkout of this repository, but its `Cargo.toml` has
+  been moved aside so cargo treats `sia-storage-sdk/` as the standalone package it
+  is. Do not restore it, and do not build anything from the root checkout.
 - `/tmp/gh-aw/sdk-update.json` — old and new rev/version, the release tag, whether the
   repin actually happened, and why not if it did not.
 - `/tmp/gh-aw/ffi.diff` — the diff of `sia_storage_ffi/src` between the old and new revs.
