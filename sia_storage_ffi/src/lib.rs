@@ -55,6 +55,41 @@ pub struct ShardProgress {
     pub elapsed_ms: u64,
 }
 
+/// Bytes transferred and time spent transferring them, in each direction,
+/// since the SDK was created.
+///
+/// The active durations are the time at least one sector RPC of that
+/// direction was in flight, counted once however many ran concurrently, and
+/// include a transfer still running when the stats are read. Dividing the
+/// deltas between two reads gives the connection's speed over that window.
+///
+/// Stretches where the process was frozen, such as an operating system
+/// suspending a backgrounded application, are left out. Bytes are credited
+/// when an RPC completes, so a read taken mid-RPC sees its time before its
+/// bytes.
+#[derive(uniffi::Record)]
+pub struct TransferStats {
+    /// Bytes written to hosts by RPCs that completed successfully.
+    pub uploaded_bytes: u64,
+    /// Milliseconds at least one upload RPC was in flight.
+    pub upload_active_ms: u64,
+    /// Bytes read from hosts by RPCs that completed successfully.
+    pub downloaded_bytes: u64,
+    /// Milliseconds at least one download RPC was in flight.
+    pub download_active_ms: u64,
+}
+
+impl From<sia_storage::TransferStats> for TransferStats {
+    fn from(s: sia_storage::TransferStats) -> Self {
+        Self {
+            uploaded_bytes: s.uploaded_bytes,
+            upload_active_ms: s.upload_active.as_millis() as u64,
+            downloaded_bytes: s.downloaded_bytes,
+            download_active_ms: s.download_active.as_millis() as u64,
+        }
+    }
+}
+
 #[derive(Debug, Error, uniffi::Error)]
 #[uniffi(flat_error)]
 pub enum Error {
@@ -921,6 +956,14 @@ impl Sdk {
     /// it safely.
     pub fn app_key(&self) -> AppKey {
         AppKey::from(self.inner.app_key().clone())
+    }
+
+    /// Returns the SDK's transfer totals. See [TransferStats].
+    ///
+    /// Cheap enough to poll on a display cadence: it reads counters and
+    /// does not touch the network.
+    pub fn transfer_stats(&self) -> TransferStats {
+        self.inner.transfer_stats().into()
     }
 
     /// Creates a new packed upload. This allows multiple objects to be packed together

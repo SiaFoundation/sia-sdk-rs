@@ -91,6 +91,7 @@ pub use builder::{
 };
 pub use download::{Download, DownloadError};
 pub use encryption::EncryptionKey;
+pub use hosts::transfer_stats::TransferStats;
 pub use hosts::{QueueError, RPCError};
 pub use slabs::{
     Object, ObjectEvent, PinnedSlab, SealedObject, SealedObjectError, Sector, Slab, SlabVersion,
@@ -1535,6 +1536,101 @@ mod test {
             UploadError::QueueError(QueueError::InsufficientHosts) => (),
             _ => panic!(),
         }
+    }
+
+    /// Active time is the union of the sector RPCs' in-flight spans, so 30
+    /// shard writes of a second each, running together, cost about a second
+    /// rather than the thirty seconds they sum to.
+    #[sia_core_derive::cross_target_test]
+    async fn test_transfer_stats_count_concurrent_shards_once() {
+        let app_key = Arc::new(AppKey::import(random_seed()));
+        let mock_transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(mock_transport.clone()));
+
+        let host_keys: Vec<_> = (0..30)
+            .map(|_| PrivateKey::from_seed(&random_seed()).public_key())
+            .collect();
+        hosts.update(
+            host_keys
+                .iter()
+                .map(|pk| Host {
+                    public_key: *pk,
+                    addresses: vec![NetAddress {
+                        protocol: sia_core::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                })
+                .collect(),
+            true,
+        );
+        mock_transport.set_slow_hosts(host_keys.iter().copied(), Duration::from_secs(1));
+
+        let shard_bytes = Arc::new(Mutex::new(0u64));
+        let counted = shard_bytes.clone();
+        let upload_opts = UploadOptions::default().on_shard_uploaded(move |p: ShardProgress| {
+            *counted.lock().unwrap() += p.shard_size as u64;
+        });
+
+        let started = crate::time::Instant::now();
+        let object = upload_object(
+            hosts.clone(),
+            app_client::Client::mock(),
+            app_key.clone(),
+            Object::default(),
+            Cursor::new(Bytes::from("Hello, world!")),
+            upload_opts,
+        )
+        .await
+        .expect("upload to complete");
+        let wall = started.elapsed();
+
+        let stats = hosts.transfer_stats();
+        assert_eq!(
+            stats.uploaded_bytes,
+            *shard_bytes.lock().unwrap(),
+            "every shard the upload reported should be counted once"
+        );
+        assert!(
+            stats.upload_active >= Duration::from_secs(1),
+            "each host takes a second, so at least a second was spent uploading, got {:?}",
+            stats.upload_active
+        );
+        assert!(
+            stats.upload_active <= wall,
+            "active time {:?} exceeds the {:?} the upload took, so overlapping shards were counted more than once",
+            stats.upload_active,
+            wall
+        );
+        assert_eq!(stats.downloaded_bytes, 0, "nothing has been downloaded yet");
+        assert_eq!(stats.download_active, Duration::ZERO);
+
+        let mut output = BytesMut::zeroed(object.size() as usize);
+        let mut download = Download::new(
+            &object,
+            hosts.clone(),
+            app_key.clone(),
+            DownloadOptions::default(),
+        )
+        .unwrap();
+        copy(&mut download, &mut Cursor::new(&mut output[..]))
+            .await
+            .expect("download to complete");
+
+        let after = hosts.transfer_stats();
+        assert!(after.downloaded_bytes > 0, "the download moved bytes");
+        assert!(
+            after.download_active >= Duration::from_secs(1),
+            "each host takes a second, so at least a second was spent downloading, got {:?}",
+            after.download_active
+        );
+        assert_eq!(
+            after.uploaded_bytes, stats.uploaded_bytes,
+            "downloading should not touch the upload counters"
+        );
     }
 
     #[sia_core_derive::cross_target_test]
