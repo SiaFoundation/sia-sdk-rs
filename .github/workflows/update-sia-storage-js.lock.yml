@@ -1,5 +1,5 @@
-# gh-aw-metadata: {"schema_version":"v4","frontmatter_hash":"6eed572c1318ff4eed810ee394ebc2374eb4abf283c513baff64b5ac9003d99f","body_hash":"53a49993cca9c02fef7b89f9bcf6439be46ae905e6cfd974b11be14f5289fdf1","compiler_version":"v0.86.2","strict":true,"agent_id":"copilot","agent_model":"opus","engine_versions":{"copilot":"1.0.79"},"agent_image_runner":"ubuntu-latest"}
-# gh-aw-manifest: {"version":1,"secrets":["GH_AW_CI_TRIGGER_TOKEN","GH_AW_GITHUB_MCP_SERVER_TOKEN","GH_AW_GITHUB_TOKEN","GITHUB_TOKEN","RELEASE_PAT"],"actions":[{"repo":"Swatinem/rust-cache","sha":"c19371144df3bb44fab255c43d04cbc2ab54d1c4","version":"c19371144df3bb44fab255c43d04cbc2ab54d1c4"},{"repo":"actions/cache/restore","sha":"55cc8345863c7cc4c66a329aec7e433d2d1c52a9","version":"v6.1.0"},{"repo":"actions/cache/save","sha":"55cc8345863c7cc4c66a329aec7e433d2d1c52a9","version":"v6.1.0"},{"repo":"actions/checkout","sha":"3d3c42e5aac5ba805825da76410c181273ba90b1","version":"v7.0.1"},{"repo":"actions/download-artifact","sha":"3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c","version":"v8.0.1"},{"repo":"actions/github-script","sha":"3a2844b7e9c422d3c10d287c895573f7108da1b3","version":"v9.0.0"},{"repo":"actions/setup-node","sha":"49933ea5288caeca8642d1e84afbd3f7d6820020","version":"49933ea5288caeca8642d1e84afbd3f7d6820020"},{"repo":"actions/setup-node","sha":"820762786026740c76f36085b0efc47a31fe5020","version":"v7.0.0"},{"repo":"actions/upload-artifact","sha":"043fb46d1a93c77aae656e7c1c64a875d1fc6a0a","version":"v7.0.1"},{"repo":"github/gh-aw-actions/setup","sha":"6aab9e5b5c91c615506061f09bedd81a23babe3c","version":"v0.86.2"},{"repo":"oven-sh/setup-bun","sha":"0c5077e51419868618aeaa5fe8019c62421857d6","version":"v2.2.0"}],"containers":[{"image":"ghcr.io/github/gh-aw-firewall/agent:0.27.44","digest":"sha256:0d727725c737b58c7bdf51f640cffb928385ec46517e0917c7f1a02f1bada8b4","pinned_image":"ghcr.io/github/gh-aw-firewall/agent:0.27.44@sha256:0d727725c737b58c7bdf51f640cffb928385ec46517e0917c7f1a02f1bada8b4"},{"image":"ghcr.io/github/gh-aw-firewall/api-proxy:0.27.44","digest":"sha256:b50fbadba138f6e9aba94aca09711335c489bb3b15861220cb66f6092e042dc7","pinned_image":"ghcr.io/github/gh-aw-firewall/api-proxy:0.27.44@sha256:b50fbadba138f6e9aba94aca09711335c489bb3b15861220cb66f6092e042dc7"},{"image":"ghcr.io/github/gh-aw-firewall/squid:0.27.44","digest":"sha256:83e48bbe12c634be8c228a576832fe45f66c529ac3659db92bddbcf2eeb6d627","pinned_image":"ghcr.io/github/gh-aw-firewall/squid:0.27.44@sha256:83e48bbe12c634be8c228a576832fe45f66c529ac3659db92bddbcf2eeb6d627"},{"image":"ghcr.io/github/gh-aw-mcpg:v0.4.9","digest":"sha256:e5a1569aeaf41820fa7bdee3e94468cae448133cdbf00119ad24f5b74db1ab9f","pinned_image":"ghcr.io/github/gh-aw-mcpg:v0.4.9@sha256:e5a1569aeaf41820fa7bdee3e94468cae448133cdbf00119ad24f5b74db1ab9f"},{"image":"ghcr.io/github/gh-aw-node","digest":"sha256:0d9f1fb5fd6610c0ac1f5194a38e45a8a1e81f8a390d5142d8e4e6f26a4b3196","pinned_image":"ghcr.io/github/gh-aw-node@sha256:0d9f1fb5fd6610c0ac1f5194a38e45a8a1e81f8a390d5142d8e4e6f26a4b3196"},{"image":"ghcr.io/github/github-mcp-server:v1.9.0","digest":"sha256:881b53d6f75f69bdbc1b5b10fc2f1361717c19054143b3a8529fb5c32061a50e","pinned_image":"ghcr.io/github/github-mcp-server:v1.9.0@sha256:881b53d6f75f69bdbc1b5b10fc2f1361717c19054143b3a8529fb5c32061a50e"}]}
+# gh-aw-metadata: {"schema_version":"v4","frontmatter_hash":"962ad4102ec199df844c305bcb241d70b282a4ce96ad7c6313bef44d8ee71ee8","body_hash":"53a49993cca9c02fef7b89f9bcf6439be46ae905e6cfd974b11be14f5289fdf1","compiler_version":"v0.86.2","strict":true,"agent_id":"copilot","agent_model":"opus","engine_versions":{"copilot":"1.0.79"},"agent_image_runner":"ubuntu-latest"}
+# gh-aw-manifest: {"version":1,"secrets":["GH_AW_CI_TRIGGER_TOKEN","GH_AW_GITHUB_MCP_SERVER_TOKEN","GH_AW_GITHUB_TOKEN","GITHUB_TOKEN","SIA_CI_BOT_APP_ID","SIA_CI_BOT_PRIVATE_KEY"],"actions":[{"repo":"Swatinem/rust-cache","sha":"c19371144df3bb44fab255c43d04cbc2ab54d1c4","version":"c19371144df3bb44fab255c43d04cbc2ab54d1c4"},{"repo":"actions/cache/restore","sha":"55cc8345863c7cc4c66a329aec7e433d2d1c52a9","version":"v6.1.0"},{"repo":"actions/cache/save","sha":"55cc8345863c7cc4c66a329aec7e433d2d1c52a9","version":"v6.1.0"},{"repo":"actions/checkout","sha":"3d3c42e5aac5ba805825da76410c181273ba90b1","version":"v7.0.1"},{"repo":"actions/create-github-app-token","sha":"bcd2ba49218906704ab6c1aa796996da409d3eb1","version":"v3.2.0"},{"repo":"actions/download-artifact","sha":"3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c","version":"v8.0.1"},{"repo":"actions/github-script","sha":"3a2844b7e9c422d3c10d287c895573f7108da1b3","version":"v9.0.0"},{"repo":"actions/setup-node","sha":"49933ea5288caeca8642d1e84afbd3f7d6820020","version":"49933ea5288caeca8642d1e84afbd3f7d6820020"},{"repo":"actions/setup-node","sha":"820762786026740c76f36085b0efc47a31fe5020","version":"v7.0.0"},{"repo":"actions/upload-artifact","sha":"043fb46d1a93c77aae656e7c1c64a875d1fc6a0a","version":"v7.0.1"},{"repo":"github/gh-aw-actions/setup","sha":"6aab9e5b5c91c615506061f09bedd81a23babe3c","version":"v0.86.2"},{"repo":"oven-sh/setup-bun","sha":"0c5077e51419868618aeaa5fe8019c62421857d6","version":"v2.2.0"}],"containers":[{"image":"ghcr.io/github/gh-aw-firewall/agent:0.27.44","digest":"sha256:0d727725c737b58c7bdf51f640cffb928385ec46517e0917c7f1a02f1bada8b4","pinned_image":"ghcr.io/github/gh-aw-firewall/agent:0.27.44@sha256:0d727725c737b58c7bdf51f640cffb928385ec46517e0917c7f1a02f1bada8b4"},{"image":"ghcr.io/github/gh-aw-firewall/api-proxy:0.27.44","digest":"sha256:b50fbadba138f6e9aba94aca09711335c489bb3b15861220cb66f6092e042dc7","pinned_image":"ghcr.io/github/gh-aw-firewall/api-proxy:0.27.44@sha256:b50fbadba138f6e9aba94aca09711335c489bb3b15861220cb66f6092e042dc7"},{"image":"ghcr.io/github/gh-aw-firewall/squid:0.27.44","digest":"sha256:83e48bbe12c634be8c228a576832fe45f66c529ac3659db92bddbcf2eeb6d627","pinned_image":"ghcr.io/github/gh-aw-firewall/squid:0.27.44@sha256:83e48bbe12c634be8c228a576832fe45f66c529ac3659db92bddbcf2eeb6d627"},{"image":"ghcr.io/github/gh-aw-mcpg:v0.4.9","digest":"sha256:e5a1569aeaf41820fa7bdee3e94468cae448133cdbf00119ad24f5b74db1ab9f","pinned_image":"ghcr.io/github/gh-aw-mcpg:v0.4.9@sha256:e5a1569aeaf41820fa7bdee3e94468cae448133cdbf00119ad24f5b74db1ab9f"},{"image":"ghcr.io/github/gh-aw-node","digest":"sha256:0d9f1fb5fd6610c0ac1f5194a38e45a8a1e81f8a390d5142d8e4e6f26a4b3196","pinned_image":"ghcr.io/github/gh-aw-node@sha256:0d9f1fb5fd6610c0ac1f5194a38e45a8a1e81f8a390d5142d8e4e6f26a4b3196"},{"image":"ghcr.io/github/github-mcp-server:v1.9.0","digest":"sha256:881b53d6f75f69bdbc1b5b10fc2f1361717c19054143b3a8529fb5c32061a50e","pinned_image":"ghcr.io/github/github-mcp-server:v1.9.0@sha256:881b53d6f75f69bdbc1b5b10fc2f1361717c19054143b3a8529fb5c32061a50e"}]}
 # This file was automatically generated by gh-aw (v0.86.2). DO NOT EDIT. To debug this workflow, load the skill at https://github.com/github/gh-aw/blob/main/debug.md
 #
 #    ___                   _   _
@@ -30,13 +30,15 @@
 #   - GH_AW_GITHUB_MCP_SERVER_TOKEN
 #   - GH_AW_GITHUB_TOKEN
 #   - GITHUB_TOKEN
-#   - RELEASE_PAT
+#   - SIA_CI_BOT_APP_ID
+#   - SIA_CI_BOT_PRIVATE_KEY
 #
 # Custom actions used:
 #   - Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # c19371144df3bb44fab255c43d04cbc2ab54d1c4
 #   - actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
 #   - actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
 #   - actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+#   - actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
 #   - actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
 #   - actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
 #   - actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0 (source v9)
@@ -471,7 +473,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         name: Prepare Rust SDK checkout and binding diff
-        run: "set -euo pipefail\nmkdir -p /tmp/gh-aw\n\ncurrent_napi=$(jq -r .napi .sia-sdk-rs.json)\ncurrent_wasm=$(jq -r .wasm .sia-sdk-rs.json)\n\n# The release event and release.yml's dispatch both name the tag that\n# fired. A bare manual run falls back to the newest stable napi release.\nanchor_tag=\"${RELEASE_TAG:-}\"\nif [ -z \"$anchor_tag\" ]; then\n  anchor_tag=$(gh api repos/SiaFoundation/sia-sdk-rs/releases --paginate \\\n    --jq '[.[] | select(.prerelease == false) | .tag_name\n           | select(startswith(\"sia_storage_napi/v\"))] | first')\nfi\n\n# Same path scripts/setup-rust.ts clones into, so `bun run setup` is a\n# no-op and build-wasm / setup-napi-test find the crates where they expect\n# them. Unshallow, unlike setup-rust.ts, so the tags can be diffed.\ngit clone --filter=blob:none https://github.com/SiaFoundation/sia-sdk-rs.git rust/sia-sdk-rs\ngit -C rust/sia-sdk-rs checkout --detach \"$anchor_tag\"\nanchor_sha=$(git -C rust/sia-sdk-rs rev-parse HEAD)\n\ntag_at() {\n  git -C rust/sia-sdk-rs tag --points-at \"$anchor_sha\" --list \"$1/v*\" | sort -V | tail -1\n}\n\n# The release job tags both crates on one commit, but the two releases\n# publish 1-2s apart, so whichever tag did not fire this run can briefly\n# still be missing.\ntarget_napi=\"\"\ntarget_wasm=\"\"\nfor _ in $(seq 1 10); do\n  target_napi=$(tag_at sia_storage_napi)\n  target_wasm=$(tag_at sia_storage_wasm)\n  if [ -n \"$target_napi\" ] && [ -n \"$target_wasm\" ]; then\n    break\n  fi\n  sleep 6\n  git -C rust/sia-sdk-rs fetch --tags --quiet\ndone\n\n# A crate with no tag on the anchor commit keeps its current pin.\nboth_tagged=true\nif [ -z \"$target_napi\" ]; then target_napi=\"$current_napi\"; both_tagged=false; fi\nif [ -z \"$target_wasm\" ]; then target_wasm=\"$current_wasm\"; both_tagged=false; fi\n\njq -n \\\n  --arg current_napi \"$current_napi\" --arg current_wasm \"$current_wasm\" \\\n  --arg target_napi \"$target_napi\" --arg target_wasm \"$target_wasm\" \\\n  --arg anchor_tag \"$anchor_tag\" --arg anchor_sha \"$anchor_sha\" \\\n  --argjson both_tagged \"$both_tagged\" \\\n  '{current: {napi: $current_napi, wasm: $current_wasm},\n    target: {napi: $target_napi, wasm: $target_wasm},\n    anchor: {tag: $anchor_tag, sha: $anchor_sha},\n    both_tagged: $both_tagged,\n    pin_already_current: ($current_napi == $target_napi and $current_wasm == $target_wasm)}' \\\n  > /tmp/gh-aw/sdk-update.json\ncat /tmp/gh-aw/sdk-update.json\n\n# Binding-surface diff from the old napi pin to the anchor commit.\n# Truncated so it cannot swamp the agent's context; the full tree is on\n# disk either way.\nif git -C rust/sia-sdk-rs rev-parse -q --verify \"$current_napi^{commit}\" >/dev/null; then\n  git -C rust/sia-sdk-rs diff \"$current_napi\"..\"$anchor_sha\" \\\n    -- sia_storage_napi/src sia_storage_wasm/src \\\n    | head -c 400000 > /tmp/gh-aw/bindings.diff\nelse\n  echo \"previous tag $current_napi not found; diff unavailable\" > /tmp/gh-aw/bindings.diff\nfi\n\nfor crate in sia_core sia_storage sia_storage_napi sia_storage_wasm; do\n  echo \"## $crate\"\n  git -C rust/sia-sdk-rs show \"$anchor_sha:$crate/CHANGELOG.md\" 2>/dev/null | head -60\n  echo\ndone > /tmp/gh-aw/changelog.md\n"
+        run: "set -euo pipefail\nmkdir -p /tmp/gh-aw\n\ncurrent_napi=$(jq -r .napi .sia-sdk-rs.json)\ncurrent_wasm=$(jq -r .wasm .sia-sdk-rs.json)\n\n# A release event names the tag that fired; a manual run either supplies\n# one or falls back to the newest stable napi release.\nanchor_tag=\"${RELEASE_TAG:-}\"\nif [ -z \"$anchor_tag\" ]; then\n  anchor_tag=$(gh api repos/SiaFoundation/sia-sdk-rs/releases --paginate \\\n    --jq '[.[] | select(.prerelease == false) | .tag_name\n           | select(startswith(\"sia_storage_napi/v\"))] | first')\nfi\n\n# Same path scripts/setup-rust.ts clones into, so `bun run setup` is a\n# no-op and build-wasm / setup-napi-test find the crates where they expect\n# them. Unshallow, unlike setup-rust.ts, so the tags can be diffed.\ngit clone --filter=blob:none https://github.com/SiaFoundation/sia-sdk-rs.git rust/sia-sdk-rs\ngit -C rust/sia-sdk-rs checkout --detach \"$anchor_tag\"\nanchor_sha=$(git -C rust/sia-sdk-rs rev-parse HEAD)\n\ntag_at() {\n  git -C rust/sia-sdk-rs tag --points-at \"$anchor_sha\" --list \"$1/v*\" | sort -V | tail -1\n}\n\n# The release job tags both crates on one commit, but the two releases\n# publish 1-2s apart, so whichever tag did not fire this run can briefly\n# still be missing.\ntarget_napi=\"\"\ntarget_wasm=\"\"\nfor _ in $(seq 1 10); do\n  target_napi=$(tag_at sia_storage_napi)\n  target_wasm=$(tag_at sia_storage_wasm)\n  if [ -n \"$target_napi\" ] && [ -n \"$target_wasm\" ]; then\n    break\n  fi\n  sleep 6\n  git -C rust/sia-sdk-rs fetch --tags --quiet\ndone\n\n# A crate with no tag on the anchor commit keeps its current pin.\nboth_tagged=true\nif [ -z \"$target_napi\" ]; then target_napi=\"$current_napi\"; both_tagged=false; fi\nif [ -z \"$target_wasm\" ]; then target_wasm=\"$current_wasm\"; both_tagged=false; fi\n\njq -n \\\n  --arg current_napi \"$current_napi\" --arg current_wasm \"$current_wasm\" \\\n  --arg target_napi \"$target_napi\" --arg target_wasm \"$target_wasm\" \\\n  --arg anchor_tag \"$anchor_tag\" --arg anchor_sha \"$anchor_sha\" \\\n  --argjson both_tagged \"$both_tagged\" \\\n  '{current: {napi: $current_napi, wasm: $current_wasm},\n    target: {napi: $target_napi, wasm: $target_wasm},\n    anchor: {tag: $anchor_tag, sha: $anchor_sha},\n    both_tagged: $both_tagged,\n    pin_already_current: ($current_napi == $target_napi and $current_wasm == $target_wasm)}' \\\n  > /tmp/gh-aw/sdk-update.json\ncat /tmp/gh-aw/sdk-update.json\n\n# Binding-surface diff from the old napi pin to the anchor commit.\n# Truncated so it cannot swamp the agent's context; the full tree is on\n# disk either way.\nif git -C rust/sia-sdk-rs rev-parse -q --verify \"$current_napi^{commit}\" >/dev/null; then\n  git -C rust/sia-sdk-rs diff \"$current_napi\"..\"$anchor_sha\" \\\n    -- sia_storage_napi/src sia_storage_wasm/src \\\n    | head -c 400000 > /tmp/gh-aw/bindings.diff\nelse\n  echo \"previous tag $current_napi not found; diff unavailable\" > /tmp/gh-aw/bindings.diff\nfi\n\nfor crate in sia_core sia_storage sia_storage_napi sia_storage_wasm; do\n  echo \"## $crate\"\n  git -C rust/sia-sdk-rs show \"$anchor_sha:$crate/CHANGELOG.md\" 2>/dev/null | head -60\n  echo\ndone > /tmp/gh-aw/changelog.md\n"
         working-directory: sia-storage-js
 
       - name: Configure Git credentials
@@ -531,15 +533,13 @@ jobs:
       - name: Download container images
         run: bash "${RUNNER_TEMP}/gh-aw/actions/download_docker_images.sh" ghcr.io/github/gh-aw-firewall/agent:0.27.44@sha256:0d727725c737b58c7bdf51f640cffb928385ec46517e0917c7f1a02f1bada8b4 ghcr.io/github/gh-aw-firewall/api-proxy:0.27.44@sha256:b50fbadba138f6e9aba94aca09711335c489bb3b15861220cb66f6092e042dc7 ghcr.io/github/gh-aw-firewall/squid:0.27.44@sha256:83e48bbe12c634be8c228a576832fe45f66c529ac3659db92bddbcf2eeb6d627 ghcr.io/github/gh-aw-mcpg:v0.4.9@sha256:e5a1569aeaf41820fa7bdee3e94468cae448133cdbf00119ad24f5b74db1ab9f ghcr.io/github/gh-aw-node@sha256:0d9f1fb5fd6610c0ac1f5194a38e45a8a1e81f8a390d5142d8e4e6f26a4b3196 ghcr.io/github/github-mcp-server:v1.9.0@sha256:881b53d6f75f69bdbc1b5b10fc2f1361717c19054143b3a8529fb5c32061a50e
       - name: Generate Safe Outputs Config
-        env:
-          GH_AW_SECRET_RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
           mkdir -p "${RUNNER_TEMP}/gh-aw/safeoutputs"
           mkdir -p /tmp/gh-aw/safeoutputs
           mkdir -p /tmp/gh-aw/mcp-logs/safeoutputs
-          cat > "${RUNNER_TEMP}/gh-aw/safeoutputs/config.json" << 'GH_AW_SAFE_OUTPUTS_CONFIG_31bd00e27c2f3a66_EOF'
-          {"create_pull_request":{"allowed_files":[".sia-sdk-rs.json",".changeset/**","src/**","scripts/**","tsup.config.ts"],"draft":false,"github-token":"${GH_AW_SECRET_RELEASE_PAT}","labels":["dependencies"],"max":1,"max_patch_files":100,"max_patch_size":4096,"protect_top_level_dot_folders":true,"protected_dot_folder_excludes":[".changeset/"],"protected_files":["package.json","bun.lockb","bunfig.toml","deno.json","deno.jsonc","deno.lock","global.json","NuGet.Config","Directory.Packages.props","mix.exs","mix.lock","go.mod","go.sum","stack.yaml","stack.yaml.lock","pom.xml","build.gradle","build.gradle.kts","settings.gradle","settings.gradle.kts","gradle.properties","package-lock.json","yarn.lock","pnpm-lock.yaml","npm-shrinkwrap.json","requirements.txt","Pipfile","Pipfile.lock","pyproject.toml","setup.py","setup.cfg","Gemfile","Gemfile.lock","uv.lock","CODEOWNERS","DESIGN.md","README.md","CONTRIBUTING.md","CHANGELOG.md","SECURITY.md","CODE_OF_CONDUCT.md","AGENTS.md"],"protected_files_policy":"request_review","target-repo":"SiaFoundation/sia-storage-js","title_prefix":"chore: "},"create_report_incomplete_issue":{},"missing_data":{},"missing_tool":{},"noop":{"max":1,"report-as-issue":"false"},"report_incomplete":{}}
-          GH_AW_SAFE_OUTPUTS_CONFIG_31bd00e27c2f3a66_EOF
+          cat > "${RUNNER_TEMP}/gh-aw/safeoutputs/config.json" << 'GH_AW_SAFE_OUTPUTS_CONFIG_d53a22f88b844d44_EOF'
+          {"create_pull_request":{"allowed_files":[".sia-sdk-rs.json",".changeset/**","src/**","scripts/**","tsup.config.ts"],"draft":false,"labels":["dependencies"],"max":1,"max_patch_files":100,"max_patch_size":4096,"protect_top_level_dot_folders":true,"protected_dot_folder_excludes":[".changeset/"],"protected_files":["package.json","bun.lockb","bunfig.toml","deno.json","deno.jsonc","deno.lock","global.json","NuGet.Config","Directory.Packages.props","mix.exs","mix.lock","go.mod","go.sum","stack.yaml","stack.yaml.lock","pom.xml","build.gradle","build.gradle.kts","settings.gradle","settings.gradle.kts","gradle.properties","package-lock.json","yarn.lock","pnpm-lock.yaml","npm-shrinkwrap.json","requirements.txt","Pipfile","Pipfile.lock","pyproject.toml","setup.py","setup.cfg","Gemfile","Gemfile.lock","uv.lock","CODEOWNERS","DESIGN.md","README.md","CONTRIBUTING.md","CHANGELOG.md","SECURITY.md","CODE_OF_CONDUCT.md","AGENTS.md"],"protected_files_policy":"request_review","target-repo":"SiaFoundation/sia-storage-js","title_prefix":"chore: "},"create_report_incomplete_issue":{},"missing_data":{},"missing_tool":{},"noop":{"max":1,"report-as-issue":"false"},"report_incomplete":{}}
+          GH_AW_SAFE_OUTPUTS_CONFIG_d53a22f88b844d44_EOF
       - name: Generate Safe Outputs Tools
         env:
           GH_AW_TOOLS_META_JSON: |
@@ -913,11 +913,10 @@ jobs:
             const { main } = require('${{ runner.temp }}/gh-aw/actions/redact_secrets.cjs');
             await main();
         env:
-          GH_AW_SECRET_NAMES: 'GH_AW_GITHUB_MCP_SERVER_TOKEN,GH_AW_GITHUB_TOKEN,GITHUB_TOKEN,RELEASE_PAT'
+          GH_AW_SECRET_NAMES: 'GH_AW_GITHUB_MCP_SERVER_TOKEN,GH_AW_GITHUB_TOKEN,GITHUB_TOKEN'
           SECRET_GH_AW_GITHUB_MCP_SERVER_TOKEN: ${{ secrets.GH_AW_GITHUB_MCP_SERVER_TOKEN }}
           SECRET_GH_AW_GITHUB_TOKEN: ${{ secrets.GH_AW_GITHUB_TOKEN }}
           SECRET_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SECRET_RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
       - name: Append agent step summary
         if: always()
         run: bash "${RUNNER_TEMP}/gh-aw/actions/append_agent_step_summary.sh"
@@ -1065,6 +1064,18 @@ jobs:
           GH_AW_INFO_VERSION: "1.0.79"
           GH_AW_INFO_AWF_VERSION: "v0.27.44"
           GH_AW_INFO_ENGINE_ID: "copilot"
+      - name: Generate GitHub App token
+        id: safe-outputs-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.SIA_CI_BOT_APP_ID }}
+          private-key: ${{ secrets.SIA_CI_BOT_PRIVATE_KEY }}
+          owner: SiaFoundation
+          repositories: sia-storage-js
+          github-api-url: ${{ github.api_url }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
       - name: Download agent output artifact
         id: download-agent-output
         continue-on-error: true
@@ -1164,7 +1175,7 @@ jobs:
           GH_AW_AMBIENT_CONTEXT: ${{ needs.agent.outputs.ambient_context }}
           GH_AW_WORKFLOW_ID: "update-sia-storage-js"
         with:
-          github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.safe-outputs-app-token.outputs.token }}
           script: |
             const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
             setupGlobals(core, github, context, exec, io, getOctokit);
@@ -1181,7 +1192,7 @@ jobs:
           GH_AW_DETECTION_CONCLUSION: ${{ needs.detection.outputs.detection_conclusion }}
           GH_AW_DETECTION_REASON: ${{ needs.detection.outputs.detection_reason }}
         with:
-          github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.safe-outputs-app-token.outputs.token }}
           script: |
             const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
             setupGlobals(core, github, context, exec, io, getOctokit);
@@ -1196,7 +1207,7 @@ jobs:
           GH_AW_WORKFLOW_NAME: "Update sia-storage-js"
           GH_AW_WORKFLOW_SOURCE_URL: "${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/.github/workflows/update-sia-storage-js.md"
         with:
-          github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.safe-outputs-app-token.outputs.token }}
           script: |
             const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
             setupGlobals(core, github, context, exec, io, getOctokit);
@@ -1211,7 +1222,7 @@ jobs:
           GH_AW_WORKFLOW_NAME: "Update sia-storage-js"
           GH_AW_WORKFLOW_SOURCE_URL: "${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/.github/workflows/update-sia-storage-js.md"
         with:
-          github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.safe-outputs-app-token.outputs.token }}
           script: |
             const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
             setupGlobals(core, github, context, exec, io, getOctokit);
@@ -1248,6 +1259,8 @@ jobs:
           GH_AW_ENGINE_API_HOSTS: "api.enterprise.githubcopilot.com,api.githubcopilot.com,api.business.githubcopilot.com,api.individual.githubcopilot.com"
           GH_AW_CODE_PUSH_FAILURE_ERRORS: ${{ needs.safe_outputs.outputs.code_push_failure_errors }}
           GH_AW_CODE_PUSH_FAILURE_COUNT: ${{ needs.safe_outputs.outputs.code_push_failure_count }}
+          GH_AW_SAFE_OUTPUTS_APP_TOKEN_MINTING_FAILED: ${{ needs.safe_outputs.outputs.app_token_minting_failed }}
+          GH_AW_CONCLUSION_APP_TOKEN_MINTING_FAILED: ${{ steps.safe-outputs-app-token.outcome == 'failure' }}
           GH_AW_LOCKDOWN_CHECK_FAILED: ${{ needs.activation.outputs.lockdown_check_failed }}
           GH_AW_OAUTH_TOKEN_CHECK_FAILED: ${{ needs.activation.outputs.oauth_token_check_failed }}
           GH_AW_STALE_LOCK_FILE_FAILED: ${{ needs.activation.outputs.stale_lock_file_failed }}
@@ -1260,7 +1273,7 @@ jobs:
           GH_AW_MISSING_DATA_REPORT_AS_FAILURE: "true"
           GH_AW_TIMEOUT_MINUTES: "45"
         with:
-          github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.safe-outputs-app-token.outputs.token }}
           script: |
             const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
             setupGlobals(core, github, context, exec, io, getOctokit);
@@ -1277,7 +1290,7 @@ jobs:
           GH_AW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GH_AW_REPORT_FAILED_JOBS: "true"
         with:
-          github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.safe-outputs-app-token.outputs.token }}
           script: |
             const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
             setupGlobals(core, github, context, exec, io, getOctokit);
@@ -1619,6 +1632,7 @@ jobs:
       GH_AW_WORKFLOW_NAME: "Update sia-storage-js"
       GH_AW_WORKFLOW_SOURCE_URL: "${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/.github/workflows/update-sia-storage-js.md"
     outputs:
+      app_token_minting_failed: ${{ steps.safe-outputs-app-token.outcome == 'failure' }}
       code_push_failure_count: ${{ steps.process_safe_outputs.outputs.code_push_failure_count }}
       code_push_failure_errors: ${{ steps.process_safe_outputs.outputs.code_push_failure_errors }}
       create_discussion_error_count: ${{ steps.process_safe_outputs.outputs.create_discussion_error_count }}
@@ -1670,12 +1684,24 @@ jobs:
         with:
           name: agent
           path: /tmp/gh-aw/
+      - name: Generate GitHub App token
+        id: safe-outputs-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.SIA_CI_BOT_APP_ID }}
+          private-key: ${{ secrets.SIA_CI_BOT_PRIVATE_KEY }}
+          owner: SiaFoundation
+          repositories: sia-storage-js
+          github-api-url: ${{ github.api_url }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
       - name: Checkout repository
         if: (!cancelled()) && needs.agent.result != 'skipped' && contains(needs.agent.outputs.output_types, 'create_pull_request')
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: true
-          token: ${{ secrets.RELEASE_PAT }}
+          token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
       - name: Checkout SiaFoundation/sia-storage-js into sia-storage-js
         if: (!cancelled()) && needs.agent.result != 'skipped' && contains(needs.agent.outputs.output_types, 'create_pull_request')
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1684,13 +1710,13 @@ jobs:
           repository: SiaFoundation/sia-storage-js
           ref: main
           path: sia-storage-js
-          token: ${{ secrets.RELEASE_PAT }}
+          token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
       - name: Configure Git credentials
         if: (!cancelled()) && needs.agent.result != 'skipped' && contains(needs.agent.outputs.output_types, 'create_pull_request')
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
-          GIT_TOKEN: ${{ secrets.RELEASE_PAT }}
+          GIT_TOKEN: ${{ steps.safe-outputs-app-token.outputs.token }}
           GH_AW_SUBREPO_0: "SiaFoundation/sia-storage-js"
         run: |
           bash "${RUNNER_TEMP}/gh-aw/actions/configure_git_credentials.sh"
@@ -1716,11 +1742,11 @@ jobs:
           GH_AW_ALLOWED_DOMAINS: "*.githubusercontent.com,api.business.githubcopilot.com,api.enterprise.githubcopilot.com,api.github.com,api.githubcopilot.com,api.individual.githubcopilot.com,api.npms.io,api.snapcraft.io,archive.ubuntu.com,azure.archive.ubuntu.com,bun.sh,cdn.jsdelivr.net,codeload.github.com,crates.io,crl.geotrust.com,crl.globalsign.com,crl.identrust.com,crl.sectigo.com,crl.thawte.com,crl.usertrust.com,crl.verisign.com,crl3.digicert.com,crl4.digicert.com,crls.ssl.com,deb.nodesource.com,deno.land,docs.github.com,esm.sh,get.pnpm.io,github-cloud.githubusercontent.com,github-cloud.s3.amazonaws.com,github.blog,github.com,github.githubassets.com,googleapis.deno.dev,googlechromelabs.github.io,host.docker.internal,index.crates.io,json-schema.org,json.schemastore.org,jsr.io,keyserver.ubuntu.com,lfs.github.com,nodejs.org,npm.pkg.github.com,npmjs.com,npmjs.org,objects.githubusercontent.com,ocsp.digicert.com,ocsp.geotrust.com,ocsp.globalsign.com,ocsp.identrust.com,ocsp.sectigo.com,ocsp.ssl.com,ocsp.thawte.com,ocsp.usertrust.com,ocsp.verisign.com,packagecloud.io,packages.cloud.google.com,packages.microsoft.com,patch-diff.githubusercontent.com,patchdiff.githubusercontent.com,ppa.launchpad.net,raw.githubusercontent.com,registry.bower.io,registry.npmjs.com,registry.npmjs.org,registry.yarnpkg.com,repo.yarnpkg.com,s.symcb.com,s.symcd.com,security.ubuntu.com,sh.rustup.rs,skimdb.npmjs.com,static.crates.io,static.rust-lang.org,storage.googleapis.com,telemetry.enterprise.githubcopilot.com,telemetry.vercel.com,ts-crl.ws.symantec.com,ts-ocsp.ws.symantec.com,www.googleapis.com,www.npmjs.com,www.npmjs.org,yarnpkg.com"
           GITHUB_SERVER_URL: ${{ github.server_url }}
           GITHUB_API_URL: ${{ github.api_url }}
-          GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG: "{\"create_pull_request\":{\"allowed_files\":[\".sia-sdk-rs.json\",\".changeset/**\",\"src/**\",\"scripts/**\",\"tsup.config.ts\"],\"draft\":false,\"github-token\":\"${{ secrets.RELEASE_PAT }}\",\"labels\":[\"dependencies\"],\"max\":1,\"max_patch_files\":100,\"max_patch_size\":4096,\"protect_top_level_dot_folders\":true,\"protected_dot_folder_excludes\":[\".changeset/\"],\"protected_files\":[\"package.json\",\"bun.lockb\",\"bunfig.toml\",\"deno.json\",\"deno.jsonc\",\"deno.lock\",\"global.json\",\"NuGet.Config\",\"Directory.Packages.props\",\"mix.exs\",\"mix.lock\",\"go.mod\",\"go.sum\",\"stack.yaml\",\"stack.yaml.lock\",\"pom.xml\",\"build.gradle\",\"build.gradle.kts\",\"settings.gradle\",\"settings.gradle.kts\",\"gradle.properties\",\"package-lock.json\",\"yarn.lock\",\"pnpm-lock.yaml\",\"npm-shrinkwrap.json\",\"requirements.txt\",\"Pipfile\",\"Pipfile.lock\",\"pyproject.toml\",\"setup.py\",\"setup.cfg\",\"Gemfile\",\"Gemfile.lock\",\"uv.lock\",\"CODEOWNERS\",\"DESIGN.md\",\"README.md\",\"CONTRIBUTING.md\",\"CHANGELOG.md\",\"SECURITY.md\",\"CODE_OF_CONDUCT.md\",\"AGENTS.md\"],\"protected_files_policy\":\"request_review\",\"target-repo\":\"SiaFoundation/sia-storage-js\",\"title_prefix\":\"chore: \"},\"create_report_incomplete_issue\":{},\"missing_data\":{},\"missing_tool\":{},\"noop\":{\"max\":1,\"report-as-issue\":\"false\"},\"report_incomplete\":{}}"
+          GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG: "{\"create_pull_request\":{\"allowed_files\":[\".sia-sdk-rs.json\",\".changeset/**\",\"src/**\",\"scripts/**\",\"tsup.config.ts\"],\"draft\":false,\"labels\":[\"dependencies\"],\"max\":1,\"max_patch_files\":100,\"max_patch_size\":4096,\"protect_top_level_dot_folders\":true,\"protected_dot_folder_excludes\":[\".changeset/\"],\"protected_files\":[\"package.json\",\"bun.lockb\",\"bunfig.toml\",\"deno.json\",\"deno.jsonc\",\"deno.lock\",\"global.json\",\"NuGet.Config\",\"Directory.Packages.props\",\"mix.exs\",\"mix.lock\",\"go.mod\",\"go.sum\",\"stack.yaml\",\"stack.yaml.lock\",\"pom.xml\",\"build.gradle\",\"build.gradle.kts\",\"settings.gradle\",\"settings.gradle.kts\",\"gradle.properties\",\"package-lock.json\",\"yarn.lock\",\"pnpm-lock.yaml\",\"npm-shrinkwrap.json\",\"requirements.txt\",\"Pipfile\",\"Pipfile.lock\",\"pyproject.toml\",\"setup.py\",\"setup.cfg\",\"Gemfile\",\"Gemfile.lock\",\"uv.lock\",\"CODEOWNERS\",\"DESIGN.md\",\"README.md\",\"CONTRIBUTING.md\",\"CHANGELOG.md\",\"SECURITY.md\",\"CODE_OF_CONDUCT.md\",\"AGENTS.md\"],\"protected_files_policy\":\"request_review\",\"target-repo\":\"SiaFoundation/sia-storage-js\",\"title_prefix\":\"chore: \"},\"create_report_incomplete_issue\":{},\"missing_data\":{},\"missing_tool\":{},\"noop\":{\"max\":1,\"report-as-issue\":\"false\"},\"report_incomplete\":{}}"
           GH_AW_CI_TRIGGER_TOKEN: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
+          GITHUB_TOKEN: ${{ steps.safe-outputs-app-token.outputs.token }}
         with:
-          github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.safe-outputs-app-token.outputs.token }}
           script: |
             const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
             setupGlobals(core, github, context, exec, io, getOctokit);

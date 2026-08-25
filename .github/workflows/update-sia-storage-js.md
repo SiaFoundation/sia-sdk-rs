@@ -28,9 +28,9 @@ models:
   default-ai-credits-pricing:
     input: 5.0
     output: 25.0
-# A release burst publishes the napi and wasm releases seconds apart, and
-# release.yml dispatches again once cargo publish finishes. Only the last of
-# those matters, so let each new run cancel the one before it.
+# A release burst publishes the napi and wasm releases seconds apart, so both
+# fire this workflow. Only the last run matters — it is the one that can see
+# both tags — so let each new run cancel the one before it.
 concurrency:
   group: update-sia-storage-js
   cancel-in-progress: true
@@ -79,8 +79,8 @@ steps:
       current_napi=$(jq -r .napi .sia-sdk-rs.json)
       current_wasm=$(jq -r .wasm .sia-sdk-rs.json)
 
-      # The release event and release.yml's dispatch both name the tag that
-      # fired. A bare manual run falls back to the newest stable napi release.
+      # A release event names the tag that fired; a manual run either supplies
+      # one or falls back to the newest stable napi release.
       anchor_tag="${RELEASE_TAG:-}"
       if [ -z "$anchor_tag" ]; then
         anchor_tag=$(gh api repos/SiaFoundation/sia-sdk-rs/releases --paginate \
@@ -149,9 +149,16 @@ steps:
         echo
       done > /tmp/gh-aw/changelog.md
 safe-outputs:
+  # Pull requests are authored by the app's bot identity rather than a
+  # developer's PAT. The token is minted per run and scoped to just the one
+  # target repository.
+  github-app:
+    client-id: ${{ secrets.SIA_CI_BOT_APP_ID }}
+    private-key: ${{ secrets.SIA_CI_BOT_PRIVATE_KEY }}
+    owner: SiaFoundation
+    repositories: [sia-storage-js]
   create-pull-request:
     target-repo: SiaFoundation/sia-storage-js
-    github-token: ${{ secrets.RELEASE_PAT }}
     title-prefix: "chore: "
     labels: [dependencies]
     draft: false

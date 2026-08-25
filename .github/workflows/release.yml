@@ -7,8 +7,6 @@ on:
 
 permissions:
   contents: write
-  actions: write
-
 
 jobs:
   release:
@@ -22,9 +20,19 @@ jobs:
         run: |
           rustup update stable
           cargo install knope
+      # Releases created with GITHUB_TOKEN raise no `release` event, which is
+      # what the sia-storage-js / sia-storage-sdk update workflows trigger on.
+      # An app token is a real identity, so the event fires.
+      - name: Mint bot token
+        id: bot-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.SIA_CI_BOT_APP_ID }}
+          private-key: ${{ secrets.SIA_CI_BOT_PRIVATE_KEY }}
+          permission-contents: write
       - name: Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.bot-token.outputs.token }}
         run: knope release
       - name: Publish Crates
         env:
@@ -42,19 +50,3 @@ jobs:
               fi
             }
           done
-
-      - name: Update sia-storage-js
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          git fetch --tags --quiet
-          tag=$(git tag --points-at HEAD --list 'sia_storage_napi/v*' | sort -V | tail -1)
-          if [ -z "$tag" ]; then
-            tag=$(git tag --points-at HEAD --list 'sia_storage_wasm/v*' | sort -V | tail -1)
-          fi
-          if [ -z "$tag" ]; then
-            echo "No sia_storage_napi or sia_storage_wasm tag on this commit; nothing to update."
-            exit 0
-          fi
-          gh workflow run update-sia-storage-js.lock.yml --ref master -f release_tag="$tag"

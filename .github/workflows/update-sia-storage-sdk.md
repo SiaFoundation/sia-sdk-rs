@@ -168,9 +168,16 @@ steps:
         echo
       done > /tmp/gh-aw/changelog.md
 safe-outputs:
+  # Pull requests are authored by the app's bot identity rather than a
+  # developer's PAT. The token is minted per run and scoped to just the one
+  # target repository.
+  github-app:
+    client-id: ${{ secrets.SIA_CI_BOT_APP_ID }}
+    private-key: ${{ secrets.SIA_CI_BOT_PRIVATE_KEY }}
+    owner: SiaFoundation
+    repositories: [sia-storage-sdk]
   create-pull-request:
     target-repo: SiaFoundation/sia-storage-sdk
-    github-token: ${{ secrets.RELEASE_PAT }}
     title-prefix: "chore: "
     labels: [dependencies]
     draft: false
