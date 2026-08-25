@@ -226,8 +226,8 @@ impl Sdk {
 
     /// Generates a signed share URL for an object. Anyone with the URL can
     /// download and decrypt the object until `validUntil`.
-    #[wasm_bindgen(js_name = "shareObject")]
-    pub fn share_object(
+    #[wasm_bindgen(js_name = "objectShareUrl")]
+    pub fn object_share_url(
         &self,
         object: &PinnedObject,
         valid_until: js_sys::Date,
@@ -235,7 +235,7 @@ impl Sdk {
         let valid_until = ms_to_chrono(valid_until.get_time())?;
         let url = self
             .inner
-            .share_object(&object.0, valid_until)
+            .object_share_url(&object.0, valid_until)
             .map_err(to_js_err)?;
         Ok(url.to_string())
     }
@@ -243,11 +243,11 @@ impl Sdk {
     /// Resolves a share URL (sia://...) and returns the shared object.
     /// The encryption key is extracted from the URL fragment (never sent
     /// to the indexer).
-    #[wasm_bindgen(js_name = "sharedObject")]
-    pub async fn shared_object(&self, share_url: &str) -> Result<PinnedObject, JsError> {
+    #[wasm_bindgen(js_name = "objectFromShareUrl")]
+    pub async fn object_from_share_url(&self, share_url: &str) -> Result<PinnedObject, JsError> {
         let sdk = self.inner.clone();
         let url = share_url.to_string();
-        let obj = run_local(async move { sdk.shared_object(url).await })
+        let obj = run_local(async move { sdk.object_from_share_url(url).await })
             .await
             .map_err(to_js_err)?;
         Ok(PinnedObject(obj))
