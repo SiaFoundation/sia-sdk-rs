@@ -1,8 +1,7 @@
-use std::fmt;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
+use serde_with::hex::Hex;
 use serde_with::{DefaultOnNull, serde_as};
 use sia_core::blake2::{Blake2b256, Digest};
 use sia_core::encoding::SiaEncodable;
@@ -18,30 +17,9 @@ pub const NONCE_SIZE: usize = 32;
 
 /// The per-key salt used to derive a sharing key from the owner's app key. It
 /// (de)serializes as a hex string, matching indexd.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Nonce(pub(crate) [u8; NONCE_SIZE]);
-
-impl fmt::Display for Nonce {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", hex::encode(self.0))
-    }
-}
-
-impl Serialize for Nonce {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for Nonce {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        let mut out = [0u8; NONCE_SIZE];
-        hex::decode_to_slice(&s, &mut out)
-            .map_err(|e| serde::de::Error::custom(format!("invalid nonce: {e}")))?;
-        Ok(Nonce(out))
-    }
-}
+#[serde_as]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Nonce(#[serde_as(as = "Hex")] pub(crate) [u8; NONCE_SIZE]);
 
 /// Deterministically derives the sharing key's seed from the owner's app key
 /// and a nonce, matching indexd's `DeriveSharingKey`. The seed is the
