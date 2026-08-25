@@ -1177,25 +1177,25 @@ impl Sdk {
 
     /// Creates a signed URL that can be used to share object metadata
     /// with other people using an indexer.
-    pub fn share_object(
+    pub fn object_share_url(
         &self,
         object: Arc<PinnedObject>,
         valid_until: SystemTime,
     ) -> Result<String, Error> {
         let u = self
             .inner
-            .share_object(&object.object(), valid_until.into())?;
+            .object_share_url(&object.object(), valid_until.into())?;
         Ok(u.to_string())
     }
 
     /// Retrieves a shared object from a signed URL.
-    pub async fn shared_object(&self, shared_url: &str) -> Result<PinnedObject, Error> {
+    pub async fn object_from_share_url(&self, shared_url: &str) -> Result<PinnedObject, Error> {
         let shared_url: Url = shared_url
             .parse()
             .map_err(|e| Error::Custom(format!("{e}")))?;
         let sdk = self.inner.clone();
         spawn(async move {
-            let object = sdk.shared_object(shared_url).await?;
+            let object = sdk.object_from_share_url(shared_url).await?;
             Ok(PinnedObject {
                 inner: Arc::new(Mutex::new(object)),
             })
