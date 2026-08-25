@@ -15,10 +15,12 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::hosts::metrics::{HostMetric, HostScore, RPCAverage, Transfer};
+use crate::hosts::transfer_stats::{TransferStats, TransferTracker};
 use crate::rhp4::{Client, HostEndpoint, Transport};
 use crate::time::{Duration, Elapsed, Instant, timeout};
 
 mod metrics;
+pub(crate) mod transfer_stats;
 
 /// Represents a host in the Sia network. The
 /// addresses can be used to connect to the host.
@@ -282,6 +284,8 @@ pub(crate) struct Hosts {
 
     global_write_avg: Arc<RwLock<RPCAverage>>,
     global_read_avg: Arc<RwLock<RPCAverage>>,
+
+    transfer: TransferTracker,
 }
 
 impl Hosts {
@@ -293,7 +297,21 @@ impl Hosts {
 
             global_write_avg: Arc::new(RwLock::new(RPCAverage::default())),
             global_read_avg: Arc::new(RwLock::new(RPCAverage::default())),
+
+            transfer: TransferTracker::default(),
         }
+    }
+
+    /// Bytes moved and time spent moving them, across every transfer this
+    /// SDK has run. See [`TransferStats`].
+    pub fn transfer_stats(&self) -> TransferStats {
+        self.transfer.stats()
+    }
+
+    /// The tracker behind [`Self::transfer_stats`], for spawning its
+    /// suspension watcher.
+    pub fn transfer_tracker(&self) -> TransferTracker {
+        self.transfer.clone()
     }
 
     fn host_endpoint(&self, host_key: PublicKey) -> Result<HostEndpoint, RPCError> {
@@ -498,12 +516,17 @@ impl Hosts {
             )
             .await?;
             let bytes = sector.len() as u32;
+            let mut span = self.transfer.upload();
             let (root, elapsed) = self
                 .transport
                 .write_sector(&host, prices, account_key, sector)
                 .await
+                .inspect(|_| span.transferred(bytes as u64))
                 .inspect_err(|_| self.hosts.add_failure(host_key))
                 .map_err(RPCError::Rhp)?;
+            // Close the span before the sample bookkeeping below, which
+            // takes locks every other in-flight RPC contends on.
+            drop(span);
             self.record_write_sample(host_key, bytes, elapsed);
             Ok(root)
         })
@@ -535,12 +558,17 @@ impl Hosts {
                 false,
             )
             .await?;
+            let mut span = self.transfer.download();
             let (data, elapsed) = self
                 .transport
                 .read_sector(&host, prices, account_key, root, offset, length)
                 .await
+                .inspect(|(data, _)| span.transferred(data.len() as u64))
                 .inspect_err(|_| self.hosts.add_failure(host_key))
                 .map_err(RPCError::Rhp)?;
+            // Close the span before the sample bookkeeping below, which
+            // takes locks every other in-flight RPC contends on.
+            drop(span);
             self.record_read_sample(host_key, bytes, elapsed);
             Ok(data)
         })

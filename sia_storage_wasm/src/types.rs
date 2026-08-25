@@ -29,6 +29,38 @@ impl From<sia_storage::ShardProgress> for ShardProgress {
     }
 }
 
+/// Bytes transferred and time spent transferring them, in each direction,
+/// since the SDK was created.
+///
+/// The active times are how long at least one sector RPC of that direction
+/// was in flight, counted once however many ran concurrently, and include a
+/// transfer still running when the stats are read. Dividing the deltas
+/// between two reads gives the transfer speed over that window.
+///
+/// Stretches where the process was frozen are left out. Bytes are credited
+/// when an RPC completes, so a read taken mid-RPC sees its time before its
+/// bytes.
+#[derive(serde::Serialize, tsify::Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferStats {
+    pub uploaded_bytes: u64,
+    pub upload_active_ms: f64,
+    pub downloaded_bytes: u64,
+    pub download_active_ms: f64,
+}
+
+impl From<sia_storage::TransferStats> for TransferStats {
+    fn from(s: sia_storage::TransferStats) -> Self {
+        Self {
+            uploaded_bytes: s.uploaded_bytes,
+            upload_active_ms: s.upload_active.as_millis() as f64,
+            downloaded_bytes: s.downloaded_bytes,
+            download_active_ms: s.download_active.as_millis() as f64,
+        }
+    }
+}
+
 /// Application info registered with the indexer.
 #[derive(serde::Serialize, tsify::Tsify)]
 #[tsify(into_wasm_abi)]

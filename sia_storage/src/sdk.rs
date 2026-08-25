@@ -13,6 +13,7 @@ use url::Url;
 use crate::app_client::PinObjectError::UnpinnedSlab;
 use crate::app_client::{self, SLAB_PIN_BATCH_SIZE, SlabPinParams};
 use crate::hosts::Hosts;
+use crate::hosts::transfer_stats::TransferStats;
 use crate::rhp4::{Client, HostEndpoint};
 use crate::task::AbortOnDropHandle;
 use crate::time::Duration;
@@ -54,6 +55,7 @@ pub struct Sdk {
     api_client: app_client::Client,
     hosts: Hosts,
     _refresh_task: Arc<AbortOnDropHandle<()>>,
+    _suspension_task: Arc<AbortOnDropHandle<()>>,
 }
 
 impl Sdk {
@@ -126,11 +128,14 @@ impl Sdk {
             hosts.clone(),
             Duration::from_secs(10 * 60),
         );
+        let suspension_task =
+            AbortOnDropHandle::new(maybe_spawn!(hosts.transfer_tracker().watch_suspension()));
         Ok(Self {
             app_key,
             api_client,
             hosts,
             _refresh_task: Arc::new(refresh_task),
+            _suspension_task: Arc::new(suspension_task),
         })
     }
 
@@ -157,6 +162,17 @@ impl Sdk {
     /// should store it safely.
     pub fn app_key(&self) -> &AppKey {
         &self.app_key
+    }
+
+    /// Returns the total bytes transferred and the time spent transferring
+    /// them, in each direction, since the SDK was created.
+    ///
+    /// The counters cover every transfer this SDK has run, so an
+    /// application that samples them periodically gets the connection's
+    /// speed over any window by dividing the deltas. See [`TransferStats`]
+    /// for what the active durations mean.
+    pub fn transfer_stats(&self) -> TransferStats {
+        self.hosts.transfer_stats()
     }
 
     /// Reads until EOF and uploads all slabs. The data will be erasure coded,

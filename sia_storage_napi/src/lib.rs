@@ -325,6 +325,37 @@ pub struct ShardProgress {
     pub elapsed_ms: f64,
 }
 
+/// Bytes transferred and time spent transferring them, in each direction,
+/// since the SDK was created.
+///
+/// The active times are how long at least one sector RPC of that direction
+/// was in flight, counted once however many ran concurrently, and include a
+/// transfer still running when the stats are read. Dividing the deltas
+/// between two reads gives the transfer speed over that window.
+///
+/// Stretches where the process was frozen, such as an operating system
+/// suspending a backgrounded application, are left out. Bytes are credited
+/// when an RPC completes, so a read taken mid-RPC sees its time before its
+/// bytes.
+#[napi(object)]
+pub struct TransferStats {
+    pub uploaded_bytes: BigInt,
+    pub upload_active_ms: f64,
+    pub downloaded_bytes: BigInt,
+    pub download_active_ms: f64,
+}
+
+impl From<sia_storage::TransferStats> for TransferStats {
+    fn from(s: sia_storage::TransferStats) -> Self {
+        Self {
+            uploaded_bytes: BigInt::from(s.uploaded_bytes),
+            upload_active_ms: s.upload_active.as_millis() as f64,
+            downloaded_bytes: BigInt::from(s.downloaded_bytes),
+            download_active_ms: s.download_active.as_millis() as f64,
+        }
+    }
+}
+
 /// A Send-safe wrapper around a JS callback that converts it into a
 /// `ThreadsafeFunction` during napi parameter extraction.
 pub struct SendableCallback<T: ToNapiValue + 'static> {
@@ -776,6 +807,13 @@ impl Sdk {
     #[napi]
     pub fn app_key(&self) -> AppKey {
         AppKey(self.inner.app_key().clone())
+    }
+
+    /// Returns the SDK's transfer totals. Reads counters only, so it is
+    /// cheap to poll on a display cadence.
+    #[napi]
+    pub fn transfer_stats(&self) -> TransferStats {
+        self.inner.transfer_stats().into()
     }
 
     /// Creates a new packed upload for efficiently uploading multiple small

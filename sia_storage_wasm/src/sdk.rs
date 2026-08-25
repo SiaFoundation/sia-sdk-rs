@@ -39,6 +39,14 @@ impl Sdk {
         AppKey(self.inner.app_key().clone())
     }
 
+    /// Returns the SDK's transfer totals. Reads counters only, so it is
+    /// cheap to poll on a display cadence.
+    #[wasm_bindgen(js_name = "transferStats", unchecked_return_type = "TransferStats")]
+    pub fn transfer_stats(&self) -> Result<JsValue, JsError> {
+        let stats: types::TransferStats = self.inner.transfer_stats().into();
+        types::to_js(&stats)
+    }
+
     /// Returns account information from the indexer.
     #[wasm_bindgen(unchecked_return_type = "Account")]
     pub async fn account(&self) -> Result<JsValue, JsError> {
