@@ -24,12 +24,13 @@ impl Sdk {
         Ok(())
     }
 
-    /// Lists and decrypts the objects attached to `key`.
+    /// Lists and decrypts the objects attached to `key`. Omit `offset` or
+    /// `limit` to use the indexer's default paging.
     pub async fn shared_objects(
         &self,
         key: &SharingKey,
-        offset: u64,
-        limit: u64,
+        offset: Option<u64>,
+        limit: Option<u64>,
     ) -> Result<Vec<Object>, SharingError> {
         let sealed = self
             .api_client
