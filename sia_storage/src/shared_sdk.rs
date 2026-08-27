@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, Utc};
@@ -24,6 +25,10 @@ const REFRESH_MARGIN_SECS: i64 = 60;
 const MIN_REFRESH_SECS: u64 = 30;
 /// Refresh at least this often, regardless of the tokens' claimed validity.
 const MAX_REFRESH_SECS: u64 = 4 * 60;
+/// Stop refreshing only after this many consecutive unauthorized responses. A
+/// single 401 can be transient clock skew, so one is not enough to conclude the
+/// sharing key was revoked.
+const MAX_AUTH_FAILURES: u32 = 3;
 
 /// A read-only SDK for downloading the objects a sharing key grants access to.
 ///
@@ -135,14 +140,42 @@ impl SharedSdk {
         Duration::from_secs(secs)
     }
 
-    /// Whether a refresh error is terminal, meaning the sharing key is no
-    /// longer accepted (deleted, expired, or revoked) so retrying cannot
-    /// recover it. Transient errors fall back to the floor interval instead.
-    fn is_terminal(err: &app_client::Error) -> bool {
-        matches!(
-            err,
-            app_client::Error::Unauthorized(_) | app_client::Error::NotFound(_)
-        )
+    /// Applies a refresh outcome to the loop's state, returning the next
+    /// earliest expiry to pace from, or [`ControlFlow::Break`] when the sharing
+    /// key is no longer accepted. Only [`MAX_AUTH_FAILURES`] consecutive
+    /// unauthorized responses count as revocation, since a single 401 can be
+    /// transient clock skew; every other error is transient and retried.
+    fn apply_refresh(
+        result: Result<Option<DateTime<Utc>>, app_client::Error>,
+        auth_failures: &mut u32,
+    ) -> ControlFlow<(), Option<DateTime<Utc>>> {
+        match result {
+            Ok(next) => {
+                *auth_failures = 0;
+                ControlFlow::Continue(next)
+            }
+            Err(app_client::Error::Unauthorized(err)) => {
+                *auth_failures += 1;
+                if *auth_failures >= MAX_AUTH_FAILURES {
+                    warn!(
+                        "shared key unauthorized {} times, stopping refresh: {err}",
+                        *auth_failures
+                    );
+                    ControlFlow::Break(())
+                } else {
+                    warn!(
+                        "shared hosts unauthorized ({}/{MAX_AUTH_FAILURES}), retrying: {err}",
+                        *auth_failures
+                    );
+                    ControlFlow::Continue(None)
+                }
+            }
+            Err(err) => {
+                warn!("failed to refresh shared hosts, retrying: {err}");
+                *auth_failures = 0;
+                ControlFlow::Continue(None)
+            }
+        }
     }
 
     /// Spawns a background task that refreshes the hosts and tokens, pacing
@@ -156,19 +189,13 @@ impl SharedSdk {
     ) -> AbortOnDropHandle<()> {
         AbortOnDropHandle::new(maybe_spawn!(async move {
             let mut earliest = initial_earliest;
+            let mut auth_failures = 0;
             loop {
                 sleep(Self::refresh_delay(earliest)).await;
-                match Self::refresh(&sharing_key, &api_client, &hosts, &tokens).await {
-                    Ok(next) => earliest = next,
-                    Err(err) if Self::is_terminal(&err) => {
-                        warn!("shared key no longer accessible, stopping refresh: {err}");
-                        break;
-                    }
-                    Err(err) => {
-                        warn!("failed to refresh shared hosts: {err}");
-                        // fall back to the floor interval and retry
-                        earliest = None;
-                    }
+                let result = Self::refresh(&sharing_key, &api_client, &hosts, &tokens).await;
+                match Self::apply_refresh(result, &mut auth_failures) {
+                    ControlFlow::Continue(next) => earliest = next,
+                    ControlFlow::Break(()) => break,
                 }
             }
         }))
@@ -256,6 +283,47 @@ mod tests {
     use httptest::matchers::*;
     use httptest::{Expectation, Server};
     use sia_core::signing::PrivateKey;
+
+    #[test]
+    fn test_apply_refresh_tolerates_transient_errors() {
+        let mut failures = 2;
+
+        // A non-auth error (e.g. a 404 during a redeploy) is transient and
+        // clears the streak.
+        assert!(matches!(
+            SharedSdk::apply_refresh(
+                Err(app_client::Error::NotFound("route".into())),
+                &mut failures
+            ),
+            ControlFlow::Continue(None)
+        ));
+        assert_eq!(failures, 0);
+
+        // Only MAX_AUTH_FAILURES consecutive 401s stop the loop.
+        for _ in 0..MAX_AUTH_FAILURES - 1 {
+            assert!(matches!(
+                SharedSdk::apply_refresh(
+                    Err(app_client::Error::Unauthorized("skew".into())),
+                    &mut failures
+                ),
+                ControlFlow::Continue(None)
+            ));
+        }
+        assert!(matches!(
+            SharedSdk::apply_refresh(
+                Err(app_client::Error::Unauthorized("revoked".into())),
+                &mut failures
+            ),
+            ControlFlow::Break(())
+        ));
+
+        // A success clears the streak.
+        assert!(matches!(
+            SharedSdk::apply_refresh(Ok(None), &mut failures),
+            ControlFlow::Continue(None)
+        ));
+        assert_eq!(failures, 0);
+    }
 
     #[tokio::test]
     async fn test_recipient_flow() {
