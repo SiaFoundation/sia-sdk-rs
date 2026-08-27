@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use chrono::{DateTime, Utc};
 use log::warn;
 use sia_core::rhp4::AccountToken;
-use sia_core::signing::{PrivateKey, PublicKey};
+use sia_core::signing::PublicKey;
 use sia_core::types::Hash256;
 
 use crate::app_client::IntoUrl;
@@ -14,8 +14,8 @@ use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, sleep};
 use crate::tokens::AccountTokenSource;
 use crate::{
-    AppKey, BuilderError, Download, DownloadError, DownloadOptions, Error, HostQuery, KeyStats,
-    Object, app_client,
+    BuilderError, Download, DownloadError, DownloadOptions, Error, HostQuery, KeyStats, Object,
+    SharingKey, app_client,
 };
 
 /// Refresh the token cache this long before the earliest token expires.
@@ -33,7 +33,7 @@ const MAX_REFRESH_SECS: u64 = 4 * 60;
 /// account; the tokens are refreshed automatically before they expire.
 #[derive(Clone)]
 pub struct SharedSdk {
-    sharing_key: Arc<AppKey>,
+    sharing_key: Arc<SharingKey>,
     api_client: app_client::Client,
     hosts: Hosts,
     tokens: Arc<RwLock<HashMap<PublicKey, AccountToken>>>,
@@ -45,7 +45,7 @@ impl SharedSdk {
     /// and the token cache. Returns the earliest token expiry so the caller can
     /// schedule the next refresh before it.
     async fn refresh(
-        sharing_key: &AppKey,
+        sharing_key: &SharingKey,
         api_client: &app_client::Client,
         hosts: &Hosts,
         tokens: &RwLock<HashMap<PublicKey, AccountToken>>,
@@ -92,16 +92,16 @@ impl SharedSdk {
     /// recipient is up to the caller.
     pub async fn connect<U: IntoUrl>(indexer_url: U, seed: [u8; 32]) -> Result<Self, BuilderError> {
         let api_client = app_client::Client::new(indexer_url)?;
-        Self::new(api_client, PrivateKey::from_seed(&seed)).await
+        Self::new(api_client, SharingKey::import(seed)).await
     }
 
     /// Connects as the recipient of a sharing key. Seeds the host list and token
     /// cache and spawns a task that refreshes them before the tokens expire.
     pub(crate) async fn new(
         api_client: app_client::Client,
-        sharing_key: PrivateKey,
+        sharing_key: SharingKey,
     ) -> Result<Self, BuilderError> {
-        let sharing_key = Arc::new(AppKey(sharing_key));
+        let sharing_key = Arc::new(sharing_key);
         let hosts = Hosts::new(Client::new());
         let tokens = Arc::new(RwLock::new(HashMap::new()));
         let earliest = Self::refresh(&sharing_key, &api_client, &hosts, &tokens).await?;
@@ -148,7 +148,7 @@ impl SharedSdk {
     /// Spawns a background task that refreshes the hosts and tokens, pacing
     /// itself off the tokens' expiry.
     fn spawn_refresh_task(
-        sharing_key: Arc<AppKey>,
+        sharing_key: Arc<SharingKey>,
         api_client: app_client::Client,
         hosts: Hosts,
         tokens: Arc<RwLock<HashMap<PublicKey, AccountToken>>>,
@@ -189,7 +189,7 @@ impl SharedSdk {
             .shared_object_by_id(&self.sharing_key.0, key)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
-        Ok(sealed.open(self.sharing_key.as_ref())?)
+        Ok(sealed.open_with(&self.sharing_key.0)?)
     }
 
     /// Lists and decrypts a page of the objects the sharing key grants access
@@ -202,7 +202,7 @@ impl SharedSdk {
             .map_err(|e| Error::App(format!("{e:?}")))?;
         sealed
             .into_iter()
-            .map(|s| s.open(self.sharing_key.as_ref()).map_err(Error::from))
+            .map(|s| s.open_with(&self.sharing_key.0).map_err(Error::from))
             .collect()
     }
 
@@ -251,6 +251,7 @@ mod tests {
     use httptest::http::{Response, StatusCode};
     use httptest::matchers::*;
     use httptest::{Expectation, Server};
+    use sia_core::signing::PrivateKey;
 
     #[tokio::test]
     async fn test_recipient_flow() {
@@ -291,8 +292,7 @@ mod tests {
             ..Default::default()
         };
         let object_id = object.id();
-        let object_body =
-            serde_json::to_string(&object.seal(&AppKey(sharing_key.clone()))).unwrap();
+        let object_body = serde_json::to_string(&object.seal_with(&sharing_key)).unwrap();
 
         let stats = KeyStats {
             object_count: 1,
