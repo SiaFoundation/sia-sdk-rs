@@ -829,4 +829,137 @@ mod test {
             .expect_err("a record for another key must be rejected");
         assert!(matches!(err, SharingError::KeyMismatch), "{err}");
     }
+
+    #[tokio::test]
+    async fn test_unshare_object_detaches() {
+        use httptest::http::{Response, StatusCode};
+        use httptest::matchers::*;
+        use httptest::{Expectation, Server};
+
+        use crate::{AppKey, Host};
+
+        let app_key = Arc::new(AppKey::import(random_seed()));
+        let sharing_key = SharingKey::import([1u8; 32]);
+        let object_id = sia_core::types::Hash256::new([2u8; 32]);
+        let path = format!(
+            "/sharing/{}/objects/{}",
+            sharing_key.public_key(),
+            object_id
+        );
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/hosts"))
+                .times(..)
+                .respond_with(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(serde_json::to_string(&Vec::<Host>::new()).unwrap())
+                        .unwrap(),
+                ),
+        );
+        // The exact DELETE path is the assertion: httptest panics on any request
+        // it has no expectation for, and on an unmet expectation at drop.
+        server.expect(
+            Expectation::matching(request::method_path("DELETE", path))
+                .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();
+        let sdk = Sdk::new(client, app_key)
+            .await
+            .expect("failed to build sdk");
+
+        sdk.unshare_object(&sharing_key, &object_id)
+            .await
+            .expect("detaching an attached object should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_unshare_object_not_attached() {
+        use httptest::http::{Response, StatusCode};
+        use httptest::matchers::*;
+        use httptest::{Expectation, Server};
+
+        use crate::{AppKey, Host};
+
+        let app_key = Arc::new(AppKey::import(random_seed()));
+        let sharing_key = SharingKey::import([1u8; 32]);
+        let object_id = sia_core::types::Hash256::new([2u8; 32]);
+        let path = format!(
+            "/sharing/{}/objects/{}",
+            sharing_key.public_key(),
+            object_id
+        );
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/hosts"))
+                .times(..)
+                .respond_with(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(serde_json::to_string(&Vec::<Host>::new()).unwrap())
+                        .unwrap(),
+                ),
+        );
+        // A 404 means the object was never attached to this key.
+        server.expect(
+            Expectation::matching(request::method_path("DELETE", path)).respond_with(
+                Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body("not attached")
+                    .unwrap(),
+            ),
+        );
+
+        let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();
+        let sdk = Sdk::new(client, app_key)
+            .await
+            .expect("failed to build sdk");
+
+        let err = sdk
+            .unshare_object(&sharing_key, &object_id)
+            .await
+            .expect_err("detaching an unattached object should fail");
+        assert!(matches!(err, SharingError::ObjectNotAttached), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_revoke_sharing_key() {
+        use httptest::http::{Response, StatusCode};
+        use httptest::matchers::*;
+        use httptest::{Expectation, Server};
+
+        use crate::{AppKey, Host};
+
+        let app_key = Arc::new(AppKey::import(random_seed()));
+        let sharing_key = SharingKey::import([1u8; 32]);
+        let path = format!("/sharing/{}", sharing_key.public_key());
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/hosts"))
+                .times(..)
+                .respond_with(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(serde_json::to_string(&Vec::<Host>::new()).unwrap())
+                        .unwrap(),
+                ),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("DELETE", path))
+                .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();
+        let sdk = Sdk::new(client, app_key)
+            .await
+            .expect("failed to build sdk");
+
+        sdk.revoke_sharing_key(&sharing_key)
+            .await
+            .expect("revoking a key should succeed");
+    }
 }
