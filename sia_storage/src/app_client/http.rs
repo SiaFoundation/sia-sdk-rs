@@ -616,7 +616,7 @@ mod tests {
     use sia_core::{hash_256, public_key};
 
     use crate::AppKey;
-    use crate::sharing::{Nonce, SharingKey};
+    use crate::sharing::Nonce;
 
     use crate::app_client::{
         QUERY_PARAM_CREDENTIAL, QUERY_PARAM_SIGNATURE, QUERY_PARAM_VALID_UNTIL, request_hash,
@@ -2094,10 +2094,8 @@ mod tests {
         let server = Server::run();
 
         let key = KeyResponse {
-            key: SharingKey {
-                public_key: sharing_pub,
-                nonce: Nonce([7u8; 32]),
-            },
+            public_key: sharing_pub,
+            nonce: Nonce([7u8; 32]),
             account: expected_pk,
             description: "photos".to_string(),
             stats: KeyStats {
@@ -2140,7 +2138,7 @@ mod tests {
 
         let client = Client::new(server.url("/").to_string()).unwrap();
 
-        let req = KeyRequest::new(&sharing_key, key.key.nonce, "photos".to_string(), None);
+        let req = KeyRequest::new(&sharing_key, key.nonce, "photos".to_string(), None);
         let created = client.add_sharing_key(&app_key, &req).await.unwrap();
         assert_eq!(created, key);
 

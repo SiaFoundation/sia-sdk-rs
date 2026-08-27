@@ -12,21 +12,21 @@ use tokio::io::AsyncRead;
 use url::Url;
 
 use crate::app_client::PinObjectError::UnpinnedSlab;
-use crate::app_client::{self, SLAB_PIN_BATCH_SIZE, SlabPinParams};
+use crate::app_client::{self, KeyResponse, SLAB_PIN_BATCH_SIZE, SlabPinParams};
 use crate::hosts::Hosts;
 use crate::rhp4::{Client, HostEndpoint};
-use crate::sharing::{self, KeyRequest, Nonce, SharingKey};
+use crate::sharing::{self, KeyRecord, KeyRequest, Nonce, SharingError, SharingKey};
 use crate::task::AbortOnDropHandle;
 use crate::time::Duration;
 use crate::upload::{PackedUpload, upload_object};
 use crate::{
     Account, AppKey, BuilderError, Download, DownloadError, DownloadOptions, Host, HostQuery,
-    KeyResponse, Object, ObjectEvent, ObjectsCursor, PackedUploadOptions, PinnedSlab,
-    SealedObjectError, SharingKeyOptions, UploadError, UploadOptions,
+    Object, ObjectEvent, ObjectsCursor, PackedUploadOptions, PinnedSlab, SealedObjectError,
+    SharingKeyOptions, UploadError, UploadOptions,
 };
 
-/// `SharingKey`'s operations live here so they can reach this module's private
-/// fields. The type itself is defined in [`crate::sharing`].
+/// The `Sdk` sharing methods live here so they can reach this module's private
+/// fields.
 mod sharing_key;
 
 /// Errors that can occur when using the SDK.
@@ -35,10 +35,6 @@ pub enum Error {
     /// An error from the indexer API.
     #[error("app error: {0}")]
     App(String),
-
-    /// The object is not attached to the sharing key.
-    #[error("object is not attached to the sharing key")]
-    ObjectNotAttached,
 
     /// An error during upload.
     #[error("upload error: {0}")]
@@ -432,15 +428,15 @@ impl Sdk {
             .map_err(|e| Error::App(format!("{e:?}")))
     }
 
-    /// Creates a sharing key. Attach objects to it with
-    /// [`SharingKey::add_object`].
+    /// Creates a sharing key granting read-only access to the objects the
+    /// account attaches to it with [`Sdk::share_object`].
     ///
     /// # Arguments
     /// * `options` - The [SharingKeyOptions] to create the key with.
     pub async fn create_sharing_key(
         &self,
         options: SharingKeyOptions,
-    ) -> Result<SharingKey, Error> {
+    ) -> Result<SharingKey, SharingError> {
         let nonce = Nonce(rand::random());
         let sharing_key =
             PrivateKey::from_seed(&sharing::derive_sharing_seed(&self.app_key.0, &nonce));
@@ -448,42 +444,64 @@ impl Sdk {
         let created = self
             .api_client
             .add_sharing_key(&self.app_key.0, &req)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
+            .await?;
 
         // Checked against the locally generated nonce so an indexer echoing a
         // different key of this account cannot make the caller seal objects
         // under it.
-        if created.key.nonce != nonce || created.key.public_key != sharing_key.public_key() {
-            return Err(Error::App(
-                "indexer returned a different sharing key than was created".into(),
-            ));
+        if created.nonce != nonce || created.public_key != sharing_key.public_key() {
+            return Err(SharingError::KeyMismatch);
         }
-        Ok(created.key)
+        Ok(SharingKey(sharing_key))
     }
 
-    /// Lists the account's sharing keys.
-    pub async fn sharing_keys(&self, offset: u64, limit: u64) -> Result<Vec<KeyResponse>, Error> {
-        self.api_client
+    /// Lists the account's sharing keys, each re-derived into a usable credential
+    /// so it can be passed back to [`Sdk::share_object`],
+    /// [`Sdk::revoke_sharing_key`], and the other sharing methods.
+    pub async fn sharing_keys(
+        &self,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<KeyRecord>, SharingError> {
+        let records = self
+            .api_client
             .sharing_keys(&self.app_key.0, offset, limit)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))
+            .await?;
+        records.into_iter().map(|r| self.key_record(r)).collect()
     }
 
     /// Fetches the indexer's current record for `key`.
-    pub async fn sharing_key(&self, key: &SharingKey) -> Result<KeyResponse, Error> {
+    pub async fn sharing_key(&self, key: &SharingKey) -> Result<KeyRecord, SharingError> {
         let record = self
             .api_client
-            .sharing_key(&self.app_key.0, &key.public_key)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
-
-        if record.key != *key {
-            return Err(Error::App(
-                "indexer returned a different sharing key than requested".into(),
-            ));
+            .sharing_key(&self.app_key.0, &key.public_key())
+            .await?;
+        if record.public_key != key.public_key() {
+            return Err(SharingError::KeyMismatch);
         }
-        Ok(record)
+        Ok(KeyRecord {
+            key: key.clone(),
+            description: record.description,
+            stats: record.stats,
+        })
+    }
+
+    /// Re-derives the sharing key an indexer record names and pairs it with the
+    /// record's stats, rejecting a record whose nonce does not derive its public
+    /// key.
+    fn key_record(&self, record: KeyResponse) -> Result<KeyRecord, SharingError> {
+        let sharing_key = PrivateKey::from_seed(&sharing::derive_sharing_seed(
+            &self.app_key.0,
+            &record.nonce,
+        ));
+        if sharing_key.public_key() != record.public_key {
+            return Err(SharingError::KeyMismatch);
+        }
+        Ok(KeyRecord {
+            key: SharingKey(sharing_key),
+            description: record.description,
+            stats: record.stats,
+        })
     }
 }
 
@@ -688,10 +706,8 @@ mod test {
         let other_nonce = Nonce([9u8; 32]);
         let other_seed = derive_sharing_seed(&app_key.0, &other_nonce);
         let substituted = KeyResponse {
-            key: SharingKey {
-                public_key: PrivateKey::from_seed(&other_seed).public_key(),
-                nonce: other_nonce,
-            },
+            public_key: PrivateKey::from_seed(&other_seed).public_key(),
+            nonce: other_nonce,
             account: app_key.public_key(),
             description: "photos".to_string(),
             stats: KeyStats {
@@ -738,7 +754,7 @@ mod test {
             })
             .await
             .expect_err("a substituted key must be rejected");
-        assert!(format!("{err}").contains("different sharing key"), "{err}");
+        assert!(matches!(err, SharingError::KeyMismatch), "{err}");
     }
 
     // Fetching a key by its public key must reject a record for a *different*
@@ -759,16 +775,11 @@ mod test {
             |nonce| PrivateKey::from_seed(&derive_sharing_seed(&app_key.0, &nonce)).public_key();
 
         let requested_nonce = Nonce([1u8; 32]);
-        let requested = SharingKey {
-            public_key: account_key(requested_nonce),
-            nonce: requested_nonce,
-        };
+        let requested = SharingKey::import(derive_sharing_seed(&app_key.0, &requested_nonce));
         let other_nonce = Nonce([9u8; 32]);
         let substituted = KeyResponse {
-            key: SharingKey {
-                public_key: account_key(other_nonce),
-                nonce: other_nonce,
-            },
+            public_key: account_key(other_nonce),
+            nonce: other_nonce,
             account: app_key.public_key(),
             description: "photos".to_string(),
             stats: KeyStats {
@@ -781,7 +792,7 @@ mod test {
                 updated_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
             },
         };
-        assert_ne!(substituted.key.public_key, requested.public_key);
+        assert_ne!(substituted.public_key, requested.public_key());
 
         let server = Server::run();
         server.expect(
@@ -797,7 +808,7 @@ mod test {
         server.expect(
             Expectation::matching(request::method_path(
                 "GET",
-                format!("/sharing/{}", requested.public_key),
+                format!("/sharing/{}", requested.public_key()),
             ))
             .respond_with(
                 Response::builder()
@@ -816,9 +827,6 @@ mod test {
             .sharing_key(&requested)
             .await
             .expect_err("a record for another key must be rejected");
-        assert!(
-            format!("{err}").contains("different sharing key than requested"),
-            "{err}"
-        );
+        assert!(matches!(err, SharingError::KeyMismatch), "{err}");
     }
 }
