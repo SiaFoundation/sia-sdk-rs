@@ -15,7 +15,7 @@ use thiserror::Error;
 use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::DecryptError;
-use crate::sharing::{KeyRequest, SharedObjectRequest, SharingKey};
+use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
 use crate::slabs::{Sector, SlabVersion};
 use crate::{
     Account, AppMetadata, HostQuery, Object, ObjectsCursor, PinnedSlab, SealedObject, Slab,
@@ -206,14 +206,15 @@ pub struct KeyStats {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A sharing key record from the indexer: the key, who owns it, its description,
-/// and its [`KeyStats`]. The counts are a snapshot, not a live view.
+/// A sharing key record from the indexer: the key's public half and nonce, the
+/// account that owns it, its description, and its [`KeyStats`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct KeyResponse {
-    /// The key this record describes.
-    #[serde(flatten)]
-    pub key: SharingKey,
+pub(crate) struct KeyResponse {
+    /// The public half of the sharing key.
+    pub public_key: PublicKey,
+    /// The nonce the key was derived from.
+    pub nonce: Nonce,
     /// The account that owns the key.
     pub account: PublicKey,
     /// A human-readable description.

@@ -1,3 +1,5 @@
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
@@ -8,9 +10,9 @@ use sia_core::encoding::SiaEncodable;
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;
 
-use crate::AppKey;
+use crate::app_client::{self, KeyStats};
 use crate::object_encryption::derive;
-use crate::slabs::Object;
+use crate::slabs::{Object, SealedObjectError};
 
 /// The size of a sharing key [`Nonce`].
 pub const NONCE_SIZE: usize = 32;
@@ -112,7 +114,7 @@ impl SharedObjectRequest {
     /// Re-seals `object` under `sharing_key` so a recipient holding that key can
     /// decrypt it.
     pub(crate) fn new(object: &Object, sharing_key: &PrivateKey) -> Self {
-        let sealed = object.seal(&AppKey(sharing_key.clone()));
+        let sealed = object.seal_with(sharing_key);
         Self {
             object_id: object.id(),
             encrypted_data_key: sealed.encrypted_data_key,
@@ -124,13 +126,74 @@ impl SharedObjectRequest {
     }
 }
 
-/// A sharing key, granting read-only access to the objects attached to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SharingKey {
-    /// The key's public half. Recipients are identified by it.
-    pub public_key: PublicKey,
-    pub(crate) nonce: Nonce,
+/// A credential granting read-only access to the objects attached to it. Like
+/// an [`AppKey`](crate::AppKey), it wraps a private key and is shared out of
+/// band: the account that created it attaches and detaches objects, and any
+/// holder of the key can list and download them.
+#[derive(Clone)]
+pub struct SharingKey(pub(crate) PrivateKey);
+
+impl SharingKey {
+    /// Imports a sharing key from a seed exported with [`SharingKey::export`] or
+    /// handed out by the key's owner.
+    pub fn import(seed: [u8; 32]) -> Self {
+        SharingKey(PrivateKey::from_seed(&seed))
+    }
+
+    /// Exports the key's seed, the whole credential a recipient needs to read
+    /// its objects.
+    pub fn export(&self) -> [u8; 32] {
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&self.0.as_ref()[..32]);
+        seed
+    }
+
+    /// Returns the key's public half, by which the indexer identifies it.
+    pub fn public_key(&self) -> PublicKey {
+        self.0.public_key()
+    }
+}
+
+impl fmt::Debug for SharingKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SharingKey")
+            .field(&self.public_key())
+            .finish()
+    }
+}
+
+/// One of an account's sharing keys as returned by
+/// [`Sdk::sharing_keys`](crate::Sdk::sharing_keys): the credential paired with
+/// the indexer's snapshot of what it grants access to.
+#[derive(Debug, Clone)]
+pub struct KeyRecord {
+    /// The sharing key credential.
+    pub key: SharingKey,
+    /// The key's human-readable description.
+    pub description: String,
+    /// A snapshot of the objects the key grants access to.
+    pub stats: KeyStats,
+}
+
+/// Errors returned by the [`Sdk`](crate::Sdk) sharing key operations.
+#[derive(Debug, thiserror::Error)]
+pub enum SharingError {
+    /// The indexer request failed.
+    #[error("app error: {0}")]
+    Api(#[from] app_client::Error),
+
+    /// The object is not attached to the sharing key.
+    #[error("object is not attached to the sharing key")]
+    ObjectNotAttached,
+
+    /// The indexer returned a sharing key that does not match the one that was
+    /// created or requested.
+    #[error("indexer returned a mismatched sharing key")]
+    KeyMismatch,
+
+    /// A shared object could not be opened.
+    #[error("sealed object: {0}")]
+    SealedObject(#[from] SealedObjectError),
 }
 
 #[cfg(test)]
