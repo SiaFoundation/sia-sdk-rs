@@ -8,7 +8,7 @@ use serde_with::base64::Base64;
 use serde_with::{DefaultOnNull, serde_as};
 use sia_core::blake2::{Blake2b256, Digest};
 use sia_core::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
-use sia_core::signing::{PublicKey, Signature};
+use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;
 use thiserror::Error;
 
@@ -292,15 +292,18 @@ impl SealedObject {
 
     /// Decrypts and verifies the sealed object, returning the underlying [Object].
     pub fn open(self, app_key: &AppKey) -> Result<Object, SealedObjectError> {
-        // verify signatures first
-        let object_id = self.id();
-        self.verify_signatures(&app_key.public_key(), &object_id)?;
+        self.open_with(&app_key.0)
+    }
 
-        // decrypt data key and metadata
-        let data_key = open_data_key(&app_key.0, &object_id, &self.encrypted_data_key)?;
+    /// Decrypts and verifies the sealed object with the private key it was sealed
+    /// under, returning the underlying [Object].
+    pub(crate) fn open_with(self, key: &PrivateKey) -> Result<Object, SealedObjectError> {
+        let object_id = self.id();
+        self.verify_signatures(&key.public_key(), &object_id)?;
+
+        let data_key = open_data_key(key, &object_id, &self.encrypted_data_key)?;
         let metadata = if !self.encrypted_metadata.is_empty() {
-            let metadata_key =
-                open_metadata_key(&app_key.0, &object_id, &self.encrypted_metadata_key)?;
+            let metadata_key = open_metadata_key(key, &object_id, &self.encrypted_metadata_key)?;
             open_metadata(&metadata_key, &self.encrypted_metadata)?
         } else {
             Vec::new()
@@ -475,19 +478,23 @@ impl Object {
 
     /// Encrypts and signs the object, producing a [SealedObject] that can be pinned to the indexer.
     pub fn seal(&self, app_key: &AppKey) -> SealedObject {
+        self.seal_with(&app_key.0)
+    }
+
+    /// Encrypts and signs the object with `key`, producing a [SealedObject] only
+    /// the holder of `key` can open.
+    pub(crate) fn seal_with(&self, key: &PrivateKey) -> SealedObject {
         let object_id = self.id();
 
-        // encrypt data key and create data signature
-        let encrypted_data_key = seal_data_key(&app_key.0, &object_id, &self.data_key);
+        let encrypted_data_key = seal_data_key(key, &object_id, &self.data_key);
         let data_signature = {
             let sig_hash = SealedObject::data_sig_hash(&object_id, &encrypted_data_key);
-            app_key.sign(sig_hash.as_ref())
+            key.sign(sig_hash.as_ref())
         };
 
-        // encrypt metadata key and metadata, if present, and create metadata signature
         let (encrypted_metadata_key, encrypted_metadata) = if !self.metadata.is_empty() {
             let metadata_key = EncryptionKey::from(rand::random::<[u8; 32]>());
-            let encrypted_metadata_key = seal_metadata_key(&app_key.0, &object_id, &metadata_key);
+            let encrypted_metadata_key = seal_metadata_key(key, &object_id, &metadata_key);
             let encrypted_metadata = seal_metadata(&metadata_key, &self.metadata);
             (encrypted_metadata_key, encrypted_metadata)
         } else {
@@ -500,7 +507,7 @@ impl Object {
                 &encrypted_metadata_key,
                 &encrypted_metadata,
             );
-            app_key.sign(sig_hash.as_ref())
+            key.sign(sig_hash.as_ref())
         };
 
         SealedObject {
