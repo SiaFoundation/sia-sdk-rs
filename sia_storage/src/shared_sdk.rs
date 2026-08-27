@@ -216,6 +216,12 @@ impl SharedSdk {
             .shared_object_by_id(&self.sharing_key.0, key)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
+        let id = sealed.id();
+        if id != *key {
+            return Err(Error::App(format!(
+                "indexer returned object {id} but {key} was requested"
+            )));
+        }
         Ok(sealed.open_with(&self.sharing_key.0)?)
     }
 
@@ -439,5 +445,82 @@ mod tests {
         assert_eq!(fetched.slabs(), object.slabs());
 
         assert!(sdk.download(&object, DownloadOptions::default()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_object_rejects_mismatched_id() {
+        let sharing_seed = [7u8; 32];
+        let sharing_key = PrivateKey::from_seed(&sharing_seed);
+
+        let host = Host {
+            public_key: PublicKey::new([3u8; 32]),
+            addresses: vec![],
+            country_code: "US".to_string(),
+            latitude: 0.0,
+            longitude: 0.0,
+            good_for_upload: true,
+        };
+        let token = AccountToken::new(&PrivateKey::from_seed(&[8u8; 32]), host.public_key);
+        let hosts_body = serde_json::to_string(&vec![SharedHost {
+            host: host.clone(),
+            token,
+        }])
+        .unwrap();
+
+        // A validly sealed object whose real id differs from the one requested.
+        let object = Object {
+            data_key: [9u8; 32].into(),
+            slabs: vec![Slab {
+                version: V0,
+                encryption_key: [1u8; 32].into(),
+                min_shards: 1,
+                sectors: vec![Sector {
+                    root: Hash256::new([2u8; 32]),
+                    host_key: host.public_key,
+                }],
+                offset: 0,
+                length: 256,
+            }],
+            ..Default::default()
+        };
+        let object_body = serde_json::to_string(&object.seal_with(&sharing_key)).unwrap();
+        let requested_id = Hash256::new([0xabu8; 32]);
+        assert_ne!(requested_id, object.id());
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/shared/hosts"))
+                .times(1..)
+                .respond_with(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(hosts_body)
+                        .unwrap(),
+                ),
+        );
+        // The indexer answers the request for `requested_id` with a different
+        // object that is nonetheless sealed under the same sharing key.
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!("/shared/objects/{requested_id}"),
+            ))
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(object_body)
+                    .unwrap(),
+            ),
+        );
+
+        let sdk = SharedSdk::connect(format!("http://{}", server.addr()), sharing_seed)
+            .await
+            .expect("failed to build shared sdk");
+
+        let err = sdk.object(&requested_id).await.unwrap_err();
+        assert!(
+            matches!(err, Error::App(ref msg) if msg.contains("was requested")),
+            "expected an id-mismatch error, got: {err:?}"
+        );
     }
 }
