@@ -420,14 +420,27 @@ impl Client {
         self.get_json::<_, ()>("shared", sharing_key, None).await
     }
 
+    /// Builds the offset and limit query params for a paginated request,
+    /// omitting either that is not set.
+    fn pagination_query(offset: Option<u64>, limit: Option<u64>) -> Vec<(&'static str, String)> {
+        let mut query = Vec::new();
+        if let Some(offset) = offset {
+            query.push(("offset", offset.to_string()));
+        }
+        if let Some(limit) = limit {
+            query.push(("limit", limit.to_string()));
+        }
+        query
+    }
+
     /// Lists the objects the sharing key grants access to.
     pub(crate) async fn shared_objects(
         &self,
         sharing_key: &PrivateKey,
-        offset: u64,
-        limit: u64,
+        offset: Option<u64>,
+        limit: Option<u64>,
     ) -> Result<Vec<SealedObject>, Error> {
-        let query = [("offset", offset.to_string()), ("limit", limit.to_string())];
+        let query = Self::pagination_query(offset, limit);
         self.get_json::<_, _>("shared/objects", sharing_key, Some(&query))
             .await
     }
@@ -466,10 +479,10 @@ impl Client {
     pub(crate) async fn sharing_keys(
         &self,
         app_key: &PrivateKey,
-        offset: u64,
-        limit: u64,
+        offset: Option<u64>,
+        limit: Option<u64>,
     ) -> Result<Vec<KeyResponse>, Error> {
-        let query = [("offset", offset.to_string()), ("limit", limit.to_string())];
+        let query = Self::pagination_query(offset, limit);
         self.get_json::<_, _>("sharing", app_key, Some(&query))
             .await
     }
@@ -514,10 +527,10 @@ impl Client {
         &self,
         app_key: &PrivateKey,
         sharing_key: &PublicKey,
-        offset: u64,
-        limit: u64,
+        offset: Option<u64>,
+        limit: Option<u64>,
     ) -> Result<Vec<SealedObject>, Error> {
-        let query = [("offset", offset.to_string()), ("limit", limit.to_string())];
+        let query = Self::pagination_query(offset, limit);
         self.get_json::<_, _>(
             &format!("sharing/{sharing_key}/objects"),
             app_key,
@@ -628,6 +641,23 @@ mod tests {
     use httptest::http::Response;
     use httptest::matchers::*;
     use httptest::{Expectation, Server};
+
+    #[test]
+    fn test_pagination_query() {
+        assert!(Client::pagination_query(None, None).is_empty());
+        assert_eq!(
+            Client::pagination_query(Some(5), None),
+            vec![("offset", "5".to_string())]
+        );
+        assert_eq!(
+            Client::pagination_query(None, Some(10)),
+            vec![("limit", "10".to_string())]
+        );
+        assert_eq!(
+            Client::pagination_query(Some(5), Some(10)),
+            vec![("offset", "5".to_string()), ("limit", "10".to_string())]
+        );
+    }
 
     /// Validates a signed HTTP request by reconstructing the URL from the
     /// request, then verifying the credential, signature, and expiration.
@@ -2066,7 +2096,10 @@ mod tests {
 
         assert_eq!(client.shared_stats(&sharing_key).await.unwrap(), stats);
         assert_eq!(
-            client.shared_objects(&sharing_key, 0, 100).await.unwrap(),
+            client
+                .shared_objects(&sharing_key, Some(0), Some(100))
+                .await
+                .unwrap(),
             vec![sealed.clone()]
         );
         assert_eq!(

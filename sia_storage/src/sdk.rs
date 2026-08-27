@@ -460,8 +460,8 @@ impl Sdk {
     /// [`Sdk::revoke_sharing_key`], and the other sharing methods.
     pub async fn sharing_keys(
         &self,
-        offset: u64,
-        limit: u64,
+        offset: Option<u64>,
+        limit: Option<u64>,
     ) -> Result<Vec<KeyRecord>, SharingError> {
         let records = self
             .api_client

@@ -557,8 +557,8 @@ impl Client {
     pub(crate) async fn shared_objects(
         &self,
         sharing_key: &PrivateKey,
-        offset: u64,
-        limit: u64,
+        offset: Option<u64>,
+        limit: Option<u64>,
     ) -> Result<Vec<SealedObject>, Error> {
         match self {
             Self::Http(c) => c.shared_objects(sharing_key, offset, limit).await,
@@ -611,8 +611,8 @@ impl Client {
     pub(crate) async fn sharing_keys(
         &self,
         app_key: &PrivateKey,
-        offset: u64,
-        limit: u64,
+        offset: Option<u64>,
+        limit: Option<u64>,
     ) -> Result<Vec<KeyResponse>, Error> {
         match self {
             Self::Http(c) => c.sharing_keys(app_key, offset, limit).await,
@@ -666,8 +666,8 @@ impl Client {
         &self,
         app_key: &PrivateKey,
         sharing_key: &PublicKey,
-        offset: u64,
-        limit: u64,
+        offset: Option<u64>,
+        limit: Option<u64>,
     ) -> Result<Vec<SealedObject>, Error> {
         match self {
             Self::Http(c) => {

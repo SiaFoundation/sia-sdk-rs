@@ -193,8 +193,12 @@ impl SharedSdk {
     }
 
     /// Lists and decrypts a page of the objects the sharing key grants access
-    /// to.
-    pub async fn objects(&self, offset: u64, limit: u64) -> Result<Vec<Object>, Error> {
+    /// to. Omit `offset` or `limit` to use the indexer's default paging.
+    pub async fn objects(
+        &self,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Object>, Error> {
         let sealed = self
             .api_client
             .shared_objects(&self.sharing_key.0, offset, limit)
