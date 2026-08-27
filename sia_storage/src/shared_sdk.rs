@@ -25,9 +25,9 @@ const REFRESH_MARGIN_SECS: i64 = 60;
 const MIN_REFRESH_SECS: u64 = 30;
 /// Refresh at least this often, regardless of the tokens' claimed validity.
 const MAX_REFRESH_SECS: u64 = 4 * 60;
-/// Stop refreshing only after this many consecutive unauthorized responses. A
-/// single 401 can be transient clock skew, so one is not enough to conclude the
-/// sharing key was revoked.
+/// Stop refreshing only after this many unauthorized responses with no
+/// successful refresh in between. A single 401 can be transient clock skew, so
+/// one is not enough to conclude the sharing key was revoked.
 const MAX_AUTH_FAILURES: u32 = 3;
 
 /// A read-only SDK for downloading the objects a sharing key grants access to.
@@ -142,9 +142,10 @@ impl SharedSdk {
 
     /// Applies a refresh outcome to the loop's state, returning the next
     /// earliest expiry to pace from, or [`ControlFlow::Break`] when the sharing
-    /// key is no longer accepted. Only [`MAX_AUTH_FAILURES`] consecutive
-    /// unauthorized responses count as revocation, since a single 401 can be
-    /// transient clock skew; every other error is transient and retried.
+    /// key is no longer accepted. A single 401 can be transient clock skew, so
+    /// revocation is only concluded after [`MAX_AUTH_FAILURES`] unauthorized
+    /// responses with no successful refresh in between. A success clears the
+    /// count; any other error is transient and retried without clearing it.
     fn apply_refresh(
         result: Result<Option<DateTime<Utc>>, app_client::Error>,
         auth_failures: &mut u32,
@@ -172,7 +173,6 @@ impl SharedSdk {
             }
             Err(err) => {
                 warn!("failed to refresh shared hosts, retrying: {err}");
-                *auth_failures = 0;
                 ControlFlow::Continue(None)
             }
         }
@@ -285,11 +285,20 @@ mod tests {
     use sia_core::signing::PrivateKey;
 
     #[test]
-    fn test_apply_refresh_tolerates_transient_errors() {
-        let mut failures = 2;
+    fn test_apply_refresh_stops_after_repeated_unauthorized() {
+        let mut failures = 0;
 
-        // A non-auth error (e.g. a 404 during a redeploy) is transient and
-        // clears the streak.
+        // Unauthorized responses accumulate the streak.
+        assert!(matches!(
+            SharedSdk::apply_refresh(
+                Err(app_client::Error::Unauthorized("skew".into())),
+                &mut failures
+            ),
+            ControlFlow::Continue(None)
+        ));
+        // A transient non-auth error (e.g. a 404 during a redeploy) is retried
+        // but must NOT clear the streak, or a revoked key on a flaky connection
+        // would never stop refreshing.
         assert!(matches!(
             SharedSdk::apply_refresh(
                 Err(app_client::Error::NotFound("route".into())),
@@ -297,18 +306,16 @@ mod tests {
             ),
             ControlFlow::Continue(None)
         ));
-        assert_eq!(failures, 0);
+        assert_eq!(failures, 1, "a transient error must not reset the streak");
 
-        // Only MAX_AUTH_FAILURES consecutive 401s stop the loop.
-        for _ in 0..MAX_AUTH_FAILURES - 1 {
-            assert!(matches!(
-                SharedSdk::apply_refresh(
-                    Err(app_client::Error::Unauthorized("skew".into())),
-                    &mut failures
-                ),
-                ControlFlow::Continue(None)
-            ));
-        }
+        // Reaching MAX_AUTH_FAILURES unauthorized responses stops the loop.
+        assert!(matches!(
+            SharedSdk::apply_refresh(
+                Err(app_client::Error::Unauthorized("still".into())),
+                &mut failures
+            ),
+            ControlFlow::Continue(None)
+        ));
         assert!(matches!(
             SharedSdk::apply_refresh(
                 Err(app_client::Error::Unauthorized("revoked".into())),
@@ -317,7 +324,8 @@ mod tests {
             ControlFlow::Break(())
         ));
 
-        // A success clears the streak.
+        // Only a successful refresh clears the streak.
+        let mut failures = 2;
         assert!(matches!(
             SharedSdk::apply_refresh(Ok(None), &mut failures),
             ControlFlow::Continue(None)
