@@ -123,3 +123,44 @@ pub(crate) fn open_metadata(
         .map_err(|_| DecryptError::Decryption)?;
     Ok(decrypted_metadata)
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[sia_core_derive::cross_target_test]
+    fn test_data_key_seal_open_roundtrip() {
+        let app_key = PrivateKey::from_seed(&[1u8; 32]);
+        let object_id = Hash256::new([2u8; 32]);
+        let data_key = EncryptionKey::from([3u8; 32]);
+
+        let sealed = seal_data_key(&app_key, &object_id, &data_key);
+        let opened = open_data_key(&app_key, &object_id, &sealed).expect("should open");
+        assert_eq!(opened, data_key);
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_open_data_key_rejects_wrong_key() {
+        let app_key = PrivateKey::from_seed(&[1u8; 32]);
+        let wrong_key = PrivateKey::from_seed(&[9u8; 32]);
+        let object_id = Hash256::new([2u8; 32]);
+        let data_key = EncryptionKey::from([3u8; 32]);
+
+        // A different app key derives a different cipher, so the AEAD tag fails.
+        let sealed = seal_data_key(&app_key, &object_id, &data_key);
+        let err = open_data_key(&wrong_key, &object_id, &sealed)
+            .expect_err("a wrong key must not decrypt");
+        assert!(matches!(err, DecryptError::Decryption));
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_open_data_key_rejects_truncated_ciphertext() {
+        let app_key = PrivateKey::from_seed(&[1u8; 32]);
+        let object_id = Hash256::new([2u8; 32]);
+
+        // Shorter than the 24-byte nonce: rejected before any decryption.
+        let err = open_data_key(&app_key, &object_id, &[0u8; NONCE_SIZE - 1])
+            .expect_err("a truncated ciphertext must be rejected");
+        assert!(matches!(err, DecryptError::Decryption));
+    }
+}

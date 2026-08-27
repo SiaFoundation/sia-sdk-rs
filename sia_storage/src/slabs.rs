@@ -770,6 +770,33 @@ mod test {
         assert_eq!(opened.metadata, meta);
     }
 
+    #[sia_core_derive::cross_target_test]
+    fn test_open_with_wrong_key_rejected() {
+        let obj = Object {
+            slabs: vec![Slab {
+                version: SlabVersion::V0,
+                encryption_key: random_bytes_32().into(),
+                min_shards: 2,
+                sectors: vec![],
+                offset: 0,
+                length: 100,
+            }],
+            metadata: b"secret".to_vec(),
+            ..Default::default()
+        };
+
+        let key = PrivateKey::from_seed(&[1u8; 32]);
+        let wrong_key = PrivateKey::from_seed(&[2u8; 32]);
+
+        // open_with verifies the signatures against the opener's key first, so a
+        // wrong key is rejected before any attempt to decrypt.
+        let sealed = obj.seal_with(&key);
+        let err = sealed
+            .open_with(&wrong_key)
+            .expect_err("a wrong key must be rejected");
+        assert!(matches!(err, SealedObjectError::InvalidSignature), "{err}");
+    }
+
     #[cfg(feature = "less-safe-crypto")]
     #[sia_core_derive::cross_target_test]
     fn test_less_safe_new_roundtrip() {
