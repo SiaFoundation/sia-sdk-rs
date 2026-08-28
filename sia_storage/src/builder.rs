@@ -30,7 +30,7 @@ pub struct RequestingApprovalState {
 pub struct ApprovedState {
     register_url: Url,
     user_secret: Hash256,
-    reconnecting: Option<bool>,
+    reconnecting: bool,
 }
 
 /// A builder for creating an SDK instance.
@@ -248,7 +248,7 @@ impl Builder<ApprovedState> {
     ///
     /// A returning user must supply the same recovery phrase to
     /// [Builder::register] to regain access to their data.
-    pub fn reconnecting(&self) -> Option<bool> {
+    pub fn reconnecting(&self) -> bool {
         self.state.reconnecting
     }
 

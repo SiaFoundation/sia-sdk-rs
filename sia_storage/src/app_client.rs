@@ -108,14 +108,15 @@ impl Error {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AuthConnectStatusResponse {
     approved: bool,
-    reconnecting: Option<bool>,
+    #[serde(default)]
+    reconnecting: bool,
     user_secret: Option<Hash256>,
 }
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct AuthApproval {
     pub user_secret: Hash256,
-    pub reconnecting: Option<bool>,
+    pub reconnecting: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]

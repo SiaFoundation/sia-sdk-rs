@@ -905,7 +905,7 @@ mod tests {
                 user_secret: hash_256!(
                     "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
                 ),
-                reconnecting: None,
+                reconnecting: false,
             }
         );
 
@@ -921,7 +921,7 @@ mod tests {
                 user_secret: hash_256!(
                     "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
                 ),
-                reconnecting: Some(true),
+                reconnecting: true,
             }
         );
 
@@ -1572,7 +1572,7 @@ mod tests {
         let user_secret = Hash256::new(rand::random());
         let status_response = serde_json::to_string(&AuthConnectStatusResponse {
             approved: true,
-            reconnecting: None,
+            reconnecting: false,
             user_secret: Some(user_secret),
         })
         .unwrap();
@@ -1716,7 +1716,7 @@ mod tests {
         let user_secret = Hash256::new(rand::random());
         let status_response = serde_json::to_string(&AuthConnectStatusResponse {
             approved: true,
-            reconnecting: None,
+            reconnecting: false,
             user_secret: Some(user_secret),
         })
         .unwrap();

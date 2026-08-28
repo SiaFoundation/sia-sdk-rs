@@ -113,7 +113,7 @@ impl Client {
     ) -> Result<Option<AuthApproval>, Error> {
         Ok(Some(AuthApproval {
             user_secret: self.state.read().unwrap().user_secret,
-            reconnecting: None,
+            reconnecting: false,
         }))
     }
 

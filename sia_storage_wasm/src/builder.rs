@@ -162,7 +162,7 @@ impl Builder {
     /// account for this application. Only valid after `waitForApproval` has
     /// resolved.
     #[wasm_bindgen]
-    pub fn reconnecting(&self) -> Result<Option<bool>, JsError> {
+    pub fn reconnecting(&self) -> Result<bool, JsError> {
         let state = self.state.borrow();
         match state.as_ref() {
             Some(BuilderState::Approved(builder)) => Ok(builder.reconnecting()),

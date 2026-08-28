@@ -221,7 +221,7 @@ impl Builder {
     /// account for this application. Only valid after `waitForApproval` has
     /// resolved.
     #[napi]
-    pub fn reconnecting(&self) -> Result<Option<bool>> {
+    pub fn reconnecting(&self) -> Result<bool> {
         let state = self
             .state
             .lock()
