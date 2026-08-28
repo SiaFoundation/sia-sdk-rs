@@ -14,6 +14,14 @@ use crate::object::PinnedObject;
 use crate::run_local;
 use crate::types::{self, HostQuery, KeyStats, download_options_from_js};
 
+/// Decodes the hex seed a sharing key's owner handed out.
+fn seed_from_hex(seed: &str) -> Result<[u8; 32], JsError> {
+    let bytes = hex::decode(seed.trim()).map_err(to_js_err)?;
+    bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| JsError::new(&format!("seed must be 32 bytes, got {}", v.len())))
+}
+
 /// A sharing key, granting read-only access to the objects attached to it.
 ///
 /// It is just the credential; the operations that use it live on `Sdk`.
@@ -34,6 +42,16 @@ impl SharingKey {
 
 #[wasm_bindgen]
 impl SharingKey {
+    /// Imports a sharing key from the hex seed its owner handed out.
+    ///
+    /// Pass the string returned by [seed](Self::seed).
+    #[wasm_bindgen(js_name = "fromSeed")]
+    pub fn from_seed(seed: &str) -> Result<SharingKey, JsError> {
+        Ok(SharingKey {
+            inner: StorageSharingKey::import(seed_from_hex(seed)?),
+        })
+    }
+
     /// The key's public half, which identifies it.
     #[wasm_bindgen(getter, js_name = "publicKey")]
     pub fn public_key(&self) -> String {
@@ -98,10 +116,7 @@ impl SharedSdk {
     /// Connects to `indexerUrl` as the recipient of the sharing key derived
     /// from `seed`, which is the hex string the key's owner handed out.
     pub async fn connect(indexer_url: String, seed: String) -> Result<SharedSdk, JsError> {
-        let bytes = hex::decode(seed.trim()).map_err(to_js_err)?;
-        let seed: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
-            JsError::new(&format!("seed must be 32 bytes, got {}", v.len()))
-        })?;
+        let seed = seed_from_hex(&seed)?;
         let inner = StorageSharedSdk::connect(indexer_url, seed)
             .await
             .map_err(to_js_err)?;
