@@ -10,7 +10,17 @@ const INDEXER_URL = 'https://sia.storage';
 const logEl = document.getElementById('log');
 
 function log(...args) {
-  const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ');
+  const msg = args
+    .map((a) =>
+      // JSON.stringify(Error) is "{}" (message/stack are non-enumerable), so pull
+      // the message out; plain objects (e.g. upload progress) still render as JSON.
+      a instanceof Error
+        ? a.message || String(a)
+        : typeof a === 'object' && a !== null
+          ? JSON.stringify(a)
+          : a,
+    )
+    .join(' ');
   logEl.textContent += msg + '\n';
   logEl.scrollTop = logEl.scrollHeight;
   console.log(...args);
