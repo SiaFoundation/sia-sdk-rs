@@ -130,18 +130,16 @@ impl Client {
             .await?;
         match resp.status() {
             StatusCode::OK => {
-                if let Ok(status) = resp.json::<AuthConnectStatusResponse>().await {
-                    if status.approved {
-                        Ok(status.user_secret.map(|user_secret| AuthApproval {
-                            user_secret,
-                            reconnecting: status.reconnecting,
-                        }))
-                    } else {
-                        Ok(None)
-                    }
-                } else {
-                    Err(Error::Api("invalid response format".to_string()))
+                let Ok(status) = resp.json::<AuthConnectStatusResponse>().await else {
+                    return Err(Error::Api("invalid response format".to_string()));
+                };
+                if !status.approved {
+                    return Ok(None);
                 }
+                Ok(status.user_secret.map(|user_secret| AuthApproval {
+                    user_secret,
+                    reconnecting: status.reconnecting,
+                }))
             }
             StatusCode::NOT_FOUND => Err(Error::UserRejected),
             _ => Err(Error::Api(resp.text().await?)),
