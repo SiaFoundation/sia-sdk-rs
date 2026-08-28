@@ -3,6 +3,7 @@ import init, {
   generateRecoveryPhrase,
   PinnedObject,
   setLogger,
+  SharedSdk,
 } from './pkg/sia_storage_wasm.js';
 
 const INDEXER_URL = 'https://sia.storage';
@@ -11,6 +12,7 @@ const logEl = document.getElementById('log');
 function log(...args) {
   const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ');
   logEl.textContent += msg + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
   console.log(...args);
 }
 
@@ -72,7 +74,7 @@ async function main() {
   log(`\nUploading ${(uploadSize / 1024 / 1024).toFixed(1)} MiB of random data...`);
 
   const uploadStart = performance.now();
-  const obj = await sdk.upload(new PinnedObject(), new Blob([uploadData]).stream(),  {
+  const obj = await sdk.upload(new PinnedObject(), new Blob([uploadData]).stream(), {
     onShardUploaded: (progress) => {
       log(progress);
     },
@@ -97,6 +99,45 @@ async function main() {
     downloaded.every((b, i) => b === uploadData[i]);
   log(`Download complete: ${downloaded.length} bytes in ${dlElapsed.toFixed(2)}s (${dlRate.toFixed(2)} MiB/s)`);
   log('Data integrity check:', match ? 'PASSED' : 'FAILED');
+
+  // -- share --
+  log('\nCreating a sharing key for that object...');
+  const key = await sdk.createSharingKey('example', null);
+  await sdk.shareObject(key, obj);
+  // The object is still usable here; shareObject borrows it rather than
+  // consuming the handle.
+  log(`Shared object ${obj.id()} under key ${key.publicKey}`);
+
+  const record = await sdk.sharingKey(key);
+  log(`The key now grants access to ${record.stats.objectCount} object(s), ${record.stats.objectSize} bytes`);
+
+  // -- read it back as a recipient --
+  // The seed is the whole credential. Everything below runs without the app
+  // key, as a recipient who was handed nothing else.
+  const seed = key.seed();
+  log(`\nConnecting as a recipient with seed ${seed.slice(0, 16)}...`);
+  const shared = await SharedSdk.connect(INDEXER_URL, seed);
+
+  const stats = await shared.stats();
+  log(`Recipient sees ${stats.objectCount} object(s), ${stats.objectSize} bytes`);
+
+  const sharedObj = await shared.object(obj.id());
+  const sharedBytes = new Uint8Array(
+    await new Response(shared.download(sharedObj)).arrayBuffer(),
+  );
+  const sharedMatch = sharedBytes.length === uploadData.length &&
+    sharedBytes.every((b, i) => b === uploadData[i]);
+  log('Recipient download check:', sharedMatch ? 'PASSED' : 'FAILED');
+
+  await sdk.revokeSharingKey(key);
+  log('Deleted the sharing key');
+
+  // Free the SDK handles once the demo is done. They run background refresh and
+  // connection-warming tasks whose logging continues until they are freed, so an
+  // unfreed handle leaves the finished page looking stuck.
+  shared.free();
+  sdk.free();
+  log('\nDone.');
 }
 
 main().catch(err => {
