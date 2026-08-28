@@ -13,6 +13,7 @@ use crate::helpers::to_js_err;
 use crate::object::PinnedObject;
 use crate::packed::PackedUpload;
 use crate::run_local;
+use crate::sharing::{KeyRecord, SharingKey};
 use crate::stream_reader::js_stream_reader;
 use crate::types::{
     self, HostQuery, ObjectEvent, download_options_from_js, ms_to_chrono,
@@ -34,6 +35,96 @@ impl Sdk {
 
 #[wasm_bindgen]
 impl Sdk {
+    /// Creates a sharing key. Attach objects to it with `Sdk.shareObject`.
+    #[wasm_bindgen(js_name = "createSharingKey")]
+    pub async fn create_sharing_key(
+        &self,
+        description: String,
+        expires_at: Option<js_sys::Date>,
+    ) -> Result<SharingKey, JsError> {
+        let expires_at = expires_at.map(|d| ms_to_chrono(d.get_time())).transpose()?;
+        let key = self
+            .inner
+            .create_sharing_key(sia_storage::SharingKeyOptions {
+                description,
+                expires_at,
+            })
+            .await
+            .map_err(to_js_err)?;
+        Ok(SharingKey::new(key))
+    }
+
+    /// Lists the account's sharing keys, most recently created first.
+    #[wasm_bindgen(js_name = "sharingKeys")]
+    pub async fn sharing_keys(&self, offset: u32, limit: u32) -> Result<Vec<KeyRecord>, JsError> {
+        let keys = self
+            .inner
+            .sharing_keys(Some(offset as u64), Some(limit as u64))
+            .await
+            .map_err(to_js_err)?;
+        Ok(keys.into_iter().map(KeyRecord::new).collect())
+    }
+
+    /// Fetches the indexer's record for a key, including its counts.
+    #[wasm_bindgen(js_name = "sharingKey")]
+    pub async fn sharing_key(&self, key: &SharingKey) -> Result<KeyRecord, JsError> {
+        let record = self.inner.sharing_key(key.key()).await.map_err(to_js_err)?;
+        Ok(KeyRecord::new(record))
+    }
+
+    /// Attaches an object to a sharing key, re-sealing its encryption keys under
+    /// the key so recipients can decrypt it. Attaching an already-attached
+    /// object replaces its re-sealed keys, so a failed call can be retried.
+    #[wasm_bindgen(js_name = "shareObject")]
+    pub async fn share_object(
+        &self,
+        key: &SharingKey,
+        object: &PinnedObject,
+    ) -> Result<(), JsError> {
+        self.inner
+            .share_object(key.key(), &object.0)
+            .await
+            .map_err(to_js_err)
+    }
+
+    /// Lists and decrypts a page of the objects a sharing key grants access to.
+    #[wasm_bindgen(js_name = "sharedObjects")]
+    pub async fn shared_objects(
+        &self,
+        key: &SharingKey,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<PinnedObject>, JsError> {
+        let objects = self
+            .inner
+            .shared_objects(key.key(), Some(offset as u64), Some(limit as u64))
+            .await
+            .map_err(to_js_err)?;
+        Ok(objects.into_iter().map(PinnedObject).collect())
+    }
+
+    /// Detaches an object from a sharing key, leaving the key and its other
+    /// attachments in place.
+    #[wasm_bindgen(js_name = "unshareObject")]
+    pub async fn unshare_object(&self, key: &SharingKey, id: String) -> Result<(), JsError> {
+        let id = Hash256::from_str(&id).map_err(to_js_err)?;
+        self.inner
+            .unshare_object(key.key(), &id)
+            .await
+            .map_err(to_js_err)
+    }
+
+    /// Deletes a sharing key along with all of its attachments, revoking
+    /// recipients' access. Account tokens already issued stay valid until they
+    /// expire, so a download in flight can keep reading for up to five minutes.
+    #[wasm_bindgen(js_name = "revokeSharingKey")]
+    pub async fn revoke_sharing_key(&self, key: &SharingKey) -> Result<(), JsError> {
+        self.inner
+            .revoke_sharing_key(key.key())
+            .await
+            .map_err(to_js_err)
+    }
+
     /// Returns the AppKey used by this SDK instance.
     #[wasm_bindgen(js_name = "appKey")]
     pub fn app_key(&self) -> AppKey {
