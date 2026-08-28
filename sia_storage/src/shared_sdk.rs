@@ -158,7 +158,7 @@ impl SharedSdk {
         self.api_client
             .shared_stats(&self.sharing_key.0)
             .await
-            .map_err(|e| Error::App(format!("{e:?}")))
+            .map_err(Error::from)
     }
 
     /// Retrieves and decrypts a single object the sharing key grants access to.
@@ -166,8 +166,7 @@ impl SharedSdk {
         let sealed = self
             .api_client
             .shared_object_by_id(&self.sharing_key.0, key)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
+            .await?;
         let id = sealed.id();
         if id != *key {
             return Err(Error::App(format!(
@@ -187,8 +186,7 @@ impl SharedSdk {
         let sealed = self
             .api_client
             .shared_objects(&self.sharing_key.0, offset, limit)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
+            .await?;
         sealed
             .into_iter()
             .map(|s| s.open_with(&self.sharing_key.0).map_err(Error::from))
@@ -202,8 +200,7 @@ impl SharedSdk {
         let shared = self
             .api_client
             .shared_hosts(&self.sharing_key.0, query)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
+            .await?;
         Ok(shared.into_iter().map(|h| h.host).collect())
     }
 

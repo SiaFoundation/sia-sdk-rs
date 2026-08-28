@@ -36,6 +36,12 @@ pub enum Error {
     #[error("app error: {0}")]
     App(String),
 
+    /// An error from the indexer API client. Callers can match on the inner
+    /// [AppApiError](crate::AppApiError) to distinguish cases worth handling differently, such as
+    /// [AppApiError::Unauthorized](crate::AppApiError::Unauthorized) for a revoked or expired key.
+    #[error("app client error: {0}")]
+    AppClient(#[from] crate::AppApiError),
+
     /// An error during upload.
     #[error("upload error: {0}")]
     Upload(#[from] UploadError),
