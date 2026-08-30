@@ -15,7 +15,9 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
 mod logging;
+mod sharing;
 pub use logging::*;
+pub use sharing::*;
 
 mod builder;
 pub use builder::*;
