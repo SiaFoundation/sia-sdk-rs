@@ -13,10 +13,12 @@ use tokio_util::sync::CancellationToken;
 mod builder;
 mod io;
 mod logging;
+mod sharing;
 
 pub use builder::*;
 pub use io::SendableReader;
 pub use logging::*;
+pub use sharing::*;
 
 /// Metadata about an application connecting to the indexer.
 #[napi(object)]
