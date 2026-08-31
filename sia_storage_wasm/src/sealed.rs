@@ -1,7 +1,6 @@
 use wasm_bindgen::prelude::*;
 
 #[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(transparent)]
 pub struct SealedObject(pub sia_storage::SealedObject);
 

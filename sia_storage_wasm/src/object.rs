@@ -1,3 +1,4 @@
+use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
@@ -72,13 +73,14 @@ impl PinnedObject {
     }
 
     /// Seals the object for offline storage.
-    pub fn seal(&self, app_key: &AppKey) -> SealedObject {
-        SealedObject(self.0.seal(&app_key.0))
+    pub fn seal(&self, app_key: &AppKey) -> Result<Ts<SealedObject>, JsError> {
+        Ok(SealedObject(self.0.seal(&app_key.0)).into_ts()?)
     }
 
     /// Opens a previously sealed object.
-    pub fn open(app_key: &AppKey, sealed_obj: SealedObject) -> Result<PinnedObject, JsError> {
-        let obj = sealed_obj.0.open(&app_key.0).map_err(to_js_err)?;
+    pub fn open(app_key: &AppKey, sealed_obj: Ts<SealedObject>) -> Result<PinnedObject, JsError> {
+        let sealed = sealed_obj.to_rust()?;
+        let obj = sealed.0.open(&app_key.0).map_err(to_js_err)?;
         Ok(PinnedObject(obj))
     }
 }

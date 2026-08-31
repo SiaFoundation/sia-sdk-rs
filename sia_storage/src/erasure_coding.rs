@@ -437,7 +437,7 @@ mod tests {
 
     #[sia_core_derive::cross_target_test]
     fn test_erasure_code_golden() {
-        use sia_core::blake2::{Blake2b256, Digest};
+        use blake2b_simd::Params;
         use sia_core::hash_256;
         use sia_core::types::Hash256;
 
@@ -502,7 +502,12 @@ mod tests {
         coder.encode_shards(&mut shards).unwrap();
 
         for (i, shard) in shards.iter().enumerate() {
-            let got: Hash256 = Blake2b256::new().chain_update(shard).finalize().into();
+            let got: Hash256 = Params::new()
+                .hash_length(32)
+                .to_state()
+                .update(shard)
+                .finalize()
+                .into();
             assert_eq!(got, EXPECTED_SHARD_HASHES[i], "shard {i} hash mismatch");
         }
 
@@ -514,7 +519,12 @@ mod tests {
             coder.reconstruct_data_shards(&mut opt).unwrap();
             for i in 0..DATA_SHARDS {
                 let shard = opt[i].as_ref().expect("data shard reconstructed");
-                let got: Hash256 = Blake2b256::new().chain_update(shard).finalize().into();
+                let got: Hash256 = Params::new()
+                    .hash_length(32)
+                    .to_state()
+                    .update(shard)
+                    .finalize()
+                    .into();
                 assert_eq!(got, EXPECTED_SHARD_HASHES[i], "{label}: shard {i} mismatch");
             }
         };

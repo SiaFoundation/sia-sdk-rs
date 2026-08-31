@@ -3,12 +3,11 @@ use base64::prelude::*;
 
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
-use blake2::Digest;
+use blake2b_simd::Params;
 use chrono::{DateTime, Utc};
 use reqwest::Method;
 use serde_with::base64::Base64;
 use serde_with::{DefaultOnNull, serde_as};
-use sia_core::blake2::Blake2b256;
 
 use thiserror::Error;
 
@@ -723,11 +722,11 @@ fn request_hash(
         .map_or(url.host_str().unwrap_or("localhost").to_string(), |port| {
             format!("{}:{}", url.host_str().unwrap_or("localhost"), port)
         });
-    let mut state = Blake2b256::new();
+    let mut state = Params::new().hash_length(32).to_state();
     state.update(method.as_str().as_bytes());
     state.update(host_port.as_bytes());
     state.update(url.path().as_bytes());
-    state.update(valid_until.timestamp().to_le_bytes());
+    state.update(&valid_until.timestamp().to_le_bytes());
     if let Some(body) = body {
         state.update(body);
     }
@@ -754,10 +753,12 @@ fn sign(
 fn register_app_sig_hash(request_id: &str, ephemeral_key: &PublicKey) -> Hash256 {
     const KEY_DOMAIN: &[u8] = b"registerAppKey";
 
-    Blake2b256::default()
-        .chain_update(KEY_DOMAIN)
-        .chain_update(ephemeral_key)
-        .chain_update(request_id.as_bytes())
+    Params::new()
+        .hash_length(32)
+        .to_state()
+        .update(KEY_DOMAIN)
+        .update(ephemeral_key.as_ref())
+        .update(request_id.as_bytes())
         .finalize()
         .into()
 }
@@ -775,21 +776,21 @@ fn pre_authorization_sig_hash(
     meta: &AppMetadata,
     pre_authorized_key: &PublicKey,
 ) -> Hash256 {
-    fn write_string(h: &mut Blake2b256, s: &str) {
-        h.update((s.len() as u64).to_le_bytes());
+    fn write_string(h: &mut blake2b_simd::State, s: &str) {
+        h.update(&(s.len() as u64).to_le_bytes());
         h.update(s.as_bytes());
     }
 
-    let mut h = Blake2b256::default();
+    let mut h = Params::new().hash_length(32).to_state();
     write_string(&mut h, "indexd/preauthorize-app/v1");
-    h.update(ephemeral_key);
-    h.update(meta.id);
+    h.update(ephemeral_key.as_ref());
+    h.update(meta.id.as_ref());
     write_string(&mut h, meta.name);
     write_string(&mut h, meta.description);
     write_string(&mut h, meta.logo_url.unwrap_or(""));
     write_string(&mut h, meta.service_url);
     write_string(&mut h, meta.callback_url.unwrap_or(""));
-    h.update(pre_authorized_key);
+    h.update(pre_authorized_key.as_ref());
     h.finalize().into()
 }
 
