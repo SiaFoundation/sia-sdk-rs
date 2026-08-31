@@ -20,6 +20,10 @@ use crate::{
 /// How often to replace the account tokens. Tokens are issued with a fixed
 /// five minute validity, so this leaves a minute of margin.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(4 * 60);
+
+/// How soon to try again after a failed refresh.
+const RETRY_INTERVAL: Duration = Duration::from_secs(10);
+
 /// Stop refreshing only after this many unauthorized responses with no
 /// successful refresh in between. A single 401 can be transient clock skew, so
 /// one is not enough to conclude the sharing key was revoked.
@@ -127,10 +131,14 @@ impl SharedSdk {
     ) -> AbortOnDropHandle<()> {
         AbortOnDropHandle::new(maybe_spawn!(async move {
             let mut auth_failures = 0;
+            let mut delay = REFRESH_INTERVAL;
             loop {
-                sleep(REFRESH_INTERVAL).await;
-                match Self::refresh(&sharing_key, &api_client, &hosts, &tokens).await {
-                    Ok(()) => auth_failures = 0,
+                sleep(delay).await;
+                delay = match Self::refresh(&sharing_key, &api_client, &hosts, &tokens).await {
+                    Ok(()) => {
+                        auth_failures = 0;
+                        REFRESH_INTERVAL
+                    }
                     Err(app_client::Error::Unauthorized(err)) => {
                         // A single 401 can be transient clock skew, so only
                         // conclude the key was revoked after several in a row.
@@ -144,11 +152,15 @@ impl SharedSdk {
                         warn!(
                             "shared hosts unauthorized ({auth_failures}/{MAX_AUTH_FAILURES}), retrying: {err}"
                         );
+                        RETRY_INTERVAL
                     }
                     // Transient errors are retried without clearing the streak,
                     // so a revoked key on a flaky connection still stops.
-                    Err(err) => warn!("failed to refresh shared hosts, retrying: {err}"),
-                }
+                    Err(err) => {
+                        warn!("failed to refresh shared hosts, retrying: {err}");
+                        RETRY_INTERVAL
+                    }
+                };
             }
         }))
     }
