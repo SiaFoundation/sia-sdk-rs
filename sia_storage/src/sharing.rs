@@ -1,11 +1,11 @@
 use std::fmt;
 
+use blake2b_simd::Params;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::hex::Hex;
 use serde_with::{DefaultOnNull, serde_as};
-use sia_core::blake2::{Blake2b256, Digest};
 use sia_core::encoding::SiaEncodable;
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;
@@ -73,14 +73,14 @@ fn key_request_sig_hash(
     description: &str,
     expires_at: Option<&DateTime<Utc>>,
 ) -> Hash256 {
-    let mut state = Blake2b256::default();
+    let mut state = Params::new().hash_length(32).to_state();
     // length-prefixed strings, raw fixed-size keys/nonce, unix-seconds time
     "indexd/sharing-key/create/v1"
         .to_string()
         .encode(&mut state)
         .unwrap();
     public_key.encode(&mut state).unwrap();
-    state.update(nonce.0);
+    state.update(&nonce.0);
     description.to_string().encode(&mut state).unwrap();
     expires_at.is_some().encode(&mut state).unwrap();
     if let Some(expires_at) = expires_at {
