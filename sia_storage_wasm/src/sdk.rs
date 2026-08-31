@@ -5,6 +5,7 @@ use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
 use sia_storage::{self, HostQuery as StorageHostQuery, Sdk as StorageSdk};
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
+use tsify::Ts;
 use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
@@ -52,11 +53,11 @@ impl Sdk {
 
     /// Returns a list of usable hosts, optionally filtered by a HostQuery.
     #[wasm_bindgen(unchecked_return_type = "Host[]")]
-    pub async fn hosts(&self, query: Option<HostQuery>) -> Result<JsValue, JsError> {
+    pub async fn hosts(&self, query: Option<Ts<HostQuery>>) -> Result<JsValue, JsError> {
         let sdk = self.inner.clone();
         let q: StorageHostQuery = match query {
             Some(hq) => {
-                let mut q: StorageHostQuery = hq.into();
+                let mut q: StorageHostQuery = hq.to_rust()?.into();
                 q.protocol = Some(Protocol::QUIC);
                 q
             }

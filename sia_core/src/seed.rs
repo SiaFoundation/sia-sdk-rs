@@ -1,8 +1,8 @@
 use std::fmt::Display;
 
-use crate::blake2::{Blake2b256, Digest};
 use crate::signing::PrivateKey;
 use bip39::{Error as MnemonicError, Language, Mnemonic};
+use blake2b_simd::Params;
 use thiserror::Error;
 use zeroize::ZeroizeOnDrop;
 
@@ -33,10 +33,14 @@ impl Seed {
     }
 
     pub fn from_seed(seed: [u8; 16]) -> Self {
-        let mut h = Blake2b256::new();
-        h.update(seed);
+        let mut h = Params::new().hash_length(32).to_state();
+        h.update(&seed);
 
-        let entropy: [u8; 32] = h.finalize().into();
+        let entropy: [u8; 32] = h
+            .finalize()
+            .as_bytes()
+            .try_into()
+            .expect("blake2b output is 32 bytes");
         Seed { seed, entropy }
     }
 
@@ -46,10 +50,14 @@ impl Seed {
 
     /// Derive a private key from the seed
     pub fn private_key(&self, index: u64) -> PrivateKey {
-        let mut h = Blake2b256::new();
+        let mut h = Params::new().hash_length(32).to_state();
         h.update(self.entropy());
-        h.update(index.to_le_bytes());
-        let hash: [u8; 32] = h.finalize().into();
+        h.update(&index.to_le_bytes());
+        let hash: [u8; 32] = h
+            .finalize()
+            .as_bytes()
+            .try_into()
+            .expect("blake2b output is 32 bytes");
 
         PrivateKey::from_seed(&hash)
     }

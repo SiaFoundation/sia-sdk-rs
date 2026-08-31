@@ -6,7 +6,6 @@ use crate::object::PinnedObject;
 
 /// Progress information about a successfully uploaded or downloaded shard.
 #[derive(serde::Serialize, tsify::Tsify)]
-#[tsify(into_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct ShardProgress {
     pub host_key: String,
@@ -31,7 +30,6 @@ impl From<sia_storage::ShardProgress> for ShardProgress {
 
 /// Application info registered with the indexer.
 #[derive(serde::Serialize, tsify::Tsify)]
-#[tsify(into_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct App {
     pub id: String,
@@ -55,7 +53,6 @@ impl From<sia_storage::App> for App {
 
 /// Information about the user's account on the indexer.
 #[derive(serde::Serialize, tsify::Tsify)]
-#[tsify(into_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub account_key: String,
@@ -215,7 +212,6 @@ pub(crate) fn download_options_from_js(val: JsValue) -> sia_storage::DownloadOpt
 
 /// Query parameters for filtering hosts.
 #[derive(serde::Deserialize, tsify::Tsify)]
-#[tsify(from_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct HostQuery {
     pub country: Option<String>,

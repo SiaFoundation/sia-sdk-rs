@@ -4,9 +4,9 @@ use sia_core::rhp4::SECTOR_SIZE;
 
 use crate::AppKey;
 use crate::encryption::EncryptionKey;
+use blake2b_simd::Params;
 use serde_with::base64::Base64;
 use serde_with::{DefaultOnNull, serde_as};
-use sia_core::blake2::{Blake2b256, Digest};
 use sia_core::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;
@@ -99,7 +99,7 @@ impl Slab {
     /// creates a unique identifier for the resulting slab to be referenced by hashing
     /// its contents, excluding the host key, length, and offset.
     pub fn digest(&self) -> Hash256 {
-        let mut state = Blake2b256::new();
+        let mut state = Params::new().hash_length(32).to_state();
         if self.version != SlabVersion::V0 {
             // V0 doesn't have a version field and the existing IDs can't change for backwards compatibility
             self.version.encode(&mut state).unwrap();
@@ -244,7 +244,7 @@ impl SiaDecodable for SealedObject {
 
 impl SealedObject {
     fn data_sig_hash(object_id: &Hash256, encrypted_data_key: &[u8]) -> Hash256 {
-        let mut state = Blake2b256::default();
+        let mut state = Params::new().hash_length(32).to_state();
         object_id.encode(&mut state).unwrap();
         state.update(encrypted_data_key);
         state.finalize().into()
@@ -255,7 +255,7 @@ impl SealedObject {
         encrypted_meta_key: &[u8],
         encrypted_metadata: &[u8],
     ) -> Hash256 {
-        let mut state = Blake2b256::default();
+        let mut state = Params::new().hash_length(32).to_state();
         object_id.encode(&mut state).unwrap();
         state.update(encrypted_meta_key);
         state.update(encrypted_metadata);
@@ -531,7 +531,7 @@ impl Default for Object {
 }
 
 pub(crate) fn object_id(slabs: &[Slab]) -> Hash256 {
-    let mut state = Blake2b256::default();
+    let mut state = Params::new().hash_length(32).to_state();
     for slab in slabs.iter() {
         let slab_id = slab.digest();
         slab_id
