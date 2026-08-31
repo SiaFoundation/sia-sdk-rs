@@ -17,6 +17,9 @@ pub use merkle::sector_root;
 pub const SEGMENT_SIZE: usize = 64;
 pub const SECTOR_SIZE: usize = 1 << 22;
 pub const LEAVES_PER_SECTOR: usize = SECTOR_SIZE / SEGMENT_SIZE;
+/// Number of blocks that a host stores a temporary sector before deleting it
+/// if it has not been appended to a contract.
+pub const TEMP_SECTOR_DURATION: u64 = 144 * 3;
 
 /// Contains the prices and parameters of a host.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SiaEncode, SiaDecode, AsyncSiaDecode)]

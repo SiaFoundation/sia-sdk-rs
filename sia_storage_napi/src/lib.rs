@@ -993,26 +993,26 @@ impl Sdk {
 
     /// Creates a signed URL for sharing an object.
     #[napi]
-    pub fn share_object(
+    pub fn object_share_url(
         &self,
         object: &PinnedObject,
         valid_until: DateTime<Utc>,
     ) -> Result<String> {
         let u = self
             .inner
-            .share_object(&object.object(), valid_until)
+            .object_share_url(&object.object(), valid_until)
             .map_err(|e| Error::from_reason(e.to_string()))?;
         Ok(u.to_string())
     }
 
     /// Retrieves a shared object from a signed URL.
     #[napi]
-    pub async fn shared_object(&self, shared_url: String) -> Result<PinnedObject> {
+    pub async fn object_from_share_url(&self, shared_url: String) -> Result<PinnedObject> {
         let shared_url =
             sia_storage::Url::parse(&shared_url).map_err(|e| Error::from_reason(e.to_string()))?;
         let object = self
             .inner
-            .shared_object(shared_url)
+            .object_from_share_url(shared_url)
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
         Ok(PinnedObject {

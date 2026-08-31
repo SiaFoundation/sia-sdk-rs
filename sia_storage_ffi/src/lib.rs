@@ -770,6 +770,31 @@ impl Download {
         .await?
     }
 
+    /// Writes the whole download to the file at `path`, creating or truncating
+    /// it, and returns the number of bytes written.
+    ///
+    /// Prefer this to [Download::read] when the destination is a local file:
+    /// the data never crosses the FFI boundary. Use [Download::read] if you
+    /// need the bytes themselves. Progress is still reported through the
+    /// `shard_downloaded` callback on [DownloadOptions].
+    pub async fn write_to_path(&self, path: String) -> Result<u64, DownloadError> {
+        let inner = self.inner.clone();
+        let cancel = self.cancel.clone();
+        spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+                result = async {
+                    let mut guard = inner.lock().await;
+                    let Some(reader) = guard.as_mut() else {
+                        return Err(DownloadError::Cancelled);
+                    };
+                    Ok::<_, DownloadError>(reader.write_to_path(path).await?)
+                } => result,
+            }
+        })
+        .await?
+    }
+
     /// Cancels the download and aborts any in-flight chunk recovery tasks.
     /// Interrupts an in-flight [Download::read] immediately. Subsequent reads
     /// return [DownloadError::Cancelled].
@@ -1152,25 +1177,25 @@ impl Sdk {
 
     /// Creates a signed URL that can be used to share object metadata
     /// with other people using an indexer.
-    pub fn share_object(
+    pub fn object_share_url(
         &self,
         object: Arc<PinnedObject>,
         valid_until: SystemTime,
     ) -> Result<String, Error> {
         let u = self
             .inner
-            .share_object(&object.object(), valid_until.into())?;
+            .object_share_url(&object.object(), valid_until.into())?;
         Ok(u.to_string())
     }
 
     /// Retrieves a shared object from a signed URL.
-    pub async fn shared_object(&self, shared_url: &str) -> Result<PinnedObject, Error> {
+    pub async fn object_from_share_url(&self, shared_url: &str) -> Result<PinnedObject, Error> {
         let shared_url: Url = shared_url
             .parse()
             .map_err(|e| Error::Custom(format!("{e}")))?;
         let sdk = self.inner.clone();
         spawn(async move {
-            let object = sdk.shared_object(shared_url).await?;
+            let object = sdk.object_from_share_url(shared_url).await?;
             Ok(PinnedObject {
                 inner: Arc::new(Mutex::new(object)),
             })

@@ -11,7 +11,8 @@ use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::{Hosts, InflightGuard, RPCError};
 use crate::slabs::SlabVersion::{V0, V1};
 use crate::time::{Duration, Elapsed, Instant, sleep};
-use crate::{AppKey, DownloadOptions, Object, Sector, ShardProgress, ShardProgressCallback, Slab};
+use crate::tokens::AccountTokenSource;
+use crate::{DownloadOptions, Object, Sector, ShardProgress, ShardProgressCallback, Slab};
 use bytes::{Buf, Bytes};
 use log::{debug, warn};
 use sia_core::rhp4::SEGMENT_SIZE;
@@ -132,7 +133,7 @@ struct DownloadResult {
 struct SlabRecovery<State> {
     client: Hosts,
     controller: Arc<InflightController>,
-    account_key: Arc<AppKey>,
+    tokens: AccountTokenSource,
 
     slab_index: usize,
     min_shards: usize,
@@ -144,14 +145,15 @@ struct SlabRecovery<State> {
 }
 
 impl SlabRecovery<AwaitingRecovery> {
-    fn new(
+    fn new<S: Into<AccountTokenSource>>(
         client: Hosts,
         controller: Arc<InflightController>,
-        account_key: Arc<AppKey>,
+        tokens: S,
         slab: ChunkSlab,
         seq: usize,
         popped: watch::Sender<usize>,
     ) -> Result<Self, DownloadError> {
+        let tokens = tokens.into();
         if slab.slab.min_shards == 0 {
             return Err(DownloadError::InvalidSlab(
                 "min_shards cannot be 0".to_string(),
@@ -201,7 +203,7 @@ impl SlabRecovery<AwaitingRecovery> {
         Ok(Self {
             client,
             controller,
-            account_key,
+            tokens,
             slab_index: slab.index,
             min_shards,
             encryption_key: slab.slab.encryption_key,
@@ -224,19 +226,30 @@ impl SlabRecovery<AwaitingRecovery> {
     ) -> impl Future<Output = DownloadResult> + 'static {
         let client = self.client.clone();
         let controller = self.controller.clone();
-        let account_key = self.account_key.clone();
+        let tokens = self.tokens.clone();
         async move {
             // Hold the inflight reservation for the duration of the RPC. The
             // guard was created by the caller before spawning so the load is
             // visible to concurrent `prioritize` calls, then dropped here on
             // either success or error.
             let _inflight = inflight;
+            // No RPC is attempted without a token, so nothing has elapsed.
+            let token = match tokens.token(task.sector.host_key) {
+                Ok(token) => token,
+                Err(error) => {
+                    return DownloadResult {
+                        task,
+                        elapsed: Duration::ZERO,
+                        result: Err(error),
+                    };
+                }
+            };
             let permit = controller.sample();
             let start = Instant::now();
             let result = client
                 .read_sector(
                     task.sector.host_key,
-                    &account_key.0,
+                    token,
                     task.sector.root,
                     sector_offset,
                     sector_length,
@@ -312,7 +325,7 @@ impl SlabRecovery<AwaitingRecovery> {
                                 return Ok(SlabRecovery {
                                     client: self.client,
                                     controller: self.controller,
-                                    account_key: self.account_key,
+                                    tokens: self.tokens,
                                     min_shards,
                                     slab_index: self.slab_index,
                                     encryption_key: self.encryption_key,
@@ -383,7 +396,7 @@ impl SlabRecovery<ShardsRecovered> {
         Ok(SlabRecovery {
             client: self.client,
             controller: self.controller,
-            account_key: self.account_key,
+            tokens: self.tokens,
             min_shards: self.min_shards,
             slab_index: self.slab_index,
             encryption_key: self.encryption_key,
@@ -410,11 +423,13 @@ pub(crate) struct ChunkSlab {
 
 const INITIAL_CHUNK_SIZE: usize = 1 << 15; // 32 KiB
 const MAX_CHUNK_SIZE: usize = 1 << 20; // 1 MiB
+#[cfg(feature = "fs")]
+const WRITE_BUFFER_BYTES: usize = 4 << 20; // 4 MiB
 
 /// Iterator-like state for splitting slabs into chunks. The chunk size starts
 /// at [`INITIAL_CHUNK_SIZE`] for a fast first byte and doubles per chunk up to
-/// `SECTOR_SIZE`, so a long transfer settles into large reads without paying
-/// that latency up front.
+/// [`MAX_CHUNK_SIZE`], so a long transfer settles into large reads without
+/// paying that latency up front.
 pub(crate) struct ChunkIter {
     slabs: Vec<Slab>,
     slab_idx: usize,
@@ -494,7 +509,7 @@ impl Iterator for ChunkIter {
 /// first byte — lands in roughly one round trip.
 pub struct Download {
     hosts: Hosts,
-    account_key: Arc<AppKey>,
+    tokens: AccountTokenSource,
     data_key: EncryptionKey,
 
     // download state
@@ -576,7 +591,7 @@ impl Download {
             return false;
         };
         let hosts = self.hosts.clone();
-        let account_key = self.account_key.clone();
+        let tokens = self.tokens.clone();
         let shard_progress_callback = self.shard_downloaded.clone();
         // Build the SlabRecovery synchronously so prioritization and top-K
         // inflight reservations land before this method returns; each
@@ -596,7 +611,7 @@ impl Download {
         let recovery = SlabRecovery::new(
             hosts,
             self.controller.clone(),
-            account_key,
+            tokens,
             chunk_slab,
             seq,
             self.popped.clone(),
@@ -627,8 +642,27 @@ impl Download {
         }
     }
 
+    /// Writes the whole download to the file at `path`, creating or truncating
+    /// it, and returns the number of bytes written.
+    #[cfg(feature = "fs")]
+    pub async fn write_to_path<P: AsRef<std::path::Path>>(
+        &mut self,
+        path: P,
+    ) -> Result<u64, DownloadError> {
+        let file = tokio::fs::File::create(path).await?;
+        // buffer the writes since copy moves 8 KiB at a time and every
+        // tokio::fs write is a hop to the blocking pool
+        let mut writer = tokio::io::BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
+        // the AsyncRead impl boxes the download error in an io::Error; unwrap
+        // it so callers still get the variant
+        tokio::io::copy(self, &mut writer).await.map_err(|e| {
+            e.downcast::<DownloadError>()
+                .unwrap_or_else(DownloadError::Io)
+        })
+    }
+
     /// Returns the next decoded chunk of data. Returns an empty `Vec` on EOF.
-    /// Chunks are up to 256 KiB.
+    /// Chunks are up to [`MAX_CHUNK_SIZE`].
     ///
     /// This is primarily intended for FFI bindings to enable zero-copy
     /// transfer of an owned `Vec<u8>`. For general use, prefer the
@@ -662,10 +696,10 @@ impl Download {
         Ok(result)
     }
 
-    pub(crate) fn new(
+    pub(crate) fn new<T: Into<AccountTokenSource>>(
         object: &Object,
         hosts: Hosts,
-        account_key: Arc<AppKey>,
+        tokens: T,
         options: DownloadOptions,
     ) -> Result<Self, DownloadError> {
         if options.max_buffered_chunks == Some(0) {
@@ -673,6 +707,7 @@ impl Download {
                 "max buffered chunks must be greater than 0".to_string(),
             ));
         }
+        let tokens = tokens.into();
         let object_size = object.size();
         let data_key = object.data_key.clone();
         let available = object_size.saturating_sub(options.offset);
@@ -691,7 +726,7 @@ impl Download {
         let chunk_iter = ChunkIter::new(slabs, options.offset, remaining);
         let mut download = Self {
             hosts,
-            account_key,
+            tokens,
             controller,
             data_key,
             buf: Bytes::new(),
@@ -722,7 +757,7 @@ mod test {
     use crate::hosts::Hosts;
     use crate::rhp4::{Client, mock};
     use crate::upload::upload_object;
-    use crate::{Host, ShardProgress, UploadOptions};
+    use crate::{AppKey, Host, ShardProgress, UploadOptions};
 
     #[sia_core_derive::cross_target_test]
     async fn test_out_of_order_download() {
@@ -925,7 +960,7 @@ mod test {
         let mut sectors = Vec::with_capacity(total_shards);
         for (i, mut shard) in shards.into_iter().enumerate() {
             crate::encryption::encrypt_shard(&slab_key, i as u8, 0, &mut shard);
-            let root = hosts
+            let (root, _) = hosts
                 .write_sector(
                     host_keys[i],
                     &app_key.0,
@@ -1143,6 +1178,72 @@ mod test {
             .await
             .unwrap();
         assert_eq!(data, recovered_data);
+    }
+
+    /// `write_to_path` drives the [AsyncRead] impl, which erases the download
+    /// error into an `io::Error`. Callers still need the variant.
+    #[cfg(feature = "fs")]
+    #[tokio::test]
+    async fn test_download_write_to_path_reports_download_error() {
+        let upload_options = UploadOptions::default();
+        let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
+
+        let transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&rand::random()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: sia_core::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                })
+                .collect(),
+            true,
+        );
+        let mut data = BytesMut::zeroed(optimal_data_size);
+        rand::rng().fill_bytes(&mut data);
+        let data = data.freeze();
+        let app_key = Arc::new(AppKey::import(rand::random()));
+
+        let obj = upload_object(
+            hosts.clone(),
+            crate::app_client::Client::mock(),
+            app_key.clone(),
+            Object::default(),
+            Cursor::new(data.clone()),
+            upload_options,
+        )
+        .await
+        .unwrap();
+        // every read from the slab's hosts fails, so no recovery reaches
+        // min_shards however many times it retries
+        transport.set_read_failures(
+            obj.slabs()[0].sectors.iter().map(|s| s.host_key),
+            usize::MAX,
+        );
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut download = Download::new(
+            &obj,
+            hosts.clone(),
+            app_key.clone(),
+            DownloadOptions::default(),
+        )
+        .unwrap();
+        let err = download
+            .write_to_path(dir.path().join("object.bin"))
+            .await
+            .expect_err("download to fail");
+        assert!(
+            matches!(err, DownloadError::NotEnoughShards(..)),
+            "expected NotEnoughShards, got {err:?}"
+        );
     }
 
     #[sia_core_derive::cross_target_test]

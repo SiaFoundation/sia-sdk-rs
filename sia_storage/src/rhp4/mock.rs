@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use chrono::Utc;
-use sia_core::rhp4::HostPrices;
+use sia_core::rhp4::{AccountToken, HostPrices};
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::{Currency, Hash256};
 
@@ -20,6 +20,8 @@ pub struct Client {
     read_delays: Arc<RwLock<HashMap<Hash256, Duration>>>,
     initial_read_delay: Arc<RwLock<Option<Duration>>>,
     read_failures: Arc<RwLock<HashMap<PublicKey, usize>>>,
+    tip_height: Arc<RwLock<u64>>,
+    tip_height_step: Arc<RwLock<u64>>,
 }
 
 impl Default for Client {
@@ -37,6 +39,8 @@ impl Client {
             read_delays: Arc::new(RwLock::new(HashMap::new())),
             initial_read_delay: Arc::new(RwLock::new(None)),
             read_failures: Arc::new(RwLock::new(HashMap::new())),
+            tip_height: Arc::new(RwLock::new(1)),
+            tip_height_step: Arc::new(RwLock::new(0)),
         }
     }
 
@@ -76,11 +80,24 @@ impl Client {
     pub fn set_initial_read_delay(&self, delay: Duration) {
         *self.initial_read_delay.write().unwrap() = Some(delay);
     }
+
+    /// Sets the chain height reported in host prices and how far it advances
+    /// on each call, simulating the chain moving while an upload runs.
+    pub fn set_tip_height(&self, height: u64, step: u64) {
+        *self.tip_height.write().unwrap() = height;
+        *self.tip_height_step.write().unwrap() = step;
+    }
 }
 
 impl Transport for Client {
     async fn host_prices(&self, _: &HostEndpoint) -> Result<(HostPrices, Duration), RHP4Error> {
         let start = Instant::now();
+        let tip_height = {
+            let mut height = self.tip_height.write().unwrap();
+            let reported = *height;
+            *height += *self.tip_height_step.read().unwrap();
+            reported
+        };
         let prices = HostPrices {
             contract_price: Currency::zero(),
             collateral: Currency::zero(),
@@ -88,7 +105,7 @@ impl Transport for Client {
             egress_price: Currency::zero(),
             storage_price: Currency::zero(),
             free_sector_price: Currency::zero(),
-            tip_height: 1,
+            tip_height,
             signature: Signature::default(),
             valid_until: Utc::now() + chrono::Duration::days(1),
         };
@@ -134,7 +151,7 @@ impl Transport for Client {
         &self,
         host: &HostEndpoint,
         _: HostPrices,
-        _: &PrivateKey,
+        _: AccountToken,
         root: Hash256,
         offset: usize,
         length: usize,

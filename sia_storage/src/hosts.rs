@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 use chrono::Utc;
 use log::debug;
 use serde::{Deserialize, Serialize};
-use sia_core::rhp4::{HostPrices, SECTOR_SIZE};
+use sia_core::rhp4::{AccountToken, HostPrices, SECTOR_SIZE};
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
@@ -22,7 +22,7 @@ mod metrics;
 
 /// Represents a host in the Sia network. The
 /// addresses can be used to connect to the host.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 /// A storage host on the Sia network.
 pub struct Host {
@@ -257,6 +257,10 @@ pub enum RPCError {
     #[error("unknown host: {0}")]
     UnknownHost(PublicKey),
 
+    /// No account token is available to pay the host.
+    #[error("no account token for host: {0}")]
+    NoToken(PublicKey),
+
     /// An error in the RHP4 protocol.
     #[error("RHP error: {0}")]
     Rhp(#[from] crate::rhp4::Error),
@@ -485,7 +489,7 @@ impl Hosts {
         account_key: &PrivateKey,
         sector: bytes::Bytes,
         write_timeout: Duration,
-    ) -> Result<Hash256, RPCError> {
+    ) -> Result<(Hash256, u64), RPCError> {
         let host = self.host_endpoint(host_key)?;
         timeout(write_timeout, async {
             let (prices, _) = Self::fetch_prices(
@@ -498,6 +502,7 @@ impl Hosts {
             )
             .await?;
             let bytes = sector.len() as u32;
+            let tip_height = prices.tip_height;
             let (root, elapsed) = self
                 .transport
                 .write_sector(&host, prices, account_key, sector)
@@ -505,7 +510,7 @@ impl Hosts {
                 .inspect_err(|_| self.hosts.add_failure(host_key))
                 .map_err(RPCError::Rhp)?;
             self.record_write_sample(host_key, bytes, elapsed);
-            Ok(root)
+            Ok((root, tip_height))
         })
         .await?
     }
@@ -517,7 +522,7 @@ impl Hosts {
     pub async fn read_sector(
         &self,
         host_key: PublicKey,
-        account_key: &PrivateKey,
+        token: AccountToken,
         root: Hash256,
         offset: usize,
         length: usize,
@@ -537,7 +542,7 @@ impl Hosts {
             .await?;
             let (data, elapsed) = self
                 .transport
-                .read_sector(&host, prices, account_key, root, offset, length)
+                .read_sector(&host, prices, token, root, offset, length)
                 .await
                 .inspect_err(|_| self.hosts.add_failure(host_key))
                 .map_err(RPCError::Rhp)?;

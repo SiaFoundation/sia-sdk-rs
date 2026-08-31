@@ -60,13 +60,18 @@ mod hosts;
 mod object_encryption;
 mod rhp4;
 mod sdk;
+mod shared_sdk;
+mod sharing;
 mod slabs;
+mod tokens;
 mod upload;
 
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 
 pub use sdk::{Error, Sdk};
+pub use shared_sdk::SharedSdk;
+pub use sharing::{KeyRecord, SharingError, SharingKey};
 
 use std::sync::Arc;
 
@@ -85,7 +90,7 @@ pub use sia_core::signing::{PublicKey, Signature};
 pub use sia_core::types::Hash256;
 pub use sia_core::types::v2::Protocol;
 
-pub use app_client::Error as AppApiError;
+pub use app_client::{Error as AppApiError, KeyStats};
 pub use builder::{
     ApprovedState, Builder, BuilderError, DisconnectedState, RequestingApprovalState,
 };
@@ -286,6 +291,15 @@ pub struct Account {
     pub last_used: DateTime<Utc>,
 }
 
+/// Options for creating a sharing key.
+#[derive(Clone, Default)]
+pub struct SharingKeyOptions {
+    /// A human-readable label for the key.
+    pub description: String,
+    /// When the key should expire, or `None` for no expiry.
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub type ShardProgressCallback = Arc<dyn Fn(ShardProgress) + Send + Sync + 'static>;
 
@@ -357,6 +371,8 @@ pub struct UploadOptions {
     pub max_buffered_slabs: Option<usize>,
 
     /// Optional callback to receive progress updates for each uploaded shard.
+    /// A shard may be reported more than once if its slab outlives the hosts'
+    /// temporary storage and is uploaded again.
     pub shard_uploaded: Option<ShardProgressCallback>,
 
     /// When set, the reader's data overwrites the object starting at this byte
@@ -495,6 +511,8 @@ pub struct PackedUploadOptions {
     pub max_buffered_slabs: Option<usize>,
 
     /// Optional callback to receive progress updates for each uploaded shard.
+    /// A shard may be reported more than once if its slab outlives the hosts'
+    /// temporary storage and is uploaded again.
     pub shard_uploaded: Option<ShardProgressCallback>,
 }
 
@@ -1076,6 +1094,68 @@ mod test {
             .await
             .expect("download to complete");
         assert_eq!(output.freeze(), input);
+    }
+
+    #[cfg(feature = "fs")]
+    #[tokio::test]
+    async fn test_download_write_to_path() {
+        let app_key = Arc::new(AppKey::import(random_seed()));
+        let hosts = Hosts::new(Client::mock());
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: sia_core::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                })
+                .collect(),
+            true,
+        );
+
+        // larger than WRITE_BUFFER_BYTES so the transfer crosses a mid-stream
+        // flush, and not a multiple of it so the tail relies on the final one
+        let mut input = BytesMut::zeroed((5 << 20) + 12_345);
+        random_bytes(&mut input);
+        let input = input.freeze();
+
+        let mut packed_upload = PackedUpload::new(
+            hosts.clone(),
+            app_client::Client::mock(),
+            app_key.clone(),
+            PackedUploadOptions::default(),
+        )
+        .unwrap();
+        packed_upload
+            .add(Cursor::new(input.clone()))
+            .await
+            .expect("add to complete");
+        let objects = packed_upload.finalize().await.expect("upload to finish");
+        assert_eq!(objects.len(), 1);
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("object.bin");
+        let mut download = Download::new(
+            &objects[0],
+            hosts.clone(),
+            app_key.clone(),
+            DownloadOptions::default(),
+        )
+        .unwrap();
+        let n = download
+            .write_to_path(&path)
+            .await
+            .expect("write_to_path to complete");
+
+        assert_eq!(n, input.len() as u64);
+        let written = tokio::fs::read(&path).await.expect("read written file");
+        assert_eq!(written.len(), input.len());
+        assert_eq!(Bytes::from(written), input);
     }
 
     #[sia_core_derive::cross_target_test]
