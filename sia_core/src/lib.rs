@@ -23,7 +23,6 @@ macro_rules! maybe_spawn_blocking {
     }};
 }
 
-pub mod blake2;
 pub mod consensus;
 pub mod encoding;
 pub mod encoding_async;
