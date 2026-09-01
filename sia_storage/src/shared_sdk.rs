@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use log::warn;
+use reqwest::StatusCode;
 use sia_core::rhp4::AccountToken;
 use sia_core::signing::PublicKey;
 use sia_core::types::Hash256;
@@ -139,7 +140,7 @@ impl SharedSdk {
                         auth_failures = 0;
                         REFRESH_INTERVAL
                     }
-                    Err(app_client::Error::Unauthorized(err)) => {
+                    Err(app_client::Error::Api(StatusCode::UNAUTHORIZED, err)) => {
                         // A single 401 can be transient clock skew, so only
                         // conclude the key was revoked after several in a row.
                         auth_failures += 1;

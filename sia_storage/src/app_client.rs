@@ -5,7 +5,7 @@ use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
 use blake2b_simd::Params;
 use chrono::{DateTime, Utc};
-use reqwest::Method;
+use reqwest::{Method, StatusCode};
 use serde_with::base64::Base64;
 use serde_with::{DefaultOnNull, serde_as};
 
@@ -47,16 +47,8 @@ const SHARE_URL_FETCH_SCHEME: &str = "http";
 #[derive(Debug, Error)]
 pub enum Error {
     /// The indexer returned an error response.
-    #[error("indexd responded with an error: {0}")]
-    Api(String),
-
-    /// The indexer rejected the request as unauthorized.
-    #[error("unauthorized: {0}")]
-    Unauthorized(String),
-
-    /// The indexer did not have the requested resource.
-    #[error("not found: {0}")]
-    NotFound(String),
+    #[error("indexd responded with an error: {0}: {1}")]
+    Api(StatusCode, String),
 
     /// An invalid HTTP header value was constructed.
     #[error("invalid header value: {0}")]
@@ -101,11 +93,13 @@ pub enum PinObjectError {
 }
 
 impl Error {
-    /// Returns whether repeating the request may succeed. HTTP status codes are
-    /// currently flattened into [`Error::Api`], so API responses must be
-    /// treated as retryable alongside transport errors.
+    /// Returns whether repeating the request may succeed.
     pub(crate) fn is_retryable(&self) -> bool {
-        matches!(self, Self::Api(_) | Self::Reqwest(_))
+        match self {
+            Self::Api(StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED, _) => false,
+            Self::Api(..) | Self::Reqwest(_) => true,
+            _ => false,
+        }
     }
 }
 
@@ -708,7 +702,7 @@ const MOCK_UNSUPPORTED: &str = "sharing is not supported by the mock indexer cli
 
 #[cfg(any(test, feature = "mock"))]
 fn unsupported_by_mock() -> Error {
-    Error::Api(MOCK_UNSUPPORTED.to_string())
+    Error::Api(StatusCode::NOT_IMPLEMENTED, MOCK_UNSUPPORTED.to_string())
 }
 
 fn request_hash(
