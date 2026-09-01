@@ -30,6 +30,7 @@ pub struct RequestingApprovalState {
 pub struct ApprovedState {
     register_url: Url,
     user_secret: Hash256,
+    reconnecting: bool,
 }
 
 /// A builder for creating an SDK instance.
@@ -62,6 +63,11 @@ pub enum BuilderError {
     /// The connection approval request expired before the user approved it.
     #[error("request expired")]
     RequestExpired,
+
+    /// The recovery phrase does not derive the app key of the account that
+    /// is already connected to this application.
+    #[error("recovery phrase does not match the existing account")]
+    WrongRecoveryPhrase,
 
     /// The indexer rejected the pre-authorized connection request. The key is
     /// usually invalid, expired, exhausted, or restricted to a different
@@ -154,7 +160,7 @@ impl Builder<DisconnectedState> {
 
         // The indexer approves a valid pre-authorized request synchronously, so
         // the user secret is available on the first status check.
-        let user_secret = self
+        let status = self
             .client
             .check_request_status(&self.ephemeral_key, Url::parse(&resp.status_url)?)
             .await?
@@ -164,7 +170,10 @@ impl Builder<DisconnectedState> {
                 )
             })?;
 
-        let private_key = derive_app_key(mnemonic, &self.app_meta.id, &user_secret)?;
+        let private_key = derive_app_key(mnemonic, &self.app_meta.id, &status.user_secret)?;
+        if status.reconnecting && !self.client.check_app_authenticated(&private_key).await? {
+            return Err(BuilderError::WrongRecoveryPhrase);
+        }
         self.client
             .register_app(
                 &self.ephemeral_key,
@@ -220,7 +229,7 @@ impl Builder<RequestingApprovalState> {
                 return Err(BuilderError::RequestExpired);
             }
 
-            if let Some(user_secret) = self
+            if let Some(status) = self
                 .client
                 .check_request_status(&self.ephemeral_key, self.state.status_url.clone())
                 .await?
@@ -229,7 +238,8 @@ impl Builder<RequestingApprovalState> {
                     ephemeral_key: self.ephemeral_key,
                     state: ApprovedState {
                         register_url: self.state.register_url.clone(),
-                        user_secret,
+                        user_secret: status.user_secret,
+                        reconnecting: status.reconnecting,
                     },
                     app_meta: self.app_meta,
                     client: self.client,
@@ -241,7 +251,21 @@ impl Builder<RequestingApprovalState> {
 }
 
 impl Builder<ApprovedState> {
+    /// Returns whether the connect key the user approved with already has an
+    /// account for this application.
+    ///
+    /// A returning user must supply the same recovery phrase to
+    /// [Builder::register] to regain access to their data.
+    pub fn reconnecting(&self) -> bool {
+        self.state.reconnecting
+    }
+
     /// Completes the registration process and returns an SDK instance.
+    ///
+    /// When reconnecting, the derived app key is verified against the indexer
+    /// before registering. If it does not belong to the existing account,
+    /// this fails with [BuilderError::WrongRecoveryPhrase] instead of
+    /// registering a new account.
     ///
     /// # Arguments
     /// * `mnemonic` - The user's mnemonic phrase used to derive the application key.
@@ -250,6 +274,9 @@ impl Builder<ApprovedState> {
     /// Returns [BuilderError] if the registration fails or the SDK cannot be created.
     pub async fn register(self, mnemonic: &str) -> Result<Sdk, BuilderError> {
         let private_key = derive_app_key(mnemonic, &self.app_meta.id, &self.state.user_secret)?;
+        if self.state.reconnecting && !self.client.check_app_authenticated(&private_key).await? {
+            return Err(BuilderError::WrongRecoveryPhrase);
+        }
         self.client
             .register_app(
                 &self.ephemeral_key,
@@ -306,5 +333,96 @@ mod test {
         let derived_app_key =
             derive_app_key(MNEMONIC, &APP_ID, &SHARED_SECRET).expect("derivation failed");
         assert_eq!(derived_app_key, expected_app_key);
+    }
+}
+
+/// Integration tests requiring httptest, a native TCP mock server. Native only.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_tests {
+    use super::*;
+    use crate::app_id;
+    use httptest::http::Response;
+    use httptest::matchers::request;
+    use httptest::{Expectation, Server};
+
+    const MNEMONIC: &str = "glare own entire dish exact open theme family harsh room scrap rose";
+    const APP_META: AppMetadata = AppMetadata {
+        id: app_id!("0e90d697f5045a6593f1c43ebf79a369e2bc72cc5c7b6282f3b5aeb0de6e4005"),
+        name: "test-app",
+        description: "A test application",
+        service_url: "https://test-app.com",
+        logo_url: None,
+        callback_url: None,
+    };
+
+    /// Starts a server that approves a connection request for a returning user.
+    fn reconnecting_approval_server() -> Server {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/auth/connect")).respond_with(
+                Response::builder()
+                    .status(200)
+                    .body(format!(
+                        r#"{{"responseURL":"http://example.com/auth/connect/req","statusURL":"{}","registerURL":"{}","expiration":"2030-01-01T00:00:00Z"}}"#,
+                        server.url("/auth/connect/req/status"),
+                        server.url("/auth/connect/req/register"),
+                    ))
+                    .unwrap(),
+            ),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/auth/connect/req/status"))
+                .respond_with(
+                    Response::builder()
+                        .status(200)
+                        .body(r#"{"approved":true,"reconnecting":true,"userSecret":"cf02d945fe4bfe614d823dc13c19aa8501699e656d0f7915490c3056d5c97dc6"}"#)
+                        .unwrap(),
+                ),
+        );
+        server
+    }
+
+    #[tokio::test]
+    async fn test_register_reconnecting() {
+        // correct recovery phrase, the app key passes the check and registration proceeds
+        let server = reconnecting_approval_server();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/auth/check"))
+                .respond_with(Response::builder().status(204).body("").unwrap()),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/auth/connect/req/register"))
+                .respond_with(Response::builder().status(200).body("").unwrap()),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/hosts"))
+                .respond_with(Response::builder().status(200).body("[]").unwrap()),
+        );
+
+        let builder = Builder::new(server.url("/").to_string(), APP_META).unwrap();
+        let builder = builder.request_connection().await.unwrap();
+        let builder = builder.wait_for_approval().await.unwrap();
+        assert!(builder.reconnecting());
+        builder.register(MNEMONIC).await.unwrap();
+
+        // wrong recovery phrase, the app key fails the check and registration is refused
+        let server = reconnecting_approval_server();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/auth/check"))
+                .respond_with(Response::builder().status(401).body("").unwrap()),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/auth/connect/req/register"))
+                .times(0)
+                .respond_with(Response::builder().status(200).body("").unwrap()),
+        );
+
+        let builder = Builder::new(server.url("/").to_string(), APP_META).unwrap();
+        let builder = builder.request_connection().await.unwrap();
+        let builder = builder.wait_for_approval().await.unwrap();
+        let Err(err) = builder.register(MNEMONIC).await else {
+            panic!("expected register to fail");
+        };
+        assert!(matches!(err, BuilderError::WrongRecoveryPhrase));
     }
 }

@@ -9,9 +9,9 @@ use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 
 use super::{
-    AppConnectRequest, AuthConnectStatusResponse, Error, IntoUrl, KeyResponse, PinObjectRequest,
-    RegisterAppRequest, RegisterAppResponse, SHARE_URL_FETCH_SCHEME, SHARE_URL_SCHEME,
-    SealedObjectEvent, SharedHost, SharedObjectResponse, SlabPinParams, Url,
+    AppConnectRequest, AuthApproval, AuthConnectStatusResponse, Error, IntoUrl, KeyResponse,
+    PinObjectRequest, RegisterAppRequest, RegisterAppResponse, SHARE_URL_FETCH_SCHEME,
+    SHARE_URL_SCHEME, SealedObjectEvent, SharedHost, SharedObjectResponse, SlabPinParams, Url,
     pre_authorization_sig_hash, register_app_sig_hash, sign,
 };
 use crate::app_client::{ERROR_OBJECT_UNPINNED_SLAB, PinObjectError};
@@ -109,17 +109,13 @@ impl Client {
             .await
     }
 
-    /// Checks if an auth request has been approved.
-    ///
-    /// If approved, it returns the user secret used
-    /// to derive the application key.
-    ///
-    /// If the auth request is still pending, it returns None.
+    /// Checks if an auth request has been approved. Returns None if the
+    /// request is still pending.
     pub(crate) async fn check_request_status(
         &self,
         ephemeral_key: &PrivateKey,
         status_url: Url,
-    ) -> Result<Option<Hash256>, Error> {
+    ) -> Result<Option<AuthApproval>, Error> {
         let query_params = sign(
             ephemeral_key,
             &status_url,
@@ -137,15 +133,16 @@ impl Client {
             .await?;
         match resp.status() {
             StatusCode::OK => {
-                if let Ok(status) = resp.json::<AuthConnectStatusResponse>().await {
-                    if status.approved {
-                        Ok(status.user_secret)
-                    } else {
-                        Ok(None)
-                    }
-                } else {
-                    Err(Error::Api("invalid response format".to_string()))
+                let Ok(status) = resp.json::<AuthConnectStatusResponse>().await else {
+                    return Err(Error::Api("invalid response format".to_string()));
+                };
+                if !status.approved {
+                    return Ok(None);
                 }
+                Ok(status.user_secret.map(|user_secret| AuthApproval {
+                    user_secret,
+                    reconnecting: status.reconnecting,
+                }))
             }
             StatusCode::NOT_FOUND => Err(Error::UserRejected),
             _ => Err(Error::Api(resp.text().await?)),
@@ -1063,6 +1060,14 @@ mod tests {
             ),
         );
         server.expect(
+            Expectation::matching(request::method_path("GET", "/reconnecting")).respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body("{\"approved\": true, \"reconnecting\": true, \"userSecret\": \"3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2\"}")
+                    .unwrap(),
+            ),
+        );
+        server.expect(
             Expectation::matching(request::method_path("GET", "/rejected")).respond_with(
                 Response::builder()
                     .status(StatusCode::NOT_FOUND)
@@ -1082,7 +1087,7 @@ mod tests {
         let client = Client::new("https://foo.com").unwrap();
         let ephemeral_key = PrivateKey::from_seed(&rand::random());
 
-        // approved request
+        // approved request, from an indexer that does not report reconnecting
         let status_url: Url = server.url("/approved").to_string().parse().unwrap();
         assert_eq!(
             client
@@ -1090,7 +1095,28 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap(),
-            hash_256!("3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2")
+            AuthApproval {
+                user_secret: hash_256!(
+                    "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
+                ),
+                reconnecting: false,
+            }
+        );
+
+        // approved request, from a returning user
+        let status_url: Url = server.url("/reconnecting").to_string().parse().unwrap();
+        assert_eq!(
+            client
+                .check_request_status(&ephemeral_key, status_url)
+                .await
+                .unwrap()
+                .unwrap(),
+            AuthApproval {
+                user_secret: hash_256!(
+                    "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
+                ),
+                reconnecting: true,
+            }
         );
 
         // rejected request
@@ -1740,6 +1766,7 @@ mod tests {
         let user_secret = Hash256::new(rand::random());
         let status_response = serde_json::to_string(&AuthConnectStatusResponse {
             approved: true,
+            reconnecting: false,
             user_secret: Some(user_secret),
         })
         .unwrap();
@@ -1798,11 +1825,11 @@ mod tests {
 
         // step 2
         let status_url: Url = resp.status_url.parse().unwrap();
-        let secret = client
+        let approval = client
             .check_request_status(&ephemeral_key, status_url)
             .await
             .unwrap();
-        assert_eq!(secret, Some(user_secret));
+        assert_eq!(approval.map(|a| a.user_secret), Some(user_secret));
 
         // step 3
         let register_url: Url = resp.register_url.parse().unwrap();
@@ -1883,6 +1910,7 @@ mod tests {
         let user_secret = Hash256::new(rand::random());
         let status_response = serde_json::to_string(&AuthConnectStatusResponse {
             approved: true,
+            reconnecting: false,
             user_secret: Some(user_secret),
         })
         .unwrap();
@@ -1937,11 +1965,11 @@ mod tests {
             .unwrap();
 
         let status_url: Url = resp.status_url.parse().unwrap();
-        let secret = client
+        let approval = client
             .check_request_status(&ephemeral_key, status_url)
             .await
             .unwrap();
-        assert_eq!(secret, Some(user_secret));
+        assert_eq!(approval.map(|a| a.user_secret), Some(user_secret));
 
         let register_url: Url = resp.register_url.parse().unwrap();
         client

@@ -217,6 +217,21 @@ impl Builder {
         .await
     }
 
+    /// Returns whether the connect key the user approved with already has an
+    /// account for this application. Only valid after `waitForApproval` has
+    /// resolved.
+    #[napi]
+    pub fn reconnecting(&self) -> Result<bool> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| Error::from_reason("mutex poisoned"))?;
+        match state.as_ref() {
+            Some(BuilderState::Approved(builder)) => Ok(builder.reconnecting()),
+            _ => Err(Error::from_reason("invalid state")),
+        }
+    }
+
     /// Registers the application with the indexer using the provided mnemonic.
     #[napi]
     pub async fn register(&self, mnemonic: String) -> Result<Sdk> {

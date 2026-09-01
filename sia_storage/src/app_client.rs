@@ -114,7 +114,15 @@ impl Error {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AuthConnectStatusResponse {
     approved: bool,
+    #[serde(default)]
+    reconnecting: bool,
     user_secret: Option<Hash256>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct AuthApproval {
+    pub user_secret: Hash256,
+    pub reconnecting: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -362,17 +370,13 @@ impl Client {
         }
     }
 
-    /// Checks if an auth request has been approved.
-    ///
-    /// If approved, it returns the user secret used
-    /// to derive the application key.
-    ///
-    /// If the auth request is still pending, it returns None.
+    /// Checks if an auth request has been approved. Returns None if the
+    /// request is still pending.
     pub(crate) async fn check_request_status(
         &self,
         ephemeral_key: &PrivateKey,
         status_url: Url,
-    ) -> Result<Option<Hash256>, Error> {
+    ) -> Result<Option<AuthApproval>, Error> {
         match self {
             Self::Http(c) => c.check_request_status(ephemeral_key, status_url).await,
             #[cfg(any(test, feature = "mock"))]

@@ -10,8 +10,8 @@ use sia_core::signing::PrivateKey;
 use sia_core::types::Hash256;
 
 use super::{
-    Error, PinObjectError, RegisterAppResponse, SHARE_URL_SCHEME, SealedObjectEvent, SlabPinParams,
-    Url, sign,
+    AuthApproval, Error, PinObjectError, RegisterAppResponse, SHARE_URL_SCHEME, SealedObjectEvent,
+    SlabPinParams, Url, sign,
 };
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
@@ -110,8 +110,11 @@ impl Client {
         &self,
         _: &PrivateKey,
         _: Url,
-    ) -> Result<Option<Hash256>, Error> {
-        Ok(Some(self.state.read().unwrap().user_secret))
+    ) -> Result<Option<AuthApproval>, Error> {
+        Ok(Some(AuthApproval {
+            user_secret: self.state.read().unwrap().user_secret,
+            reconnecting: false,
+        }))
     }
 
     pub(crate) async fn register_app(

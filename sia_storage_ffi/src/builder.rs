@@ -295,6 +295,17 @@ impl Builder {
         })
     }
 
+    /// Returns whether the connect key the user approved with already has an
+    /// account for this application.
+    ///
+    /// It is only available after [Builder::wait_for_approval] has returned.
+    pub fn reconnecting(&self) -> Result<bool, BuilderError> {
+        self.with_state(|state| match state {
+            BuilderState::Approved(builder) => Ok(builder.reconnecting()),
+            _ => Err(BuilderError::InvalidState),
+        })
+    }
+
     /// Registers the application with the indexer using the provided mnemonic.
     /// Once registered, returns an [Sdk] instance that can be used to interact
     /// with the indexer.
