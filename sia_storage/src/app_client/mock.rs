@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use base64::engine::general_purpose::URL_SAFE;
 use base64::prelude::*;
 use chrono::{DateTime, Utc};
-use reqwest::Method;
+use reqwest::{Method, StatusCode};
 use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::PrivateKey;
 use sia_core::types::Hash256;
@@ -157,7 +157,7 @@ impl Client {
             .objects
             .get(key)
             .and_then(|o| o.sealed.clone())
-            .ok_or_else(|| Error::Api(format!("object {key} not found")))
+            .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("object {key} not found")))
     }
 
     pub(crate) async fn objects(
@@ -220,7 +220,10 @@ impl Client {
                 stored.updated_at = Utc::now();
                 Ok(())
             }
-            None => Err(Error::Api(format!("object {key} not found"))),
+            None => Err(Error::Api(
+                StatusCode::NOT_FOUND,
+                format!("object {key} not found"),
+            )),
         }
     }
 
@@ -241,7 +244,7 @@ impl Client {
                 min_shards: s.min_shards,
                 sectors: s.sectors.clone(),
             })
-            .ok_or_else(|| Error::Api(format!("slab {slab_id} not found")))
+            .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("slab {slab_id} not found")))
     }
 
     pub(crate) async fn pin_slabs(
@@ -253,7 +256,10 @@ impl Client {
         state.pin_slabs_calls += 1;
         if state.pin_slabs_failures > 0 {
             state.pin_slabs_failures -= 1;
-            return Err(Error::Api("temporary pin failure".to_string()));
+            return Err(Error::Api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "temporary pin failure".to_string(),
+            ));
         }
         Ok(slabs
             .iter()
@@ -382,7 +388,7 @@ impl Client {
             .objects
             .get(&id)
             .and_then(|o| o.sealed.clone())
-            .ok_or_else(|| Error::Api(format!("object {id} not found")))?;
+            .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("object {id} not found")))?;
 
         Ok(Object {
             data_key,

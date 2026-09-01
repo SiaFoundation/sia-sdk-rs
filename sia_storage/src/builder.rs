@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use rand::random;
-use reqwest::IntoUrl;
+use reqwest::{IntoUrl, StatusCode};
 use sia_core::seed::{self, Seed};
 use sia_core::signing::PrivateKey;
 use sia_core::types::Hash256;
@@ -154,7 +154,9 @@ impl Builder<DisconnectedState> {
             )
             .await
             .map_err(|e| match e {
-                app_client::Error::Unauthorized(msg) => BuilderError::PreAuthorizedKeyRejected(msg),
+                app_client::Error::Api(StatusCode::UNAUTHORIZED, msg) => {
+                    BuilderError::PreAuthorizedKeyRejected(msg)
+                }
                 e => e.into(),
             })?;
 

@@ -76,7 +76,7 @@ impl Client {
         match resp.status() {
             StatusCode::UNAUTHORIZED => Ok(false),
             StatusCode::NO_CONTENT => Ok(true),
-            _ => Err(Error::Api(resp.text().await?)),
+            _ => Err(Error::Api(resp.status(), resp.text().await?)),
         }
     }
 
@@ -131,10 +131,11 @@ impl Client {
             .query(&query_params)
             .send()
             .await?;
-        match resp.status() {
+        let http_status = resp.status();
+        match http_status {
             StatusCode::OK => {
                 let Ok(status) = resp.json::<AuthConnectStatusResponse>().await else {
-                    return Err(Error::Api("invalid response format".to_string()));
+                    return Err(Error::Format("invalid response format".to_string()));
                 };
                 if !status.approved {
                     return Ok(None);
@@ -145,7 +146,7 @@ impl Client {
                 }))
             }
             StatusCode::NOT_FOUND => Err(Error::UserRejected),
-            _ => Err(Error::Api(resp.text().await?)),
+            _ => Err(Error::Api(http_status, resp.text().await?)),
         }
     }
 
@@ -229,7 +230,7 @@ impl Client {
             .await
             .map(|_| ())
             .map_err(|e| match &e {
-                Error::Api(message) if message.contains(ERROR_OBJECT_UNPINNED_SLAB) => {
+                Error::Api(_, message) if message.contains(ERROR_OBJECT_UNPINNED_SLAB) => {
                     PinObjectError::UnpinnedSlab
                 }
                 _ => PinObjectError::Client(e),
@@ -299,12 +300,8 @@ impl Client {
     async fn handle_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
         if resp.status().is_success() {
             Ok(resp.json::<T>().await?)
-        } else if resp.status() == StatusCode::UNAUTHORIZED {
-            Err(Error::Unauthorized(resp.text().await?))
-        } else if resp.status() == StatusCode::NOT_FOUND {
-            Err(Error::NotFound(resp.text().await?))
         } else {
-            Err(Error::Api(resp.text().await?))
+            Err(Error::Api(resp.status(), resp.text().await?))
         }
     }
 
@@ -1003,7 +1000,10 @@ mod tests {
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string()).unwrap();
 
-        let expected_error = Error::Api("something went wrong".to_string());
+        let expected_error = Error::Api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "something went wrong".to_string(),
+        );
         let get_error = client
             .get_json::<(), ()>("", &app_key, None)
             .await
@@ -1037,15 +1037,19 @@ mod tests {
         let client = Client::new(server.url("/").to_string()).unwrap();
 
         let not_found = client.delete("missing", &app_key).await.unwrap_err();
-        assert!(matches!(not_found, Error::NotFound(ref m) if m == "the body"));
+        assert!(matches!(not_found, Error::Api(StatusCode::NOT_FOUND, ref m) if m == "the body"));
         let denied = client.delete("denied", &app_key).await.unwrap_err();
-        assert!(matches!(denied, Error::Unauthorized(ref m) if m == "the body"));
+        assert!(matches!(denied, Error::Api(StatusCode::UNAUTHORIZED, ref m) if m == "the body"));
         let other = client.delete("broken", &app_key).await.unwrap_err();
-        assert!(matches!(other, Error::Api(ref m) if m == "the body"));
+        assert!(
+            matches!(other, Error::Api(StatusCode::INTERNAL_SERVER_ERROR, ref m) if m == "the body")
+        );
 
-        // 404 cannot become a success on retry, so it stays out of the
-        // retryable set.
+        // 404 and 401 cannot become a success on retry, so they stay out of
+        // the retryable set. Other statuses may.
         assert!(!not_found.is_retryable());
+        assert!(!denied.is_retryable());
+        assert!(other.is_retryable());
     }
 
     #[tokio::test]
@@ -1137,7 +1141,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err.to_string(),
-            "indexd responded with an error: something went wrong"
+            "indexd responded with an error: 500 Internal Server Error: something went wrong"
         );
     }
 
@@ -1181,7 +1185,7 @@ mod tests {
         let err = client.check_app_authenticated(&app_key).await.unwrap_err();
         assert_eq!(
             err.to_string(),
-            "indexd responded with an error: something went wrong"
+            "indexd responded with an error: 500 Internal Server Error: something went wrong"
         );
     }
 
