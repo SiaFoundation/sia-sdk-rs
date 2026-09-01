@@ -11,7 +11,7 @@ use thiserror::Error;
 use url::Url;
 
 use crate::app_client::{self, Client};
-use crate::object_encryption::derive;
+use crate::object_encryption::hkdf;
 use crate::time::Duration;
 use crate::{AppID, AppKey, AppMetadata, Sdk};
 
@@ -276,7 +276,7 @@ fn derive_app_key(
     key[..32].copy_from_slice(seed.entropy());
     key[32..].copy_from_slice(shared_secret.as_ref());
     let mut okm = [0u8; 32];
-    derive(&key, app_id.as_ref(), KEY_DOMAIN, &mut okm);
+    hkdf(&key, app_id.as_ref(), KEY_DOMAIN, &mut okm);
     Ok(PrivateKey::from_seed(&okm))
 }
 

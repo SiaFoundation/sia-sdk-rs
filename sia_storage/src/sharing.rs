@@ -11,7 +11,7 @@ use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;
 
 use crate::app_client::{self, KeyStats};
-use crate::object_encryption::derive;
+use crate::object_encryption::hkdf;
 use crate::slabs::{Object, SealedObjectError};
 
 /// The size of a sharing key [`Nonce`].
@@ -28,7 +28,7 @@ pub(crate) struct Nonce(#[serde_as(as = "Hex")] pub(crate) [u8; NONCE_SIZE]);
 /// recipient's whole credential.
 pub(crate) fn derive_sharing_seed(app_key: &PrivateKey, nonce: &Nonce) -> [u8; 32] {
     let mut seed = [0u8; 32];
-    derive(app_key.as_ref(), &nonce.0, b"share key", &mut seed);
+    hkdf(app_key.as_ref(), &nonce.0, b"share key", &mut seed);
     seed
 }
 
