@@ -7,6 +7,7 @@ use sia_storage::{
     SharingKey as StorageSharingKey,
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
+use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::*;
 
 use crate::helpers::to_js_err;
@@ -97,8 +98,8 @@ impl KeyRecord {
     /// A snapshot of how many objects the key grants access to and how much
     /// space they use.
     #[wasm_bindgen(getter)]
-    pub fn stats(&self) -> KeyStats {
-        self.inner.stats.clone().into()
+    pub fn stats(&self) -> Result<Ts<KeyStats>, JsError> {
+        Ok(KeyStats::from(self.inner.stats.clone()).into_ts()?)
     }
 }
 
@@ -124,8 +125,9 @@ impl SharedSdk {
     }
 
     /// Fetches the sharing key's stats from the indexer.
-    pub async fn stats(&self) -> Result<KeyStats, JsError> {
-        Ok(self.inner.stats().await.map_err(to_js_err)?.into())
+    pub async fn stats(&self) -> Result<Ts<KeyStats>, JsError> {
+        let stats: KeyStats = self.inner.stats().await.map_err(to_js_err)?.into();
+        Ok(stats.into_ts()?)
     }
 
     /// Fetches and decrypts one object the key grants access to.
@@ -149,11 +151,11 @@ impl SharedSdk {
     /// HostQuery. Mirrors `Sdk.hosts()` but is scoped to the sharing key, so the
     /// set is already limited to hosts holding its objects.
     #[wasm_bindgen(unchecked_return_type = "Host[]")]
-    pub async fn hosts(&self, query: Option<HostQuery>) -> Result<JsValue, JsError> {
+    pub async fn hosts(&self, query: Option<Ts<HostQuery>>) -> Result<JsValue, JsError> {
         let sdk = self.inner.clone();
         let q: StorageHostQuery = match query {
             Some(hq) => {
-                let mut q: StorageHostQuery = hq.into();
+                let mut q: StorageHostQuery = hq.to_rust()?.into();
                 q.protocol = Some(Protocol::QUIC);
                 q
             }
