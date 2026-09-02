@@ -182,3 +182,11 @@ impl SharedSdk {
         Ok(wasm_streams::ReadableStream::from_async_read(download.compat(), CHUNK_SIZE).into_raw())
     }
 }
+
+// Types the download options, which wasm_bindgen otherwise emits as any.
+#[wasm_bindgen(typescript_custom_section)]
+const _: &str = r#"
+interface SharedSdk {
+    download(object: PinnedObject, options?: DownloadOptions): ReadableStream;
+}
+"#;
