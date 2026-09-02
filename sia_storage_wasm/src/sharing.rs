@@ -63,8 +63,8 @@ impl SharingKey {
     ///
     /// It is the whole credential. Pair it with the indexer's url in
     /// `SharedSdk.connect`.
-    pub fn seed(&self) -> Result<String, JsError> {
-        Ok(hex::encode(self.inner.export()))
+    pub fn seed(&self) -> String {
+        hex::encode(self.inner.export())
     }
 }
 
