@@ -1,4 +1,5 @@
 use sia_core::types::v2::Protocol;
+use tsify::Ts;
 use wasm_bindgen::prelude::*;
 
 use crate::helpers::to_js_err;
@@ -211,7 +212,7 @@ pub(crate) fn download_options_from_js(val: JsValue) -> sia_storage::DownloadOpt
 }
 
 /// Query parameters for filtering hosts.
-#[derive(serde::Deserialize, tsify::Tsify)]
+#[derive(Default, serde::Deserialize, tsify::Tsify)]
 #[serde(rename_all = "camelCase")]
 pub struct HostQuery {
     pub country: Option<String>,
@@ -229,6 +230,18 @@ impl From<HostQuery> for sia_storage::HostQuery {
             ..Default::default()
         }
     }
+}
+
+/// Converts an optional HostQuery from JS, where a missing query means no
+/// filters. The protocol is set by the From impl above in both cases.
+pub(crate) fn host_query_from_js(
+    query: Option<Ts<HostQuery>>,
+) -> Result<sia_storage::HostQuery, JsError> {
+    let query = match query {
+        Some(q) => q.to_rust()?,
+        None => HostQuery::default(),
+    };
+    Ok(query.into())
 }
 
 /// Converts milliseconds since epoch to a chrono::DateTime<Utc>.
