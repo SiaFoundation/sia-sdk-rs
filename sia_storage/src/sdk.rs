@@ -970,49 +970,24 @@ mod test {
 
     #[tokio::test]
     async fn test_unshare_object_not_attached() {
-        use httptest::http::{Response, StatusCode};
-        use httptest::matchers::*;
-        use httptest::{Expectation, Server};
+        use crate::mock::MockNetwork;
 
-        use crate::{AppKey, Host};
-
-        let app_key = Arc::new(AppKey::import(random_seed()));
-        let sharing_key = SharingKey::import([1u8; 32]);
-        let object_id = sia_core::types::Hash256::new([2u8; 32]);
-        let path = format!(
-            "/sharing/{}/objects/{}",
-            sharing_key.public_key(),
-            object_id
-        );
-
-        let server = Server::run();
-        server.expect(
-            Expectation::matching(request::method_path("GET", "/hosts"))
-                .times(..)
-                .respond_with(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .body(serde_json::to_string(&Vec::<Host>::new()).unwrap())
-                        .unwrap(),
-                ),
-        );
-        // A 404 means the object was never attached to this key.
-        server.expect(
-            Expectation::matching(request::method_path("DELETE", path)).respond_with(
-                Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body("not attached")
-                    .unwrap(),
-            ),
-        );
-
-        let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();
-        let sdk = Sdk::new(client, app_key)
+        let network = MockNetwork::new();
+        let sdk = network
+            .sdk(AppKey::import(random_seed()))
             .await
-            .expect("failed to build sdk");
+            .expect("sdk creation failed");
+
+        let key = sdk
+            .create_sharing_key(SharingKeyOptions {
+                description: "photos".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create failed");
 
         let err = sdk
-            .unshare_object(&sharing_key, &object_id)
+            .unshare_object(&key, &sia_core::types::Hash256::new([2u8; 32]))
             .await
             .expect_err("detaching an unattached object should fail");
         assert!(matches!(err, SharingError::ObjectNotAttached), "{err}");

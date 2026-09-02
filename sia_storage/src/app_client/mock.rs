@@ -457,7 +457,7 @@ impl Client {
             .sharing_keys
             .get(public_key)
             .map(StoredSharingKey::response)
-            .ok_or_else(|| Error::Api(format!("sharing key {public_key} not found")))
+            .ok_or_else(|| Error::NotFound(format!("sharing key {public_key} not found")))
     }
 
     pub(crate) async fn delete_sharing_key(
@@ -467,7 +467,9 @@ impl Client {
     ) -> Result<(), Error> {
         let mut state = self.state.write().unwrap();
         if state.sharing_keys.remove(public_key).is_none() {
-            return Err(Error::Api(format!("sharing key {public_key} not found")));
+            return Err(Error::NotFound(format!(
+                "sharing key {public_key} not found"
+            )));
         }
         Ok(())
     }
@@ -484,13 +486,13 @@ impl Client {
             .objects
             .get(&req.object_id)
             .and_then(|o| o.sealed.as_ref())
-            .ok_or_else(|| Error::Api(format!("object {} not found", req.object_id)))?
+            .ok_or_else(|| Error::NotFound(format!("object {} not found", req.object_id)))?
             .slabs
             .clone();
         let stored = state
             .sharing_keys
             .get_mut(sharing_key)
-            .ok_or_else(|| Error::Api(format!("sharing key {sharing_key} not found")))?;
+            .ok_or_else(|| Error::NotFound(format!("sharing key {sharing_key} not found")))?;
         // The request carries the object's keys re-sealed under the sharing
         // key, so store those rather than the account-sealed originals.
         stored.attached.insert(
@@ -521,7 +523,7 @@ impl Client {
             .sharing_keys
             .get(sharing_key)
             .map(|stored| stored.page(offset, limit))
-            .ok_or_else(|| Error::Api(format!("sharing key {sharing_key} not found")))
+            .ok_or_else(|| Error::NotFound(format!("sharing key {sharing_key} not found")))
     }
 
     /// Authenticates a `/shared` request the way the indexer does, by the public
@@ -534,7 +536,7 @@ impl Client {
         state
             .sharing_keys
             .get(&public_key)
-            .ok_or_else(|| Error::Api(format!("sharing key {public_key} not found")))
+            .ok_or_else(|| Error::Unauthorized(format!("sharing key {public_key} not found")))
     }
 
     pub(crate) async fn shared_stats(&self, sharing_key: &PrivateKey) -> Result<KeyStats, Error> {
@@ -563,7 +565,7 @@ impl Client {
             .attached
             .get(key)
             .cloned()
-            .ok_or_else(|| Error::Api(format!("object {key} not found")))
+            .ok_or_else(|| Error::NotFound(format!("object {key} not found")))
     }
 
     /// Signs every token with one stand-in account key. Nothing in the SDK
@@ -600,9 +602,11 @@ impl Client {
         let stored = state
             .sharing_keys
             .get_mut(sharing_key)
-            .ok_or_else(|| Error::Api(format!("sharing key {sharing_key} not found")))?;
+            .ok_or_else(|| Error::NotFound(format!("sharing key {sharing_key} not found")))?;
         if stored.attached.remove(object_key).is_none() {
-            return Err(Error::Api(format!("object {object_key} is not attached")));
+            return Err(Error::NotFound(format!(
+                "object {object_key} is not attached"
+            )));
         }
         Ok(())
     }
