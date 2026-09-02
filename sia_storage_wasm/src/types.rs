@@ -338,7 +338,6 @@ pub(crate) fn to_js<T: serde::Serialize + ?Sized>(val: &T) -> Result<JsValue, Js
 /// What a recipient can see about the sharing key they hold. The counts are a
 /// snapshot, not a live view.
 #[derive(serde::Serialize, tsify::Tsify)]
-#[tsify(into_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyStats {
     pub object_count: u64,
