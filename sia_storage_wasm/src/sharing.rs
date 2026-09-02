@@ -1,10 +1,8 @@
 use std::str::FromStr;
 
 use sia_core::types::Hash256;
-use sia_core::types::v2::Protocol;
 use sia_storage::{
-    HostQuery as StorageHostQuery, KeyRecord as StorageKeyRecord, SharedSdk as StorageSharedSdk,
-    SharingKey as StorageSharingKey,
+    KeyRecord as StorageKeyRecord, SharedSdk as StorageSharedSdk, SharingKey as StorageSharingKey,
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tsify::{Ts, Tsify};
@@ -153,17 +151,7 @@ impl SharedSdk {
     #[wasm_bindgen(unchecked_return_type = "Host[]")]
     pub async fn hosts(&self, query: Option<Ts<HostQuery>>) -> Result<JsValue, JsError> {
         let sdk = self.inner.clone();
-        let q: StorageHostQuery = match query {
-            Some(hq) => {
-                let mut q: StorageHostQuery = hq.to_rust()?.into();
-                q.protocol = Some(Protocol::QUIC);
-                q
-            }
-            None => StorageHostQuery {
-                protocol: Some(Protocol::QUIC),
-                ..Default::default()
-            },
-        };
+        let q = types::host_query_from_js(query)?;
         let hosts = run_local(async move { sdk.hosts(q).await })
             .await
             .map_err(to_js_err)?;
