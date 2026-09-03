@@ -38,7 +38,8 @@ pub enum Error {
 
     /// An error from the indexer API client. Callers can match on the inner
     /// [AppApiError](crate::AppApiError) to distinguish cases worth handling differently, such as
-    /// [AppApiError::Unauthorized](crate::AppApiError::Unauthorized) for a revoked or expired key.
+    /// [AppApiError::Api](crate::AppApiError::Api) with a `401` status for a revoked or expired
+    /// key.
     #[error("app client error: {0}")]
     AppClient(#[from] crate::AppApiError),
 

@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use base64::engine::general_purpose::URL_SAFE;
 use base64::prelude::*;
 use chrono::{DateTime, Utc};
-use reqwest::Method;
+use reqwest::{Method, StatusCode};
 use sia_core::rhp4::{AccountToken, SECTOR_SIZE};
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
@@ -170,7 +170,7 @@ impl Client {
             .objects
             .get(key)
             .and_then(|o| o.sealed.clone())
-            .ok_or_else(|| Error::Api(format!("object {key} not found")))
+            .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("object {key} not found")))
     }
 
     pub(crate) async fn objects(
@@ -233,7 +233,10 @@ impl Client {
                 stored.updated_at = Utc::now();
                 Ok(())
             }
-            None => Err(Error::Api(format!("object {key} not found"))),
+            None => Err(Error::Api(
+                StatusCode::NOT_FOUND,
+                format!("object {key} not found"),
+            )),
         }
     }
 
@@ -254,7 +257,7 @@ impl Client {
                 min_shards: s.min_shards,
                 sectors: s.sectors.clone(),
             })
-            .ok_or_else(|| Error::Api(format!("slab {slab_id} not found")))
+            .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("slab {slab_id} not found")))
     }
 
     pub(crate) async fn pin_slabs(
@@ -266,7 +269,10 @@ impl Client {
         state.pin_slabs_calls += 1;
         if state.pin_slabs_failures > 0 {
             state.pin_slabs_failures -= 1;
-            return Err(Error::Api("temporary pin failure".to_string()));
+            return Err(Error::Api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "temporary pin failure".to_string(),
+            ));
         }
         Ok(slabs
             .iter()
@@ -395,7 +401,7 @@ impl Client {
             .objects
             .get(&id)
             .and_then(|o| o.sealed.clone())
-            .ok_or_else(|| Error::Api(format!("object {id} not found")))?;
+            .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("object {id} not found")))?;
 
         Ok(Object {
             data_key,
@@ -413,7 +419,10 @@ impl Client {
     ) -> Result<KeyResponse, Error> {
         let mut state = self.state.write().unwrap();
         if state.sharing_keys.contains_key(&req.public_key) {
-            return Err(Error::Api("sharing key already exists".into()));
+            return Err(Error::Api(
+                StatusCode::CONFLICT,
+                "sharing key already exists".into(),
+            ));
         }
         let stored = StoredSharingKey {
             public_key: req.public_key,
@@ -457,7 +466,12 @@ impl Client {
             .sharing_keys
             .get(public_key)
             .map(StoredSharingKey::response)
-            .ok_or_else(|| Error::NotFound(format!("sharing key {public_key} not found")))
+            .ok_or_else(|| {
+                Error::Api(
+                    StatusCode::NOT_FOUND,
+                    format!("sharing key {public_key} not found"),
+                )
+            })
     }
 
     pub(crate) async fn delete_sharing_key(
@@ -467,9 +481,10 @@ impl Client {
     ) -> Result<(), Error> {
         let mut state = self.state.write().unwrap();
         if state.sharing_keys.remove(public_key).is_none() {
-            return Err(Error::NotFound(format!(
-                "sharing key {public_key} not found"
-            )));
+            return Err(Error::Api(
+                StatusCode::NOT_FOUND,
+                format!("sharing key {public_key} not found"),
+            ));
         }
         Ok(())
     }
@@ -486,13 +501,23 @@ impl Client {
             .objects
             .get(&req.object_id)
             .and_then(|o| o.sealed.as_ref())
-            .ok_or_else(|| Error::NotFound(format!("object {} not found", req.object_id)))?
+            .ok_or_else(|| {
+                Error::Api(
+                    StatusCode::NOT_FOUND,
+                    format!("object {} not found", req.object_id),
+                )
+            })?
             .slabs
             .clone();
         let stored = state
             .sharing_keys
             .get_mut(sharing_key)
-            .ok_or_else(|| Error::NotFound(format!("sharing key {sharing_key} not found")))?;
+            .ok_or_else(|| {
+                Error::Api(
+                    StatusCode::NOT_FOUND,
+                    format!("sharing key {sharing_key} not found"),
+                )
+            })?;
         // The request carries the object's keys re-sealed under the sharing
         // key, so store those rather than the account-sealed originals.
         stored.attached.insert(
@@ -523,7 +548,12 @@ impl Client {
             .sharing_keys
             .get(sharing_key)
             .map(|stored| stored.page(offset, limit))
-            .ok_or_else(|| Error::NotFound(format!("sharing key {sharing_key} not found")))
+            .ok_or_else(|| {
+                Error::Api(
+                    StatusCode::NOT_FOUND,
+                    format!("sharing key {sharing_key} not found"),
+                )
+            })
     }
 
     /// Authenticates a `/shared` request the way the indexer does, by the public
@@ -536,7 +566,12 @@ impl Client {
         state
             .sharing_keys
             .get(&public_key)
-            .ok_or_else(|| Error::Unauthorized(format!("sharing key {public_key} not found")))
+            .ok_or_else(|| {
+                Error::Api(
+                    StatusCode::UNAUTHORIZED,
+                    format!("sharing key {public_key} not found"),
+                )
+            })
     }
 
     pub(crate) async fn shared_stats(&self, sharing_key: &PrivateKey) -> Result<KeyStats, Error> {
@@ -565,7 +600,7 @@ impl Client {
             .attached
             .get(key)
             .cloned()
-            .ok_or_else(|| Error::NotFound(format!("object {key} not found")))
+            .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("object {key} not found")))
     }
 
     /// Signs every token with one stand-in account key. Nothing in the SDK
@@ -602,11 +637,17 @@ impl Client {
         let stored = state
             .sharing_keys
             .get_mut(sharing_key)
-            .ok_or_else(|| Error::NotFound(format!("sharing key {sharing_key} not found")))?;
+            .ok_or_else(|| {
+                Error::Api(
+                    StatusCode::NOT_FOUND,
+                    format!("sharing key {sharing_key} not found"),
+                )
+            })?;
         if stored.attached.remove(object_key).is_none() {
-            return Err(Error::NotFound(format!(
-                "object {object_key} is not attached"
-            )));
+            return Err(Error::Api(
+                StatusCode::NOT_FOUND,
+                format!("object {object_key} is not attached"),
+            ));
         }
         Ok(())
     }
