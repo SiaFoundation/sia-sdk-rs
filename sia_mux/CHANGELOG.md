@@ -1,3 +1,11 @@
+## 0.1.3 (2026-09-03)
+
+### Fixes
+
+#### Fix clippy lints introduced by Rust 1.98.
+
+Rust 1.98 extended `clippy::result_large_err` to `impl Future` return positions, added `clippy::chunks_exact_to_as_chunks`, and tightened unused import detection. These are lint fixes only, with no behavior changes.
+
 ## 0.1.2 (2026-08-07)
 
 ### Features

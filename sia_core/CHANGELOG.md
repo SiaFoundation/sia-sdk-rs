@@ -1,3 +1,16 @@
+## 0.5.0 (2026-09-03)
+
+### Breaking Changes
+
+- Remove contextual fields from several error variants to reduce `Error` enum size.
+- Removed the `blake2` module and the `blake2`/`hkdf` dependencies.
+
+### Fixes
+
+- Fixed an issue with RPCRead where the returned bytes could be longer than the requested length.
+- Reupload slabs whose sectors expired from temporary storage
+- use --locked for cargo install wasm-pack
+
 ## 0.4.2 (2026-08-07)
 
 ### Features
