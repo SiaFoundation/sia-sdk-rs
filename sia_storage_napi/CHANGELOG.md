@@ -1,3 +1,30 @@
+## 0.10.0 (2026-09-03)
+
+### Breaking Changes
+
+- Remove contextual fields from several error variants to reduce `Error` enum size.
+
+#### Renamed the share URL methods on `Sdk`.
+
+`Sdk::share_object` and `Sdk::shared_object` are now `Sdk::object_share_url` and `Sdk::object_from_share_url`. The bindings change to match, so `shareObject` and `sharedObject` become `objectShareUrl` and `objectFromShareUrl`.
+
+### Features
+
+#### Added `connect_pre_authorized` for connecting with a pre-authorized key.
+
+Applications can now bypass the interactive approval flow by connecting with a pre-authorized key that the indexer operator provisions out of band. `Builder::connect_pre_authorized(pre_authorized_key, mnemonic)` performs the connect, approval, and registration steps in one call and returns a ready SDK. The method is also exposed through the ffi, napi, and wasm bindings.
+
+#### Added `reconnecting` to the connection approval flow.
+
+After approval, `reconnecting()` reports whether the connect key already has an account for the application. When reconnecting, `register` and `connect_pre_authorized` fail with `WrongRecoveryPhrase` if the recovery phrase does not match the existing account.
+
+### Fixes
+
+- Added the HTTP status code to `AppApiError::Api` and removed the `Unauthorized` and `NotFound` variants
+- Increased default API timeout for slow indexers.
+- Retry failed shards up to three times before failing the download.
+- Added a method for truncating objects.
+
 ## 0.9.0 (2026-08-07)
 
 ### Breaking Changes

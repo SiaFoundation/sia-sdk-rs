@@ -1,3 +1,43 @@
+## 0.12.0 (2026-09-03)
+
+### Breaking Changes
+
+- Added the HTTP status code to `AppApiError::Api` and removed the `Unauthorized` and `NotFound` variants
+- Remove contextual fields from several error variants to reduce `Error` enum size.
+
+#### Renamed the share URL methods on `Sdk`.
+
+`Sdk::share_object` and `Sdk::shared_object` are now `Sdk::object_share_url` and `Sdk::object_from_share_url`. The bindings change to match, so `shareObject` and `sharedObject` become `objectShareUrl` and `objectFromShareUrl`.
+
+### Features
+
+- Added `Download::write_to_path` for writing a download directly to a file.
+- Reupload slabs whose sectors expired from temporary storage
+
+#### Added `connect_pre_authorized` for connecting with a pre-authorized key.
+
+Applications can now bypass the interactive approval flow by connecting with a pre-authorized key that the indexer operator provisions out of band. `Builder::connect_pre_authorized(pre_authorized_key, mnemonic)` performs the connect, approval, and registration steps in one call and returns a ready SDK. The method is also exposed through the ffi, napi, and wasm bindings.
+
+#### Added `reconnecting` to the connection approval flow.
+
+After approval, `reconnecting()` reports whether the connect key already has an account for the application. When reconnecting, `register` and `connect_pre_authorized` fail with `WrongRecoveryPhrase` if the recovery phrase does not match the existing account.
+
+#### Added sharing keys for scoped, read-only access to objects.
+
+A sharing key grants read-only access to a chosen set of objects without the recipient needing an account, an app registration, or an approval flow. Owners create a key with `Sdk::create_sharing_key`, attach objects with `Sdk::share_object`, and hand out the key's seed; recipients connect with `SharedSdk::connect`, which pays for reads from the owner's account rather than their own.
+
+### Fixes
+
+- Increased default API timeout for slow indexers.
+- Pin slabs immediately
+- Removed the `blake2` module and the `blake2`/`hkdf` dependencies.
+- Retry failed shards up to three times before failing the download.
+- Added a method for truncating objects.
+
+#### Fix clippy lints introduced by Rust 1.98.
+
+Rust 1.98 extended `clippy::result_large_err` to `impl Future` return positions, added `clippy::chunks_exact_to_as_chunks`, and tightened unused import detection. These are lint fixes only, with no behavior changes.
+
 ## 0.11.0 (2026-08-07)
 
 ### Breaking Changes
