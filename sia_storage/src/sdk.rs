@@ -525,6 +525,93 @@ mod test {
         seed
     }
 
+    /// The whole sharing flow against the in-memory network: an owner creates a
+    /// key and attaches an object, and a recipient holding only the seed lists,
+    /// decrypts, and downloads it.
+    #[tokio::test]
+    async fn test_mock_network_sharing_roundtrip() {
+        use std::io::Cursor;
+        use tokio::io::AsyncReadExt;
+
+        use crate::mock::MockNetwork;
+
+        let network = MockNetwork::new();
+        network.add_hosts(40);
+        let sdk = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("sdk creation failed");
+
+        let data: Vec<u8> = (0..(1 << 20)).map(|i| i as u8).collect();
+        let object = sdk
+            .upload(
+                Object::new(Some(b"metadata".to_vec())),
+                Cursor::new(data.clone()),
+                UploadOptions::default(),
+            )
+            .await
+            .expect("upload failed");
+        sdk.pin_object(&object).await.expect("pin failed");
+
+        let key = sdk
+            .create_sharing_key(SharingKeyOptions {
+                description: "photos".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create failed");
+        sdk.share_object(&key, &object)
+            .await
+            .expect("attach failed");
+
+        // the owner's view of what is attached
+        let attached = sdk
+            .shared_objects(&key, Some(0), Some(10))
+            .await
+            .expect("owner list failed");
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].id(), object.id());
+
+        let record = sdk.sharing_key(&key).await.expect("re-read failed");
+        assert_eq!(record.stats.object_count, 1);
+        assert_eq!(record.description, "photos");
+
+        // the recipient holds nothing but the seed
+        let seed = key.export();
+        let shared = network.shared_sdk(seed).await.expect("connect failed");
+
+        let stats = shared.stats().await.expect("stats failed");
+        assert_eq!(stats.object_count, 1);
+
+        let listed = shared
+            .objects(Some(0), Some(10))
+            .await
+            .expect("list failed");
+        assert_eq!(listed.len(), 1);
+
+        // re-sealing under the sharing key must round-trip, or a recipient can
+        // decrypt nothing at all
+        let fetched = shared.object(&object.id()).await.expect("fetch failed");
+        assert_eq!(fetched.slabs(), object.slabs());
+        assert_eq!(fetched.metadata, b"metadata".to_vec());
+
+        let mut reader = shared
+            .download(&fetched, DownloadOptions::default())
+            .expect("download failed");
+        let mut downloaded = Vec::new();
+        reader
+            .read_to_end(&mut downloaded)
+            .await
+            .expect("read failed");
+        assert_eq!(downloaded, data);
+
+        // detaching leaves the key in place with nothing attached
+        sdk.unshare_object(&key, &object.id())
+            .await
+            .expect("detach failed");
+        assert_eq!(shared.stats().await.expect("stats failed").object_count, 0);
+    }
+
     #[tokio::test]
     async fn test_mock_network_object_roundtrip() {
         use std::io::Cursor;
@@ -884,49 +971,24 @@ mod test {
 
     #[tokio::test]
     async fn test_unshare_object_not_attached() {
-        use httptest::http::{Response, StatusCode};
-        use httptest::matchers::*;
-        use httptest::{Expectation, Server};
+        use crate::mock::MockNetwork;
 
-        use crate::{AppKey, Host};
-
-        let app_key = Arc::new(AppKey::import(random_seed()));
-        let sharing_key = SharingKey::import([1u8; 32]);
-        let object_id = sia_core::types::Hash256::new([2u8; 32]);
-        let path = format!(
-            "/sharing/{}/objects/{}",
-            sharing_key.public_key(),
-            object_id
-        );
-
-        let server = Server::run();
-        server.expect(
-            Expectation::matching(request::method_path("GET", "/hosts"))
-                .times(..)
-                .respond_with(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .body(serde_json::to_string(&Vec::<Host>::new()).unwrap())
-                        .unwrap(),
-                ),
-        );
-        // A 404 means the object was never attached to this key.
-        server.expect(
-            Expectation::matching(request::method_path("DELETE", path)).respond_with(
-                Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body("not attached")
-                    .unwrap(),
-            ),
-        );
-
-        let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();
-        let sdk = Sdk::new(client, app_key)
+        let network = MockNetwork::new();
+        let sdk = network
+            .sdk(AppKey::import(random_seed()))
             .await
-            .expect("failed to build sdk");
+            .expect("sdk creation failed");
+
+        let key = sdk
+            .create_sharing_key(SharingKeyOptions {
+                description: "photos".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create failed");
 
         let err = sdk
-            .unshare_object(&sharing_key, &object_id)
+            .unshare_object(&key, &sia_core::types::Hash256::new([2u8; 32]))
             .await
             .expect_err("detaching an unattached object should fail");
         assert!(matches!(err, SharingError::ObjectNotAttached), "{err}");
