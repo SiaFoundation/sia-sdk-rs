@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use chrono::Utc;
 use log::debug;
 use serde::{Deserialize, Serialize};
+use sia_core::encoding::SiaEncodable;
 use sia_core::rhp4::{AccountToken, HostPrices, SECTOR_SIZE};
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
@@ -471,10 +472,14 @@ impl Hosts {
         {
             Ok((prices, false))
         } else {
-            let (prices, _) = timeout(fetch_timeout, transport.host_prices(host_endpoint))
+            let (prices, elapsed) = timeout(fetch_timeout, transport.host_prices(host_endpoint))
                 .await
                 .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))?
                 .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))?;
+            let size = prices.encoded_length() as u32;
+            if let Some(transfer) = Transfer::try_new(size, elapsed) {
+                hosts.add_read_sample(host_endpoint.public_key, transfer);
+            }
             cache.set(host_endpoint.public_key, prices.clone());
             Ok((prices, true))
         }
