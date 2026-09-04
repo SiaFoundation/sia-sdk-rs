@@ -200,6 +200,11 @@ impl HostList {
     fn add_write_sample(&self, host_key: PublicKey, transfer: Transfer) {
         self.with_metric(&host_key, |m| m.add_write_sample(transfer));
     }
+
+    /// Records an RPC that consumed its whole deadline for the given host.
+    fn add_timed_out_sample(&self, host_key: PublicKey, transfer: Transfer, write: bool) {
+        self.with_metric(&host_key, |m| m.add_timed_out(transfer, write));
+    }
 }
 
 /// RAII guard that increments an `AtomicUsize` on construction and
@@ -383,6 +388,16 @@ impl Hosts {
             .add_sample(transfer.rate());
     }
 
+    /// Records an RPC that hit `elapsed` without completing, so the host is
+    /// scored on the stall rather than left unsampled.
+    pub fn record_timed_out(&self, host_key: PublicKey, size: u32, elapsed: Duration, write: bool) {
+        let Some(transfer) = Transfer::try_new(size, elapsed) else {
+            self.hosts.add_failure(host_key);
+            return;
+        };
+        self.hosts.add_timed_out_sample(host_key, transfer, write);
+    }
+
     /// Expected duration of a `bytes`-sized write on a typical host.
     /// Falls back to a static until the first write is sampled.
     pub fn write_estimate(&self, bytes: u32) -> Duration {
@@ -496,6 +511,7 @@ impl Hosts {
         write_timeout: Duration,
     ) -> Result<(Hash256, u64), RPCError> {
         let host = self.host_endpoint(host_key)?;
+        let bytes = sector.len() as u32;
         timeout(write_timeout, async {
             let (prices, _) = Self::fetch_prices(
                 self.transport.clone(),
@@ -506,7 +522,6 @@ impl Hosts {
                 false,
             )
             .await?;
-            let bytes = sector.len() as u32;
             let tip_height = prices.tip_height;
             let (root, elapsed) = self
                 .transport
@@ -517,7 +532,8 @@ impl Hosts {
             self.record_write_sample(host_key, bytes, elapsed);
             Ok((root, tip_height))
         })
-        .await?
+        .await
+        .inspect_err(|_| self.record_timed_out(host_key, bytes, write_timeout, true))?
     }
 
     /// Performs a download RPC from the given host. The caller is
