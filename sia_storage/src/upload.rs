@@ -21,7 +21,7 @@ use log::debug;
 use sia_core::rhp4::{SECTOR_SIZE, TEMP_SECTOR_DURATION};
 use sia_core::signing::PublicKey;
 use thiserror::Error;
-use tokio::io::{AsyncRead, BufReader};
+use tokio::io::AsyncRead;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinSet;
 
@@ -665,10 +665,8 @@ impl Upload {
         Ok(())
     }
 
-    /// Returns the cumulative number of bytes that have landed in the pipeline
-    /// across all [read](Self::read) calls, including bytes from reads that
-    /// errored part-way. Callers can diff this across a call to recover a
-    /// partial count on error and treat the bytes as dead padding.
+    /// Returns the cumulative number of bytes committed to the pipeline
+    /// across all [read](Self::read) calls.
     pub(crate) fn length(&self) -> u64 {
         self.slab_buffer
             .as_ref()
@@ -794,7 +792,8 @@ impl PackedUpload {
         self.upload.remaining() as u64
     }
 
-    /// Returns the cumulative length of all objects currently in the upload.
+    /// Returns the cumulative length committed to the upload, including unused
+    /// padding from failed adds.
     pub fn length(&self) -> u64 {
         self.upload.length()
     }
@@ -816,13 +815,10 @@ impl PackedUpload {
     ///
     /// If the reader errors part-way, it's safe to continue calling
     /// [add](Self::add); no object is registered for the failed call. Or call
-    /// [finalize](Self::finalize) to collect the objects added so far. Bytes
-    /// read before the error remain in the current slab as padding and stay
-    /// counted in [length](Self::length) and [remaining](Self::remaining).
+    /// [finalize](Self::finalize) to collect the objects added so far. To retry
+    /// the failed object, add it again from the beginning.
     pub async fn add<R: AsyncRead + Unpin>(&mut self, r: R) -> Result<u64, UploadError> {
         let object = Object::default();
-        // buffer the reader since SlabReader reads 64 bytes at a time
-        let r = BufReader::new(r);
         let start = self.upload.length();
         let n = self.upload.read(object.data_key.clone(), r).await?;
         let end = self.upload.length();
@@ -894,8 +890,6 @@ pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
     reader: R,
     options: UploadOptions,
 ) -> Result<Object, UploadError> {
-    // buffer the reader since SlabReader reads 64 bytes at a time
-    let reader = BufReader::new(reader);
     let Some(start_offset) = options.start_offset else {
         let mut upload = Upload::new(hosts, api_client, app_key, options)?;
         upload.read(object.data_key.clone(), reader).await?;

@@ -6,6 +6,7 @@ use sia_storage::mock::MockNetwork;
 use sia_storage::{AppKey, DownloadOptions, Object, Sdk, UploadOptions};
 use std::io::Cursor;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, sink};
 use tokio::runtime;
 
@@ -14,6 +15,24 @@ async fn upload_object(sdk: Arc<Sdk>, input: Bytes, opts: UploadOptions) -> Obje
     sdk.upload(Object::default(), r, opts)
         .await
         .expect("upload failed")
+}
+
+async fn measure_uploads(
+    sdk: &Arc<Sdk>,
+    network: &MockNetwork,
+    input: &Bytes,
+    opts: UploadOptions,
+    iters: u64,
+) -> Duration {
+    let mut total = Duration::ZERO;
+    for _ in 0..iters {
+        let start = Instant::now();
+        upload_object(sdk.clone(), input.clone(), opts.clone()).await;
+        total += start.elapsed();
+        // clear memory usage after each iteration
+        network.clear_sectors();
+    }
+    total
 }
 
 fn upload_benchmark(c: &mut Criterion) {
@@ -43,18 +62,18 @@ fn upload_benchmark(c: &mut Criterion) {
         BenchmarkId::new("upload", "90 slabs"),
         &input,
         |b, input| {
-            b.to_async(&runtime).iter(|| async {
-                upload_object(
-                    sdk.clone(),
-                    input.clone(),
+            b.to_async(&runtime).iter_custom(|iters| {
+                measure_uploads(
+                    &sdk,
+                    &network,
+                    input,
                     UploadOptions {
                         max_buffered_slabs: Some(90),
                         ..Default::default()
                     },
+                    iters,
                 )
-                .await;
             });
-            network.clear_sectors();
         },
     );
 
@@ -62,26 +81,25 @@ fn upload_benchmark(c: &mut Criterion) {
         BenchmarkId::new("upload", "10 slabs"),
         &input,
         |b, input| {
-            b.to_async(&runtime).iter(|| async {
-                upload_object(
-                    sdk.clone(),
-                    input.clone(),
+            b.to_async(&runtime).iter_custom(|iters| {
+                measure_uploads(
+                    &sdk,
+                    &network,
+                    input,
                     UploadOptions {
                         max_buffered_slabs: Some(10),
                         ..Default::default()
                     },
+                    iters,
                 )
-                .await;
             });
-            network.clear_sectors();
         },
     );
 
     large_group.bench_with_input(BenchmarkId::new("upload", "default"), &input, |b, input| {
-        b.to_async(&runtime).iter(|| async {
-            upload_object(sdk.clone(), input.clone(), UploadOptions::default()).await;
+        b.to_async(&runtime).iter_custom(|iters| {
+            measure_uploads(&sdk, &network, input, UploadOptions::default(), iters)
         });
-        network.clear_sectors();
     });
 
     let object = runtime.block_on(async {

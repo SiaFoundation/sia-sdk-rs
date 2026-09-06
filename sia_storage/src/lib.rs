@@ -939,25 +939,6 @@ mod test {
 
     #[sia_core_derive::cross_target_test]
     async fn test_upload_packed_add_error_is_recoverable() {
-        let app_key = Arc::new(AppKey::import(random_seed()));
-        let hosts = Hosts::new(Client::mock());
-        hosts.update(
-            (0..60)
-                .map(|_| Host {
-                    public_key: PrivateKey::from_seed(&random_seed()).public_key(),
-                    addresses: vec![NetAddress {
-                        protocol: sia_core::types::v2::Protocol::QUIC,
-                        address: "localhost:1234".to_string(),
-                    }],
-                    country_code: "US".to_string(),
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    good_for_upload: true,
-                })
-                .collect(),
-            true,
-        );
-
         // reader that delivers `data` then errors on the next poll.
         struct ErrAfter {
             data: Vec<u8>,
@@ -979,54 +960,82 @@ mod test {
             }
         }
 
-        let partial: Vec<u8> = (0..100u8).collect();
-        let good: Bytes = Bytes::from_static(b"recoverable object data after the hole");
+        // Fail within a batch, after a batch, and after crossing a slab.
+        for failed_bytes in [
+            100,
+            64 * 1024 + 13,
+            PackedUploadOptions::default().optimal_data_size() + 13,
+        ] {
+            let app_key = Arc::new(AppKey::import(random_seed()));
+            let hosts = Hosts::new(Client::mock());
+            hosts.update(
+                (0..60)
+                    .map(|_| Host {
+                        public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                        addresses: vec![NetAddress {
+                            protocol: sia_core::types::v2::Protocol::QUIC,
+                            address: "localhost:1234".to_string(),
+                        }],
+                        country_code: "US".to_string(),
+                        latitude: 0.0,
+                        longitude: 0.0,
+                        good_for_upload: true,
+                    })
+                    .collect(),
+                true,
+            );
+            let before = Bytes::from_static(b"before failed");
+            let retry = Bytes::from(
+                (0..failed_bytes + 71)
+                    .map(|i| (i.wrapping_mul(37) ^ (i >> 8)) as u8)
+                    .collect::<Vec<_>>(),
+            );
+            let after = Bytes::from_static(b"object after the retry");
+            let mut packed_upload = PackedUpload::new(
+                hosts.clone(),
+                app_client::Client::mock(),
+                app_key.clone(),
+                PackedUploadOptions::default(),
+            )
+            .unwrap();
+            packed_upload
+                .add(Cursor::new(before.clone()))
+                .await
+                .unwrap();
+            packed_upload
+                .add(ErrAfter {
+                    data: retry[..failed_bytes].to_vec(),
+                    pos: 0,
+                })
+                .await
+                .expect_err("erroring reader should fail the add");
 
-        let mut packed_upload = PackedUpload::new(
-            hosts.clone(),
-            app_client::Client::mock(),
-            app_key.clone(),
-            PackedUploadOptions::default(),
-        )
-        .unwrap();
-        packed_upload
-            .add(ErrAfter {
-                data: partial.clone(),
-                pos: 0,
-            })
-            .await
-            .expect_err("erroring reader should fail the add");
-
-        // errored add left `partial.len()` bytes as dead padding in the slab;
-        // the packer stays usable and subsequent adds stay aligned.
-        assert_eq!(packed_upload.length(), partial.len() as u64);
-
-        packed_upload
-            .add(Cursor::new(good.clone()))
-            .await
-            .expect("subsequent add after errored add must succeed");
-
-        let objects = packed_upload.finalize().await.expect("finalize");
-        // only the successful add registered an object
-        assert_eq!(objects.len(), 1);
-        assert_eq!(objects[0].size(), good.len() as u64);
-        // the good object's bytes start *after* the padding from the errored add
-        assert_eq!(objects[0].slabs().len(), 1);
-        assert_eq!(objects[0].slabs()[0].offset, partial.len() as u32);
-        assert_eq!(objects[0].slabs()[0].length, good.len() as u32);
-
-        let mut output = BytesMut::zeroed(good.len());
-        let mut download = Download::new(
-            &objects[0],
-            hosts.clone(),
-            app_key.clone(),
-            DownloadOptions::default(),
-        )
-        .unwrap();
-        copy(&mut download, &mut Cursor::new(&mut output[..]))
-            .await
-            .expect("download to complete");
-        assert_eq!(output.freeze(), good);
+            // Retry the complete object with a fresh reader. The amount of
+            // padding left by the failed attempt is an implementation detail.
+            packed_upload.add(Cursor::new(retry.clone())).await.unwrap();
+            packed_upload.add(Cursor::new(after.clone())).await.unwrap();
+            let objects = packed_upload.finalize().await.expect("finalize");
+            assert_eq!(objects.len(), 3, "failed add must not register an object");
+            for (object, expected) in objects.iter().zip([before, retry, after]) {
+                assert_eq!(object.size(), expected.len() as u64);
+                let mut output = BytesMut::zeroed(expected.len());
+                let mut download = Download::new(
+                    object,
+                    hosts.clone(),
+                    app_key.clone(),
+                    DownloadOptions::default(),
+                )
+                .unwrap();
+                copy(&mut download, &mut Cursor::new(&mut output[..]))
+                    .await
+                    .expect("download to complete");
+                assert_eq!(
+                    output.freeze(),
+                    expected,
+                    "failure after {failed_bytes} bytes"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "fs")]

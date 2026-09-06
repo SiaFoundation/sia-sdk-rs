@@ -90,6 +90,8 @@ pub(crate) struct SlabReader {
     data_shards: usize,
     encryption_key: EncryptionKey,
     shards: Vec<Vec<u8>>,
+    // Reused across slabs and packed objects; keeps read/encrypt calls large.
+    read_buffer: Vec<u8>,
     length: usize,
     total_length: u64,
 }
@@ -100,6 +102,23 @@ pub(crate) struct ReadSlab {
     pub shards: Vec<Vec<u8>>,
 }
 
+/// Reads as many bytes as possible from `r` into `buf` stopping at EoF. 
+/// Returns the number of bytes read.
+/// 
+/// This behavior is distinct from `read_exact` since it will
+/// not return unexpected EoF if buf is not filled.
+async fn fill_buf<R: AsyncReadExt + Unpin>(r: &mut R, buf: &mut [u8]) -> io::Result<usize> {
+    let mut read_total: usize = 0;
+    while read_total < buf.len() {
+        let n = r.read(&mut buf[read_total..]).await?;
+        if n == 0 {
+            break;
+        }
+        read_total += n;
+    }
+    Ok(read_total)
+}
+
 impl SlabReader {
     pub(crate) fn new(data_shards: usize, parity_shards: usize) -> Self {
         let total_shards = data_shards + parity_shards;
@@ -107,6 +126,7 @@ impl SlabReader {
             data_shards,
             encryption_key: rand::random::<[u8; 32]>().into(),
             shards: vec![vec![0u8; SECTOR_SIZE]; total_shards],
+            read_buffer: vec![0u8; 64 * 1024],
             length: 0,
             total_length: 0,
         }
@@ -116,8 +136,9 @@ impl SlabReader {
         self.length
     }
 
-    /// Cumulative bytes that have landed in the pipeline across all
-    /// `read_slab` calls, including bytes from reads that errored part-way.
+    /// Cumulative bytes committed to shards across all `read_slab` calls, 
+    /// including partially successful reads.
+    /// 
     /// Unlike [length](Self::length), this never resets when a slab is
     /// finalized.
     pub fn total_length(&self) -> u64 {
@@ -167,19 +188,24 @@ impl SlabReader {
                 break;
             }
 
-            // calculate current position in the interleaved layout
-            let stripe_size = SEGMENT_SIZE * self.data_shards;
-            let shard_index = (self.length % stripe_size) / SEGMENT_SIZE;
-            let byte_in_seg = self.length % SEGMENT_SIZE;
-            let seg_start = (self.length / stripe_size) * SEGMENT_SIZE;
-
-            let segment =
-                &mut self.shards[shard_index][seg_start + byte_in_seg..seg_start + SEGMENT_SIZE];
-            let n = r.read(segment).await?;
+            let n = fill_buf(&mut r, &mut self.read_buffer).await?;
             if n == 0 {
                 break;
             }
-            cipher.apply_keystream(&mut segment[..n]);
+            cipher.apply_keystream(&mut self.read_buffer[..n]);
+            // stripe the encrypted read buffer across the slab shards
+            let stripe_size = SEGMENT_SIZE * self.data_shards;
+            let mut copied = 0;
+            while copied < n {
+                let position = self.length + copied;
+                let shard_index = (position % stripe_size) / SEGMENT_SIZE;
+                let byte_in_seg = position % SEGMENT_SIZE;
+                let shard_offset = (position / stripe_size) * SEGMENT_SIZE + byte_in_seg;
+                let count = (SEGMENT_SIZE - byte_in_seg).min(n - copied);
+                self.shards[shard_index][shard_offset..shard_offset + count]
+                    .copy_from_slice(&self.read_buffer[copied..copied + count]);
+                copied += count;
+            }
             self.length += n;
             self.total_length += n as u64;
             total_read += n;
@@ -205,6 +231,9 @@ impl SlabReader {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::ReadBuf;
 
     use super::*;
 
@@ -212,7 +241,7 @@ mod tests {
         vec![i; SECTOR_SIZE]
     }
 
-    /// Reverses the per-segment encryption `read_slab` applies, restoring the
+    /// Reverses the object encryption `read_slab` applies, restoring the
     /// data shards to plaintext so the striping assertions can compare against
     /// the original input. Mirrors `read_slab`'s logical-order walk.
     fn decrypt_data_shards(
@@ -539,5 +568,196 @@ mod tests {
         // minimum remaining: drop 20 shards (all data + half of parity), leaving DATA_SHARDS parity shards
         let min_remaining: Vec<usize> = (0..PARITY_SHARDS).collect();
         check_reconstruct(&min_remaining, "min_remaining");
+    }
+
+    struct ChunkedReader<'a> {
+        data: &'a [u8],
+        max_read: usize,
+        fail_at_end: bool,
+    }
+
+    impl AsyncRead for ChunkedReader<'_> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.data.is_empty() && self.fail_at_end {
+                return Poll::Ready(Err(io::Error::other("reader failed")));
+            }
+            let n = self.data.len().min(self.max_read).min(buf.remaining());
+            buf.put_slice(&self.data[..n]);
+            self.data = &self.data[n..];
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn input(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| (i.wrapping_mul(37) ^ (i >> 8)) as u8)
+            .collect()
+    }
+
+    // Encrypt each object's contiguous plaintext independently of the reader's
+    // chunk sizes and scatter implementation.
+    fn append_ciphertext(
+        ciphertext: &mut Vec<u8>,
+        data: &[u8],
+        data_key: &EncryptionKey,
+        slab_key: &EncryptionKey,
+    ) {
+        let offset = ciphertext.len();
+        ciphertext.extend_from_slice(data);
+        Chacha20Cipher::new_v1(data_key.clone(), offset as u64, slab_key)
+            .apply_keystream(&mut ciphertext[offset..]);
+    }
+
+    fn assert_ciphertext(slab: &ReadSlab, data_shards: usize, ciphertext: &[u8]) {
+        assert_eq!(slab.length, ciphertext.len());
+        // Read the on-disk interleaving in logical order. Include all unused
+        // bytes to ensure partial segments and untouched rows retain padding.
+        let mut logical = Vec::with_capacity(data_shards * SECTOR_SIZE);
+        for offset in (0..SECTOR_SIZE).step_by(SEGMENT_SIZE) {
+            for shard in &slab.shards[..data_shards] {
+                logical.extend_from_slice(&shard[offset..offset + SEGMENT_SIZE]);
+            }
+        }
+        assert_eq!(&logical[..ciphertext.len()], ciphertext);
+        assert!(logical[ciphertext.len()..].iter().all(|&b| b == 0));
+        assert!(slab.shards[data_shards..].iter().flatten().all(|&b| b == 0));
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_batched_reader_short_reads_and_key_changes() {
+        const BUFFER_SIZE: usize = 64 * 1024;
+        let data = input(2 * BUFFER_SIZE + 71);
+        let first = input(13); // change keys inside a segment
+        let first_key = EncryptionKey::from([1; 32]);
+        let second_key = EncryptionKey::from([2; 32]);
+        for max_read in [1, 63, 64, 65, BUFFER_SIZE - 1, BUFFER_SIZE, BUFFER_SIZE + 1] {
+            let mut reader = SlabReader::new(3, 2);
+            let slab_key = reader.encryption_key.clone();
+            let (n, slab) = reader
+                .read_slab(first_key.clone(), &mut Cursor::new(&first))
+                .await
+                .unwrap();
+            assert_eq!(n, first.len());
+            assert!(slab.is_none());
+            let mut source = ChunkedReader {
+                data: &data,
+                max_read,
+                fail_at_end: false,
+            };
+            let (n, slab) = reader
+                .read_slab(second_key.clone(), &mut source)
+                .await
+                .unwrap();
+            assert_eq!(n, data.len(), "max_read = {max_read}");
+            assert!(slab.is_none());
+            assert!(source.data.is_empty());
+            assert_eq!(reader.total_length(), (first.len() + data.len()) as u64);
+            let mut expected = Vec::new();
+            append_ciphertext(&mut expected, &first, &first_key, &slab_key);
+            append_ciphertext(&mut expected, &data, &second_key, &slab_key);
+            assert_ciphertext(&reader.finish().unwrap(), 3, &expected);
+        }
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_batched_reader_error_progress_and_resume() {
+        let first = input(64 * 1024 + 13);
+        let second = input(64 * 1024 + 71);
+        let first_key = EncryptionKey::from([3; 32]);
+        let second_key = EncryptionKey::from([4; 32]);
+        let mut reader = SlabReader::new(3, 2);
+        let slab_key = reader.encryption_key.clone();
+        let mut source = ChunkedReader {
+            data: &first,
+            max_read: 4093,
+            fail_at_end: true,
+        };
+        let error = reader
+            .read_slab(first_key.clone(), &mut source)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        let committed = reader.length();
+        assert!(committed <= first.len());
+        assert_eq!(reader.total_length(), committed as u64);
+        let (n, slab) = reader
+            .read_slab(second_key.clone(), &mut Cursor::new(&second))
+            .await
+            .unwrap();
+        assert_eq!(n, second.len());
+        assert!(slab.is_none());
+        assert_eq!(reader.total_length(), (committed + second.len()) as u64);
+        let mut expected = Vec::new();
+        append_ciphertext(&mut expected, &first[..committed], &first_key, &slab_key);
+        append_ciphertext(&mut expected, &second, &second_key, &slab_key);
+        assert_ciphertext(&reader.finish().unwrap(), 3, &expected);
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_batched_reader_slab_boundary_and_empty_reads() {
+        const DATA_SHARDS: usize = 3;
+        const SLAB_SIZE: usize = DATA_SHARDS * SECTOR_SIZE;
+        let data = input(SLAB_SIZE + 71);
+        let data_key = EncryptionKey::from([5; 32]);
+        let mut source = Cursor::new(&data);
+        let mut reader = SlabReader::new(DATA_SHARDS, 2);
+        let (n, slab) = reader
+            .read_slab(data_key.clone(), &mut source)
+            .await
+            .unwrap();
+        let slab = slab.unwrap();
+        assert_eq!(n, SLAB_SIZE);
+        assert_eq!(source.position(), SLAB_SIZE as u64);
+        assert_eq!(reader.length(), 0);
+        assert_eq!(reader.total_length(), SLAB_SIZE as u64);
+        let mut expected = Vec::new();
+        append_ciphertext(
+            &mut expected,
+            &data[..SLAB_SIZE],
+            &data_key,
+            &slab.encryption_key,
+        );
+        assert_ciphertext(&slab, DATA_SHARDS, &expected);
+
+        let (n, next) = reader
+            .read_slab(data_key.clone(), &mut source)
+            .await
+            .unwrap();
+        assert_eq!(n, 71);
+        assert!(next.is_none());
+        assert_eq!(source.position(), data.len() as u64);
+        assert_eq!(reader.total_length(), data.len() as u64);
+        let (n, next) = reader
+            .read_slab(data_key.clone(), &mut source)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(next.is_none());
+        assert_eq!(reader.length(), 71);
+        assert_eq!(reader.total_length(), data.len() as u64);
+        let next = reader.finish().unwrap();
+        assert_ne!(next.encryption_key, slab.encryption_key);
+        let mut expected = Vec::new();
+        append_ciphertext(
+            &mut expected,
+            &data[SLAB_SIZE..],
+            &data_key,
+            &next.encryption_key,
+        );
+        assert_ciphertext(&next, DATA_SHARDS, &expected);
+
+        let mut empty = SlabReader::new(1, 1);
+        let (n, slab) = empty
+            .read_slab(data_key, &mut Cursor::new([]))
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(slab.is_none());
+        assert!(empty.finish().is_none());
     }
 }
