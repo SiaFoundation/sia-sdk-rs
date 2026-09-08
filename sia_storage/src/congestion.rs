@@ -42,7 +42,8 @@ struct State {
     completions: usize,
     successes: usize,
     elapsed_sum: f64,
-    /// `prev_goodput == 0` means there is no baseline yet (bootstrap / re-probe).
+    /// Goodput of the previous decided window, or 0 for no baseline yet
+    /// (bootstrap / re-probe). A decided window has a success, so it is never 0.
     prev_goodput: f64,
     prev_limit: usize,
     goodput_ema: f64,
@@ -60,6 +61,29 @@ impl State {
         } else {
             (self.limit * self.scale).clamp(MIN_WINDOW, MAX_WINDOW)
         }
+    }
+
+    /// Halves the limit and probes upward again from there.
+    fn back_off(&mut self, old: usize) {
+        self.limit = (old / 2).max(self.floor);
+        self.strikes = 0;
+        self.probing = true;
+        self.prev_goodput = 0.0;
+        self.steady_run = 0;
+    }
+
+    /// Commits the new limit, superseding in-flight samples if it moved.
+    fn apply_limit(&mut self, old: usize, goodput: f64) -> isize {
+        self.prev_limit = old;
+        let delta = self.limit as isize - old as isize;
+        if delta != 0 {
+            self.generation += 1;
+            debug!(
+                "AIMD limit {old} -> {} ({delta:+}) goodput {goodput:.0}",
+                self.limit
+            );
+        }
+        delta
     }
 }
 
@@ -130,20 +154,31 @@ impl InflightController {
         }
 
         let old = state.limit;
-        // throughput ≈ inflight / latency
-        let goodput = if state.elapsed_sum > 0.0 {
-            state.successes as f64 * old as f64 / state.elapsed_sum
-        } else {
-            0.0
-        };
+        let (successes, window_elapsed) = (state.successes, state.elapsed_sum);
         state.completions = 0;
         state.successes = 0;
         state.elapsed_sum = 0.0;
 
+        // Nothing succeeded: back off without waiting out the strikes. Must come
+        // before the baseline below, which reads a stored 0 as "no baseline" and climbs.
+        if successes == 0 {
+            state.back_off(old);
+            return state.apply_limit(old, 0.0);
+        }
+        if window_elapsed <= 0.0 {
+            // too fast to measure
+            return 0;
+        }
+
+        // throughput ≈ inflight / latency
+        let goodput = successes as f64 * old as f64 / window_elapsed;
+
         let adverse = state.prev_goodput > 0.0 && {
             if state.probing {
+                // each doubling has to keep paying off
                 goodput < state.prev_goodput * (1.0 + RISE_MARGIN)
             } else {
+                // once settled, only a drop at an unchanged limit counts
                 old == state.prev_limit && goodput < state.goodput_ema * (1.0 - DECLINE_MARGIN)
             }
         };
@@ -152,49 +187,36 @@ impl InflightController {
             state.strikes += 1;
             return 0;
         }
-
         state.strikes = 0;
-        if state.prev_goodput <= 0.0 {
-            // bootstrap / re-probe: climb
-            state.limit = (old * 2).min(state.cap);
+
+        let doubled = (old * 2).min(state.cap);
+        if !adverse && state.probing {
+            // no baseline yet, or still paying off: climb
+            state.limit = doubled;
             state.prev_goodput = goodput;
         } else if !adverse {
-            if state.probing {
-                state.limit = (old * 2).min(state.cap);
-            } else {
-                state.goodput_ema = EMA_ALPHA * goodput + (1.0 - EMA_ALPHA) * state.goodput_ema;
-                state.steady_run += 1;
-                // periodically probe upward in case capacity has freed up
-                if state.steady_run >= PROBE_INTERVAL && old < state.cap {
-                    state.steady_run = 0;
-                    state.probing = true;
-                    state.limit = (old * 2).min(state.cap);
-                }
+            // settled and healthy
+            state.goodput_ema = EMA_ALPHA * goodput + (1.0 - EMA_ALPHA) * state.goodput_ema;
+            state.steady_run += 1;
+            // periodically probe upward in case capacity has freed up
+            if state.steady_run >= PROBE_INTERVAL && old < state.cap {
+                state.steady_run = 0;
+                state.probing = true;
+                state.limit = doubled;
             }
             state.prev_goodput = goodput;
         } else if state.probing {
+            // the last doubling did not pay off: settle below it
             state.limit = state.prev_limit.clamp(state.floor, state.cap);
             state.probing = false;
             state.goodput_ema = goodput;
             state.prev_goodput = goodput;
             state.steady_run = 0;
         } else {
-            state.limit = (old / 2).max(state.floor);
-            state.probing = true;
-            state.prev_goodput = 0.0;
-            state.steady_run = 0;
+            // sustained decline at a settled limit
+            state.back_off(old);
         }
-        state.prev_limit = old;
-
-        let delta = state.limit as isize - old as isize;
-        if delta != 0 {
-            state.generation += 1;
-            debug!(
-                "AIMD limit {old} -> {} ({delta:+}) goodput {goodput:.0}",
-                state.limit
-            );
-        }
-        delta
+        state.apply_limit(old, goodput)
     }
 }
 
@@ -242,6 +264,65 @@ mod tests {
             step_saturating(&c, 64, 1.0),
             64,
             "settles at the last climbing level"
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_all_failures_back_off() {
+        // with no baseline yet
+        let c = InflightController::new(8, 2, 1000, 1);
+        let mut trace = vec![c.limit()];
+        for _ in 0..10 {
+            for _ in 0..MIN_WINDOW {
+                c.record(c.sample(), Duration::from_secs(1), false);
+            }
+            trace.push(c.limit());
+        }
+        assert!(
+            trace.windows(2).all(|w| w[1] <= w[0]),
+            "limit must never climb while everything fails: {trace:?}"
+        );
+        assert_eq!(c.limit(), 2, "should reach the floor: {trace:?}");
+
+        // and from a settled, healthy limit
+        let c = InflightController::new(8, 2, 1000, 1);
+        for _ in 0..5 {
+            step_saturating(&c, 64, 1.0);
+        }
+        assert_eq!(c.limit(), 64);
+        let mut trace = vec![c.limit()];
+        for _ in 0..10 {
+            let window = c.state.lock().unwrap().window();
+            for _ in 0..window {
+                c.record(c.sample(), Duration::from_secs(1), false);
+            }
+            trace.push(c.limit());
+        }
+        assert!(
+            trace.windows(2).all(|w| w[1] <= w[0]),
+            "limit must never climb while everything fails: {trace:?}"
+        );
+        assert_eq!(c.limit(), 2, "should reach the floor: {trace:?}");
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_recovers_after_a_failing_window() {
+        let c = InflightController::new(8, 2, 1000, 1);
+        for _ in 0..5 {
+            step_saturating(&c, 64, 1.0);
+        }
+        assert_eq!(c.limit(), 64);
+
+        // a settled controller samples a full `limit * scale` window
+        let window = c.state.lock().unwrap().window();
+        for _ in 0..window {
+            c.record(c.sample(), Duration::from_secs(1), false);
+        }
+        assert_eq!(c.limit(), 32, "one bad window halves the limit");
+
+        assert!(
+            step(&c, 1.0) > 32,
+            "should climb again once operations succeed"
         );
     }
 
