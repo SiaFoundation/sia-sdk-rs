@@ -298,6 +298,9 @@ impl Builder {
     /// Returns whether the connect key the user approved with already has an
     /// account for this application.
     ///
+    /// The connect key may have accounts under more than one recovery phrase.
+    /// Use [Builder::matches_existing_app_key] to check a particular phrase.
+    ///
     /// It is only available after [Builder::wait_for_approval] has returned.
     pub fn reconnecting(&self) -> Result<bool, BuilderError> {
         self.with_state(|state| match state {
@@ -306,9 +309,32 @@ impl Builder {
         })
     }
 
+    /// Returns whether `mnemonic` derives an application key that is already
+    /// registered with the indexer. Unlike [Builder::register], the builder
+    /// remains usable. Only available after [Builder::wait_for_approval].
+    ///
+    /// # Arguments
+    /// * `mnemonic` - The user's mnemonic phrase used to derive the application key.
+    pub async fn matches_existing_app_key(&self, mnemonic: String) -> Result<bool, BuilderError> {
+        self.with_state_transition(|state| async move {
+            let result = match &state {
+                BuilderState::Approved(builder) => builder
+                    .matches_existing_app_key(&mnemonic)
+                    .await
+                    .map_err(BuilderError::from),
+                _ => Err(BuilderError::InvalidState),
+            };
+            Ok((state, result))
+        })
+        .await?
+    }
+
     /// Registers the application with the indexer using the provided mnemonic.
     /// Once registered, returns an [Sdk] instance that can be used to interact
     /// with the indexer.
+    ///
+    /// A different recovery phrase registers a new application key even when
+    /// [Builder::reconnecting] is true.
     ///
     /// # Arguments
     /// * `mnemonic` - The user's mnemonic phrase used to derive the application key.

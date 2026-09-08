@@ -31,7 +31,7 @@ mod http;
 pub(crate) mod mock;
 
 const QUERY_PARAM_VALID_UNTIL: &str = "sv";
-const QUERY_PARAM_CREDENTIAL: &str = "sc";
+pub(crate) const QUERY_PARAM_CREDENTIAL: &str = "sc";
 const QUERY_PARAM_SIGNATURE: &str = "ss";
 
 const SHARE_URL_SCHEME: &str = "sia";

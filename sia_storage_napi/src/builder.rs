@@ -220,6 +220,9 @@ impl Builder {
     /// Returns whether the connect key the user approved with already has an
     /// account for this application. Only valid after `waitForApproval` has
     /// resolved.
+    ///
+    /// The connect key may have accounts under more than one recovery phrase.
+    /// Use `matchesExistingAppKey` to check a particular phrase.
     #[napi]
     pub fn reconnecting(&self) -> Result<bool> {
         let state = self
@@ -232,7 +235,28 @@ impl Builder {
         }
     }
 
+    /// Returns whether `mnemonic` derives an application key that is already
+    /// registered with the indexer. Unlike `register`, the builder remains
+    /// usable. Only valid after `waitForApproval` has resolved.
+    #[napi]
+    pub async fn matches_existing_app_key(&self, mnemonic: String) -> Result<bool> {
+        self.with_state_transition(|state| async move {
+            let result = match &state {
+                BuilderState::Approved(builder) => builder
+                    .matches_existing_app_key(&mnemonic)
+                    .await
+                    .map_err(|e| Error::from_reason(e.to_string())),
+                _ => Err(Error::from_reason("invalid state")),
+            };
+            Ok((state, result))
+        })
+        .await?
+    }
+
     /// Registers the application with the indexer using the provided mnemonic.
+    ///
+    /// A different recovery phrase registers a new application key even when
+    /// `reconnecting()` is true.
     #[napi]
     pub async fn register(&self, mnemonic: String) -> Result<Sdk> {
         self.with_state_transition(|state| async move {

@@ -161,6 +161,9 @@ impl Builder {
     /// Returns whether the connect key the user approved with already has an
     /// account for this application. Only valid after `waitForApproval` has
     /// resolved.
+    ///
+    /// The connect key may have accounts under more than one recovery phrase.
+    /// Use `matchesExistingAppKey` to check a particular phrase.
     #[wasm_bindgen]
     pub fn reconnecting(&self) -> Result<bool, JsError> {
         let state = self.state.borrow();
@@ -170,7 +173,36 @@ impl Builder {
         }
     }
 
+    /// Returns whether `mnemonic` derives an application key that is already
+    /// registered with the indexer. Unlike `register`, the builder remains
+    /// usable. Only valid after `waitForApproval` has resolved.
+    #[wasm_bindgen(js_name = "matchesExistingAppKey")]
+    pub async fn matches_existing_app_key(&self, mnemonic: &str) -> Result<bool, JsError> {
+        let state = self.state.borrow_mut().take();
+        let mnemonic = mnemonic.to_string();
+
+        let (next_state, result) = run_local(async move {
+            match state {
+                Some(BuilderState::Approved(builder)) => {
+                    let result = builder
+                        .matches_existing_app_key(&mnemonic)
+                        .await
+                        .map_err(to_js_err);
+                    (Some(BuilderState::Approved(builder)), result)
+                }
+                other => (other, Err(JsError::new("must be in approved state"))),
+            }
+        })
+        .await;
+
+        *self.state.borrow_mut() = next_state;
+        result
+    }
+
     /// Completes registration and returns a Sdk instance.
+    ///
+    /// A different recovery phrase registers a new application key even when
+    /// `reconnecting()` is true.
     pub async fn register(&self, mnemonic: &str) -> Result<Sdk, JsError> {
         let state = self.state.borrow_mut().take();
         let mnemonic = mnemonic.to_string();
