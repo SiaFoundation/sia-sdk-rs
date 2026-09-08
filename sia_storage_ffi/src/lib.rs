@@ -55,6 +55,73 @@ pub struct ShardProgress {
     pub elapsed_ms: u64,
 }
 
+/// Running totals for a transfer, read by polling rather than pushed per shard.
+///
+/// Pass one to [`UploadOptions`], [`PackedUploadOptions`], or
+/// [`DownloadOptions`] and hold a reference to read it on whatever cadence
+/// suits the caller. One counter shared across several transfers totals them.
+/// Read once more after a transfer resolves, since the last shards land
+/// between polls.
+#[derive(Default, uniffi::Object)]
+pub struct TransferProgress {
+    shards: AtomicU64,
+    shard_bytes: AtomicU64,
+}
+
+#[uniffi::export]
+impl TransferProgress {
+    #[uniffi::constructor]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Shards completed so far.
+    pub fn shards(&self) -> u64 {
+        self.shards.load(Ordering::Relaxed)
+    }
+
+    /// Bytes completed so far, summed over shards.
+    ///
+    /// Uploads count every shard at the full sector size, so compare against
+    /// [`encoded_size`] rather than the object's length. Downloads count only
+    /// the shards needed to recover the requested range.
+    pub fn shard_bytes(&self) -> u64 {
+        self.shard_bytes.load(Ordering::Relaxed)
+    }
+}
+
+impl TransferProgress {
+    fn record(&self, shard_bytes: u64) {
+        self.shards.fetch_add(1, Ordering::Relaxed);
+        self.shard_bytes.fetch_add(shard_bytes, Ordering::Relaxed);
+    }
+}
+
+/// Builds the per-shard hook the SDK calls, feeding whichever of the counter
+/// and the callback the caller supplied.
+fn shard_progress_callback(
+    progress: Option<Arc<TransferProgress>>,
+    callback: Option<Arc<dyn ProgressCallback>>,
+) -> Option<sia_storage::ShardProgressCallback> {
+    if progress.is_none() && callback.is_none() {
+        return None;
+    }
+    Some(Arc::new(move |p: sia_storage::ShardProgress| {
+        if let Some(progress) = &progress {
+            progress.record(p.shard_size as u64);
+        }
+        if let Some(callback) = &callback {
+            callback.progress(ShardProgress {
+                host_key: p.host_key.to_string(),
+                shard_size: p.shard_size as u64,
+                shard_index: p.shard_index as u32,
+                slab_index: p.slab_index as u32,
+                elapsed_ms: p.elapsed.as_millis() as u64,
+            });
+        }
+    }))
+}
+
 #[derive(Debug, Error, uniffi::Error)]
 #[uniffi(flat_error)]
 pub enum Error {
@@ -828,6 +895,10 @@ pub struct UploadOptions {
     /// Optional callback to report upload progress.
     #[uniffi(default = None)]
     pub shard_uploaded: Option<Arc<dyn ProgressCallback>>,
+
+    /// Optional counter polled for upload progress.
+    #[uniffi(default = None)]
+    pub progress: Option<Arc<TransferProgress>>,
 }
 
 impl From<UploadOptions> for sia_storage::UploadOptions {
@@ -837,19 +908,7 @@ impl From<UploadOptions> for sia_storage::UploadOptions {
         options.data_shards = val.data_shards.unwrap_or(options.data_shards);
         options.parity_shards = val.parity_shards.unwrap_or(options.parity_shards);
         options.start_offset = val.start_offset;
-        options.shard_uploaded =
-            val.shard_uploaded
-                .map(|callback| -> sia_storage::ShardProgressCallback {
-                    Arc::new(move |p: sia_storage::ShardProgress| {
-                        callback.progress(ShardProgress {
-                            host_key: p.host_key.to_string(),
-                            shard_size: p.shard_size as u64,
-                            shard_index: p.shard_index as u32,
-                            slab_index: p.slab_index as u32,
-                            elapsed_ms: p.elapsed.as_millis() as u64,
-                        });
-                    })
-                });
+        options.shard_uploaded = shard_progress_callback(val.progress, val.shard_uploaded);
         options
     }
 }
@@ -869,6 +928,10 @@ pub struct PackedUploadOptions {
     /// Optional callback to report upload progress.
     #[uniffi(default = None)]
     pub shard_uploaded: Option<Arc<dyn ProgressCallback>>,
+
+    /// Optional counter polled for upload progress.
+    #[uniffi(default = None)]
+    pub progress: Option<Arc<TransferProgress>>,
 }
 
 impl From<PackedUploadOptions> for sia_storage::PackedUploadOptions {
@@ -877,19 +940,7 @@ impl From<PackedUploadOptions> for sia_storage::PackedUploadOptions {
         options.max_buffered_slabs = val.max_buffered_slabs.map(|v| v as usize);
         options.data_shards = val.data_shards.unwrap_or(options.data_shards);
         options.parity_shards = val.parity_shards.unwrap_or(options.parity_shards);
-        options.shard_uploaded =
-            val.shard_uploaded
-                .map(|callback| -> sia_storage::ShardProgressCallback {
-                    Arc::new(move |p: sia_storage::ShardProgress| {
-                        callback.progress(ShardProgress {
-                            host_key: p.host_key.to_string(),
-                            shard_size: p.shard_size as u64,
-                            shard_index: p.shard_index as u32,
-                            slab_index: p.slab_index as u32,
-                            elapsed_ms: p.elapsed.as_millis() as u64,
-                        });
-                    })
-                });
+        options.shard_uploaded = shard_progress_callback(val.progress, val.shard_uploaded);
         options
     }
 }
@@ -907,6 +958,10 @@ pub struct DownloadOptions {
     /// Optional callback to report download progress.
     #[uniffi(default = None)]
     pub shard_downloaded: Option<Arc<dyn ProgressCallback>>,
+
+    /// Optional counter polled for download progress.
+    #[uniffi(default = None)]
+    pub progress: Option<Arc<TransferProgress>>,
 }
 
 impl From<DownloadOptions> for sia_storage::DownloadOptions {
@@ -915,19 +970,7 @@ impl From<DownloadOptions> for sia_storage::DownloadOptions {
         options.max_buffered_chunks = val.max_buffered_chunks.map(|v| v as usize);
         options.offset = val.offset.unwrap_or(options.offset);
         options.length = val.length;
-        options.shard_downloaded =
-            val.shard_downloaded
-                .map(|callback| -> sia_storage::ShardProgressCallback {
-                    Arc::new(move |p: sia_storage::ShardProgress| {
-                        callback.progress(ShardProgress {
-                            host_key: p.host_key.to_string(),
-                            shard_size: p.shard_size as u64,
-                            shard_index: p.shard_index as u32,
-                            slab_index: p.slab_index as u32,
-                            elapsed_ms: p.elapsed.as_millis() as u64,
-                        });
-                    })
-                });
+        options.shard_downloaded = shard_progress_callback(val.progress, val.shard_downloaded);
         options
     }
 }
@@ -1221,4 +1264,58 @@ pub fn encoded_size(size: u64, data_shards: u8, parity_shards: u8) -> u64 {
     let slab_size = total_shards * SECTOR_SIZE as u64;
     let slabs = size.div_ceil(data_shards as u64 * SECTOR_SIZE as u64);
     slabs * slab_size
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sia_core::signing::PublicKey;
+    use std::time::Duration;
+
+    fn shard(shard_size: usize) -> sia_storage::ShardProgress {
+        sia_storage::ShardProgress {
+            host_key: PublicKey::new([0; 32]),
+            shard_size,
+            shard_index: 0,
+            slab_index: 0,
+            elapsed: Duration::from_millis(1),
+        }
+    }
+
+    #[test]
+    fn test_no_hook_installed_when_caller_wants_no_progress() {
+        assert!(shard_progress_callback(None, None).is_none());
+    }
+
+    #[test]
+    fn test_counter_totals_shards_and_bytes() {
+        let progress = Arc::new(TransferProgress::new());
+        let hook = shard_progress_callback(Some(progress.clone()), None).unwrap();
+
+        hook(shard(100));
+        hook(shard(50));
+
+        assert_eq!(progress.shards(), 2);
+        assert_eq!(progress.shard_bytes(), 150);
+    }
+
+    #[test]
+    fn test_counter_and_callback_both_receive_every_shard() {
+        struct Recorder(Mutex<Vec<u64>>);
+        impl ProgressCallback for Recorder {
+            fn progress(&self, progress: ShardProgress) {
+                self.0.lock().unwrap().push(progress.shard_size);
+            }
+        }
+
+        let progress = Arc::new(TransferProgress::new());
+        let recorder = Arc::new(Recorder(Mutex::new(Vec::new())));
+        let hook = shard_progress_callback(Some(progress.clone()), Some(recorder.clone())).unwrap();
+
+        hook(shard(100));
+        hook(shard(50));
+
+        assert_eq!(progress.shard_bytes(), 150);
+        assert_eq!(*recorder.0.lock().unwrap(), vec![100, 50]);
+    }
 }
