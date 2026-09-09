@@ -711,6 +711,91 @@ mod test {
         );
     }
 
+    /// Deleting an object must detach it from every sharing key holding it.
+    /// indexd deletes the object row and `shared_objects.object_id` cascades,
+    /// so a mock that only tombstones the object would leave recipients able
+    /// to list and fetch something the indexer has dropped.
+    #[tokio::test]
+    async fn test_deleting_an_object_detaches_it_from_sharing_keys() {
+        use std::io::Cursor;
+
+        use crate::mock::MockNetwork;
+
+        let network = MockNetwork::new();
+        network.add_hosts(40);
+        let sdk = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("sdk creation failed");
+
+        let object = sdk
+            .upload(
+                Object::default(),
+                Cursor::new(vec![7u8; 1 << 16]),
+                UploadOptions::default(),
+            )
+            .await
+            .expect("upload failed");
+        sdk.pin_object(&object).await.expect("pin failed");
+
+        // Two keys, because the object has to come off all of them and one key
+        // cannot distinguish "detached from all" from "detached from the first".
+        let mut keys = Vec::new();
+        for description in ["first", "second"] {
+            let key = sdk
+                .create_sharing_key(SharingKeyOptions {
+                    description: description.to_string(),
+                    ..Default::default()
+                })
+                .await
+                .expect("create failed");
+            sdk.share_object(&key, &object)
+                .await
+                .expect("attach failed");
+            assert_eq!(
+                sdk.sharing_key(&key)
+                    .await
+                    .expect("re-read failed")
+                    .stats
+                    .object_count,
+                1
+            );
+            keys.push(key);
+        }
+
+        sdk.delete_object(&object.id())
+            .await
+            .expect("delete failed");
+
+        for key in &keys {
+            let record = sdk.sharing_key(key).await.expect("re-read failed");
+            assert_eq!(
+                record.stats.object_count, 0,
+                "key {} still counts the deleted object",
+                record.description
+            );
+            assert!(
+                sdk.shared_objects(key, None, None)
+                    .await
+                    .expect("owner list failed")
+                    .is_empty(),
+                "key {} still lists the deleted object",
+                record.description
+            );
+        }
+
+        // A recipient holding the seed must not be able to fetch it either.
+        let shared = network
+            .shared_sdk(keys[0].export())
+            .await
+            .expect("connect failed");
+        assert_eq!(shared.stats().await.expect("stats failed").object_count, 0);
+        assert!(
+            shared.object(&object.id()).await.is_err(),
+            "a recipient can still fetch a deleted object"
+        );
+    }
+
     #[tokio::test]
     async fn test_mock_network_object_roundtrip() {
         use std::io::Cursor;

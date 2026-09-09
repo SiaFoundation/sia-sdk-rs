@@ -232,13 +232,20 @@ impl Client {
             Some(stored) => {
                 stored.sealed = None;
                 stored.updated_at = Utc::now();
-                Ok(())
             }
-            None => Err(Error::Api(
-                StatusCode::NOT_FOUND,
-                format!("object {key} not found"),
-            )),
+            None => {
+                return Err(Error::Api(
+                    StatusCode::NOT_FOUND,
+                    format!("object {key} not found"),
+                ));
+            }
         }
+        // Deleting an object detaches it from every sharing key it was
+        // attached to.
+        for stored in state.sharing_keys.values_mut() {
+            stored.attached.remove(key);
+        }
+        Ok(())
     }
 
     pub(crate) async fn slab(
