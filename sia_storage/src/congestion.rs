@@ -8,9 +8,14 @@ use crate::time::Duration;
 /// limit, clamped, so the goodput estimate stays stable without going open-loop.
 const MIN_WINDOW: usize = 16;
 const MAX_WINDOW: usize = 1024;
-/// While probing, keep doubling only while goodput rises at least this much;
-/// once a doubling buys less, probing stops.
-const RISE_MARGIN: f64 = 0.1;
+/// While probing, keep climbing unless goodput *drops* by more than this.
+///
+/// Demanding a positive gain per step stalls the climb: throughput per step is
+/// measured with far more noise than the gain being looked for, so a step that
+/// paid off often looks like one that didn't. Flat goodput means the step was
+/// harmless, and harmless steps are worth keeping — the depth only needs to
+/// stop where throughput actually degrades.
+const RISE_MARGIN: f64 = -0.1;
 /// In steady state, goodput must fall more than this below its smoothed peak to
 /// count as real congestion and trigger a back-off.
 const DECLINE_MARGIN: f64 = 0.25;
@@ -22,6 +27,9 @@ const CONFIRM: usize = 2;
 /// Healthy steady windows between upward probes, so a settled limit climbs again
 /// when capacity frees up (e.g. a concurrent transfer finishes).
 const PROBE_INTERVAL: usize = 8;
+/// Factor to climb by per step. Four rather than two so a download reaches a
+/// deep working point within its own lifetime.
+const CLIMB: usize = 4;
 
 /// Generation-stamped token: taken at dispatch via [`InflightController::sample`]
 /// and returned to [`InflightController::record`]. A completion stamped with a
@@ -189,7 +197,7 @@ impl InflightController {
         }
         state.strikes = 0;
 
-        let doubled = (old * 2).min(state.cap);
+        let doubled = (old * CLIMB).min(state.cap);
         if !adverse && state.probing {
             // no baseline yet, or still paying off: climb
             state.limit = doubled;

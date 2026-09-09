@@ -225,7 +225,6 @@ impl SlabRecovery<AwaitingRecovery> {
         sector_length: usize,
     ) -> impl Future<Output = DownloadResult> + 'static {
         let client = self.client.clone();
-        let controller = self.controller.clone();
         let tokens = self.tokens.clone();
         async move {
             // Hold the inflight reservation for the duration of the RPC. The
@@ -244,7 +243,6 @@ impl SlabRecovery<AwaitingRecovery> {
                     };
                 }
             };
-            let permit = controller.sample();
             let start = Instant::now();
             let result = client
                 .read_sector(
@@ -258,7 +256,6 @@ impl SlabRecovery<AwaitingRecovery> {
                 )
                 .await;
             let elapsed = start.elapsed();
-            controller.record(permit, elapsed, result.is_ok());
             DownloadResult {
                 task,
                 result,
@@ -616,18 +613,30 @@ impl Download {
             seq,
             self.popped.clone(),
         );
+        // The limit counts chunks, so a chunk is what gets sampled: the window
+        // then covers a real share of what is in flight, and
+        // `successes * limit / Σ elapsed` is chunks in flight over chunk
+        // latency — the rate at which the download actually progresses.
+        let controller = self.controller.clone();
+        let permit = controller.sample();
         self.queue
             .push_back(AbortOnDropHandle::new(maybe_spawn!(async move {
-                let recovery = recovery?;
-                let mut buf = Vec::with_capacity(len);
-                recovery
-                    .recover_shards(shard_progress_callback)
-                    .await?
-                    .decode()?
-                    .write(&mut buf)
-                    .await?;
-                cipher.apply_keystream(&mut buf);
-                Ok(buf)
+                let started = Instant::now();
+                let recovered = async move {
+                    let recovery = recovery?;
+                    let mut buf = Vec::with_capacity(len);
+                    recovery
+                        .recover_shards(shard_progress_callback)
+                        .await?
+                        .decode()?
+                        .write(&mut buf)
+                        .await?;
+                    cipher.apply_keystream(&mut buf);
+                    Ok::<_, DownloadError>(buf)
+                }
+                .await;
+                controller.record(permit, started.elapsed(), recovered.is_ok());
+                recovered
             })));
         true
     }
@@ -713,7 +722,8 @@ impl Download {
         let available = object_size.saturating_sub(options.offset);
         let remaining = options.length.unwrap_or(available).min(available);
         let slabs = object.slabs().to_vec();
-        let scale = slabs.first().map(|s| s.min_shards as usize).unwrap_or(1);
+        // one chunk dispatched per unit of limit, and a chunk is the sample
+        let scale = 1;
         let max_buffered_chunks = options
             .max_buffered_chunks
             .unwrap_or_else(default_chunks_in_memory);
