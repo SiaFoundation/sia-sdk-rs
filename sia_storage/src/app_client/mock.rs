@@ -35,6 +35,7 @@ struct StoredObject {
 /// A sharing key and the objects attached to it.
 #[derive(Debug)]
 struct StoredSharingKey {
+    account: PublicKey,
     public_key: PublicKey,
     nonce: Nonce,
     description: String,
@@ -414,7 +415,7 @@ impl Client {
     /// `create_sharing_key` verifies the response against the nonce it generated.
     pub(crate) async fn add_sharing_key(
         &self,
-        _: &PrivateKey,
+        app_key: &PrivateKey,
         req: &KeyRequest,
     ) -> Result<KeyResponse, Error> {
         let mut state = self.state.write().unwrap();
@@ -425,6 +426,7 @@ impl Client {
             ));
         }
         let stored = StoredSharingKey {
+            account: app_key.public_key(),
             public_key: req.public_key,
             nonce: req.nonce,
             description: req.description.clone(),
@@ -439,12 +441,19 @@ impl Client {
 
     pub(crate) async fn sharing_keys(
         &self,
-        _: &PrivateKey,
+        app_key: &PrivateKey,
         offset: Option<u64>,
         limit: Option<u64>,
     ) -> Result<Vec<KeyResponse>, Error> {
+        let owner = app_key.public_key();
         let state = self.state.read().unwrap();
-        let mut keys: Vec<_> = state.sharing_keys.values().collect();
+        // Scoped to the caller's own keys. Returning another account's key here
+        // would fail nonce re-derivation in the SDK and surface as KeyMismatch.
+        let mut keys: Vec<_> = state
+            .sharing_keys
+            .values()
+            .filter(|k| k.account == owner)
+            .collect();
         // Newest first, matching indexd, with the key's bytes breaking ties.
         keys.sort_by_key(|k| (k.created_at, k.public_key.as_ref().to_vec()));
         keys.reverse();
@@ -458,40 +467,32 @@ impl Client {
 
     pub(crate) async fn sharing_key(
         &self,
-        _: &PrivateKey,
+        app_key: &PrivateKey,
         public_key: &PublicKey,
     ) -> Result<KeyResponse, Error> {
         let state = self.state.read().unwrap();
-        state
-            .sharing_keys
-            .get(public_key)
-            .map(StoredSharingKey::response)
-            .ok_or_else(|| {
-                Error::Api(
-                    StatusCode::NOT_FOUND,
-                    format!("sharing key {public_key} not found"),
-                )
-            })
+        Ok(Self::owned(&state, app_key, public_key)?.response())
     }
 
     pub(crate) async fn delete_sharing_key(
         &self,
-        _: &PrivateKey,
+        app_key: &PrivateKey,
         public_key: &PublicKey,
     ) -> Result<(), Error> {
+        let owner = app_key.public_key();
         let mut state = self.state.write().unwrap();
-        if state.sharing_keys.remove(public_key).is_none() {
-            return Err(Error::Api(
-                StatusCode::NOT_FOUND,
-                format!("sharing key {public_key} not found"),
-            ));
+        // Checked before removing so one account cannot revoke another's key.
+        match state.sharing_keys.get(public_key) {
+            Some(k) if k.account == owner => {}
+            _ => return Err(key_not_found(public_key)),
         }
+        state.sharing_keys.remove(public_key);
         Ok(())
     }
 
     pub(crate) async fn add_shared_object(
         &self,
-        _: &PrivateKey,
+        app_key: &PrivateKey,
         sharing_key: &PublicKey,
         req: &SharedObjectRequest,
     ) -> Result<(), Error> {
@@ -509,15 +510,7 @@ impl Client {
             })?
             .slabs
             .clone();
-        let stored = state
-            .sharing_keys
-            .get_mut(sharing_key)
-            .ok_or_else(|| {
-                Error::Api(
-                    StatusCode::NOT_FOUND,
-                    format!("sharing key {sharing_key} not found"),
-                )
-            })?;
+        let stored = Self::owned_mut(&mut state, app_key, sharing_key)?;
         // The request carries the object's keys re-sealed under the sharing
         // key, so store those rather than the account-sealed originals.
         stored.attached.insert(
@@ -538,22 +531,45 @@ impl Client {
 
     pub(crate) async fn sharing_key_objects(
         &self,
-        _: &PrivateKey,
+        app_key: &PrivateKey,
         sharing_key: &PublicKey,
         offset: Option<u64>,
         limit: Option<u64>,
     ) -> Result<Vec<SealedObject>, Error> {
         let state = self.state.read().unwrap();
+        Ok(Self::owned(&state, app_key, sharing_key)?.page(offset, limit))
+    }
+
+    /// Looks up a key the calling account owns.
+    ///
+    /// A key belonging to another account is reported as missing rather than
+    /// forbidden. That is what indexd's queries produce by filtering on
+    /// `account_id`, and it keeps one account from probing for the existence of
+    /// another's keys.
+    fn owned<'a>(
+        state: &'a State,
+        app_key: &PrivateKey,
+        public_key: &PublicKey,
+    ) -> Result<&'a StoredSharingKey, Error> {
         state
             .sharing_keys
-            .get(sharing_key)
-            .map(|stored| stored.page(offset, limit))
-            .ok_or_else(|| {
-                Error::Api(
-                    StatusCode::NOT_FOUND,
-                    format!("sharing key {sharing_key} not found"),
-                )
-            })
+            .get(public_key)
+            .filter(|k| k.account == app_key.public_key())
+            .ok_or_else(|| key_not_found(public_key))
+    }
+
+    /// Mutable counterpart of [`Client::owned`].
+    fn owned_mut<'a>(
+        state: &'a mut State,
+        app_key: &PrivateKey,
+        public_key: &PublicKey,
+    ) -> Result<&'a mut StoredSharingKey, Error> {
+        let owner = app_key.public_key();
+        state
+            .sharing_keys
+            .get_mut(public_key)
+            .filter(|k| k.account == owner)
+            .ok_or_else(|| key_not_found(public_key))
     }
 
     /// Authenticates a `/shared` request the way the indexer does, by the public
@@ -563,15 +579,12 @@ impl Client {
         sharing_key: &PrivateKey,
     ) -> Result<&'a StoredSharingKey, Error> {
         let public_key = sharing_key.public_key();
-        state
-            .sharing_keys
-            .get(&public_key)
-            .ok_or_else(|| {
-                Error::Api(
-                    StatusCode::UNAUTHORIZED,
-                    format!("sharing key {public_key} not found"),
-                )
-            })
+        state.sharing_keys.get(&public_key).ok_or_else(|| {
+            Error::Api(
+                StatusCode::UNAUTHORIZED,
+                format!("sharing key {public_key} not found"),
+            )
+        })
     }
 
     pub(crate) async fn shared_stats(&self, sharing_key: &PrivateKey) -> Result<KeyStats, Error> {
@@ -629,20 +642,12 @@ impl Client {
 
     pub(crate) async fn delete_shared_object(
         &self,
-        _: &PrivateKey,
+        app_key: &PrivateKey,
         sharing_key: &PublicKey,
         object_key: &Hash256,
     ) -> Result<(), Error> {
         let mut state = self.state.write().unwrap();
-        let stored = state
-            .sharing_keys
-            .get_mut(sharing_key)
-            .ok_or_else(|| {
-                Error::Api(
-                    StatusCode::NOT_FOUND,
-                    format!("sharing key {sharing_key} not found"),
-                )
-            })?;
+        let stored = Self::owned_mut(&mut state, app_key, sharing_key)?;
         if stored.attached.remove(object_key).is_none() {
             return Err(Error::Api(
                 StatusCode::NOT_FOUND,
@@ -651,6 +656,13 @@ impl Client {
         }
         Ok(())
     }
+}
+
+fn key_not_found(public_key: &PublicKey) -> Error {
+    Error::Api(
+        StatusCode::NOT_FOUND,
+        format!("sharing key {public_key} not found"),
+    )
 }
 
 /// Derives a slab's id the same way the indexer does, from the fields covered
@@ -680,7 +692,7 @@ impl StoredSharingKey {
         KeyResponse {
             public_key: self.public_key,
             nonce: self.nonce,
-            account: PublicKey::new([0u8; 32]),
+            account: self.account,
             description: self.description.clone(),
             stats: KeyStats {
                 object_count: self.attached.len() as u64,

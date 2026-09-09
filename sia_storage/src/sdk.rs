@@ -612,6 +612,105 @@ mod test {
         assert_eq!(shared.stats().await.expect("stats failed").object_count, 0);
     }
 
+    /// Two accounts on one network must not see or touch each other's sharing
+    /// keys. indexd scopes every owner-side query by `account_id`, so a mock
+    /// that ignores the app key would let a test pass against behaviour the
+    /// real indexer rejects.
+    #[tokio::test]
+    async fn test_sharing_keys_are_scoped_to_their_owner() {
+        use std::io::Cursor;
+
+        use crate::mock::MockNetwork;
+
+        let network = MockNetwork::new();
+        network.add_hosts(40);
+        let owner = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("owner sdk creation failed");
+        let other = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("second sdk creation failed");
+
+        let key = owner
+            .create_sharing_key(SharingKeyOptions {
+                description: "owner's key".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create failed");
+
+        // The owner's own view is unaffected by the scoping.
+        assert_eq!(
+            owner
+                .sharing_keys(None, None)
+                .await
+                .expect("owner list failed")
+                .len(),
+            1
+        );
+
+        // The second account must not learn the key exists, which is why a
+        // foreign key is reported as missing rather than forbidden.
+        assert!(
+            other
+                .sharing_keys(None, None)
+                .await
+                .expect("second list failed")
+                .is_empty(),
+            "another account's keys must not be listed"
+        );
+        assert!(
+            other.sharing_key(&key).await.is_err(),
+            "fetching another account's key must fail"
+        );
+        assert!(
+            other.shared_objects(&key, None, None).await.is_err(),
+            "listing another account's attachments must fail"
+        );
+        // unshare_object maps every 404 to ObjectNotAttached, so this asserts
+        // only that it fails. The endpoint cannot distinguish a foreign key
+        // from an unattached object against real indexd either.
+        assert!(
+            other
+                .unshare_object(&key, &Hash256::default())
+                .await
+                .is_err(),
+            "detaching from another account's key must fail"
+        );
+
+        // Attaching needs an object that exists, or the object lookup fails
+        // first and proves nothing about the key scoping.
+        let object = other
+            .upload(
+                Object::default(),
+                Cursor::new(vec![0u8; 1 << 16]),
+                UploadOptions::default(),
+            )
+            .await
+            .expect("upload failed");
+        other.pin_object(&object).await.expect("pin failed");
+        assert!(
+            other.share_object(&key, &object).await.is_err(),
+            "attaching to another account's key must fail"
+        );
+
+        // The owner still has the key after all of that, so the scoping
+        // rejected the caller rather than damaging the record.
+        assert!(
+            other.revoke_sharing_key(&key).await.is_err(),
+            "revoking another account's key must fail"
+        );
+        let record = owner.sharing_key(&key).await.expect("owner lost its key");
+        assert_eq!(record.description, "owner's key");
+        assert_eq!(
+            record.key.public_key(),
+            key.public_key(),
+            "the owner's key must be unchanged"
+        );
+    }
+
     #[tokio::test]
     async fn test_mock_network_object_roundtrip() {
         use std::io::Cursor;
