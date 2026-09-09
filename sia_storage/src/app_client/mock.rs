@@ -459,7 +459,7 @@ impl Client {
         let mut keys: Vec<_> = state
             .sharing_keys
             .values()
-            .filter(|k| k.account == owner)
+            .filter(|k| k.account == owner && !k.expired())
             .collect();
         // Newest first, matching indexd, with the key's bytes breaking ties.
         keys.sort_by_key(|k| (k.created_at, k.public_key.as_ref().to_vec()));
@@ -478,7 +478,7 @@ impl Client {
         public_key: &PublicKey,
     ) -> Result<KeyResponse, Error> {
         let state = self.state.read().unwrap();
-        Ok(Self::owned(&state, app_key, public_key)?.response())
+        Ok(Self::active(&state, app_key, public_key)?.response())
     }
 
     pub(crate) async fn delete_sharing_key(
@@ -517,7 +517,7 @@ impl Client {
             })?
             .slabs
             .clone();
-        let stored = Self::owned_mut(&mut state, app_key, sharing_key)?;
+        let stored = Self::active_mut(&mut state, app_key, sharing_key)?;
         // The request carries the object's keys re-sealed under the sharing
         // key, so store those rather than the account-sealed originals.
         stored.attached.insert(
@@ -544,7 +544,7 @@ impl Client {
         limit: Option<u64>,
     ) -> Result<Vec<SealedObject>, Error> {
         let state = self.state.read().unwrap();
-        Ok(Self::owned(&state, app_key, sharing_key)?.page(offset, limit))
+        Ok(Self::active(&state, app_key, sharing_key)?.page(offset, limit))
     }
 
     /// Looks up a key the calling account owns.
@@ -579,19 +579,56 @@ impl Client {
             .ok_or_else(|| key_not_found(public_key))
     }
 
+    /// Owner-scoped lookup that also rejects an expired key.
+    ///
+    /// indexd gates reads and new attachments on `expires_at`, but deliberately
+    /// does not gate revoking or detaching, so an owner can still clean up after
+    /// a key expires. Those two paths use [`Client::owned`] and
+    /// [`Client::owned_mut`] directly for that reason.
+    fn active<'a>(
+        state: &'a State,
+        app_key: &PrivateKey,
+        public_key: &PublicKey,
+    ) -> Result<&'a StoredSharingKey, Error> {
+        let stored = Self::owned(state, app_key, public_key)?;
+        if stored.expired() {
+            return Err(key_not_found(public_key));
+        }
+        Ok(stored)
+    }
+
+    /// Mutable counterpart of [`Client::active`].
+    fn active_mut<'a>(
+        state: &'a mut State,
+        app_key: &PrivateKey,
+        public_key: &PublicKey,
+    ) -> Result<&'a mut StoredSharingKey, Error> {
+        let stored = Self::owned_mut(state, app_key, public_key)?;
+        if stored.expired() {
+            return Err(key_not_found(public_key));
+        }
+        Ok(stored)
+    }
+
     /// Authenticates a `/shared` request the way the indexer does, by the public
-    /// half of the key it is signed with.
+    /// half of the key it is signed with. An expired key authenticates nothing,
+    /// which is how a key with an expiry stops granting access without anyone
+    /// having to revoke it.
     fn shared<'a>(
         state: &'a State,
         sharing_key: &PrivateKey,
     ) -> Result<&'a StoredSharingKey, Error> {
         let public_key = sharing_key.public_key();
-        state.sharing_keys.get(&public_key).ok_or_else(|| {
-            Error::Api(
-                StatusCode::UNAUTHORIZED,
-                format!("sharing key {public_key} not found"),
-            )
-        })
+        state
+            .sharing_keys
+            .get(&public_key)
+            .filter(|k| !k.expired())
+            .ok_or_else(|| {
+                Error::Api(
+                    StatusCode::UNAUTHORIZED,
+                    format!("sharing key {public_key} not found"),
+                )
+            })
     }
 
     pub(crate) async fn shared_stats(&self, sharing_key: &PrivateKey) -> Result<KeyStats, Error> {
@@ -687,6 +724,13 @@ fn slab_id(params: &SlabPinParams) -> Hash256 {
 }
 
 impl StoredSharingKey {
+    /// Whether the key's expiry has passed. indexd keeps expired rows until
+    /// `PruneExpiredSharingKeys` sweeps them, and filters them out of its
+    /// queries in the meantime, so the mock keeps them and filters too.
+    fn expired(&self) -> bool {
+        self.expires_at.is_some_and(|t| t <= Utc::now())
+    }
+
     /// Builds the record the sharing key API returns, with counts derived from
     /// what is currently attached.
     fn response(&self) -> KeyResponse {

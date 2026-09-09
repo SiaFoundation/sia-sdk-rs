@@ -796,6 +796,90 @@ mod test {
         );
     }
 
+    /// An expired key must stop granting access and stop accepting new
+    /// attachments, but must still be revocable so an owner can clean up.
+    /// indexd filters on `expires_at` in its reads and in its attach, and
+    /// deliberately does not filter it in delete.
+    #[tokio::test]
+    async fn test_expired_sharing_keys_are_filtered_out() {
+        use std::io::Cursor;
+
+        use crate::mock::MockNetwork;
+
+        let network = MockNetwork::new();
+        network.add_hosts(40);
+        let sdk = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("sdk creation failed");
+
+        let object = sdk
+            .upload(
+                Object::default(),
+                Cursor::new(vec![9u8; 1 << 16]),
+                UploadOptions::default(),
+            )
+            .await
+            .expect("upload failed");
+        sdk.pin_object(&object).await.expect("pin failed");
+
+        // A key that expires in the future is the positive control. Without it
+        // a filter that rejected every key carrying an expiry at all would pass
+        // this test.
+        let live = sdk
+            .create_sharing_key(SharingKeyOptions {
+                description: "live".to_string(),
+                expires_at: Some(Utc::now() + Duration::from_secs(3600)),
+            })
+            .await
+            .expect("create failed");
+        sdk.share_object(&live, &object)
+            .await
+            .expect("attach to a live key failed");
+        sdk.sharing_key(&live).await.expect("live re-read failed");
+        network
+            .shared_sdk(live.export())
+            .await
+            .expect("recipient of a live key was refused");
+
+        let expired = sdk
+            .create_sharing_key(SharingKeyOptions {
+                description: "expired".to_string(),
+                expires_at: Some(Utc::now() - Duration::from_secs(3600)),
+            })
+            .await
+            .expect("create failed");
+
+        assert!(
+            sdk.sharing_key(&expired).await.is_err(),
+            "an expired key must not be readable"
+        );
+        assert!(
+            sdk.share_object(&expired, &object).await.is_err(),
+            "an expired key must not accept new attachments"
+        );
+        assert!(
+            sdk.shared_objects(&expired, None, None).await.is_err(),
+            "an expired key must not list its attachments"
+        );
+        assert!(
+            network.shared_sdk(expired.export()).await.is_err(),
+            "an expired key must stop authenticating its holder"
+        );
+
+        // Only the live key is listed, so the filter drops the expired one
+        // without hiding the rest.
+        let listed = sdk.sharing_keys(None, None).await.expect("list failed");
+        assert_eq!(listed.len(), 1, "only the live key should be listed");
+        assert_eq!(listed[0].description, "live");
+
+        // Revoking is deliberately not gated on expiry, or an owner could never
+        // clear an expired key out.
+        sdk.revoke_sharing_key(&expired)
+            .await
+            .expect("an expired key must still be revocable");
+    }
+
     #[tokio::test]
     async fn test_mock_network_object_roundtrip() {
         use std::io::Cursor;
