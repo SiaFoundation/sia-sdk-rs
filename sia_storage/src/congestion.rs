@@ -88,8 +88,15 @@ impl State {
         self.probing = true;
         self.prev_goodput = 0.0;
         self.steady_run = 0;
-        // acted on; keeping it would let one stray timeout back off again
-        self.timeout_hosts.clear();
+    }
+
+    /// Backs off and stays there. For a window that gave no goodput to judge:
+    /// `back_off` alone leaves no baseline, which the next window reads as
+    /// "climb", straight back into whatever caused it.
+    fn settle_back(&mut self, old: usize) -> isize {
+        self.back_off(old);
+        self.probing = false;
+        self.apply_limit(old, 0.0)
     }
 
     /// Commits the new limit, superseding in-flight samples if it moved.
@@ -174,11 +181,7 @@ impl InflightController {
             return;
         }
         let old = state.limit;
-        state.back_off(old);
-        // Settle rather than probe: `back_off` leaves no baseline, which the
-        // next window reads as "climb", straight back into the timeout.
-        state.probing = false;
-        state.apply_limit(old, 0.0);
+        state.settle_back(old);
     }
 
     /// Issues a permit stamped with the current generation. Take one at dispatch
@@ -215,12 +218,10 @@ impl InflightController {
         // Nothing succeeded: back off without waiting out the strikes. Must come
         // before the baseline below, which reads a stored 0 as "no baseline" and climbs.
         if successes == 0 {
-            state.back_off(old);
-            return state.apply_limit(old, 0.0);
+            return state.settle_back(old);
         }
-        // Decay rather than clear: a window can decide on a single success
-        // while reads are still stranding. Sparse timeouts age out instead of
-        // tallying up forever; a rate that outruns the decay still backs off.
+
+        // Decay timeouts once per window if the window made some progress.
         state.decay_timeouts();
 
         if window_elapsed <= 0.0 {
@@ -539,10 +540,23 @@ mod tests {
         for _ in 0..window {
             c.record(c.sample(), Duration::from_secs(1), false);
         }
-        assert_eq!(c.limit(), settled / 2, "one bad window halves the limit");
+        let after = c.limit();
+        assert_eq!(after, settled / 2, "one bad window halves the limit");
+
+        // settled, so it must not double straight back on the next window.
+        // Same latency model as `step_saturating`, or the goodput baseline this
+        // leaves behind reads as a decline once the test resumes stepping.
+        let (window, secs) = {
+            let state = c.state.lock().unwrap();
+            (state.window(), (state.limit as f64 / 64.0).max(1.0))
+        };
+        for _ in 0..window {
+            c.record(c.sample(), Duration::from_secs_f64(secs), true);
+        }
+        assert_eq!(c.limit(), after, "climbed back on the very next window");
 
         assert!(
-            step_saturating(&c, 64, 1.0) > settled / 2,
+            step_saturating(&c, 64, 1.0) > after,
             "should climb again once operations succeed"
         );
     }
