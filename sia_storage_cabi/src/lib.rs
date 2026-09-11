@@ -422,6 +422,8 @@ fn start_packed(packed: PackedUpload, out: *mut *mut FfiPacked) -> i32 {
 
 // --- memory / util -----------------------------------------------------------
 
+/// # Safety
+/// `s` must be non null and writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_string_free(s: *mut c_char) {
     if !s.is_null() {
@@ -429,6 +431,8 @@ pub unsafe extern "C" fn sia_string_free(s: *mut c_char) {
     }
 }
 
+/// # Safety
+/// This function is only callable across the C ABI and takes no pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_set_logger(cb: Option<LogFn>, userdata: usize, max_level: i32) {
     let Some(cb) = cb else { return };
@@ -444,6 +448,8 @@ pub unsafe extern "C" fn sia_set_logger(cb: Option<LogFn>, userdata: usize, max_
     }
 }
 
+/// # Safety
+/// This function is only callable across the C ABI and takes no pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_generate_recovery_phrase() -> *mut c_char {
     CString::new(sia_storage::generate_recovery_phrase())
@@ -453,11 +459,15 @@ pub unsafe extern "C" fn sia_generate_recovery_phrase() -> *mut c_char {
 
 // --- cancellation ------------------------------------------------------------
 
+/// # Safety
+/// This function is only callable across the C ABI and takes no pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_cancel_new() -> *mut CancellationToken {
     Box::into_raw(Box::new(CancellationToken::new()))
 }
 
+/// # Safety
+/// `c` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_cancel_cancel(c: *mut CancellationToken) {
     if !c.is_null() {
@@ -465,6 +475,8 @@ pub unsafe extern "C" fn sia_cancel_cancel(c: *mut CancellationToken) {
     }
 }
 
+/// # Safety
+/// `c` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_cancel_free(c: *mut CancellationToken) {
     if !c.is_null() {
@@ -474,6 +486,11 @@ pub unsafe extern "C" fn sia_cancel_free(c: *mut CancellationToken) {
 
 // --- builder -------------------------------------------------------------------
 
+/// # Safety
+/// `indexer_url` must be non null and NUL terminated.
+/// `app_meta_json` must be non null and NUL terminated.
+/// `out` must be non null and writable. On success it receives an owned handle that must be released with sia_builder_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_builder_new(
     indexer_url: *const c_char,
@@ -518,6 +535,8 @@ pub unsafe extern "C" fn sia_builder_new(
     })
 }
 
+/// # Safety
+/// `b` may be null. Otherwise it must come from sia_builder_new and must not be used again after this returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_builder_free(b: *mut FfiBuilder) {
     if !b.is_null() {
@@ -525,6 +544,12 @@ pub unsafe extern "C" fn sia_builder_free(b: *mut FfiBuilder) {
     }
 }
 
+/// # Safety
+/// `b` must be a live handle from sia_builder_new that has not been freed.
+/// `app_key` must be readable for 32 bytes.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `out` must be non null and writable. On success it receives an owned handle that must be released with sia_sdk_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_builder_connect(
     b: *mut FfiBuilder,
@@ -552,6 +577,11 @@ pub unsafe extern "C" fn sia_builder_connect(
     })
 }
 
+/// # Safety
+/// `b` must be a live handle from sia_builder_new that has not been freed.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `response_url` must be non null and writable. On success it receives an owned string that must be released with sia_string_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_builder_request_connection(
     b: *mut FfiBuilder,
@@ -581,6 +611,10 @@ pub unsafe extern "C" fn sia_builder_request_connection(
     })
 }
 
+/// # Safety
+/// `b` must be a live handle from sia_builder_new that has not been freed.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_builder_wait_for_approval(
     b: *mut FfiBuilder,
@@ -607,6 +641,12 @@ pub unsafe extern "C" fn sia_builder_wait_for_approval(
     })
 }
 
+/// # Safety
+/// `b` must be a live handle from sia_builder_new that has not been freed.
+/// `mnemonic` must be non null and NUL terminated.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `out` must be non null and writable. On success it receives an owned handle that must be released with sia_sdk_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_builder_register(
     b: *mut FfiBuilder,
@@ -641,6 +681,8 @@ pub unsafe extern "C" fn sia_builder_register(
 
 // --- sdk -----------------------------------------------------------------------
 
+/// # Safety
+/// `sdk` may be null. Otherwise it must come from sia_builder_connect, sia_builder_register or sia_mock_sdk and must not be used again after this returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_free(sdk: *mut Sdk) {
     if !sdk.is_null() {
@@ -648,12 +690,20 @@ pub unsafe extern "C" fn sia_sdk_free(sdk: *mut Sdk) {
     }
 }
 
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `out` must be writable for 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_app_key(sdk: *const Sdk, out: *mut u8) {
     let seed = unsafe { &*sdk }.app_key().export();
     unsafe { std::slice::from_raw_parts_mut(out, 32) }.copy_from_slice(&seed);
 }
 
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `out_json` must be non null and writable. On success it receives an owned string that must be released with sia_string_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_account(
     sdk: *const Sdk,
@@ -677,6 +727,12 @@ pub unsafe extern "C" fn sia_sdk_account(
     })
 }
 
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `id` must be readable for 32 bytes.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `out` must be non null and writable. On success it receives an owned handle that must be released with sia_object_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_object(
     sdk: *const Sdk,
@@ -699,6 +755,12 @@ pub unsafe extern "C" fn sia_sdk_object(
     })
 }
 
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `after_id` must be readable for 32 bytes.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `out` must be non null and writable. On success it receives an owned handle that must be released with sia_events_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_object_events(
     sdk: *const Sdk,
@@ -753,6 +815,11 @@ pub unsafe extern "C" fn sia_sdk_object_events(
     })
 }
 
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `obj` must be a live handle from sia_object_new or any call that returns an object that has not been freed.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_pin_object(
     sdk: *const Sdk,
@@ -771,6 +838,11 @@ pub unsafe extern "C" fn sia_sdk_pin_object(
     })
 }
 
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `obj` must be a live handle from sia_object_new or any call that returns an object that has not been freed.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_update_object_metadata(
     sdk: *const Sdk,
@@ -789,6 +861,11 @@ pub unsafe extern "C" fn sia_sdk_update_object_metadata(
     })
 }
 
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `id` must be readable for 32 bytes.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_delete_object(
     sdk: *const Sdk,
@@ -807,6 +884,10 @@ pub unsafe extern "C" fn sia_sdk_delete_object(
     })
 }
 
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_prune_slabs(
     sdk: *const Sdk,
@@ -823,6 +904,11 @@ pub unsafe extern "C" fn sia_sdk_prune_slabs(
     })
 }
 
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `obj` must be a live handle from sia_object_new or any call that returns an object that has not been freed.
+/// `out_url` must be non null and writable. On success it receives an owned string that must be released with sia_string_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_object_share_url(
     sdk: *const Sdk,
@@ -850,6 +936,12 @@ pub unsafe extern "C" fn sia_sdk_object_share_url(
     })
 }
 
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `share_url` must be non null and NUL terminated.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `out` must be non null and writable. On success it receives an owned handle that must be released with sia_object_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_object_from_share_url(
     sdk: *const Sdk,
@@ -877,11 +969,15 @@ pub unsafe extern "C" fn sia_sdk_object_from_share_url(
 
 // --- object --------------------------------------------------------------------
 
+/// # Safety
+/// This function is only callable across the C ABI and takes no pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_new() -> *mut Object {
     Box::into_raw(Box::new(Object::default()))
 }
 
+/// # Safety
+/// `o` may be null. Otherwise it must come from sia_object_new or any call that returns an object and must not be used again after this returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_free(o: *mut Object) {
     if !o.is_null() {
@@ -889,32 +985,46 @@ pub unsafe extern "C" fn sia_object_free(o: *mut Object) {
     }
 }
 
+/// # Safety
+/// `o` must be a live handle from sia_object_new or any call that returns an object that has not been freed.
+/// `out` must be writable for 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_id(o: *const Object, out: *mut u8) {
     let id = unsafe { &*o }.id();
     unsafe { std::slice::from_raw_parts_mut(out, 32) }.copy_from_slice(id.as_ref());
 }
 
+/// # Safety
+/// `o` must be a live handle from sia_object_new or any call that returns an object that has not been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_size(o: *const Object) -> u64 {
     unsafe { &*o }.size()
 }
 
+/// # Safety
+/// `o` must be a live handle from sia_object_new or any call that returns an object that has not been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_encoded_size(o: *const Object) -> u64 {
     unsafe { &*o }.encoded_size()
 }
 
+/// # Safety
+/// `o` must be a live handle from sia_object_new or any call that returns an object that has not been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_created_at(o: *const Object) -> i64 {
     unsafe { &*o }.created_at.timestamp_micros()
 }
 
+/// # Safety
+/// `o` must be a live handle from sia_object_new or any call that returns an object that has not been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_updated_at(o: *const Object) -> i64 {
     unsafe { &*o }.updated_at.timestamp_micros()
 }
 
+/// # Safety
+/// `o` must be a live handle from sia_object_new or any call that returns an object that has not been freed.
+/// `buf` must be writable for `cap` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_metadata(o: *const Object, buf: *mut u8, cap: usize) -> usize {
     let meta = &unsafe { &*o }.metadata;
@@ -924,6 +1034,9 @@ pub unsafe extern "C" fn sia_object_metadata(o: *const Object, buf: *mut u8, cap
     meta.len()
 }
 
+/// # Safety
+/// `o` must be a live handle from sia_object_new or any call that returns an object that has not been freed.
+/// `data` must be readable for `len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_set_metadata(o: *mut Object, data: *const u8, len: usize) {
     let meta = if data.is_null() || len == 0 {
@@ -936,11 +1049,19 @@ pub unsafe extern "C" fn sia_object_set_metadata(o: *mut Object, data: *const u8
 
 // --- object events -------------------------------------------------------------
 
+/// # Safety
+/// `evs` must be a live handle from sia_sdk_object_events that has not been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_events_len(evs: *const FfiEvents) -> usize {
     unsafe { &*evs }.0.len()
 }
 
+/// # Safety
+/// `evs` must be a live handle from sia_sdk_object_events that has not been freed.
+/// `id_out` must be writable for 32 bytes.
+/// `deleted` must be non null and writable.
+/// `updated_at_unix_us` must be non null and writable.
+/// `obj` must be non null and writable. On success it receives an owned handle that must be released with sia_object_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_events_at(
     evs: *mut FfiEvents,
@@ -969,6 +1090,8 @@ pub unsafe extern "C" fn sia_events_at(
     true
 }
 
+/// # Safety
+/// `evs` may be null. Otherwise it must come from sia_sdk_object_events and must not be used again after this returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_events_free(evs: *mut FfiEvents) {
     if !evs.is_null() {
@@ -978,6 +1101,12 @@ pub unsafe extern "C" fn sia_events_free(evs: *mut FfiEvents) {
 
 // --- upload --------------------------------------------------------------------
 
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `obj` must be a live handle from sia_object_new or any call that returns an object that has not been freed.
+/// `opts` must be non null and point to an initialised struct.
+/// `out` must be non null and writable. On success it receives an owned handle that must be released with sia_upload_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_upload_start(
     sdk: *const Sdk,
@@ -1001,6 +1130,12 @@ pub unsafe extern "C" fn sia_upload_start(
     })
 }
 
+/// # Safety
+/// `up` must be a live handle from sia_upload_start that has not been freed.
+/// `data` must be readable for `len` bytes.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `written` must be non null and writable.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_upload_write(
     up: *mut FfiUpload,
@@ -1082,6 +1217,11 @@ pub unsafe extern "C" fn sia_upload_write(
     })
 }
 
+/// # Safety
+/// `up` must be a live handle from sia_upload_start that has not been freed.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `out` must be non null and writable. On success it receives an owned handle that must be released with sia_object_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_upload_finish(
     up: *mut FfiUpload,
@@ -1110,6 +1250,8 @@ pub unsafe extern "C" fn sia_upload_finish(
     })
 }
 
+/// # Safety
+/// `up` may be null. Otherwise it must come from sia_upload_start and must not be used again after this returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_upload_free(up: *mut FfiUpload) {
     if up.is_null() {
@@ -1123,6 +1265,12 @@ pub unsafe extern "C" fn sia_upload_free(up: *mut FfiUpload) {
 
 // --- download ------------------------------------------------------------------
 
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `obj` must be a live handle from sia_object_new or any call that returns an object that has not been freed.
+/// `opts` must be non null and point to an initialised struct.
+/// `out` must be non null and writable. On success it receives an owned handle that must be released with sia_download_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_download_start(
     sdk: *const Sdk,
@@ -1144,6 +1292,12 @@ pub unsafe extern "C" fn sia_download_start(
     })
 }
 
+/// # Safety
+/// `dl` must be a live handle from sia_download_start that has not been freed.
+/// `buf` must be writable for `cap` bytes.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `n` must be non null and writable.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_download_read(
     dl: *mut FfiDownload,
@@ -1204,6 +1358,8 @@ pub unsafe extern "C" fn sia_download_read(
     })
 }
 
+/// # Safety
+/// `dl` may be null. Otherwise it must come from sia_download_start and must not be used again after this returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_download_free(dl: *mut FfiDownload) {
     if !dl.is_null() {
@@ -1213,6 +1369,11 @@ pub unsafe extern "C" fn sia_download_free(dl: *mut FfiDownload) {
 
 // --- packed upload ---------------------------------------------------------------
 
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `opts` must be non null and point to an initialised struct.
+/// `out` must be non null and writable. On success it receives an owned handle that must be released with sia_packed_upload_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_packed_upload_start(
     sdk: *const Sdk,
@@ -1231,6 +1392,8 @@ pub unsafe extern "C" fn sia_packed_upload_start(
     })
 }
 
+/// # Safety
+/// `up` must be a live handle from sia_packed_upload_start that has not been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_packed_upload_remaining(up: *const FfiPacked) -> u64 {
     let up = unsafe { &*up };
@@ -1244,6 +1407,8 @@ pub unsafe extern "C" fn sia_packed_upload_remaining(up: *const FfiPacked) -> u6
     })
 }
 
+/// # Safety
+/// `up` must be a live handle from sia_packed_upload_start that has not been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_packed_upload_length(up: *const FfiPacked) -> u64 {
     let up = unsafe { &*up };
@@ -1257,11 +1422,16 @@ pub unsafe extern "C" fn sia_packed_upload_length(up: *const FfiPacked) -> u64 {
     })
 }
 
+/// # Safety
+/// `up` must be a live handle from sia_packed_upload_start that has not been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_packed_upload_optimal_data_size(up: *const FfiPacked) -> u64 {
     unsafe { &*up }.optimal_data_size
 }
 
+/// # Safety
+/// `up` must be a live handle from sia_packed_upload_start that has not been freed.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_packed_upload_add_begin(
     up: *mut FfiPacked,
@@ -1287,6 +1457,11 @@ pub unsafe extern "C" fn sia_packed_upload_add_begin(
     })
 }
 
+/// # Safety
+/// `up` must be a live handle from sia_packed_upload_start that has not been freed.
+/// `data` must be readable for `len` bytes.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_packed_upload_add_write(
     up: *mut FfiPacked,
@@ -1322,6 +1497,11 @@ pub unsafe extern "C" fn sia_packed_upload_add_write(
     })
 }
 
+/// # Safety
+/// `up` must be a live handle from sia_packed_upload_start that has not been freed.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `written` must be non null and writable.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_packed_upload_add_finish(
     up: *mut FfiPacked,
@@ -1348,6 +1528,12 @@ pub unsafe extern "C" fn sia_packed_upload_add_finish(
     })
 }
 
+/// # Safety
+/// `up` must be a live handle from sia_packed_upload_start that has not been freed.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `out_objs` must be non null and writable. On success it receives an owned array that must be released with sia_object_array_free.
+/// `out_len` must be non null and writable.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_packed_upload_finalize(
     up: *mut FfiPacked,
@@ -1390,6 +1576,8 @@ pub unsafe extern "C" fn sia_packed_upload_finalize(
     })
 }
 
+/// # Safety
+/// `objs` may be null. Otherwise it must be an array of `len` objects from a call that produced one, and must not be used again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_array_free(objs: *mut *mut Object, len: usize) {
     if !objs.is_null() {
@@ -1397,6 +1585,8 @@ pub unsafe extern "C" fn sia_object_array_free(objs: *mut *mut Object, len: usiz
     }
 }
 
+/// # Safety
+/// `up` may be null. Otherwise it must come from sia_packed_upload_start and must not be used again after this returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_packed_upload_free(up: *mut FfiPacked) {
     if up.is_null() {
@@ -1416,6 +1606,12 @@ pub unsafe extern "C" fn sia_packed_upload_free(up: *mut FfiPacked) {
 
 /// Seals an object under the account's app key and encodes it as JSON.
 /// Free the result with sia_string_free.
+///
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `obj` must be a live handle from sia_object_new or any call that returns an object that has not been freed.
+/// `out_json` must be non null and writable. On success it receives an owned string that must be released with sia_string_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_seal_json(
     sdk: *const Sdk,
@@ -1440,6 +1636,12 @@ pub unsafe extern "C" fn sia_object_seal_json(
 /// Decodes a sealed object from JSON and opens it with the account's app key,
 /// verifying its signatures. This is how a caller that persisted the sealed
 /// form gets a usable object back.
+///
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `json` must be non null and NUL terminated.
+/// `out` must be non null and writable. On success it receives an owned handle that must be released with sia_object_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_from_sealed_json(
     sdk: *const Sdk,
@@ -1502,6 +1704,9 @@ fn write_object_array(objects: Vec<Object>, out_objs: *mut *mut *mut Object, out
 
 /// Rebuilds a sharing key from an exported seed. This is how a recipient, or a
 /// process that persisted the seed, gets a usable credential back.
+///
+/// # Safety
+/// `seed` must be readable for 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sharing_key_import(seed: *const u8) -> *mut SharingKey {
     let mut buf = [0u8; 32];
@@ -1509,6 +1714,8 @@ pub unsafe extern "C" fn sia_sharing_key_import(seed: *const u8) -> *mut Sharing
     Box::into_raw(Box::new(SharingKey::import(buf)))
 }
 
+/// # Safety
+/// `key` may be null. Otherwise it must come from sia_sharing_key_import or sia_sdk_create_sharing_key and must not be used again after this returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sharing_key_free(key: *mut SharingKey) {
     if !key.is_null() {
@@ -1518,6 +1725,10 @@ pub unsafe extern "C" fn sia_sharing_key_free(key: *mut SharingKey) {
 
 /// Writes the key's 32-byte seed, which is the entire credential. Treat the
 /// output as secret.
+///
+/// # Safety
+/// `key` must be a live handle from sia_sharing_key_import or sia_sdk_create_sharing_key that has not been freed.
+/// `out` must be writable for 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sharing_key_export(key: *const SharingKey, out: *mut u8) {
     let seed = unsafe { &*key }.export();
@@ -1526,12 +1737,22 @@ pub unsafe extern "C" fn sia_sharing_key_export(key: *const SharingKey, out: *mu
 
 /// Writes the key's public half, by which the indexer identifies it. Safe to
 /// log or display.
+///
+/// # Safety
+/// `key` must be a live handle from sia_sharing_key_import or sia_sdk_create_sharing_key that has not been freed.
+/// `out` must be writable for 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sharing_key_public_key(key: *const SharingKey, out: *mut u8) {
     let pk = unsafe { &*key }.public_key();
     unsafe { std::slice::from_raw_parts_mut(out, 32) }.copy_from_slice(pk.as_ref());
 }
 
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `description` must be non null and NUL terminated.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `out` must be non null and writable. On success it receives an owned handle that must be released with sia_sharing_key_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_create_sharing_key(
     sdk: *const Sdk,
@@ -1573,6 +1794,14 @@ pub unsafe extern "C" fn sia_sdk_create_sharing_key(
 
 /// Fetches the indexer's current record for one key. *out_description receives
 /// an owned string; free it with sia_string_free.
+///
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `key` must be a live handle from sia_sharing_key_import or sia_sdk_create_sharing_key that has not been freed.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `out_description` must be non null and writable. On success it receives an owned string that must be released with sia_string_free.
+/// `out_stats` must be non null and writable.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_sharing_key(
     sdk: *const Sdk,
@@ -1602,6 +1831,12 @@ pub unsafe extern "C" fn sia_sdk_sharing_key(
 
 /// Lists the account's sharing keys. Pass 0 for offset or limit to use the
 /// indexer's default paging.
+///
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `out` must be non null and writable. On success it receives an owned handle that must be released with sia_key_records_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_sharing_keys(
     sdk: *const Sdk,
@@ -1625,6 +1860,8 @@ pub unsafe extern "C" fn sia_sdk_sharing_keys(
     })
 }
 
+/// # Safety
+/// `recs` must be a live handle from sia_sdk_sharing_keys that has not been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_key_records_len(recs: *const FfiKeyRecords) -> usize {
     unsafe { &*recs }.0.len()
@@ -1634,6 +1871,12 @@ pub unsafe extern "C" fn sia_key_records_len(recs: *const FfiKeyRecords) -> usiz
 /// with sia_sharing_key_free, and *out_description an owned string, freed with
 /// sia_string_free. Returns false when `i` is out of range, leaving the out
 /// params untouched.
+///
+/// # Safety
+/// `recs` must be a live handle from sia_sdk_sharing_keys that has not been freed.
+/// `out_key` must be non null and writable. On success it receives an owned handle that must be released with sia_sharing_key_free.
+/// `out_description` must be non null and writable. On success it receives an owned string that must be released with sia_string_free.
+/// `out_stats` must be non null and writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_key_records_at(
     recs: *const FfiKeyRecords,
@@ -1655,6 +1898,8 @@ pub unsafe extern "C" fn sia_key_records_at(
     true
 }
 
+/// # Safety
+/// `recs` may be null. Otherwise it must come from sia_sdk_sharing_keys and must not be used again after this returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_key_records_free(recs: *mut FfiKeyRecords) {
     if !recs.is_null() {
@@ -1665,6 +1910,13 @@ pub unsafe extern "C" fn sia_key_records_free(recs: *mut FfiKeyRecords) {
 /// Attaches an object to a sharing key, re-sealing its keys under that key.
 /// Attaching an object already attached replaces its sealed keys, so a failed
 /// call can be retried with the same object.
+///
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `key` must be a live handle from sia_sharing_key_import or sia_sdk_create_sharing_key that has not been freed.
+/// `obj` must be a live handle from sia_object_new or any call that returns an object that has not been freed.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_share_object(
     sdk: *const Sdk,
@@ -1688,6 +1940,14 @@ pub unsafe extern "C" fn sia_sdk_share_object(
 /// Lists and decrypts the objects attached to a key. *out_objs receives a heap
 /// array of owned handles; free the array with sia_object_array_free. Pass 0
 /// for offset or limit to use the indexer's default paging.
+///
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `key` must be a live handle from sia_sharing_key_import or sia_sdk_create_sharing_key that has not been freed.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `out_objs` must be non null and writable. On success it receives an owned array that must be released with sia_object_array_free.
+/// `out_len` must be non null and writable.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_shared_objects(
     sdk: *const Sdk,
@@ -1716,6 +1976,13 @@ pub unsafe extern "C" fn sia_sdk_shared_objects(
 
 /// Detaches one object from a key. Returns SIA_ERR_OBJECT_NOT_ATTACHED when the
 /// object was not attached to it.
+///
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `key` must be a live handle from sia_sharing_key_import or sia_sdk_create_sharing_key that has not been freed.
+/// `object_id` must be readable for 32 bytes.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_unshare_object(
     sdk: *const Sdk,
@@ -1738,6 +2005,12 @@ pub unsafe extern "C" fn sia_sdk_unshare_object(
 
 /// Revokes a key, detaching every object attached to it at once. Downloads
 /// already in flight can keep reading from hosts for up to five more minutes.
+///
+/// # Safety
+/// `sdk` must be a live handle from sia_builder_connect, sia_builder_register or sia_mock_sdk that has not been freed.
+/// `key` must be a live handle from sia_sharing_key_import or sia_sdk_create_sharing_key that has not been freed.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_revoke_sharing_key(
     sdk: *const Sdk,
@@ -1764,6 +2037,8 @@ pub unsafe extern "C" fn sia_sdk_revoke_sharing_key(
 // by in-process hosts, which means every other function in this library runs
 // the same code path under test that it runs in production.
 
+/// # Safety
+/// This function is only callable across the C ABI and takes no pointers.
 #[cfg(feature = "mock")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_mock_new(num_hosts: usize) -> *mut FfiMock {
@@ -1772,6 +2047,8 @@ pub unsafe extern "C" fn sia_mock_new(num_hosts: usize) -> *mut FfiMock {
     Box::into_raw(Box::new(FfiMock { network }))
 }
 
+/// # Safety
+/// `m` may be null. Otherwise it must come from sia_mock_new and must not be used again after this returns.
 #[cfg(feature = "mock")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_mock_free(m: *mut FfiMock) {
@@ -1782,6 +2059,13 @@ pub unsafe extern "C" fn sia_mock_free(m: *mut FfiMock) {
 
 /// Builds an Sdk served by the mock network. The result is an ordinary handle
 /// and is released with sia_sdk_free like any other.
+///
+/// # Safety
+/// `m` must be a live handle from sia_mock_new that has not been freed.
+/// `app_key` must be readable for 32 bytes.
+/// `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token from sia_cancel_new.
+/// `out` must be non null and writable. On success it receives an owned handle that must be released with sia_sdk_free.
+/// `err` may be null. Otherwise it receives an owned message on failure that must be released with sia_string_free.
 #[cfg(feature = "mock")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_mock_sdk(
@@ -1807,12 +2091,17 @@ pub unsafe extern "C" fn sia_mock_sdk(
 
 /// Drops every sector the mock hosts hold, so a download of an object that was
 /// already uploaded fails the way it would if the hosts had lost the data.
+///
+/// # Safety
+/// `m` must be a live handle from sia_mock_new that has not been freed.
 #[cfg(feature = "mock")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_mock_clear_sectors(m: *const FfiMock) {
     unsafe { &*m }.network.clear_sectors();
 }
 
+/// # Safety
+/// `m` must be a live handle from sia_mock_new that has not been freed.
 #[cfg(feature = "mock")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_mock_pinned_slabs(m: *const FfiMock) -> usize {
