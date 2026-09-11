@@ -1,6 +1,8 @@
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use log::debug;
+use sia_core::signing::PublicKey;
 
 use crate::time::Duration;
 
@@ -9,9 +11,8 @@ use crate::time::Duration;
 const MIN_WINDOW: usize = 16;
 const MAX_WINDOW: usize = 1024;
 /// While probing, keep climbing unless goodput *drops* by more than this. Per
-/// step, throughput is measured with far more noise than the gain being looked
-/// for, so requiring a gain stalls the climb early; a step that changes nothing
-/// costs nothing, and only a real drop should stop it.
+/// step the measurement is noisier than the gain being looked for, so requiring
+/// a gain stalls the climb early.
 const RISE_MARGIN: f64 = -0.1;
 /// In steady state, goodput must fall more than this below its smoothed peak to
 /// count as real congestion and trigger a back-off.
@@ -26,6 +27,10 @@ const CONFIRM: usize = 2;
 const PROBE_INTERVAL: usize = 8;
 /// Factor to climb by per step.
 const CLIMB: usize = 2;
+/// Outstanding timeout strikes before backing off. One is just a bad host; this
+/// many different peers is the pipeline. Strikes decay as windows finish, so
+/// reaching this takes timeouts arriving faster than they are worked off.
+const TIMEOUT_STRIKES: usize = 8;
 
 /// Generation-stamped token: taken at dispatch via [`InflightController::sample`]
 /// and returned to [`InflightController::record`]. A completion stamped with a
@@ -56,6 +61,9 @@ struct State {
     /// Bumped on every limit change; stamps in-flight samples so a completion
     /// from a superseded limit is discarded.
     generation: u64,
+    /// Hosts holding a timeout strike, oldest first. One entry per host, so an
+    /// unreachable peer cannot spend them all.
+    timeout_hosts: VecDeque<PublicKey>,
 }
 
 impl State {
@@ -67,6 +75,12 @@ impl State {
         }
     }
 
+    /// Ages out half the timeout strikes. Rounded up so the last one clears.
+    fn decay_timeouts(&mut self) {
+        let drop = self.timeout_hosts.len().div_ceil(2);
+        self.timeout_hosts.drain(..drop);
+    }
+
     /// Halves the limit and probes upward again from there.
     fn back_off(&mut self, old: usize) {
         self.limit = (old / 2).max(self.floor);
@@ -74,6 +88,8 @@ impl State {
         self.probing = true;
         self.prev_goodput = 0.0;
         self.steady_run = 0;
+        // acted on; keeping it would let one stray timeout back off again
+        self.timeout_hosts.clear();
     }
 
     /// Commits the new limit, superseding in-flight samples if it moved.
@@ -81,6 +97,12 @@ impl State {
         self.prev_limit = old;
         let delta = self.limit as isize - old as isize;
         if delta != 0 {
+            // `generation` discards old-limit samples still in flight; this
+            // drops those already counted.
+            self.completions = 0;
+            self.successes = 0;
+            self.elapsed_sum = 0.0;
+            self.timeout_hosts.clear();
             self.generation += 1;
             debug!(
                 "AIMD limit {old} -> {} ({delta:+}) goodput {goodput:.0}",
@@ -120,6 +142,7 @@ impl InflightController {
                 strikes: 0,
                 steady_run: 0,
                 generation: 0,
+                timeout_hosts: VecDeque::new(),
             }),
         }
     }
@@ -130,6 +153,32 @@ impl InflightController {
 
     pub(crate) fn cap(&self) -> usize {
         self.state.lock().unwrap().cap
+    }
+
+    /// Reports that an operation hit its deadline. A read that could not move in
+    /// 60s is evidence goodput cannot give: on a saturated link the measurement
+    /// reads flat, which [`RISE_MARGIN`] treats as permission to climb.
+    ///
+    /// `permit` is the token from [`Self::sample`] at dispatch, so the cohort
+    /// stranded by a back-off cannot drive another one. Repeats from one `host`
+    /// count once: an unreachable peer says nothing about the pipeline.
+    pub(crate) fn record_timeout(&self, permit: SamplePermit, host: PublicKey) {
+        let mut state = self.state.lock().unwrap();
+        if permit.generation != state.generation || state.limit <= state.floor {
+            return;
+        }
+        if !state.timeout_hosts.contains(&host) {
+            state.timeout_hosts.push_back(host);
+        }
+        if state.timeout_hosts.len() < TIMEOUT_STRIKES {
+            return;
+        }
+        let old = state.limit;
+        state.back_off(old);
+        // Settle rather than probe: `back_off` leaves no baseline, which the
+        // next window reads as "climb", straight back into the timeout.
+        state.probing = false;
+        state.apply_limit(old, 0.0);
     }
 
     /// Issues a permit stamped with the current generation. Take one at dispatch
@@ -169,6 +218,11 @@ impl InflightController {
             state.back_off(old);
             return state.apply_limit(old, 0.0);
         }
+        // Decay rather than clear: a window can decide on a single success
+        // while reads are still stranding. Sparse timeouts age out instead of
+        // tallying up forever; a rate that outruns the decay still backs off.
+        state.decay_timeouts();
+
         if window_elapsed <= 0.0 {
             // too fast to measure
             return 0;
@@ -244,6 +298,17 @@ mod tests {
         step(c, secs)
     }
 
+    fn host(i: usize) -> PublicKey {
+        PublicKey::new([i as u8; 32])
+    }
+
+    /// Enough distinct hosts timing out to count as congestion.
+    fn timeouts(c: &InflightController) {
+        for i in 0..TIMEOUT_STRIKES {
+            c.record_timeout(c.sample(), host(i));
+        }
+    }
+
     /// Drives the limit to the ceiling on a link that saturates at `sat`.
     fn climb_to_cap(c: &InflightController, sat: usize) -> usize {
         for _ in 0..20 {
@@ -265,10 +330,162 @@ mod tests {
     }
 
     #[sia_core_derive::cross_target_test]
-    // Saturation shows up as flat goodput, which means the step cost nothing —
-    // and a step that costs nothing is worth keeping, because the per-step
-    // measurement is far noisier than the gain being looked for. Demanding a
-    // gain stalls the climb well below the depth the link can serve.
+    fn test_timeout_backs_off_without_a_window() {
+        let c = InflightController::new(8, 2, 1000, 1);
+        let settled = climb_to_cap(&c, 64);
+
+        // too few hosts is not congestion
+        let permit = c.sample();
+        for i in 0..TIMEOUT_STRIKES - 1 {
+            c.record_timeout(permit, host(i));
+        }
+        assert_eq!(c.limit(), settled, "backed off before the evidence was in");
+
+        // enough of them is, and no window has to fill first
+        c.record_timeout(permit, host(TIMEOUT_STRIKES - 1));
+        assert_eq!(c.limit(), settled / 2);
+
+        // the cohort stranded by that back-off must not drive another
+        for i in 0..100 {
+            c.record_timeout(permit, host(i));
+        }
+        assert_eq!(c.limit(), settled / 2, "stranded cohort backed off again");
+
+        // but reads dispatched since are fresh evidence, at the same limit
+        timeouts(&c);
+        assert_eq!(
+            c.limit(),
+            settled / 4,
+            "congestion at a settled limit must still bite"
+        );
+    }
+
+    // A timeout back-off must not leave the controller bootstrapping.
+    #[sia_core_derive::cross_target_test]
+    fn test_timeout_settles_instead_of_reprobing() {
+        let c = InflightController::new(8, 2, 1000, 1);
+        let settled = climb_to_cap(&c, 64);
+        timeouts(&c);
+        let after = c.limit();
+
+        // one healthy window is not enough to send it back up
+        let window = |c: &InflightController| {
+            let n = c.state.lock().unwrap().window();
+            for _ in 0..n {
+                c.record(c.sample(), Duration::from_secs(1), true);
+            }
+        };
+        window(&c);
+        assert_eq!(c.limit(), after, "must not climb on the very next window");
+
+        // but PROBE_INTERVAL of them is
+        for _ in 0..PROBE_INTERVAL {
+            window(&c);
+        }
+        assert!(
+            c.limit() > after,
+            "should probe again once settled and healthy"
+        );
+        assert!(settled > after);
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_timeout_back_off_starts_a_fresh_window() {
+        let c = InflightController::new(8, 2, 1000, 1);
+        climb_to_cap(&c, 64);
+
+        // a partial window, measured at the deep limit
+        for _ in 0..8 {
+            c.record(c.sample(), Duration::from_secs(10), true);
+        }
+        assert!(c.state.lock().unwrap().completions > 0);
+
+        // averaging these into the window that judges the new limit would mix
+        // two regimes
+        timeouts(&c);
+        let state = c.state.lock().unwrap();
+        assert_eq!(state.completions, 0, "stale completions carried over");
+        assert_eq!(state.successes, 0, "stale successes carried over");
+        assert_eq!(state.elapsed_sum, 0.0, "stale latency carried over");
+    }
+
+    // One unreachable peer strands a read per chunk, so its timeouts arrive in
+    // bulk. That is a bad host, not a saturated pipeline.
+    #[sia_core_derive::cross_target_test]
+    fn test_one_bad_host_is_not_congestion() {
+        let c = InflightController::new(8, 2, 1000, 1);
+        let settled = climb_to_cap(&c, 64);
+
+        let permit = c.sample();
+        for _ in 0..TIMEOUT_STRIKES * 4 {
+            c.record_timeout(permit, host(1));
+        }
+        assert_eq!(
+            c.limit(),
+            settled,
+            "one unreachable peer backed off the pipeline"
+        );
+    }
+
+    // A window deciding does not mean the timeouts stopped, so strikes decay
+    // rather than clear.
+    #[sia_core_derive::cross_target_test]
+    fn test_sustained_timeouts_outrun_the_decay() {
+        let c = InflightController::new(64, 2, 64, 1);
+
+        let mut h = 0;
+        for _ in 0..4 {
+            // just under the threshold, so only the decay decides
+            for _ in 0..TIMEOUT_STRIKES - 1 {
+                c.record_timeout(c.sample(), host(h));
+                h += 1;
+            }
+            if c.limit() < 64 {
+                return;
+            }
+            let n = c.state.lock().unwrap().window();
+            for _ in 0..n {
+                c.record(c.sample(), Duration::from_secs(1), true);
+            }
+        }
+        panic!("sustained timeouts never backed the limit off");
+    }
+
+    // Pinned at the cap the limit never moves, so nothing else resets the
+    // strikes: a lifetime tally would halve a healthy download on strays alone.
+    #[sia_core_derive::cross_target_test]
+    fn test_timeouts_do_not_accumulate_across_healthy_windows() {
+        let c = InflightController::new(64, 2, 64, 1);
+
+        for i in 0..TIMEOUT_STRIKES * 4 {
+            c.record_timeout(c.sample(), host(i));
+            // checked every iteration: a back-off climbs back to the cap
+            // within a few windows, so the final limit alone would hide it
+            assert_eq!(
+                c.limit(),
+                64,
+                "stray timeouts halved a healthy pipeline after {} of them",
+                i + 1
+            );
+            // a full window of healthy work in between
+            let n = c.state.lock().unwrap().window();
+            for _ in 0..n {
+                c.record(c.sample(), Duration::from_secs(1), true);
+            }
+        }
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_timeout_does_not_go_below_the_floor() {
+        let c = InflightController::new(8, 4, 1000, 1);
+        for _ in 0..20 {
+            timeouts(&c);
+            step_saturating(&c, 1, 1.0);
+        }
+        assert!(c.limit() >= 4, "floor holds, got {}", c.limit());
+    }
+
+    // Saturation reads as flat goodput, which is not a reason to stop.
     #[sia_core_derive::cross_target_test]
     fn test_climbs_through_saturation() {
         let c = InflightController::new(8, 2, 1000, 1);
@@ -344,7 +561,6 @@ mod tests {
         );
     }
 
-    #[sia_core_derive::cross_target_test]
     // After backing off, healthy work has to be able to win the depth back.
     #[sia_core_derive::cross_target_test]
     fn test_climbs_again_after_backing_off() {

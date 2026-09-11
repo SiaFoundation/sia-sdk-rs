@@ -226,6 +226,7 @@ impl SlabRecovery<AwaitingRecovery> {
     ) -> impl Future<Output = DownloadResult> + 'static {
         let client = self.client.clone();
         let tokens = self.tokens.clone();
+        let controller = self.controller.clone();
         async move {
             // Hold the inflight reservation for the duration of the RPC. The
             // guard was created by the caller before spawning so the load is
@@ -243,6 +244,7 @@ impl SlabRecovery<AwaitingRecovery> {
                     };
                 }
             };
+            let permit = controller.sample();
             let start = Instant::now();
             let result = client
                 .read_sector(
@@ -256,6 +258,9 @@ impl SlabRecovery<AwaitingRecovery> {
                 )
                 .await;
             let elapsed = start.elapsed();
+            if matches!(result, Err(RPCError::Elapsed(_))) {
+                controller.record_timeout(permit, task.sector.host_key);
+            }
             DownloadResult {
                 task,
                 result,
@@ -613,10 +618,8 @@ impl Download {
             seq,
             self.popped.clone(),
         );
-        // The limit counts chunks, so a chunk is what gets sampled: the window
-        // then covers a real share of what is in flight, and the controller's
-        // `successes * limit / Σ elapsed` becomes chunks over chunk latency —
-        // the rate at which the download actually progresses.
+        // The limit counts chunks, so a chunk is what gets sampled: goodput then
+        // reads as chunks over chunk latency, the rate the download progresses at.
         let controller = self.controller.clone();
         let permit = controller.sample();
         self.queue
