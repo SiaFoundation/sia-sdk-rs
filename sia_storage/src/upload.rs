@@ -121,6 +121,29 @@ impl Drop for HostGuard {
     }
 }
 
+/// A finished write attempt. The result is only reachable through
+/// [`ShardAttempt::accept`], so the host is always settled with it. An
+/// unaccepted attempt returns its host to the pool.
+struct ShardAttempt {
+    host: HostGuard,
+    result: Result<SectorUploadResult, UploadError>,
+}
+
+impl ShardAttempt {
+    /// Consumes the attempt. A winner keeps its host, which no other shard
+    /// in the slab may reuse. A failure hands the host back to requeue.
+    fn accept(self) -> Result<SectorUploadResult, (HostGuard, UploadError)> {
+        match self.result {
+            Ok(result) => {
+                let host_key = self.host.into_host_key();
+                debug_assert_eq!(host_key, result.sector.host_key);
+                Ok(result)
+            }
+            Err(e) => Err((self.host, e)),
+        }
+    }
+}
+
 /// Penalizes a losing initial attempt cancelled mid-RPC. Runs on drop
 /// because cancellation drops the future at its await.
 struct RacePenalty {
@@ -304,7 +327,7 @@ impl Drop for ShardPermit {
 impl ShardUpload {
     fn spawn_write(
         &self,
-        tasks: &mut JoinSet<(HostGuard, Result<SectorUploadResult, UploadError>)>,
+        tasks: &mut JoinSet<ShardAttempt>,
         host: HostGuard,
         write_timeout: Duration,
         permit: UploadPermit,
@@ -361,7 +384,7 @@ impl ShardUpload {
                     }
                 })
                 .map_err(UploadError::from);
-            (host, result)
+            ShardAttempt { host, result }
         });
     }
 
@@ -418,17 +441,14 @@ impl ShardUpload {
                 biased;
                 Some(res) = tasks.join_next() => {
                     last_event = Instant::now();
-                    let (host, result) = res?;
-                    match result {
+                    match res?.accept() {
                         Ok(result) => {
-                            let winner = host.into_host_key();
-                            debug_assert_eq!(winner, result.sector.host_key);
                             // Dropping the JoinSet cancels the losers. Only a lone
                             // attempt still in its RPC is penalized.
                             self.won.store(true, Ordering::SeqCst);
                             return Ok(result);
                         }
-                        Err(_) => {
+                        Err((host, _)) => {
                             if tasks.is_empty() {
                                 let (host, permit) = self.acquire_host(Some(host)).await?;
                                 self.spawn_write(&mut tasks, host, UPLOAD_TIMEOUT, permit);
@@ -1176,11 +1196,10 @@ mod tests {
             Duration::from_millis(10),
             upload.limiter.acquire().await,
         );
-        let (host, result) = tasks.join_next().await.unwrap().unwrap();
-        assert!(matches!(
-            result,
-            Err(UploadError::RPC(RPCError::Elapsed(_)))
-        ));
+        let Err((host, e)) = tasks.join_next().await.unwrap().unwrap().accept() else {
+            panic!("the write should time out");
+        };
+        assert!(matches!(e, UploadError::RPC(RPCError::Elapsed(_))));
         let (replacement, permit) = upload.acquire_host(Some(host)).await.unwrap();
         assert_ne!(
             replacement.host_key(),
@@ -1438,15 +1457,16 @@ mod tests {
             UPLOAD_TIMEOUT,
             upload.limiter.acquire().await,
         );
-        let (host, result) = tasks.join_next().await.unwrap().unwrap();
-        assert!(result.is_ok());
+        let attempt = tasks.join_next().await.unwrap().unwrap();
+        assert!(attempt.result.is_ok());
         assert_eq!(*upload.limiter.inflight.lock().unwrap(), 0);
         let mut held = Vec::new();
         while let Some(host) = upload.pick_next_host() {
             assert_ne!(host.host_key(), fast_key);
             held.push(host);
         }
-        drop(host);
+        // An unaccepted attempt still returns its host.
+        drop(attempt);
         let restored = upload.pick_next_host().unwrap();
         assert_eq!(restored.host_key(), fast_key);
         assert!(upload.pick_next_host().is_none());
