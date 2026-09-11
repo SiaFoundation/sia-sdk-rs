@@ -2229,7 +2229,13 @@ mod tests {
             let mut sdk = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_mock_sdk(mock, seed.as_ptr(), std::ptr::null_mut(), &mut sdk, &mut err),
+                sia_mock_sdk(
+                    mock,
+                    seed.as_ptr(),
+                    std::ptr::null_mut(),
+                    &mut sdk,
+                    &mut err
+                ),
                 SIA_OK,
                 "sia_mock_sdk: {}",
                 take_err(err)
