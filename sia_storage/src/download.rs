@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Poll, ready};
 
-use crate::congestion::InflightController;
+use crate::congestion::{InflightController, SamplePermit};
 use crate::encryption::{Chacha20Cipher, EncryptionKey, encrypt_recovered_shards};
 use crate::erasure_coding::{self, ErasureCoder};
 use crate::hosts::{Hosts, InflightGuard, RPCError};
@@ -134,6 +134,9 @@ struct SlabRecovery<State> {
     client: Hosts,
     controller: Arc<InflightController>,
     tokens: AccountTokenSource,
+    /// Sampled when the chunk was admitted. Sector reads report timeouts under
+    /// it, so a chunk from the old limit cannot drive a second back-off.
+    permit: SamplePermit,
 
     slab_index: usize,
     min_shards: usize,
@@ -149,6 +152,7 @@ impl SlabRecovery<AwaitingRecovery> {
         client: Hosts,
         controller: Arc<InflightController>,
         tokens: S,
+        permit: SamplePermit,
         slab: ChunkSlab,
         seq: usize,
         popped: watch::Sender<usize>,
@@ -204,6 +208,7 @@ impl SlabRecovery<AwaitingRecovery> {
             client,
             controller,
             tokens,
+            permit,
             slab_index: slab.index,
             min_shards,
             encryption_key: slab.slab.encryption_key,
@@ -225,8 +230,9 @@ impl SlabRecovery<AwaitingRecovery> {
         sector_length: usize,
     ) -> impl Future<Output = DownloadResult> + 'static {
         let client = self.client.clone();
-        let controller = self.controller.clone();
         let tokens = self.tokens.clone();
+        let controller = self.controller.clone();
+        let permit = self.permit;
         async move {
             // Hold the inflight reservation for the duration of the RPC. The
             // guard was created by the caller before spawning so the load is
@@ -244,7 +250,6 @@ impl SlabRecovery<AwaitingRecovery> {
                     };
                 }
             };
-            let permit = controller.sample();
             let start = Instant::now();
             let result = client
                 .read_sector(
@@ -258,7 +263,9 @@ impl SlabRecovery<AwaitingRecovery> {
                 )
                 .await;
             let elapsed = start.elapsed();
-            controller.record(permit, elapsed, result.is_ok());
+            if matches!(result, Err(RPCError::Elapsed(_))) {
+                controller.record_timeout(permit, task.sector.host_key);
+            }
             DownloadResult {
                 task,
                 result,
@@ -326,6 +333,7 @@ impl SlabRecovery<AwaitingRecovery> {
                                     client: self.client,
                                     controller: self.controller,
                                     tokens: self.tokens,
+                                    permit: self.permit,
                                     min_shards,
                                     slab_index: self.slab_index,
                                     encryption_key: self.encryption_key,
@@ -397,6 +405,7 @@ impl SlabRecovery<ShardsRecovered> {
             client: self.client,
             controller: self.controller,
             tokens: self.tokens,
+            permit: self.permit,
             min_shards: self.min_shards,
             slab_index: self.slab_index,
             encryption_key: self.encryption_key,
@@ -608,26 +617,37 @@ impl Download {
                 &chunk_slab.slab.encryption_key,
             ),
         };
+        // The limit counts chunks, so a chunk is what gets sampled: goodput then
+        // reads as chunks over chunk latency, the rate the download progresses at.
+        let controller = self.controller.clone();
+        let permit = controller.sample();
         let recovery = SlabRecovery::new(
             hosts,
             self.controller.clone(),
             tokens,
+            permit,
             chunk_slab,
             seq,
             self.popped.clone(),
         );
         self.queue
             .push_back(AbortOnDropHandle::new(maybe_spawn!(async move {
-                let recovery = recovery?;
-                let mut buf = Vec::with_capacity(len);
-                recovery
-                    .recover_shards(shard_progress_callback)
-                    .await?
-                    .decode()?
-                    .write(&mut buf)
-                    .await?;
-                cipher.apply_keystream(&mut buf);
-                Ok(buf)
+                let started = Instant::now();
+                let recovered = async move {
+                    let recovery = recovery?;
+                    let mut buf = Vec::with_capacity(len);
+                    recovery
+                        .recover_shards(shard_progress_callback)
+                        .await?
+                        .decode()?
+                        .write(&mut buf)
+                        .await?;
+                    cipher.apply_keystream(&mut buf);
+                    Ok::<_, DownloadError>(buf)
+                }
+                .await;
+                controller.record(permit, started.elapsed(), recovered.is_ok());
+                recovered
             })));
         true
     }
@@ -713,7 +733,8 @@ impl Download {
         let available = object_size.saturating_sub(options.offset);
         let remaining = options.length.unwrap_or(available).min(available);
         let slabs = object.slabs().to_vec();
-        let scale = slabs.first().map(|s| s.min_shards as usize).unwrap_or(1);
+        // one chunk dispatched per unit of limit, and a chunk is the sample
+        let scale = 1;
         let max_buffered_chunks = options
             .max_buffered_chunks
             .unwrap_or_else(default_chunks_in_memory);
@@ -1081,15 +1102,18 @@ mod test {
             slab.length = length as u32;
 
             let mut recovered_data = Vec::with_capacity(length);
+            let controller = Arc::new(InflightController::new(
+                INITIAL_INFLIGHT,
+                MIN_INFLIGHT,
+                100,
+                10,
+            ));
+            let permit = controller.sample();
             SlabRecovery::new(
                 hosts.clone(),
-                Arc::new(InflightController::new(
-                    INITIAL_INFLIGHT,
-                    MIN_INFLIGHT,
-                    100,
-                    10,
-                )),
+                controller,
                 app_key.clone(),
+                permit,
                 ChunkSlab {
                     slab,
                     index: 0,
@@ -1412,15 +1436,18 @@ mod test {
     async fn test_download_race_gated_outside_window() {
         let (hosts, app_key, slab) = racing_setup(Duration::from_millis(1500)).await;
         let start = Instant::now();
+        let controller = Arc::new(InflightController::new(
+            INITIAL_INFLIGHT,
+            MIN_INFLIGHT,
+            100,
+            10,
+        ));
+        let permit = controller.sample();
         SlabRecovery::new(
             hosts.clone(),
-            Arc::new(InflightController::new(
-                INITIAL_INFLIGHT,
-                MIN_INFLIGHT,
-                100,
-                10,
-            )),
+            controller,
             app_key.clone(),
+            permit,
             racing_chunk(&slab),
             RACE_WINDOW, // first chunk outside the window
             watch::channel(0).0,
@@ -1440,15 +1467,18 @@ mod test {
     async fn test_download_race_within_window() {
         let (hosts, app_key, slab) = racing_setup(Duration::from_millis(1500)).await;
         let start = Instant::now();
+        let controller = Arc::new(InflightController::new(
+            INITIAL_INFLIGHT,
+            MIN_INFLIGHT,
+            100,
+            10,
+        ));
+        let permit = controller.sample();
         SlabRecovery::new(
             hosts.clone(),
-            Arc::new(InflightController::new(
-                INITIAL_INFLIGHT,
-                MIN_INFLIGHT,
-                100,
-                10,
-            )),
+            controller,
             app_key.clone(),
+            permit,
             racing_chunk(&slab),
             0,
             watch::channel(0).0,
@@ -1477,15 +1507,18 @@ mod test {
             tx.send_modify(|p| *p += 1);
         });
         let start = Instant::now();
+        let controller = Arc::new(InflightController::new(
+            INITIAL_INFLIGHT,
+            MIN_INFLIGHT,
+            100,
+            10,
+        ));
+        let permit = controller.sample();
         SlabRecovery::new(
             hosts.clone(),
-            Arc::new(InflightController::new(
-                INITIAL_INFLIGHT,
-                MIN_INFLIGHT,
-                100,
-                10,
-            )),
+            controller,
             app_key.clone(),
+            permit,
             racing_chunk(&slab),
             RACE_WINDOW,
             popped_tx,
