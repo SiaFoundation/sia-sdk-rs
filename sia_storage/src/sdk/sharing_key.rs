@@ -1,6 +1,7 @@
 //! Owner-side operations on a [`SharingKey`]. A descendant of the `sdk` module
 //! so it can reach [`Sdk`]'s private fields.
 
+use reqwest::StatusCode;
 use sia_core::types::Hash256;
 
 use crate::sharing::{SharedObjectRequest, SharingError, SharingKey};
@@ -52,7 +53,7 @@ impl Sdk {
             .delete_shared_object(&self.app_key.0, &key.public_key(), object_id)
             .await
             .map_err(|e| match e {
-                app_client::Error::NotFound(_) => SharingError::ObjectNotAttached,
+                app_client::Error::Api(StatusCode::NOT_FOUND, _) => SharingError::ObjectNotAttached,
                 e => SharingError::Api(e),
             })
     }

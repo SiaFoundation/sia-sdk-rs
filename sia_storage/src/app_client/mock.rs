@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use base64::engine::general_purpose::URL_SAFE;
 use base64::prelude::*;
 use chrono::{DateTime, Utc};
-use reqwest::Method;
+use reqwest::{Method, StatusCode};
 use sia_core::rhp4::{AccountToken, SECTOR_SIZE};
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
@@ -35,6 +35,7 @@ struct StoredObject {
 /// A sharing key and the objects attached to it.
 #[derive(Debug)]
 struct StoredSharingKey {
+    account: PublicKey,
     public_key: PublicKey,
     nonce: Nonce,
     description: String,
@@ -170,7 +171,7 @@ impl Client {
             .objects
             .get(key)
             .and_then(|o| o.sealed.clone())
-            .ok_or_else(|| Error::Api(format!("object {key} not found")))
+            .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("object {key} not found")))
     }
 
     pub(crate) async fn objects(
@@ -231,10 +232,20 @@ impl Client {
             Some(stored) => {
                 stored.sealed = None;
                 stored.updated_at = Utc::now();
-                Ok(())
             }
-            None => Err(Error::Api(format!("object {key} not found"))),
+            None => {
+                return Err(Error::Api(
+                    StatusCode::NOT_FOUND,
+                    format!("object {key} not found"),
+                ));
+            }
         }
+        // Deleting an object detaches it from every sharing key it was
+        // attached to.
+        for stored in state.sharing_keys.values_mut() {
+            stored.attached.remove(key);
+        }
+        Ok(())
     }
 
     pub(crate) async fn slab(
@@ -254,7 +265,7 @@ impl Client {
                 min_shards: s.min_shards,
                 sectors: s.sectors.clone(),
             })
-            .ok_or_else(|| Error::Api(format!("slab {slab_id} not found")))
+            .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("slab {slab_id} not found")))
     }
 
     pub(crate) async fn pin_slabs(
@@ -266,7 +277,10 @@ impl Client {
         state.pin_slabs_calls += 1;
         if state.pin_slabs_failures > 0 {
             state.pin_slabs_failures -= 1;
-            return Err(Error::Api("temporary pin failure".to_string()));
+            return Err(Error::Api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "temporary pin failure".to_string(),
+            ));
         }
         Ok(slabs
             .iter()
@@ -395,7 +409,7 @@ impl Client {
             .objects
             .get(&id)
             .and_then(|o| o.sealed.clone())
-            .ok_or_else(|| Error::Api(format!("object {id} not found")))?;
+            .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("object {id} not found")))?;
 
         Ok(Object {
             data_key,
@@ -408,14 +422,18 @@ impl Client {
     /// `create_sharing_key` verifies the response against the nonce it generated.
     pub(crate) async fn add_sharing_key(
         &self,
-        _: &PrivateKey,
+        app_key: &PrivateKey,
         req: &KeyRequest,
     ) -> Result<KeyResponse, Error> {
         let mut state = self.state.write().unwrap();
         if state.sharing_keys.contains_key(&req.public_key) {
-            return Err(Error::Api("sharing key already exists".into()));
+            return Err(Error::Api(
+                StatusCode::CONFLICT,
+                "sharing key already exists".into(),
+            ));
         }
         let stored = StoredSharingKey {
+            account: app_key.public_key(),
             public_key: req.public_key,
             nonce: req.nonce,
             description: req.description.clone(),
@@ -430,12 +448,19 @@ impl Client {
 
     pub(crate) async fn sharing_keys(
         &self,
-        _: &PrivateKey,
+        app_key: &PrivateKey,
         offset: Option<u64>,
         limit: Option<u64>,
     ) -> Result<Vec<KeyResponse>, Error> {
+        let owner = app_key.public_key();
         let state = self.state.read().unwrap();
-        let mut keys: Vec<_> = state.sharing_keys.values().collect();
+        // Scoped to the caller's own keys. Returning another account's key here
+        // would fail nonce re-derivation in the SDK and surface as KeyMismatch.
+        let mut keys: Vec<_> = state
+            .sharing_keys
+            .values()
+            .filter(|k| k.account == owner && !k.expired())
+            .collect();
         // Newest first, matching indexd, with the key's bytes breaking ties.
         keys.sort_by_key(|k| (k.created_at, k.public_key.as_ref().to_vec()));
         keys.reverse();
@@ -449,34 +474,32 @@ impl Client {
 
     pub(crate) async fn sharing_key(
         &self,
-        _: &PrivateKey,
+        app_key: &PrivateKey,
         public_key: &PublicKey,
     ) -> Result<KeyResponse, Error> {
         let state = self.state.read().unwrap();
-        state
-            .sharing_keys
-            .get(public_key)
-            .map(StoredSharingKey::response)
-            .ok_or_else(|| Error::NotFound(format!("sharing key {public_key} not found")))
+        Ok(Self::active(&state, app_key, public_key)?.response())
     }
 
     pub(crate) async fn delete_sharing_key(
         &self,
-        _: &PrivateKey,
+        app_key: &PrivateKey,
         public_key: &PublicKey,
     ) -> Result<(), Error> {
+        let owner = app_key.public_key();
         let mut state = self.state.write().unwrap();
-        if state.sharing_keys.remove(public_key).is_none() {
-            return Err(Error::NotFound(format!(
-                "sharing key {public_key} not found"
-            )));
+        // Checked before removing so one account cannot revoke another's key.
+        match state.sharing_keys.get(public_key) {
+            Some(k) if k.account == owner => {}
+            _ => return Err(key_not_found(public_key)),
         }
+        state.sharing_keys.remove(public_key);
         Ok(())
     }
 
     pub(crate) async fn add_shared_object(
         &self,
-        _: &PrivateKey,
+        app_key: &PrivateKey,
         sharing_key: &PublicKey,
         req: &SharedObjectRequest,
     ) -> Result<(), Error> {
@@ -486,13 +509,15 @@ impl Client {
             .objects
             .get(&req.object_id)
             .and_then(|o| o.sealed.as_ref())
-            .ok_or_else(|| Error::NotFound(format!("object {} not found", req.object_id)))?
+            .ok_or_else(|| {
+                Error::Api(
+                    StatusCode::NOT_FOUND,
+                    format!("object {} not found", req.object_id),
+                )
+            })?
             .slabs
             .clone();
-        let stored = state
-            .sharing_keys
-            .get_mut(sharing_key)
-            .ok_or_else(|| Error::NotFound(format!("sharing key {sharing_key} not found")))?;
+        let stored = Self::active_mut(&mut state, app_key, sharing_key)?;
         // The request carries the object's keys re-sealed under the sharing
         // key, so store those rather than the account-sealed originals.
         stored.attached.insert(
@@ -513,21 +538,82 @@ impl Client {
 
     pub(crate) async fn sharing_key_objects(
         &self,
-        _: &PrivateKey,
+        app_key: &PrivateKey,
         sharing_key: &PublicKey,
         offset: Option<u64>,
         limit: Option<u64>,
     ) -> Result<Vec<SealedObject>, Error> {
         let state = self.state.read().unwrap();
+        Ok(Self::active(&state, app_key, sharing_key)?.page(offset, limit))
+    }
+
+    /// Looks up a key the calling account owns.
+    ///
+    /// A key belonging to another account is reported as missing rather than
+    /// forbidden. That is what indexd's queries produce by filtering on
+    /// `account_id`, and it keeps one account from probing for the existence of
+    /// another's keys.
+    fn owned<'a>(
+        state: &'a State,
+        app_key: &PrivateKey,
+        public_key: &PublicKey,
+    ) -> Result<&'a StoredSharingKey, Error> {
         state
             .sharing_keys
-            .get(sharing_key)
-            .map(|stored| stored.page(offset, limit))
-            .ok_or_else(|| Error::NotFound(format!("sharing key {sharing_key} not found")))
+            .get(public_key)
+            .filter(|k| k.account == app_key.public_key())
+            .ok_or_else(|| key_not_found(public_key))
+    }
+
+    /// Mutable counterpart of [`Client::owned`].
+    fn owned_mut<'a>(
+        state: &'a mut State,
+        app_key: &PrivateKey,
+        public_key: &PublicKey,
+    ) -> Result<&'a mut StoredSharingKey, Error> {
+        let owner = app_key.public_key();
+        state
+            .sharing_keys
+            .get_mut(public_key)
+            .filter(|k| k.account == owner)
+            .ok_or_else(|| key_not_found(public_key))
+    }
+
+    /// Owner-scoped lookup that also rejects an expired key.
+    ///
+    /// indexd gates reads and new attachments on `expires_at`, but deliberately
+    /// does not gate revoking or detaching, so an owner can still clean up after
+    /// a key expires. Those two paths use [`Client::owned`] and
+    /// [`Client::owned_mut`] directly for that reason.
+    fn active<'a>(
+        state: &'a State,
+        app_key: &PrivateKey,
+        public_key: &PublicKey,
+    ) -> Result<&'a StoredSharingKey, Error> {
+        let stored = Self::owned(state, app_key, public_key)?;
+        if stored.expired() {
+            return Err(key_not_found(public_key));
+        }
+        Ok(stored)
+    }
+
+    /// Mutable counterpart of [`Client::active`].
+    fn active_mut<'a>(
+        state: &'a mut State,
+        app_key: &PrivateKey,
+        public_key: &PublicKey,
+    ) -> Result<&'a mut StoredSharingKey, Error> {
+        let stored = Self::owned_mut(state, app_key, public_key)?;
+        if stored.expired() {
+            return Err(key_not_found(public_key));
+        }
+        Ok(stored)
     }
 
     /// Authenticates a `/shared` request the way the indexer does, by the public
-    /// half of the key it is signed with.
+    /// half of the key it is signed with. An expired key authenticates nothing,
+    /// which is how a key with an expiry stops granting access without anyone
+    /// having to revoke it.
     fn shared<'a>(
         state: &'a State,
         sharing_key: &PrivateKey,
@@ -536,7 +622,13 @@ impl Client {
         state
             .sharing_keys
             .get(&public_key)
-            .ok_or_else(|| Error::Unauthorized(format!("sharing key {public_key} not found")))
+            .filter(|k| !k.expired())
+            .ok_or_else(|| {
+                Error::Api(
+                    StatusCode::UNAUTHORIZED,
+                    format!("sharing key {public_key} not found"),
+                )
+            })
     }
 
     pub(crate) async fn shared_stats(&self, sharing_key: &PrivateKey) -> Result<KeyStats, Error> {
@@ -565,7 +657,7 @@ impl Client {
             .attached
             .get(key)
             .cloned()
-            .ok_or_else(|| Error::NotFound(format!("object {key} not found")))
+            .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("object {key} not found")))
     }
 
     /// Signs every token with one stand-in account key. Nothing in the SDK
@@ -594,22 +686,27 @@ impl Client {
 
     pub(crate) async fn delete_shared_object(
         &self,
-        _: &PrivateKey,
+        app_key: &PrivateKey,
         sharing_key: &PublicKey,
         object_key: &Hash256,
     ) -> Result<(), Error> {
         let mut state = self.state.write().unwrap();
-        let stored = state
-            .sharing_keys
-            .get_mut(sharing_key)
-            .ok_or_else(|| Error::NotFound(format!("sharing key {sharing_key} not found")))?;
+        let stored = Self::owned_mut(&mut state, app_key, sharing_key)?;
         if stored.attached.remove(object_key).is_none() {
-            return Err(Error::NotFound(format!(
-                "object {object_key} is not attached"
-            )));
+            return Err(Error::Api(
+                StatusCode::NOT_FOUND,
+                format!("object {object_key} is not attached"),
+            ));
         }
         Ok(())
     }
+}
+
+fn key_not_found(public_key: &PublicKey) -> Error {
+    Error::Api(
+        StatusCode::NOT_FOUND,
+        format!("sharing key {public_key} not found"),
+    )
 }
 
 /// Derives a slab's id the same way the indexer does, from the fields covered
@@ -627,6 +724,13 @@ fn slab_id(params: &SlabPinParams) -> Hash256 {
 }
 
 impl StoredSharingKey {
+    /// Whether the key's expiry has passed. indexd keeps expired rows until
+    /// `PruneExpiredSharingKeys` sweeps them, and filters them out of its
+    /// queries in the meantime, so the mock keeps them and filters too.
+    fn expired(&self) -> bool {
+        self.expires_at.is_some_and(|t| t <= Utc::now())
+    }
+
     /// Builds the record the sharing key API returns, with counts derived from
     /// what is currently attached.
     fn response(&self) -> KeyResponse {
@@ -639,7 +743,7 @@ impl StoredSharingKey {
         KeyResponse {
             public_key: self.public_key,
             nonce: self.nonce,
-            account: PublicKey::new([0u8; 32]),
+            account: self.account,
             description: self.description.clone(),
             stats: KeyStats {
                 object_count: self.attached.len() as u64,

@@ -38,7 +38,8 @@ pub enum Error {
 
     /// An error from the indexer API client. Callers can match on the inner
     /// [AppApiError](crate::AppApiError) to distinguish cases worth handling differently, such as
-    /// [AppApiError::Unauthorized](crate::AppApiError::Unauthorized) for a revoked or expired key.
+    /// [AppApiError::Api](crate::AppApiError::Api) with a `401` status for a revoked or expired
+    /// key.
     #[error("app client error: {0}")]
     AppClient(#[from] crate::AppApiError),
 
@@ -609,6 +610,274 @@ mod test {
             .await
             .expect("detach failed");
         assert_eq!(shared.stats().await.expect("stats failed").object_count, 0);
+    }
+
+    /// Two accounts on one network must not see or touch each other's sharing
+    /// keys. indexd scopes every owner-side query by `account_id`, so a mock
+    /// that ignores the app key would let a test pass against behaviour the
+    /// real indexer rejects.
+    #[tokio::test]
+    async fn test_sharing_keys_are_scoped_to_their_owner() {
+        use std::io::Cursor;
+
+        use crate::mock::MockNetwork;
+
+        let network = MockNetwork::new();
+        network.add_hosts(40);
+        let owner = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("owner sdk creation failed");
+        let other = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("second sdk creation failed");
+
+        let key = owner
+            .create_sharing_key(SharingKeyOptions {
+                description: "owner's key".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create failed");
+
+        // The owner's own view is unaffected by the scoping.
+        assert_eq!(
+            owner
+                .sharing_keys(None, None)
+                .await
+                .expect("owner list failed")
+                .len(),
+            1
+        );
+
+        // The second account must not learn the key exists, which is why a
+        // foreign key is reported as missing rather than forbidden.
+        assert!(
+            other
+                .sharing_keys(None, None)
+                .await
+                .expect("second list failed")
+                .is_empty(),
+            "another account's keys must not be listed"
+        );
+        assert!(
+            other.sharing_key(&key).await.is_err(),
+            "fetching another account's key must fail"
+        );
+        assert!(
+            other.shared_objects(&key, None, None).await.is_err(),
+            "listing another account's attachments must fail"
+        );
+        // unshare_object maps every 404 to ObjectNotAttached, so this asserts
+        // only that it fails. The endpoint cannot distinguish a foreign key
+        // from an unattached object against real indexd either.
+        assert!(
+            other
+                .unshare_object(&key, &Hash256::default())
+                .await
+                .is_err(),
+            "detaching from another account's key must fail"
+        );
+
+        // Attaching needs an object that exists, or the object lookup fails
+        // first and proves nothing about the key scoping.
+        let object = other
+            .upload(
+                Object::default(),
+                Cursor::new(vec![0u8; 1 << 16]),
+                UploadOptions::default(),
+            )
+            .await
+            .expect("upload failed");
+        other.pin_object(&object).await.expect("pin failed");
+        assert!(
+            other.share_object(&key, &object).await.is_err(),
+            "attaching to another account's key must fail"
+        );
+
+        // The owner still has the key after all of that, so the scoping
+        // rejected the caller rather than damaging the record.
+        assert!(
+            other.revoke_sharing_key(&key).await.is_err(),
+            "revoking another account's key must fail"
+        );
+        let record = owner.sharing_key(&key).await.expect("owner lost its key");
+        assert_eq!(record.description, "owner's key");
+        assert_eq!(
+            record.key.public_key(),
+            key.public_key(),
+            "the owner's key must be unchanged"
+        );
+    }
+
+    /// Deleting an object must detach it from every sharing key holding it.
+    /// indexd deletes the object row and `shared_objects.object_id` cascades,
+    /// so a mock that only tombstones the object would leave recipients able
+    /// to list and fetch something the indexer has dropped.
+    #[tokio::test]
+    async fn test_deleting_an_object_detaches_it_from_sharing_keys() {
+        use std::io::Cursor;
+
+        use crate::mock::MockNetwork;
+
+        let network = MockNetwork::new();
+        network.add_hosts(40);
+        let sdk = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("sdk creation failed");
+
+        let object = sdk
+            .upload(
+                Object::default(),
+                Cursor::new(vec![7u8; 1 << 16]),
+                UploadOptions::default(),
+            )
+            .await
+            .expect("upload failed");
+        sdk.pin_object(&object).await.expect("pin failed");
+
+        // Two keys, because the object has to come off all of them and one key
+        // cannot distinguish "detached from all" from "detached from the first".
+        let mut keys = Vec::new();
+        for description in ["first", "second"] {
+            let key = sdk
+                .create_sharing_key(SharingKeyOptions {
+                    description: description.to_string(),
+                    ..Default::default()
+                })
+                .await
+                .expect("create failed");
+            sdk.share_object(&key, &object)
+                .await
+                .expect("attach failed");
+            assert_eq!(
+                sdk.sharing_key(&key)
+                    .await
+                    .expect("re-read failed")
+                    .stats
+                    .object_count,
+                1
+            );
+            keys.push(key);
+        }
+
+        sdk.delete_object(&object.id())
+            .await
+            .expect("delete failed");
+
+        for key in &keys {
+            let record = sdk.sharing_key(key).await.expect("re-read failed");
+            assert_eq!(
+                record.stats.object_count, 0,
+                "key {} still counts the deleted object",
+                record.description
+            );
+            assert!(
+                sdk.shared_objects(key, None, None)
+                    .await
+                    .expect("owner list failed")
+                    .is_empty(),
+                "key {} still lists the deleted object",
+                record.description
+            );
+        }
+
+        // A recipient holding the seed must not be able to fetch it either.
+        let shared = network
+            .shared_sdk(keys[0].export())
+            .await
+            .expect("connect failed");
+        assert_eq!(shared.stats().await.expect("stats failed").object_count, 0);
+        assert!(
+            shared.object(&object.id()).await.is_err(),
+            "a recipient can still fetch a deleted object"
+        );
+    }
+
+    /// An expired key must stop granting access and stop accepting new
+    /// attachments, but must still be revocable so an owner can clean up.
+    /// indexd filters on `expires_at` in its reads and in its attach, and
+    /// deliberately does not filter it in delete.
+    #[tokio::test]
+    async fn test_expired_sharing_keys_are_filtered_out() {
+        use std::io::Cursor;
+
+        use crate::mock::MockNetwork;
+
+        let network = MockNetwork::new();
+        network.add_hosts(40);
+        let sdk = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("sdk creation failed");
+
+        let object = sdk
+            .upload(
+                Object::default(),
+                Cursor::new(vec![9u8; 1 << 16]),
+                UploadOptions::default(),
+            )
+            .await
+            .expect("upload failed");
+        sdk.pin_object(&object).await.expect("pin failed");
+
+        // A key that expires in the future is the positive control. Without it
+        // a filter that rejected every key carrying an expiry at all would pass
+        // this test.
+        let live = sdk
+            .create_sharing_key(SharingKeyOptions {
+                description: "live".to_string(),
+                expires_at: Some(Utc::now() + Duration::from_secs(3600)),
+            })
+            .await
+            .expect("create failed");
+        sdk.share_object(&live, &object)
+            .await
+            .expect("attach to a live key failed");
+        sdk.sharing_key(&live).await.expect("live re-read failed");
+        network
+            .shared_sdk(live.export())
+            .await
+            .expect("recipient of a live key was refused");
+
+        let expired = sdk
+            .create_sharing_key(SharingKeyOptions {
+                description: "expired".to_string(),
+                expires_at: Some(Utc::now() - Duration::from_secs(3600)),
+            })
+            .await
+            .expect("create failed");
+
+        assert!(
+            sdk.sharing_key(&expired).await.is_err(),
+            "an expired key must not be readable"
+        );
+        assert!(
+            sdk.share_object(&expired, &object).await.is_err(),
+            "an expired key must not accept new attachments"
+        );
+        assert!(
+            sdk.shared_objects(&expired, None, None).await.is_err(),
+            "an expired key must not list its attachments"
+        );
+        assert!(
+            network.shared_sdk(expired.export()).await.is_err(),
+            "an expired key must stop authenticating its holder"
+        );
+
+        // Only the live key is listed, so the filter drops the expired one
+        // without hiding the rest.
+        let listed = sdk.sharing_keys(None, None).await.expect("list failed");
+        assert_eq!(listed.len(), 1, "only the live key should be listed");
+        assert_eq!(listed[0].description, "live");
+
+        // Revoking is deliberately not gated on expiry, or an owner could never
+        // clear an expired key out.
+        sdk.revoke_sharing_key(&expired)
+            .await
+            .expect("an expired key must still be revocable");
     }
 
     #[tokio::test]
