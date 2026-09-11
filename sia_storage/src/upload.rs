@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::io;
 #[cfg(feature = "fs")]
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::app_client::{self, SlabPinParams};
@@ -60,6 +61,8 @@ struct ShardUpload {
     slab_index: usize,
     shard_index: usize,
     waiting: watch::Sender<usize>,
+    /// Set when this shard accepts a result.
+    won: Arc<AtomicBool>,
 }
 
 struct SectorUploadResult {
@@ -68,6 +71,77 @@ struct SectorUploadResult {
     elapsed: Duration,
     /// Chain height the host reported when this sector was written.
     tip_height: u64,
+}
+
+/// Holds a host until the shard accepts its result. Dropping it returns
+/// the host to the pool without charging an attempt.
+struct HostGuard {
+    hosts: Arc<Mutex<HostQueue>>,
+    host_key: Option<PublicKey>,
+    inflight: Option<InflightGuard>,
+}
+
+impl HostGuard {
+    fn new(hosts: Arc<Mutex<HostQueue>>, host_key: PublicKey, inflight: InflightGuard) -> Self {
+        Self {
+            hosts,
+            host_key: Some(host_key),
+            inflight: Some(inflight),
+        }
+    }
+
+    /// The host this attempt is writing to.
+    fn host_key(&self) -> PublicKey {
+        self.host_key.expect("host taken before the guard dropped")
+    }
+
+    /// Releases the RPC load. The host stays reserved.
+    fn release_inflight(&mut self) {
+        self.inflight = None;
+    }
+
+    /// Takes the host so `Drop` no longer returns it. The caller either
+    /// consumes a winner or requeues a failure.
+    #[must_use]
+    fn into_host_key(mut self) -> PublicKey {
+        self.host_key
+            .take()
+            .expect("host taken before the guard dropped")
+    }
+}
+
+impl Drop for HostGuard {
+    fn drop(&mut self) {
+        // Must not be dropped while holding the queue lock. Release load
+        // first so the host is idle when requeued.
+        self.release_inflight();
+        if let Some(host_key) = self.host_key {
+            self.hosts.lock().unwrap().restore(host_key);
+        }
+    }
+}
+
+/// Penalizes a losing initial attempt cancelled mid-RPC. Runs on drop
+/// because cancellation drops the future at its await.
+struct RacePenalty {
+    client: Hosts,
+    slab_index: usize,
+    shard_index: usize,
+    host_key: PublicKey,
+    won: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl Drop for RacePenalty {
+    fn drop(&mut self) {
+        if self.armed && self.won.load(Ordering::SeqCst) {
+            debug!(
+                "slab {} shard {} upload to host {} cancelled after losing a race",
+                self.slab_index, self.shard_index, self.host_key
+            );
+            self.client.add_failure(self.host_key);
+        }
+    }
 }
 
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(90);
@@ -230,72 +304,109 @@ impl Drop for ShardPermit {
 impl ShardUpload {
     fn spawn_write(
         &self,
-        tasks: &mut JoinSet<Result<SectorUploadResult, UploadError>>,
-        host_key: PublicKey,
-        inflight: InflightGuard,
+        tasks: &mut JoinSet<(HostGuard, Result<SectorUploadResult, UploadError>)>,
+        host: HostGuard,
         write_timeout: Duration,
         permit: UploadPermit,
     ) {
+        // Only a lone attempt can lose to its racers.
+        let initial = tasks.is_empty();
+        let won = self.won.clone();
         let client = self.client.clone();
-        let hosts = self.hosts.clone();
         let limiter = self.limiter.clone();
         let account_key = self.account_key.clone();
         let data = self.data.clone();
         let slab_index = self.slab_index;
         let shard_index = self.shard_index;
         join_set_spawn!(tasks, async move {
-            let _permit = permit;
-            // Hold the inflight guard for the duration of the RPC so the
-            // host's load is visible to concurrent pickers; dropped here
-            // either after success or failure.
-            let _inflight = inflight;
+            // Drop `host` before the permit so a cancelled write requeues
+            // the host before waking the next shard.
+            let upload_permit = permit;
+            let mut host = host;
+            let host_key = host.host_key();
+            let mut race_penalty = RacePenalty {
+                client: client.clone(),
+                slab_index,
+                shard_index,
+                host_key,
+                won,
+                armed: initial,
+            };
             let sample = limiter.sample();
             let start = Instant::now();
             let result = client
                 .write_sector(host_key, &account_key.0, data, write_timeout)
                 .await;
+            race_penalty.armed = false;
             let elapsed = start.elapsed();
             limiter.record(sample, elapsed, result.is_ok());
-            let (root, tip_height) = result
+            host.release_inflight();
+            drop(upload_permit);
+            let result = result
                 .inspect_err(|e| {
                     debug!(
                         "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {elapsed:?} {e}",
                     );
-                    hosts.lock().unwrap().retry(host_key);
-                })?;
-            debug!(
-                "slab {slab_index} shard {shard_index} uploaded to {host_key} in {:?}",
-                elapsed
-            );
-            Ok(SectorUploadResult {
-                sector: Sector { root, host_key },
-                shard_index,
-                elapsed,
-                tip_height,
-            })
+                })
+                .map(|(root, tip_height)| {
+                    debug!(
+                        "slab {slab_index} shard {shard_index} uploaded to {host_key} in {:?}",
+                        elapsed
+                    );
+                    SectorUploadResult {
+                        sector: Sector { root, host_key },
+                        shard_index,
+                        elapsed,
+                        tip_height,
+                    }
+                })
+                .map_err(UploadError::from);
+            (host, result)
         });
     }
 
-    /// Atomically pick the next-best host for this shard from the slab's
-    /// pool and reserve an inflight slot on it. The returned guard must
-    /// travel with the spawned write task so the reservation lives until
-    /// the RPC finishes.
-    fn pick_next_host(&self) -> Option<(PublicKey, InflightGuard)> {
-        self.hosts.lock().unwrap().pick()
+    /// Picks the next-best surplus host and reserves an inflight slot. The
+    /// guard must live until the write RPC finishes.
+    fn pick_next_host(&self) -> Option<HostGuard> {
+        self.hosts
+            .lock()
+            .unwrap()
+            .pick()
+            .map(|(host_key, inflight)| HostGuard::new(self.hosts.clone(), host_key, inflight))
+    }
+
+    /// Takes a permit, then a host. A `failed` host is requeued and
+    /// replaced under one lock. Permits come first so no host is held
+    /// while waiting on the limiter.
+    async fn acquire_host(
+        &self,
+        failed: Option<HostGuard>,
+    ) -> Result<(HostGuard, UploadPermit), QueueError> {
+        let permit = self.limiter.acquire().await;
+        let failed_key = failed.map(HostGuard::into_host_key);
+        let mut hosts = self.hosts.lock().unwrap();
+        let next = match failed_key {
+            Some(host_key) => hosts.swap(host_key),
+            None => hosts.pick_initial(),
+        };
+        let (host_key, inflight) = next.ok_or(QueueError::NoMoreHosts)?;
+        Ok((
+            HostGuard::new(self.hosts.clone(), host_key, inflight),
+            permit,
+        ))
     }
 
     async fn upload_shard(
         self,
         waiting_guard: WaitingGuard,
     ) -> Result<SectorUploadResult, UploadError> {
-        let permit = self.limiter.acquire().await;
+        let (host, permit) = self.acquire_host(None).await?;
         // This shard is about to have an attempt in flight; it no longer
         // blocks racing.
         drop(waiting_guard);
         let mut waiting_rx = self.waiting.subscribe();
-        let (initial, initial_guard) = self.pick_next_host().ok_or(QueueError::NoMoreHosts)?;
         let mut tasks = JoinSet::new();
-        self.spawn_write(&mut tasks, initial, initial_guard, UPLOAD_TIMEOUT, permit);
+        self.spawn_write(&mut tasks, host, UPLOAD_TIMEOUT, permit);
         let mut eligible = *waiting_rx.borrow_and_update() == 0;
         let mut last_event = Instant::now();
         let race_timeout = self
@@ -307,23 +418,23 @@ impl ShardUpload {
                 biased;
                 Some(res) = tasks.join_next() => {
                     last_event = Instant::now();
-                    match res? {
+                    let (host, result) = res?;
+                    match result {
                         Ok(result) => {
-                            if result.sector.host_key != initial {
-                                debug!(
-                                    "slab {} shard {} penalizing original host {}",
-                                    self.slab_index, self.shard_index, initial
-                                );
-                                self.client.add_failure(initial)
-                            }
+                            let winner = host.into_host_key();
+                            debug_assert_eq!(winner, result.sector.host_key);
+                            // Dropping the JoinSet cancels the losers. Only a lone
+                            // attempt still in its RPC is penalized.
+                            self.won.store(true, Ordering::SeqCst);
                             return Ok(result);
                         }
                         Err(_) => {
                             if tasks.is_empty() {
-                                let (next, guard) = self.pick_next_host()
-                                    .ok_or(QueueError::NoMoreHosts)?;
-                                let permit = self.limiter.acquire().await;
-                                self.spawn_write(&mut tasks, next, guard, UPLOAD_TIMEOUT, permit);
+                                let (host, permit) = self.acquire_host(Some(host)).await?;
+                                self.spawn_write(&mut tasks, host, UPLOAD_TIMEOUT, permit);
+                            } else {
+                                let failed = host.into_host_key();
+                                self.hosts.lock().unwrap().retry(failed);
                             }
                         }
                     }
@@ -335,12 +446,12 @@ impl ShardUpload {
                     eligible = *waiting_rx.borrow_and_update() == 0;
                     if eligible
                         && let Some(racer) = self.limiter.try_acquire()
-                        && let Some((next, guard)) = self.pick_next_host() {
+                        && let Some(host) = self.pick_next_host() {
                             debug!(
-                                "slab {} shard {} racing slow host with {next} after {:?}",
-                                self.slab_index, self.shard_index, elapsed
+                                "slab {} shard {} racing slow host with {} after {:?}",
+                                self.slab_index, self.shard_index, host.host_key(), elapsed
                             );
-                            self.spawn_write(&mut tasks, next, guard, UPLOAD_TIMEOUT, racer);
+                            self.spawn_write(&mut tasks, host, UPLOAD_TIMEOUT, racer);
                         }
                 },
                 _ = async { let _ = waiting_rx.wait_for(|waiting| *waiting == 0).await; }, if !eligible => {
@@ -579,8 +690,9 @@ impl Upload {
                 // within this slab must land on a distinct host, because
                 // duplicate sectors break redundancy and the indexer rejects
                 // them. Failed hosts can still be re-picked, up to the slab's
-                // retry cap.
-                let hosts: Arc<Mutex<HostQueue>> = Arc::new(Mutex::new(client.upload_queue()));
+                // attempt cap.
+                let hosts: Arc<Mutex<HostQueue>> =
+                    Arc::new(Mutex::new(client.upload_queue(total_shards)));
                 let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> =
                     JoinSet::new();
                 for ((shard_index, data), waiting_guard) in
@@ -601,6 +713,7 @@ impl Upload {
                             shard_index,
                             hosts,
                             waiting,
+                            won: Arc::new(AtomicBool::new(false)),
                         };
                         shard_upload.upload_shard(waiting_guard).await
                     });
@@ -999,15 +1112,18 @@ mod tests {
         }
     }
 
-    /// Sets up five fast hosts with seeded write metrics plus one unsampled
-    /// slow host. The discovery preference guarantees the slow host wins the
-    /// initial pick, and the seeded p95 keeps the race timer near its 50ms
-    /// floor so a racer (when allowed) beats the slow host comfortably.
+    /// Number of fast hosts [`racing_setup`] seeds alongside the slow one.
+    const FAST_HOSTS: usize = 5;
+
+    /// Sets up [`FAST_HOSTS`] fast hosts with seeded write metrics plus one
+    /// unsampled slow host. The discovery preference guarantees the slow host
+    /// wins the initial pick, and the seeded p95 keeps the race timer near its
+    /// 50ms floor so a racer (when allowed) beats the slow host comfortably.
     fn racing_setup(slow_delay: Duration) -> (Hosts, Arc<AppKey>, PublicKey) {
         let transport = mock::Client::new();
         let hosts_manager = Hosts::new(Client::Mock(transport.clone()));
         let app_key = Arc::new(AppKey::import(rand::random()));
-        let fast: Vec<PublicKey> = (0..5)
+        let fast: Vec<PublicKey> = (0..FAST_HOSTS)
             .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
             .collect();
         let slow = PrivateKey::from_seed(&rand::random()).public_key();
@@ -1025,27 +1141,116 @@ mod tests {
         (hosts_manager, app_key, slow)
     }
 
+    /// Builds one shard with its own pool. Pass 0 for `pending_initial`
+    /// to test surplus picks without a reserve.
     fn shard_upload(
         hosts_manager: &Hosts,
         app_key: &Arc<AppKey>,
         waiting: &watch::Sender<usize>,
+        pending_initial: usize,
     ) -> ShardUpload {
         ShardUpload {
             limiter: Arc::new(UploadLimiter::new(4, 2, 4)),
             client: hosts_manager.clone(),
-            hosts: Arc::new(Mutex::new(hosts_manager.upload_queue())),
+            hosts: Arc::new(Mutex::new(hosts_manager.upload_queue(pending_initial))),
             account_key: app_key.clone(),
             data: Bytes::from(vec![0u8; SECTOR_SIZE]),
             slab_index: 0,
             shard_index: 0,
             waiting: waiting.clone(),
+            won: Arc::new(AtomicBool::new(false)),
         }
     }
 
     #[sia_core_derive::cross_target_test]
-    async fn test_reserve_interleaves_a_lookahead_slab() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    async fn test_upload_timeout_penalizes_host_before_swap() {
+        let (hosts_manager, app_key, slow) = racing_setup(Duration::from_secs(60));
+        let (waiting, _) = watch::channel(0);
+        let upload = shard_upload(&hosts_manager, &app_key, &waiting, 0);
+        let host = upload.pick_next_host().unwrap();
+        assert_eq!(host.host_key(), slow);
+        let mut tasks = JoinSet::new();
+        upload.spawn_write(
+            &mut tasks,
+            host,
+            Duration::from_millis(10),
+            upload.limiter.acquire().await,
+        );
+        let (host, result) = tasks.join_next().await.unwrap().unwrap();
+        assert!(matches!(
+            result,
+            Err(UploadError::RPC(RPCError::Elapsed(_)))
+        ));
+        let (replacement, permit) = upload.acquire_host(Some(host)).await.unwrap();
+        assert_ne!(
+            replacement.host_key(),
+            slow,
+            "a healthy sampled host should win"
+        );
+        drop((replacement, permit));
+    }
 
+    // Not a `cross_target_test`: the shard has to sit out a full
+    // `UPLOAD_TIMEOUT`, which only paused time makes cheap, and wasm has no
+    // equivalent.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(start_paused = true)]
+    async fn test_upload_timeout_penalizes_host_once_after_retry() {
+        let (hosts_manager, app_key, slow) = racing_setup(Duration::from_secs(180));
+        hosts_manager.record_write_sample(slow, SECTOR_SIZE as u32, Duration::from_millis(1));
+        let control = PrivateKey::from_seed(&rand::random()).public_key();
+        let mut control_info = test_host(control);
+        control_info.good_for_upload = false;
+        hosts_manager.update(vec![control_info], false);
+        hosts_manager.record_write_sample(control, SECTOR_SIZE as u32, Duration::from_millis(10));
+        hosts_manager.add_failure(control);
+        hosts_manager.add_failure(control);
+        hosts_manager.record_write_sample(control, SECTOR_SIZE as u32, Duration::from_millis(10));
+        // Control failure rate is 28.8%; one failure on slow should be 20%.
+        // Keep racing disabled so the replacement is a sequential retry.
+        let (waiting, _) = watch::channel(1usize);
+        let upload = shard_upload(&hosts_manager, &app_key, &waiting, 1);
+        let result = upload
+            .upload_shard(WaitingGuard::new(waiting.clone()))
+            .await
+            .unwrap();
+        assert_ne!(result.sector.host_key, slow);
+        let mut ranked = [slow, control];
+        hosts_manager.prioritize(&mut ranked, |key| key);
+        assert_eq!(
+            ranked[0], slow,
+            "one timed-out RPC should rank ahead of the 28.8% failure-rate control"
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_upload_cancelled_retry_restores_host() {
+        let hosts_manager = Hosts::new(Client::mock());
+        let host_key = PrivateKey::from_seed(&rand::random()).public_key();
+        hosts_manager.update(vec![test_host(host_key)], true);
+        let app_key = Arc::new(AppKey::import(rand::random()));
+        let (waiting, _) = watch::channel(0);
+        let mut upload = shard_upload(&hosts_manager, &app_key, &waiting, 1);
+        upload.limiter = Arc::new(UploadLimiter::new(1, 1, 1));
+        let (host, occupied) = upload.acquire_host(None).await.unwrap();
+
+        // Park the retry on capacity, then cancel it. The host must return
+        // for free.
+        assert!(
+            crate::time::timeout(Duration::from_millis(10), upload.acquire_host(Some(host)),)
+                .await
+                .is_err(),
+            "the retry should park while the only permit is held"
+        );
+        drop(occupied);
+        assert_eq!(*upload.limiter.inflight.lock().unwrap(), 0);
+        let restored = upload.pick_next_host().unwrap();
+        assert_eq!(restored.host_key(), host_key);
+        assert!(upload.pick_next_host().is_none());
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_reserve_interleaves_a_lookahead_slab() {
         // The limit stays at 2 (no completions). The gate admits `limit +
         // shards` of backlog — the in-flight target plus a slab of lookahead —
         // so two 4-shard slabs fit before it parks, giving the slow pipe one
@@ -1120,7 +1325,7 @@ mod tests {
         // another shard is still waiting for an attempt, so the slow initial
         // host must not be raced
         let (waiting, _) = watch::channel(1usize);
-        let upload = shard_upload(&hosts_manager, &app_key, &waiting);
+        let upload = shard_upload(&hosts_manager, &app_key, &waiting, 1);
         let start = Instant::now();
         let result = upload
             .upload_shard(WaitingGuard::new(waiting.clone()))
@@ -1139,9 +1344,30 @@ mod tests {
 
     #[sia_core_derive::cross_target_test]
     async fn test_upload_race_when_idle() {
+        assert_race_penalizes_initial_host(false).await;
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_upload_race_penalizes_retry() {
+        assert_race_penalizes_initial_host(true).await;
+    }
+
+    /// Checks the beaten initial host is demoted below hosts that
+    /// delivered. When `failed_initial` is set, the beaten attempt is a
+    /// retry.
+    async fn assert_race_penalizes_initial_host(failed_initial: bool) {
         let (hosts_manager, app_key, slow) = racing_setup(Duration::from_millis(600));
+        if failed_initial {
+            // The broken host picks first and fails, so its retry gets raced.
+            hosts_manager.record_write_sample(slow, SECTOR_SIZE as u32, Duration::from_millis(1));
+            let mut broken = test_host(PrivateKey::from_seed(&rand::random()).public_key());
+            broken.addresses.clear();
+            hosts_manager.update(vec![broken], false);
+        }
         let (waiting, _) = watch::channel(0usize);
-        let upload = shard_upload(&hosts_manager, &app_key, &waiting);
+        let upload = shard_upload(&hosts_manager, &app_key, &waiting, 1);
+        let hosts = upload.hosts.clone();
+        let limiter = upload.limiter.clone();
         let start = Instant::now();
         let result = upload
             .upload_shard(WaitingGuard::new(waiting.clone()))
@@ -1156,6 +1382,77 @@ mod tests {
             "racer should win quickly: {:?}",
             start.elapsed()
         );
+
+        // Losers abort asynchronously. Wait for their permits to drop before
+        // inspecting the pool.
+        crate::time::timeout(Duration::from_secs(1), async {
+            while *limiter.inflight.lock().unwrap() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut hosts = hosts.lock().unwrap();
+        let remaining: Vec<_> = std::iter::from_fn(|| hosts.pick()).collect();
+        assert_eq!(remaining.len(), FAST_HOSTS + usize::from(failed_initial));
+        assert_ne!(remaining[0].0, slow, "the beaten host should be penalized");
+        assert!(remaining.iter().any(|(host_key, _)| *host_key == slow));
+        assert!(
+            remaining
+                .iter()
+                .all(|(host_key, _)| *host_key != result.sector.host_key),
+            "the winner should be consumed"
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_upload_restores_unconsumed_attempts() {
+        let (hosts_manager, app_key, slow) = racing_setup(Duration::from_secs(60));
+        let (waiting, _) = watch::channel(0usize);
+        let upload = shard_upload(&hosts_manager, &app_key, &waiting, 0);
+
+        // Cancelling before the first poll must still return the host for free.
+        for _ in 0..4 {
+            let host = upload.pick_next_host().unwrap();
+            assert_eq!(host.host_key(), slow);
+            let mut tasks = JoinSet::new();
+            upload.spawn_write(
+                &mut tasks,
+                host,
+                UPLOAD_TIMEOUT,
+                upload.limiter.acquire().await,
+            );
+            tasks.shutdown().await;
+            assert_eq!(*upload.limiter.inflight.lock().unwrap(), 0);
+        }
+
+        // A finished write stays reserved until accepted. Dropping it must
+        // also restore the host.
+        let slow_host = upload.pick_next_host().unwrap();
+        let fast_host = upload.pick_next_host().unwrap();
+        let fast_key = fast_host.host_key();
+        let mut tasks = JoinSet::new();
+        upload.spawn_write(
+            &mut tasks,
+            fast_host,
+            UPLOAD_TIMEOUT,
+            upload.limiter.acquire().await,
+        );
+        let (host, result) = tasks.join_next().await.unwrap().unwrap();
+        assert!(result.is_ok());
+        assert_eq!(*upload.limiter.inflight.lock().unwrap(), 0);
+        let mut held = Vec::new();
+        while let Some(host) = upload.pick_next_host() {
+            assert_ne!(host.host_key(), fast_key);
+            held.push(host);
+        }
+        drop(host);
+        let restored = upload.pick_next_host().unwrap();
+        assert_eq!(restored.host_key(), fast_key);
+        assert!(upload.pick_next_host().is_none());
+
+        // Drop the guards explicitly so the pool balances.
+        drop((slow_host, held, restored));
     }
 
     #[sia_core_derive::cross_target_test]
@@ -1170,7 +1467,7 @@ mod tests {
             sleep(Duration::from_millis(150)).await;
             flip.send_modify(|w| *w -= 1);
         });
-        let upload = shard_upload(&hosts_manager, &app_key, &waiting);
+        let upload = shard_upload(&hosts_manager, &app_key, &waiting, 1);
         let start = Instant::now();
         let result = upload
             .upload_shard(WaitingGuard::new(waiting.clone()))
