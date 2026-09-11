@@ -261,8 +261,10 @@ pub struct App {
     /// A brief description of the application.
     pub description: String,
     /// An optional URL pointing to the application's logo.
+    #[serde(rename = "logoURL")]
     pub logo_url: Option<String>,
     /// An optional URL where the application can be accessed.
+    #[serde(rename = "serviceURL")]
     pub service_url: Option<String>,
 }
 
