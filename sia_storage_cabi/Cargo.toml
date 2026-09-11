@@ -19,7 +19,7 @@ crate-type = ["staticlib", "cdylib"]
 mock = ["sia_storage/mock"]
 
 [dependencies]
-sia_storage = { version = "0.11.0", path = "../sia_storage" }
+sia_storage = { version = "0.12.0", path = "../sia_storage" }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "io-util", "time"] }
 tokio-util = "0.7.19"
 log = { version = "0.4.33", features = ["std"] }
