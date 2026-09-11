@@ -333,13 +333,16 @@ impl Hosts {
         self.hosts.available_for_upload()
     }
 
-    /// Creates a per-slab [`HostQueue`] seeded with the currently
-    /// upload-eligible hosts. The queue enforces slab uniqueness (each
-    /// host can be picked at most once until retried) and caps re-picks
-    /// per host via [`MAX_RETRIES`]. Each upload slab should construct
-    /// its own.
-    pub fn upload_queue(&self) -> HostQueue {
-        HostQueue::new(self.hosts.clone(), self.hosts.upload_eligible_hosts())
+    /// Creates a per-slab [`HostQueue`] from the currently
+    /// upload-eligible hosts. Each host is handed out once until retried.
+    /// Pass the slab's shard count as `pending_initial` so each shard has
+    /// a host reserved for its first attempt.
+    pub fn upload_queue(&self, pending_initial: usize) -> HostQueue {
+        HostQueue::new(
+            self.hosts.clone(),
+            self.hosts.upload_eligible_hosts(),
+            pending_initial,
+        )
     }
 
     /// Reserves an inflight slot for a download from the given host. The
@@ -512,7 +515,8 @@ impl Hosts {
             self.record_write_sample(host_key, bytes, elapsed);
             Ok((root, tip_height))
         })
-        .await?
+        .await
+        .inspect_err(|_| self.hosts.add_failure(host_key))?
     }
 
     /// Performs a download RPC from the given host. The caller is
@@ -573,16 +577,18 @@ pub enum QueueError {
     MaxRetriesExceeded,
 }
 
-/// Maximum number of attempts per host within a single slab — initial
-/// pick plus retries. A host with a transient failure should get a few
-/// more chances within the slab rather than being permanently sidelined
-/// on the first error.
-const MAX_RETRIES: usize = 3;
+/// Maximum failed attempts per host within a single slab. Retries a host
+/// with a transient failure instead of sidelining it on the first error.
+const MAX_HOST_ATTEMPTS: usize = 3;
 
 /// Per-slab pool of upload hosts. Snapshots upload-eligible hosts at
-/// construction and hands them out one at a time. Failed hosts can be
-/// returned via [`HostQueue::retry`] for re-pick, capped at
-/// [`MAX_RETRIES`] attempts per host across the slab.
+/// construction and hands them out one at a time. Failed hosts go back
+/// via [`HostQueue::retry`], capped at [`MAX_HOST_ATTEMPTS`] failures per
+/// host. Cancelled hosts go back via [`HostQueue::restore`] for free.
+///
+/// Holds one host in reserve per shard that has not started yet.
+/// [`HostQueue::pick_initial`] draws from the reserve; [`HostQueue::pick`]
+/// only takes the surplus, so every shard gets a host for its first attempt.
 ///
 /// `available` is a snapshot, not a live view of [`HostList`]: hosts
 /// removed via [`Hosts::update`] after construction stay in the pool but
@@ -592,25 +598,31 @@ const MAX_RETRIES: usize = 3;
 pub(crate) struct HostQueue {
     hosts: Arc<HostList>,
     available: Vec<PublicKey>,
+    /// Failed attempts per host.
     attempts: HashMap<PublicKey, usize>,
+    /// Shards still waiting on their first host. [`HostQueue::pick`] leaves
+    /// this many hosts untouched.
+    pending_initial: usize,
 }
 
 impl HostQueue {
-    fn new(hosts: Arc<HostList>, available: Vec<PublicKey>) -> Self {
+    fn new(hosts: Arc<HostList>, available: Vec<PublicKey>, pending_initial: usize) -> Self {
         Self {
             hosts,
             available,
             attempts: HashMap::new(),
+            pending_initial,
         }
     }
 
-    /// Picks the best host from the pool and atomically reserves an
-    /// inflight slot. Scoring matches [`HostScore`]: lower `failure_rate`
-    /// wins, then unsampled hosts outrank sampled (discovery), then
-    /// `throughput / (inflight + 1)` among sampled. The winner is removed
-    /// from `available`; the returned [`InflightGuard`] must be held for
-    /// the duration of the upload RPC so concurrent pickers see the load.
+    /// Picks the best surplus host and reserves an inflight slot. Best
+    /// follows [`HostScore`]: lowest failure rate, then unsampled hosts,
+    /// then weighted throughput. The winner leaves `available`; hold the
+    /// returned [`InflightGuard`] for the RPC so concurrent picks see the load.
     pub(crate) fn pick(&mut self) -> Option<(PublicKey, InflightGuard)> {
+        if self.available.len() <= self.pending_initial {
+            return None;
+        }
         let host_info = self.hosts.hosts.read().unwrap();
         let metrics = self.hosts.metrics.read().unwrap();
         let mut best: Option<(usize, HostScore, Arc<AtomicUsize>)> = None;
@@ -638,17 +650,36 @@ impl HostQueue {
         Some((host, InflightGuard::new(counter)))
     }
 
-    /// Returns a failed host to the pool so it can be re-picked. Returns
-    /// `true` when the host went back into `available`, `false` when its
-    /// per-slab attempt budget is exhausted.
+    /// Picks a host for a shard's first attempt. Returns `None` once the
+    /// reserve is empty.
+    pub(crate) fn pick_initial(&mut self) -> Option<(PublicKey, InflightGuard)> {
+        self.pending_initial = self.pending_initial.checked_sub(1)?;
+        self.pick()
+    }
+
+    /// Records a failed attempt and returns the host to the pool. Returns
+    /// `true` when the host was requeued, `false` when its per-slab budget
+    /// is exhausted.
     pub(crate) fn retry(&mut self, host: PublicKey) -> bool {
         let attempts = self.attempts.entry(host).or_default();
         *attempts += 1;
-        if *attempts >= MAX_RETRIES {
-            return false;
+        let requeued = *attempts < MAX_HOST_ATTEMPTS;
+        if requeued {
+            self.available.push(host);
         }
+        requeued
+    }
+
+    /// Returns a cancelled host to the pool without charging an attempt.
+    pub(crate) fn restore(&mut self, host: PublicKey) {
         self.available.push(host);
-        true
+    }
+
+    /// Requeues a failed host and picks its replacement in one step, so no
+    /// other shard can take the host in between.
+    pub(crate) fn swap(&mut self, host: PublicKey) -> Option<(PublicKey, InflightGuard)> {
+        self.retry(host);
+        self.pick()
     }
 }
 
@@ -705,7 +736,7 @@ mod test {
         // and have equal score; result is deterministic-enough — we just
         // assert it returns one of them, and that hk2 (not good_for_upload)
         // is never in the pool.
-        let mut queue = hosts_manager.upload_queue();
+        let mut queue = hosts_manager.upload_queue(0);
         let (first, first_guard) = queue.pick().unwrap();
         assert!(first == hk1 || first == hk3);
         assert_ne!(first, hk2);
@@ -726,7 +757,7 @@ mod test {
 
     #[sia_core_derive::cross_target_test]
     fn test_host_queue_retry_cap() {
-        // `retry` lets a host be re-picked, but MAX_RETRIES caps the total
+        // `retry` lets a host be re-picked, but MAX_HOST_ATTEMPTS caps the total
         // attempts per host across the slab.
         let hosts_manager = Hosts::new(Client::mock());
         let hk = random_pubkey();
@@ -742,16 +773,89 @@ mod test {
             true,
         );
 
-        let mut queue = hosts_manager.upload_queue();
-        for i in 0..MAX_RETRIES {
+        let mut queue = hosts_manager.upload_queue(0);
+        for i in 0..MAX_HOST_ATTEMPTS {
             let (picked, guard) = queue.pick().unwrap();
             assert_eq!(picked, hk);
             drop(guard);
             let pushed = queue.retry(picked);
-            let expected = i < MAX_RETRIES - 1;
+            let expected = i < MAX_HOST_ATTEMPTS - 1;
             assert_eq!(pushed, expected, "retry #{i} returned wrong value");
         }
         assert!(queue.pick().is_none(), "should respect retry cap");
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_host_queue_swap() {
+        let hosts_manager = Hosts::new(Client::mock());
+        let hk = random_pubkey();
+        hosts_manager.update(
+            vec![Host {
+                public_key: hk,
+                addresses: vec![],
+                country_code: String::new(),
+                latitude: 0.0,
+                longitude: 0.0,
+                good_for_upload: true,
+            }],
+            true,
+        );
+        let mut queue = hosts_manager.upload_queue(0);
+        let (mut host, guard) = queue.pick().unwrap();
+        drop(guard);
+        for _ in 1..MAX_HOST_ATTEMPTS {
+            // With no spare hosts, swapping must reclaim this shard's host.
+            let (next, guard) = queue.swap(host).unwrap();
+            assert_eq!(next, hk);
+            assert!(queue.pick().is_none());
+            drop(guard);
+            host = next;
+        }
+        assert!(queue.swap(host).is_none(), "should respect the attempt cap");
+        assert!(queue.pick().is_none());
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_host_queue_reserves_initial_picks() {
+        let hosts_manager = Hosts::new(Client::mock());
+        let keys: Vec<_> = (0..3).map(|_| random_pubkey()).collect();
+        hosts_manager.update(
+            keys.iter()
+                .map(|public_key| Host {
+                    public_key: *public_key,
+                    addresses: vec![],
+                    country_code: String::new(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                })
+                .collect(),
+            true,
+        );
+
+        // Three hosts for a two-shard slab: only one is surplus.
+        let mut queue = hosts_manager.upload_queue(2);
+        let (racer, racer_guard) = queue.pick().expect("the surplus host to be picked");
+        assert!(
+            queue.pick().is_none(),
+            "racers should not reach the reserve"
+        );
+
+        let (first, first_guard) = queue.pick_initial().expect("shard one to get a host");
+        let (second, second_guard) = queue.pick_initial().expect("shard two to get a host");
+        assert_ne!(first, second);
+        assert!([first, second].iter().all(|host| *host != racer));
+        assert!(
+            queue.pick_initial().is_none(),
+            "should exhaust the reserve after every shard has started"
+        );
+
+        // A failed shard reclaims its own host even with nothing else spare.
+        let (retried, retried_guard) = queue.swap(first).expect("swap to reclaim the failed host");
+        assert_eq!(retried, first);
+
+        // Drop the guards explicitly so the counters balance.
+        drop((racer_guard, first_guard, second_guard, retried_guard));
     }
 
     #[sia_core_derive::cross_target_test]
