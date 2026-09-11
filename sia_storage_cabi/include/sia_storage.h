@@ -186,6 +186,18 @@ int32_t sia_packed_upload_finalize(sia_packed_upload_t* up, sia_cancel_t* cancel
 void sia_object_array_free(sia_object_t** objs, size_t len);
 void sia_packed_upload_free(sia_packed_upload_t* up);
 
+// A sealed object is the one type a caller sees inside rather than holds as an
+// opaque handle, because consumers persist its fields into their own schema.
+//
+// It crosses as the JSON the indexer API already exchanges, so a caller can
+// decode it into its own type and persist it unchanged.
+//
+// *out_json receives an owned string. Free it with sia_string_free.
+int32_t sia_object_seal_json(const sia_sdk_t* sdk, const sia_object_t* obj, char** out_json, char** err);
+// Decodes and opens a sealed object, verifying its signatures against the
+// account's app key. Free the result with sia_object_free.
+int32_t sia_object_from_sealed_json(const sia_sdk_t* sdk, const char* json, sia_object_t** out, char** err);
+
 // A sharing key grants read-only access to whatever the account attaches to
 // it. The seed is the whole credential, so exporting one hands over access to
 // every object attached to that key. Revoking detaches all of them at once.

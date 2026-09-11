@@ -15,8 +15,8 @@ use sia_storage::mock::MockNetwork;
 use sia_storage::{
     AppApiError, AppKey, AppMetadata, ApprovedState, Builder, BuilderError, DisconnectedState,
     DownloadOptions, Hash256, KeyRecord, KeyStats, Object, ObjectsCursor, PackedUpload,
-    PackedUploadOptions, RequestingApprovalState, Sdk, ShardProgress, SharingError, SharingKey,
-    SharingKeyOptions, UploadOptions,
+    PackedUploadOptions, RequestingApprovalState, Sdk, SealedObject, ShardProgress, SharingError,
+    SharingKey, SharingKeyOptions, UploadOptions,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, DuplexStream, ReadBuf};
 use tokio::runtime::Runtime;
@@ -1408,6 +1408,65 @@ pub unsafe extern "C" fn sia_packed_upload_free(up: *mut FfiPacked) {
     }
 }
 
+// --- sealed objects --------------------------------------------------------------
+//
+// A sealed object is the one type a caller sees inside rather than holds as an
+// opaque handle, because consumers persist its fields into their own schema. It
+// crosses as the JSON the indexer API already exchanges.
+
+/// Seals an object under the account's app key and encodes it as JSON.
+/// Free the result with sia_string_free.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_object_seal_json(
+    sdk: *const Sdk,
+    obj: *const Object,
+    out_json: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> i32 {
+    guarded(err, || {
+        let sdk = unsafe { &*sdk };
+        let obj = unsafe { &*obj };
+        let sealed = obj.seal(sdk.app_key());
+        match serde_json::to_string(&sealed) {
+            Ok(s) => {
+                unsafe { *out_json = CString::new(s).unwrap_or_default().into_raw() }
+                SIA_OK
+            }
+            Err(e) => set_err(err, SIA_ERR, format!("failed to encode sealed object: {e}")),
+        }
+    })
+}
+
+/// Decodes a sealed object from JSON and opens it with the account's app key,
+/// verifying its signatures. This is how a caller that persisted the sealed
+/// form gets a usable object back.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_object_from_sealed_json(
+    sdk: *const Sdk,
+    json: *const c_char,
+    out: *mut *mut Object,
+    err: *mut *mut c_char,
+) -> i32 {
+    guarded(err, || {
+        let sdk = unsafe { &*sdk };
+        let s = match cstr(json) {
+            Ok(s) => s,
+            Err(e) => return set_err(err, SIA_ERR, format!("invalid sealed object json: {e}")),
+        };
+        let sealed: SealedObject = match serde_json::from_str(s) {
+            Ok(v) => v,
+            Err(e) => return set_err(err, SIA_ERR, format!("failed to decode sealed object: {e}")),
+        };
+        match sealed.open(sdk.app_key()) {
+            Ok(obj) => {
+                unsafe { *out = Box::into_raw(Box::new(obj)) }
+                SIA_OK
+            }
+            Err(e) => set_err(err, SIA_ERR, e.to_string()),
+        }
+    })
+}
+
 // --- sharing keys ----------------------------------------------------------------
 //
 // A sharing key grants read-only access to whatever the account attaches to it.
@@ -2153,6 +2212,159 @@ mod tests {
             );
 
             sia_sharing_key_free(key);
+            sia_sdk_free(sdk);
+            sia_mock_free(mock);
+        }
+    }
+
+    /// The sealed object crossing has to survive a full round trip, because the
+    /// JSON is what a caller persists. Sealing, encoding, decoding and opening
+    /// must return an object that still downloads, or a stored object becomes
+    /// unreadable after a restart.
+    #[test]
+    fn sealed_object_json_round_trips() {
+        unsafe {
+            let mock = sia_mock_new(40);
+            let seed = [31u8; 32];
+            let mut sdk = std::ptr::null_mut();
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_mock_sdk(mock, seed.as_ptr(), std::ptr::null_mut(), &mut sdk, &mut err),
+                SIA_OK,
+                "sia_mock_sdk: {}",
+                take_err(err)
+            );
+
+            // An uploaded object, so the sealed form carries real slabs and
+            // sectors rather than an empty slab list.
+            let obj = sia_object_new();
+            let meta = b"round trip metadata".to_vec();
+            sia_object_set_metadata(obj, meta.as_ptr(), meta.len());
+            let opts = default_upload_options();
+            let mut up = std::ptr::null_mut();
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_upload_start(sdk, obj, &opts, &mut up, &mut err),
+                SIA_OK,
+                "sia_upload_start: {}",
+                take_err(err)
+            );
+            let payload = vec![17u8; 5 << 20];
+            let mut wrote = 0usize;
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_upload_write(
+                    up,
+                    payload.as_ptr(),
+                    payload.len(),
+                    std::ptr::null_mut(),
+                    &mut wrote,
+                    &mut err
+                ),
+                SIA_OK,
+                "sia_upload_write: {}",
+                take_err(err)
+            );
+            let mut uploaded = std::ptr::null_mut();
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_upload_finish(up, std::ptr::null_mut(), &mut uploaded, &mut err),
+                SIA_OK,
+                "sia_upload_finish: {}",
+                take_err(err)
+            );
+            sia_upload_free(up);
+
+            let mut json = std::ptr::null_mut();
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_object_seal_json(sdk, uploaded, &mut json, &mut err),
+                SIA_OK,
+                "sia_object_seal_json: {}",
+                take_err(err)
+            );
+            let encoded = CString::from_raw(json).to_string_lossy().into_owned();
+
+            // The field names are the wire contract a consumer decodes by name.
+            for field in [
+                "encryptedDataKey",
+                "slabs",
+                "dataSignature",
+                "metadataSignature",
+                "createdAt",
+                "updatedAt",
+            ] {
+                assert!(
+                    encoded.contains(&format!("\"{field}\"")),
+                    "sealed json is missing {field}, which consumers decode by name"
+                );
+            }
+
+            let cjson = CString::new(encoded).unwrap();
+            let mut reopened = std::ptr::null_mut();
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_object_from_sealed_json(sdk, cjson.as_ptr(), &mut reopened, &mut err),
+                SIA_OK,
+                "sia_object_from_sealed_json: {}",
+                take_err(err)
+            );
+
+            let mut a = [0u8; 32];
+            let mut b = [0u8; 32];
+            sia_object_id(uploaded, a.as_mut_ptr());
+            sia_object_id(reopened, b.as_mut_ptr());
+            assert_eq!(a, b, "the round tripped object has a different id");
+            assert_eq!(
+                sia_object_size(uploaded),
+                sia_object_size(reopened),
+                "size changed across the round trip"
+            );
+
+            let n = sia_object_metadata(reopened, std::ptr::null_mut(), 0);
+            let mut got = vec![0u8; n];
+            sia_object_metadata(reopened, got.as_mut_ptr(), n);
+            assert_eq!(got, meta, "metadata did not survive the round trip");
+
+            // The reopened object must still be usable, not merely equal.
+            let dopts = default_download_options();
+            let mut dl = std::ptr::null_mut();
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_download_start(sdk, reopened, &dopts, &mut dl, &mut err),
+                SIA_OK,
+                "a round tripped object could not be downloaded: {}",
+                take_err(err)
+            );
+            let mut got = Vec::with_capacity(payload.len());
+            let mut buf = vec![0u8; 256 << 10];
+            loop {
+                let mut n = 0usize;
+                let mut err = std::ptr::null_mut();
+                assert_eq!(
+                    sia_download_read(
+                        dl,
+                        buf.as_mut_ptr(),
+                        buf.len(),
+                        std::ptr::null_mut(),
+                        &mut n,
+                        &mut err
+                    ),
+                    SIA_OK,
+                    "sia_download_read: {}",
+                    take_err(err)
+                );
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+            }
+            sia_download_free(dl);
+            assert!(got == payload, "downloaded bytes differ after a round trip");
+
+            sia_object_free(reopened);
+            sia_object_free(uploaded);
+            sia_object_free(obj);
             sia_sdk_free(sdk);
             sia_mock_free(mock);
         }
