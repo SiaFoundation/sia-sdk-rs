@@ -1,0 +1,31 @@
+[package]
+name = "sia_storage_cabi"
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/SiaFoundation/sia-sdk-rs"
+license = "MIT"
+description = "C interface to the sia_storage crate, consumed by the Go SDK and any other language with a C FFI"
+authors = ["The Sia Foundation"]
+publish = false
+
+[lib]
+# staticlib is what Go's cgo links. cdylib is what every other language with a
+# C FFI loads at runtime, so both are built.
+crate-type = ["staticlib", "cdylib"]
+
+[features]
+# Adds an in-memory host transport alongside the real one, plus the sia_mock_*
+# entry points that build an Sdk on top of it. Test builds only.
+mock = ["sia_storage/mock"]
+
+[dependencies]
+sia_storage = { version = "0.11.0", path = "../sia_storage" }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "io-util", "time"] }
+tokio-util = "0.7.19"
+log = { version = "0.4.33", features = ["std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+# A workspace member's own [profile.release] is ignored, so the debug info that
+# would otherwise triple the committed archive is stripped by the Go repo's
+# Makefile instead, which is the consumer that pays for the size.
