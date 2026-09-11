@@ -90,9 +90,8 @@ impl State {
         self.steady_run = 0;
     }
 
-    /// Backs off and stays there. For a window that gave no goodput to judge:
-    /// `back_off` alone leaves no baseline, which the next window reads as
-    /// "climb", straight back into whatever caused it.
+    /// Backs off and stays there, for a window that gave no goodput to judge.
+    /// `back_off` alone leaves no baseline, which reads as "climb".
     fn settle_back(&mut self, old: usize) -> isize {
         self.back_off(old);
         self.probing = false;
@@ -255,7 +254,12 @@ impl InflightController {
             state.prev_goodput = goodput;
         } else if !adverse {
             // settled and healthy
-            state.goodput_ema = EMA_ALPHA * goodput + (1.0 - EMA_ALPHA) * state.goodput_ema;
+            state.goodput_ema = if state.prev_goodput > 0.0 {
+                EMA_ALPHA * goodput + (1.0 - EMA_ALPHA) * state.goodput_ema
+            } else {
+                // no baseline: the EMA still describes the limit backed off from
+                goodput
+            };
             state.steady_run += 1;
             // periodically probe upward in case capacity has freed up
             if state.steady_run >= PROBE_INTERVAL && old < state.cap {
@@ -452,6 +456,32 @@ mod tests {
         panic!("sustained timeouts never backed the limit off");
     }
 
+    // Settling leaves no baseline, but the EMA still describes the old, higher
+    // limit. Blending into it reads as a decline and backs off again.
+    #[sia_core_derive::cross_target_test]
+    fn test_settling_does_not_cascade() {
+        let c = InflightController::new(8, 2, 1000, 1);
+        climb_to_cap(&c, 64);
+
+        // settled: the EMA describes the throughput at this limit
+        {
+            let mut state = c.state.lock().unwrap();
+            state.probing = false;
+            state.goodput_ema = state.limit as f64;
+            state.prev_goodput = state.limit as f64;
+        }
+
+        timeouts(&c);
+        let after = c.limit();
+
+        // healthy windows at the new limit, where goodput is honestly lower
+        let mut lowest = after;
+        for _ in 0..6 {
+            lowest = lowest.min(step(&c, 1.0));
+        }
+        assert!(lowest >= after, "cascaded from {after} down to {lowest}");
+    }
+
     // Pinned at the cap the limit never moves, so nothing else resets the
     // strikes: a lifetime tally would halve a healthy download on strays alone.
     #[sia_core_derive::cross_target_test]
@@ -543,9 +573,8 @@ mod tests {
         let after = c.limit();
         assert_eq!(after, settled / 2, "one bad window halves the limit");
 
-        // settled, so it must not double straight back on the next window.
-        // Same latency model as `step_saturating`, or the goodput baseline this
-        // leaves behind reads as a decline once the test resumes stepping.
+        // settled, so it must not double straight back. Same latency model as
+        // `step_saturating`, or the baseline it leaves reads as a decline.
         let (window, secs) = {
             let state = c.state.lock().unwrap();
             (state.window(), (state.limit as f64 / 64.0).max(1.0))
