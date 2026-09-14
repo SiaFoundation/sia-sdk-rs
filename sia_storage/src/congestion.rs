@@ -161,9 +161,10 @@ impl InflightController {
         self.state.lock().unwrap().cap
     }
 
-    /// Reports that an operation hit its deadline. A read that could not move in
-    /// 60s is evidence goodput cannot give: on a saturated link the measurement
-    /// reads flat, which [`RISE_MARGIN`] treats as permission to climb.
+    /// Reports that an operation hit its deadline. A transfer that could not
+    /// move before its deadline is evidence goodput cannot give: on a saturated
+    /// link the measurement reads flat, which [`RISE_MARGIN`] treats as
+    /// permission to climb.
     ///
     /// `permit` is the token from [`Self::sample`] at dispatch, so the cohort
     /// stranded by a back-off cannot drive another one. Repeats from one `host`
@@ -249,8 +250,15 @@ impl InflightController {
 
         let climbed = (old * CLIMB).min(state.cap);
         if !adverse && state.probing {
-            // no baseline yet, or not yet hurting: climb
-            state.limit = climbed;
+            if climbed > old {
+                // no baseline yet, or not yet hurting: climb
+                state.limit = climbed;
+            } else {
+                // pinned at the cap: no step left to judge, so settle here
+                state.probing = false;
+                state.goodput_ema = goodput;
+                state.steady_run = 0;
+            }
             state.prev_goodput = goodput;
         } else if !adverse {
             // settled and healthy
@@ -646,6 +654,33 @@ mod tests {
             }
         }
         assert!(backed_off, "sustained failures must back off");
+    }
+
+    // Probing forever at the cap leaves a real decline invisible.
+    #[sia_core_derive::cross_target_test]
+    fn test_backs_off_after_running_healthy_at_the_cap() {
+        let c = InflightController::new(64, 2, 64, 1);
+        let window = |secs: f64| {
+            let n = c.state.lock().unwrap().window();
+            for _ in 0..n {
+                c.record(c.sample(), Duration::from_secs_f64(secs), true);
+            }
+        };
+        for _ in 0..10 {
+            window(1.0);
+        }
+        assert_eq!(c.limit(), 64);
+
+        let trace: Vec<usize> = (0..10)
+            .map(|_| {
+                window(4.0);
+                c.limit()
+            })
+            .collect();
+        assert!(
+            trace.iter().any(|&l| l < 64),
+            "never backed off from the cap: {trace:?}"
+        );
     }
 
     #[sia_core_derive::cross_target_test]
