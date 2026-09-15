@@ -113,10 +113,12 @@ struct AwaitingRecovery {
 struct ShardsRecovered {
     shard_offset: usize,
     shards: Vec<Option<Vec<u8>>>,
+    slowest_winner: Option<Duration>,
 }
 
 struct SlabDecoded {
     data_shards: Vec<Bytes>,
+    slowest_winner: Option<Duration>,
 }
 
 struct DownloadResult {
@@ -305,6 +307,7 @@ impl SlabRecovery<AwaitingRecovery> {
             );
         }
         let mut recovered_shards: usize = 0;
+        let mut slowest_winner: Option<Duration> = None;
         let mut eligible = seq < popped_rx.borrow_and_update().saturating_add(RACE_WINDOW);
         let mut last_event = Instant::now();
 
@@ -316,6 +319,7 @@ impl SlabRecovery<AwaitingRecovery> {
                     match result {
                         Ok(data) => {
                             recovered_shards += 1;
+                            slowest_winner = Some(slowest_winner.unwrap_or_default().max(elapsed));
                             let shard_size = data.len();
                             shards[task.shard_index] = Some(Vec::from(data));
                             if recovered_shards <= min_shards && let Some(callback) = &shard_downloaded {
@@ -342,6 +346,7 @@ impl SlabRecovery<AwaitingRecovery> {
                                     state: ShardsRecovered {
                                         shard_offset,
                                         shards,
+                                        slowest_winner,
                                     },
                                 });
                             }
@@ -411,12 +416,21 @@ impl SlabRecovery<ShardsRecovered> {
             encryption_key: self.encryption_key,
             offset: self.offset,
             length: self.length,
-            state: SlabDecoded { data_shards },
+            state: SlabDecoded {
+                data_shards,
+                slowest_winner: self.state.slowest_winner,
+            },
         })
     }
 }
 
 impl SlabRecovery<SlabDecoded> {
+    /// The duration of the slowest completed shard that contributed to the
+    /// chunk's recovery.
+    fn slowest_winner(&self) -> Option<Duration> {
+        self.state.slowest_winner
+    }
+
     async fn write<W: AsyncWrite + Unpin>(self, w: &mut W) -> Result<(), DownloadError> {
         let skip = self.offset % (SEGMENT_SIZE * self.state.data_shards.len());
         ErasureCoder::write_data_shards(w, &self.state.data_shards, skip, self.length).await?;
@@ -636,18 +650,24 @@ impl Download {
                 let recovered = async move {
                     let recovery = recovery?;
                     let mut buf = Vec::with_capacity(len);
-                    recovery
+                    let decoded = recovery
                         .recover_shards(shard_progress_callback)
                         .await?
-                        .decode()?
-                        .write(&mut buf)
-                        .await?;
+                        .decode()?;
+                    let elapsed = decoded.slowest_winner();
+                    decoded.write(&mut buf).await?;
                     cipher.apply_keystream(&mut buf);
-                    Ok::<_, DownloadError>(buf)
+                    Ok::<_, DownloadError>((buf, elapsed))
                 }
                 .await;
-                controller.record(permit, started.elapsed(), recovered.is_ok());
-                recovered
+                // A failed chunk has no winner to time so we fall back to the
+                // overall duration.
+                let elapsed = recovered
+                    .as_ref()
+                    .map(|(_, d)| d.unwrap_or(started.elapsed()))
+                    .unwrap_or_default();
+                controller.record(permit, elapsed, recovered.is_ok());
+                recovered.map(|(buf, _)| buf)
             })));
         true
     }
