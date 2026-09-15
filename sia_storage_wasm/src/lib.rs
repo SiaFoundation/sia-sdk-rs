@@ -80,6 +80,9 @@ pub fn validate_recovery_phrase(phrase: &str) -> Result<(), JsError> {
 
 /// Calculates the encoded size of data after erasure coding.
 #[wasm_bindgen(js_name = "encodedSize")]
-pub fn encoded_size(data_size: f64, data_shards: u8, parity_shards: u8) -> f64 {
-    sia_storage::encoded_size(data_size as u64, data_shards, parity_shards) as f64
+pub fn encoded_size(data_size: f64, data_shards: u8, parity_shards: u8) -> Result<f64, JsError> {
+    if data_shards == 0 {
+        return Err(JsError::new("data shards cannot be zero"));
+    }
+    Ok(sia_storage::encoded_size(data_size as u64, data_shards, parity_shards) as f64)
 }

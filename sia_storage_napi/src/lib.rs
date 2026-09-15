@@ -1083,7 +1083,12 @@ impl Sdk {
 
 /// Calculates the encoded size of data given the original size and erasure coding parameters.
 #[napi]
-pub fn encoded_size(size: BigInt, data_shards: u8, parity_shards: u8) -> BigInt {
+pub fn encoded_size(size: BigInt, data_shards: u8, parity_shards: u8) -> Result<BigInt> {
+    // A Rust panic cannot unwind into JavaScript, so zero data shards would
+    // abort the whole Node process instead of throwing.
+    if data_shards == 0 {
+        return Err(Error::from_reason("data shards cannot be zero"));
+    }
     let (_, size, _) = size.get_u64();
-    sia_storage::encoded_size(size, data_shards, parity_shards).into()
+    Ok(sia_storage::encoded_size(size, data_shards, parity_shards).into())
 }

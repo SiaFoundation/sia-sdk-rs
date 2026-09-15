@@ -569,6 +569,10 @@ fn default_memory_budget() -> u64 {
 }
 
 /// Estimates the on-network encoded size of data after erasure coding.
+///
+/// # Panics
+///
+/// Panics if `data_shards` is zero.
 pub fn encoded_size(data_size: u64, data_shards: u8, parity_shards: u8) -> u64 {
     let total_shards = data_shards as u64 + parity_shards as u64;
     let sector_size = sia_core::rhp4::SECTOR_SIZE as u64;

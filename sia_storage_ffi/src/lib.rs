@@ -1,7 +1,6 @@
 uniffi::setup_scaffolding!();
 
 use sia_core::encoding;
-use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::{PublicKey, Signature};
 use sia_core::types::{self, Hash256, HexParseError};
 use sia_storage::{SealedObjectError, Url};
@@ -1267,9 +1266,27 @@ impl Sdk {
 
 /// Calculates the encoded size of data given the original size and erasure coding parameters.
 #[uniffi::export]
-pub fn encoded_size(size: u64, data_shards: u8, parity_shards: u8) -> u64 {
-    let total_shards = data_shards as u64 + parity_shards as u64;
-    let slab_size = total_shards * SECTOR_SIZE as u64;
-    let slabs = size.div_ceil(data_shards as u64 * SECTOR_SIZE as u64);
-    slabs * slab_size
+pub fn encoded_size(size: u64, data_shards: u8, parity_shards: u8) -> Result<u64, Error> {
+    if data_shards == 0 {
+        return Err(Error::Custom("data shards cannot be zero".into()));
+    }
+    Ok(sia_storage::encoded_size(size, data_shards, parity_shards))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoded_size_rejects_zero_data_shards() {
+        assert!(encoded_size(1 << 20, 0, 20).is_err());
+    }
+
+    #[test]
+    fn encoded_size_matches_core() {
+        assert_eq!(
+            encoded_size(1 << 20, 10, 20).unwrap(),
+            sia_storage::encoded_size(1 << 20, 10, 20)
+        );
+    }
 }
