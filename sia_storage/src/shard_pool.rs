@@ -1,16 +1,20 @@
-use std::mem;
+use std::io;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use bytes::BytesMut;
 use sia_core::rhp4::SECTOR_SIZE;
 
-/// Free list of sector-sized buffers for one upload.
+#[cfg(not(target_arch = "wasm32"))]
+type Buf = memmap2::MmapMut;
+#[cfg(target_arch = "wasm32")]
+type Buf = bytes::BytesMut;
+
+/// Free list of sector-sized anonymous mappings for one upload.
 pub(crate) struct ShardPool {
-    free: Mutex<Vec<BytesMut>>,
+    free: Mutex<Vec<Buf>>,
     max: usize,
     #[cfg(test)]
     allocated: AtomicUsize,
@@ -19,8 +23,18 @@ pub(crate) struct ShardPool {
 /// A sector-sized buffer borrowed from a [`ShardPool`]. Returns to the pool on
 /// drop.
 pub(crate) struct PooledShard {
-    buf: BytesMut,
+    buf: Option<Buf>,
     pool: Arc<ShardPool>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn map_sector() -> io::Result<Buf> {
+    memmap2::MmapMut::map_anon(SECTOR_SIZE)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn map_sector() -> io::Result<Buf> {
+    Ok(bytes::BytesMut::zeroed(SECTOR_SIZE))
 }
 
 impl ShardPool {
@@ -34,21 +48,24 @@ impl ShardPool {
         })
     }
 
-    /// Pops an idle buffer or allocates a zeroed one. Never waits.
-    pub(crate) fn take(self: &Arc<Self>) -> PooledShard {
+    /// Pops an idle buffer or maps a zeroed one. Never waits.
+    pub(crate) fn take(self: &Arc<Self>) -> io::Result<PooledShard> {
         let idle = self.free.lock().unwrap().pop();
-        let buf = idle.unwrap_or_else(|| {
-            #[cfg(test)]
-            self.allocated.fetch_add(1, Ordering::Relaxed);
-            BytesMut::zeroed(SECTOR_SIZE)
-        });
-        PooledShard {
-            buf,
+        let buf = match idle {
+            Some(buf) => buf,
+            None => {
+                #[cfg(test)]
+                self.allocated.fetch_add(1, Ordering::Relaxed);
+                map_sector()?
+            }
+        };
+        Ok(PooledShard {
+            buf: Some(buf),
             pool: self.clone(),
-        }
+        })
     }
 
-    pub(crate) fn take_slab(self: &Arc<Self>, n: usize) -> Vec<PooledShard> {
+    pub(crate) fn take_slab(self: &Arc<Self>, n: usize) -> io::Result<Vec<PooledShard>> {
         (0..n).map(|_| self.take()).collect()
     }
 
@@ -62,7 +79,7 @@ impl ShardPool {
         self.free.lock().unwrap().len()
     }
 
-    fn recycle(&self, buf: BytesMut) {
+    fn recycle(&self, buf: Buf) {
         let mut free = self.free.lock().unwrap();
         if free.len() < self.max {
             free.push(buf);
@@ -70,15 +87,25 @@ impl ShardPool {
     }
 }
 
+impl PooledShard {
+    fn inner(&self) -> &Buf {
+        self.buf.as_ref().expect("buffer is taken only in drop")
+    }
+
+    fn inner_mut(&mut self) -> &mut Buf {
+        self.buf.as_mut().expect("buffer is taken only in drop")
+    }
+}
+
 impl AsRef<[u8]> for PooledShard {
     fn as_ref(&self) -> &[u8] {
-        &self.buf
+        self.inner()
     }
 }
 
 impl AsMut<[u8]> for PooledShard {
     fn as_mut(&mut self) -> &mut [u8] {
-        &mut self.buf
+        self.inner_mut()
     }
 }
 
@@ -86,19 +113,21 @@ impl Deref for PooledShard {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        &self.buf
+        self.inner()
     }
 }
 
 impl DerefMut for PooledShard {
     fn deref_mut(&mut self) -> &mut [u8] {
-        &mut self.buf
+        self.inner_mut()
     }
 }
 
 impl Drop for PooledShard {
     fn drop(&mut self) {
-        self.pool.recycle(mem::take(&mut self.buf));
+        if let Some(buf) = self.buf.take() {
+            self.pool.recycle(buf);
+        }
     }
 }
 
@@ -110,13 +139,14 @@ mod tests {
     #[sia_core_derive::cross_target_test]
     fn test_take_reuses_recycled_buffer() {
         let pool = ShardPool::new(4);
-        let first = pool.take();
+        let first = pool.take().unwrap();
         let ptr = first.as_ptr();
         assert_eq!(first.len(), SECTOR_SIZE);
+        assert!(first.iter().all(|&b| b == 0), "fresh buffer must be zeroed");
         drop(first);
         assert_eq!(pool.idle(), 1);
 
-        let second = pool.take();
+        let second = pool.take().unwrap();
         assert_eq!(second.as_ptr(), ptr, "recycled buffer must be reused");
         assert_eq!(pool.allocated(), 1);
         assert_eq!(pool.idle(), 0);
@@ -125,12 +155,12 @@ mod tests {
     #[sia_core_derive::cross_target_test]
     fn test_recycle_caps_idle_buffers() {
         let pool = ShardPool::new(2);
-        let shards = pool.take_slab(3);
+        let shards = pool.take_slab(3).unwrap();
         assert_eq!(pool.allocated(), 3);
         drop(shards);
         assert_eq!(pool.idle(), 2, "idle buffers above max must be dropped");
 
-        let _shards = pool.take_slab(2);
+        let _shards = pool.take_slab(2).unwrap();
         assert_eq!(pool.allocated(), 3, "idle buffers must be reused first");
         assert_eq!(pool.idle(), 0);
     }
@@ -138,7 +168,7 @@ mod tests {
     #[sia_core_derive::cross_target_test]
     fn test_owned_bytes_recycle_on_last_handle() {
         let pool = ShardPool::new(1);
-        let mut shard = pool.take();
+        let mut shard = pool.take().unwrap();
         shard.fill(7);
         let ptr = shard.as_ptr();
 
@@ -151,7 +181,7 @@ mod tests {
         drop(b);
         assert_eq!(pool.idle(), 1, "last handle must recycle the buffer");
 
-        let again = pool.take();
+        let again = pool.take().unwrap();
         assert_eq!(again.as_ptr(), ptr);
         assert_eq!(pool.allocated(), 1);
     }

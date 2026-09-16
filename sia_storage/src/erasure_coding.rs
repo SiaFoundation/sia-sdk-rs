@@ -167,7 +167,7 @@ impl SlabReader {
             return Ok((0, None));
         }
         if self.shards.is_empty() {
-            self.shards = self.pool.take_slab(self.total_shards);
+            self.shards = self.pool.take_slab(self.total_shards)?;
         }
         let mut cipher = Chacha20Cipher::new_v1(data_key, self.length as u64, &self.encryption_key);
         let mut r = r.take(remaining as u64);
@@ -498,7 +498,7 @@ mod tests {
 
         // dirty every buffer the pool will hand out
         let pool = ShardPool::new(TOTAL_SHARDS);
-        for mut shard in pool.take_slab(TOTAL_SHARDS) {
+        for mut shard in pool.take_slab(TOTAL_SHARDS).unwrap() {
             shard.fill(0xFF);
         }
 
