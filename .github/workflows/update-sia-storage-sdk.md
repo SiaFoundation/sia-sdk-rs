@@ -3,6 +3,7 @@ emoji: 🧬
 name: Update sia-storage-sdk
 description: On a sia_storage_ffi release, open a pull request in SiaFoundation/sia-storage-sdk that repins the crate, regenerates the UniFFI bindings, and updates the hand-written Python, Swift, and Kotlin wrappers.
 on:
+  bots: ["sia-ci-bot[bot]"]
   release:
     types: [published]
   workflow_dispatch:
@@ -25,8 +26,17 @@ models:
   default-ai-credits-pricing:
     input: 5.0
     output: 25.0
+# Every crate in a release fires this workflow within seconds. The `if:` above
+# is checked per job, after the run has joined this group, so a run it skips
+# still cancels the one before it. When napi published right after ffi, its run
+# cancelled the ffi run and no update ran. Only ffi and manual runs share the
+# group.
 concurrency:
-  group: update-sia-storage-sdk
+  group: >-
+    ${{ (github.event_name != 'release'
+    || startsWith(github.event.release.tag_name, 'sia_storage_ffi/v'))
+    && 'update-sia-storage-sdk'
+    || format('update-sia-storage-sdk-{0}', github.run_id) }}
   cancel-in-progress: true
 runs-on: ubuntu-latest
 timeout-minutes: 60
@@ -190,6 +200,9 @@ safe-outputs:
       - "swift/**"
       - "kotlin/**"
       - "examples/**"
+      - "src/**"
+      - "README.md"
+      - ".gitignore"
     protected-files:
       policy: request_review
       exclude: ["gradle.properties", "README.md"]
@@ -306,6 +319,12 @@ release would be a downgrade. Nothing was modified; call `noop` and stop.
 the xcframework and a macOS toolchain. Regenerating `SiaStorageSDK.swift` and updating
 `Wrappers.swift` is all you can verify — the repository's own `swift.yml` builds and
 tests Swift on the pull request. Say so in the body rather than implying Swift passed.
+
+6. **Check the changed files.** Run `git status` and revert any change outside
+   `Cargo.toml`, `Cargo.lock`, `Package.swift`, `SiaStorageSDK.podspec`, `python/`,
+   `swift/`, `kotlin/`, `examples/`, `src/`, `README.md`, and `.gitignore`. Any other
+   file rejects the whole pull request. List what you reverted in the body, along with
+   any `.github/` workflow change the update needs.
 
 ## Output
 

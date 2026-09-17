@@ -13,10 +13,12 @@ use tokio_util::sync::CancellationToken;
 mod builder;
 mod io;
 mod logging;
+mod sharing;
 
 pub use builder::*;
 pub use io::SendableReader;
 pub use logging::*;
+pub use sharing::*;
 
 /// Metadata about an application connecting to the indexer.
 #[napi(object)]
@@ -34,6 +36,15 @@ pub struct AppMetadata {
 pub enum AddressProtocol {
     SiaMux,
     Quic,
+}
+
+impl From<AddressProtocol> for types::v2::Protocol {
+    fn from(protocol: AddressProtocol) -> Self {
+        match protocol {
+            AddressProtocol::SiaMux => Self::SiaMux,
+            AddressProtocol::Quic => Self::QUIC,
+        }
+    }
 }
 
 /// A network address of a storage provider on the Sia network.
@@ -164,6 +175,39 @@ impl From<sia_storage::Host> for Host {
             latitude: h.latitude,
             longitude: h.longitude,
             good_for_upload: h.good_for_upload,
+        }
+    }
+}
+
+/// Query parameters for filtering hosts.
+#[napi(object)]
+#[derive(Default)]
+pub struct HostQuery {
+    pub location: Option<GeoLocation>,
+    pub protocol: Option<AddressProtocol>,
+    pub country: Option<String>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+/// Geographic coordinates used to sort hosts by proximity.
+#[napi(object)]
+pub struct GeoLocation {
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+impl From<HostQuery> for sia_storage::HostQuery {
+    fn from(query: HostQuery) -> Self {
+        Self {
+            location: query.location.map(|location| sia_storage::GeoLocation {
+                latitude: location.latitude,
+                longitude: location.longitude,
+            }),
+            protocol: query.protocol.map(Into::into),
+            country: query.country,
+            limit: query.limit.map(u64::from),
+            offset: query.offset.map(u64::from),
         }
     }
 }
@@ -647,6 +691,12 @@ impl PackedUpload {
         )
     }
 
+    /// Returns the optimal size of each slab in bytes.
+    #[napi]
+    pub fn optimal_data_size(&self) -> BigInt {
+        BigInt::from(self.optimal_data_size)
+    }
+
     /// Adds a new object to the upload. The data is read until EOF and packed into
     /// the current slab. Returns the number of bytes consumed; call
     /// [finalize](Self::finalize) once all objects have been added to get the
@@ -878,12 +928,12 @@ impl Sdk {
         ReadableStream::new(&env, stream)
     }
 
-    /// Returns a list of all usable hosts.
+    /// Returns a list of usable hosts, optionally filtered by a query.
     #[napi]
-    pub async fn hosts(&self) -> Result<Vec<Host>> {
+    pub async fn hosts(&self, query: Option<HostQuery>) -> Result<Vec<Host>> {
         let hosts = self
             .inner
-            .hosts(Default::default())
+            .hosts(query.map(Into::into).unwrap_or_default())
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
         Ok(hosts.into_iter().map(|h| h.into()).collect())

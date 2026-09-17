@@ -64,11 +64,6 @@ pub enum BuilderError {
     #[error("request expired")]
     RequestExpired,
 
-    /// The recovery phrase does not derive the app key of the account that
-    /// is already connected to this application.
-    #[error("recovery phrase does not match the existing account")]
-    WrongRecoveryPhrase,
-
     /// The indexer rejected the pre-authorized connection request. The key is
     /// usually invalid, expired, exhausted, or restricted to a different
     /// application; the indexer's response is included.
@@ -132,7 +127,8 @@ impl Builder<DisconnectedState> {
     /// this performs the entire connect, approve, and register flow in one call.
     /// The application key is derived from `mnemonic` exactly as in the
     /// interactive flow, so a later [Builder::connected] call reconnects to the
-    /// same account.
+    /// same account. A different recovery phrase registers a new application
+    /// key even if this application already has an account.
     ///
     /// # Arguments
     /// * `pre_authorized_key` - The pre-authorized key used to approve the connection.
@@ -173,9 +169,6 @@ impl Builder<DisconnectedState> {
             })?;
 
         let private_key = derive_app_key(mnemonic, &self.app_meta.id, &status.user_secret)?;
-        if status.reconnecting && !self.client.check_app_authenticated(&private_key).await? {
-            return Err(BuilderError::WrongRecoveryPhrase);
-        }
         self.client
             .register_app(
                 &self.ephemeral_key,
@@ -256,18 +249,33 @@ impl Builder<ApprovedState> {
     /// Returns whether the connect key the user approved with already has an
     /// account for this application.
     ///
-    /// A returning user must supply the same recovery phrase to
-    /// [Builder::register] to regain access to their data.
+    /// The connect key may have accounts under more than one recovery phrase.
+    /// Use [Builder::matches_existing_app_key] to check a particular phrase.
     pub fn reconnecting(&self) -> bool {
         self.state.reconnecting
     }
 
+    /// Returns whether `mnemonic` derives an application key that is already
+    /// registered with the indexer.
+    ///
+    /// This is independent of [Builder::reconnecting] and neither registers the
+    /// key nor consumes the builder.
+    ///
+    /// # Arguments
+    /// * `mnemonic` - The user's mnemonic phrase used to derive the application key.
+    ///
+    /// # Errors
+    /// Returns [BuilderError] if the recovery phrase is invalid or the check fails.
+    pub async fn matches_existing_app_key(&self, mnemonic: &str) -> Result<bool, BuilderError> {
+        let private_key = derive_app_key(mnemonic, &self.app_meta.id, &self.state.user_secret)?;
+        Ok(self.client.check_app_authenticated(&private_key).await?)
+    }
+
     /// Completes the registration process and returns an SDK instance.
     ///
-    /// When reconnecting, the derived app key is verified against the indexer
-    /// before registering. If it does not belong to the existing account,
-    /// this fails with [BuilderError::WrongRecoveryPhrase] instead of
-    /// registering a new account.
+    /// A different recovery phrase registers a new application key even when
+    /// [Builder::reconnecting] is true. Use [Builder::matches_existing_app_key]
+    /// to check a phrase before registering.
     ///
     /// # Arguments
     /// * `mnemonic` - The user's mnemonic phrase used to derive the application key.
@@ -276,9 +284,6 @@ impl Builder<ApprovedState> {
     /// Returns [BuilderError] if the registration fails or the SDK cannot be created.
     pub async fn register(self, mnemonic: &str) -> Result<Sdk, BuilderError> {
         let private_key = derive_app_key(mnemonic, &self.app_meta.id, &self.state.user_secret)?;
-        if self.state.reconnecting && !self.client.check_app_authenticated(&private_key).await? {
-            return Err(BuilderError::WrongRecoveryPhrase);
-        }
         self.client
             .register_app(
                 &self.ephemeral_key,
@@ -342,12 +347,20 @@ mod test {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod native_tests {
     use super::*;
+    use crate::app_client::QUERY_PARAM_CREDENTIAL;
     use crate::app_id;
+    use base64::engine::general_purpose::URL_SAFE;
+    use base64::prelude::*;
     use httptest::http::Response;
-    use httptest::matchers::request;
+    use httptest::matchers::{all_of, contains, request, url_decoded};
     use httptest::{Expectation, Server};
+    use sia_core::hash_256;
 
     const MNEMONIC: &str = "glare own entire dish exact open theme family harsh room scrap rose";
+    const OTHER_MNEMONIC: &str =
+        "bleak style know actor budget endorse dream ketchup material index actual wide";
+    const USER_SECRET: Hash256 =
+        hash_256!("cf02d945fe4bfe614d823dc13c19aa8501699e656d0f7915490c3056d5c97dc6");
     const APP_META: AppMetadata = AppMetadata {
         id: app_id!("0e90d697f5045a6593f1c43ebf79a369e2bc72cc5c7b6282f3b5aeb0de6e4005"),
         name: "test-app",
@@ -372,26 +385,16 @@ mod native_tests {
                     .unwrap(),
             ),
         );
+        let approval =
+            format!(r#"{{"approved":true,"reconnecting":true,"userSecret":"{USER_SECRET}"}}"#);
         server.expect(
             Expectation::matching(request::method_path("GET", "/auth/connect/req/status"))
-                .respond_with(
-                    Response::builder()
-                        .status(200)
-                        .body(r#"{"approved":true,"reconnecting":true,"userSecret":"cf02d945fe4bfe614d823dc13c19aa8501699e656d0f7915490c3056d5c97dc6"}"#)
-                        .unwrap(),
-                ),
+                .respond_with(Response::builder().status(200).body(approval).unwrap()),
         );
         server
     }
 
-    #[tokio::test]
-    async fn test_register_reconnecting() {
-        // correct recovery phrase, the app key passes the check and registration proceeds
-        let server = reconnecting_approval_server();
-        server.expect(
-            Expectation::matching(request::method_path("GET", "/auth/check"))
-                .respond_with(Response::builder().status(204).body("").unwrap()),
-        );
+    fn expect_registration(server: &Server) {
         server.expect(
             Expectation::matching(request::method_path("POST", "/auth/connect/req/register"))
                 .respond_with(Response::builder().status(200).body("").unwrap()),
@@ -400,31 +403,69 @@ mod native_tests {
             Expectation::matching(request::method_path("GET", "/hosts"))
                 .respond_with(Response::builder().status(200).body("[]").unwrap()),
         );
+    }
+
+    /// Expects one check of the app key derived from `mnemonic`, answered with
+    /// `status`.
+    fn expect_app_key_check(server: &Server, mnemonic: &str, status: u16) {
+        let key = derive_app_key(mnemonic, &APP_META.id, &USER_SECRET).unwrap();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/auth/check"),
+                request::query(url_decoded(contains((
+                    QUERY_PARAM_CREDENTIAL,
+                    URL_SAFE.encode(key.public_key())
+                )))),
+            ])
+            .respond_with(Response::builder().status(status).body("").unwrap()),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_matches_existing_app_key() {
+        let server = reconnecting_approval_server();
+        expect_app_key_check(&server, MNEMONIC, 204);
+        expect_app_key_check(&server, OTHER_MNEMONIC, 401);
 
         let builder = Builder::new(server.url("/").to_string(), APP_META).unwrap();
         let builder = builder.request_connection().await.unwrap();
         let builder = builder.wait_for_approval().await.unwrap();
         assert!(builder.reconnecting());
-        builder.register(MNEMONIC).await.unwrap();
+        assert!(builder.matches_existing_app_key(MNEMONIC).await.unwrap());
+        assert!(
+            !builder
+                .matches_existing_app_key(OTHER_MNEMONIC)
+                .await
+                .unwrap()
+        );
+    }
 
-        // wrong recovery phrase, the app key fails the check and registration is refused
+    #[tokio::test]
+    async fn test_register_new_app_key() {
+        // the server expects no app key check
         let server = reconnecting_approval_server();
-        server.expect(
-            Expectation::matching(request::method_path("GET", "/auth/check"))
-                .respond_with(Response::builder().status(401).body("").unwrap()),
-        );
-        server.expect(
-            Expectation::matching(request::method_path("POST", "/auth/connect/req/register"))
-                .times(0)
-                .respond_with(Response::builder().status(200).body("").unwrap()),
-        );
+        expect_registration(&server);
 
         let builder = Builder::new(server.url("/").to_string(), APP_META).unwrap();
         let builder = builder.request_connection().await.unwrap();
         let builder = builder.wait_for_approval().await.unwrap();
-        let Err(err) = builder.register(MNEMONIC).await else {
-            panic!("expected register to fail");
-        };
-        assert!(matches!(err, BuilderError::WrongRecoveryPhrase));
+        let sdk = builder.register(OTHER_MNEMONIC).await.unwrap();
+        let key = derive_app_key(OTHER_MNEMONIC, &APP_META.id, &USER_SECRET).unwrap();
+        assert_eq!(sdk.app_key().public_key(), key.public_key());
+    }
+
+    #[tokio::test]
+    async fn test_connect_pre_authorized_new_app_key() {
+        let server = reconnecting_approval_server();
+        expect_registration(&server);
+
+        let builder = Builder::new(server.url("/").to_string(), APP_META).unwrap();
+        let pre_authorized_key = PrivateKey::from_seed(&random::<[u8; 32]>());
+        let sdk = builder
+            .connect_pre_authorized(&pre_authorized_key, OTHER_MNEMONIC)
+            .await
+            .unwrap();
+        let key = derive_app_key(OTHER_MNEMONIC, &APP_META.id, &USER_SECRET).unwrap();
+        assert_eq!(sdk.app_key().public_key(), key.public_key());
     }
 }

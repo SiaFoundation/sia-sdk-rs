@@ -281,6 +281,12 @@ impl UploadLimiter {
         self.controller.sample()
     }
 
+    /// Reports a write that hit its deadline. Only lowers the limit, so there
+    /// is no slot to wake for.
+    fn record_timeout(&self, permit: SamplePermit, host: PublicKey) {
+        self.controller.record_timeout(permit, host);
+    }
+
     /// Feeds a completion to the controller and wakes parked acquirers for any
     /// newly opened slots.
     fn record(&self, permit: SamplePermit, elapsed: Duration, ok: bool) {
@@ -362,6 +368,11 @@ impl ShardUpload {
                 .await;
             race_penalty.armed = false;
             let elapsed = start.elapsed();
+            // one failed completion, which a window sized to the limit
+            // dilutes; enough hosts stalling at once is the pipeline
+            if matches!(result, Err(RPCError::Elapsed(_))) {
+                limiter.record_timeout(sample, host_key);
+            }
             limiter.record(sample, elapsed, result.is_ok());
             host.release_inflight();
             drop(upload_permit);

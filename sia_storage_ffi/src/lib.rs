@@ -15,7 +15,9 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
 mod logging;
+mod sharing;
 pub use logging::*;
+pub use sharing::*;
 
 mod builder;
 pub use builder::*;
@@ -133,6 +135,15 @@ pub struct AppMetadata {
 pub enum AddressProtocol {
     SiaMux,
     Quic,
+}
+
+impl From<AddressProtocol> for types::v2::Protocol {
+    fn from(protocol: AddressProtocol) -> Self {
+        match protocol {
+            AddressProtocol::SiaMux => Self::SiaMux,
+            AddressProtocol::Quic => Self::QUIC,
+        }
+    }
 }
 
 /// A network address of a storage provider on the Sia network.
@@ -393,6 +404,43 @@ impl From<sia_storage::Host> for Host {
     }
 }
 
+/// Query parameters for filtering hosts.
+#[derive(Default, uniffi::Record)]
+pub struct HostQuery {
+    #[uniffi(default = None)]
+    pub location: Option<GeoLocation>,
+    #[uniffi(default = None)]
+    pub protocol: Option<AddressProtocol>,
+    #[uniffi(default = None)]
+    pub country: Option<String>,
+    #[uniffi(default = None)]
+    pub limit: Option<u64>,
+    #[uniffi(default = None)]
+    pub offset: Option<u64>,
+}
+
+/// Geographic coordinates used to sort hosts by proximity.
+#[derive(uniffi::Record)]
+pub struct GeoLocation {
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+impl From<HostQuery> for sia_storage::HostQuery {
+    fn from(query: HostQuery) -> Self {
+        Self {
+            location: query.location.map(|location| sia_storage::GeoLocation {
+                latitude: location.latitude,
+                longitude: location.longitude,
+            }),
+            protocol: query.protocol.map(Into::into),
+            country: query.country,
+            limit: query.limit,
+            offset: query.offset,
+        }
+    }
+}
+
 impl TryInto<sia_storage::Host> for Host {
     type Error = HexParseError;
 
@@ -624,6 +672,11 @@ impl PackedUpload {
         self.length
             .load(Ordering::Acquire)
             .div_ceil(self.optimal_data_size)
+    }
+
+    /// Returns the optimal size of each slab in bytes.
+    pub fn optimal_data_size(&self) -> u64 {
+        self.optimal_data_size
     }
 
     /// Adds a new object to the upload. The data is read until EOF and packed into
@@ -956,10 +1009,7 @@ impl Sdk {
     ///
     /// # Returns
     /// A [PackedUpload] that can be used to add objects and finalize the upload.
-    pub async fn upload_packed(
-        &self,
-        options: PackedUploadOptions,
-    ) -> Result<PackedUpload, UploadError> {
+    pub fn upload_packed(&self, options: PackedUploadOptions) -> Result<PackedUpload, UploadError> {
         let options: sia_storage::PackedUploadOptions = options.into();
         let packed_upload = self
             .inner
@@ -1055,11 +1105,12 @@ impl Sdk {
         })
     }
 
-    /// Returns a list of all usable hosts.
-    pub async fn hosts(&self) -> Result<Vec<Host>, Error> {
+    /// Returns a list of usable hosts, optionally filtered by a query.
+    #[uniffi::method(default(query = None))]
+    pub async fn hosts(&self, query: Option<HostQuery>) -> Result<Vec<Host>, Error> {
         let sdk = self.inner.clone();
         spawn(async move {
-            let hosts = sdk.hosts(Default::default()).await?;
+            let hosts = sdk.hosts(query.map(Into::into).unwrap_or_default()).await?;
             Ok(hosts.into_iter().map(|h| h.into()).collect())
         })
         .await?

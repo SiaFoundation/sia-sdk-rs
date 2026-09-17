@@ -1,14 +1,12 @@
 use wasm_bindgen::prelude::*;
 
+// The shape is given here rather than derived, because tsify resolves a
+// transparent newtype to its inner type's name and emits the self referential
+// `export type SealedObject = SealedObject;`.
 #[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
 #[serde(transparent)]
-pub struct SealedObject(pub sia_storage::SealedObject);
-
-// Override tsify's broken `export type SealedObject = SealedObject;`
-// with the actual interface shape.
-#[wasm_bindgen(typescript_custom_section)]
-const _: &str = r#"
-export interface SealedObject {
+pub struct SealedObject(
+    #[tsify(type = "{
     encryptedDataKey: string;
     slabs: Slab[];
     dataSignature: string;
@@ -17,5 +15,6 @@ export interface SealedObject {
     metadataSignature: string;
     createdAt: string;
     updatedAt: string;
-}
-"#;
+}")]
+    pub sia_storage::SealedObject,
+);

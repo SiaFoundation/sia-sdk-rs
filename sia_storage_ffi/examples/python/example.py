@@ -11,8 +11,8 @@ from sia_storage_ffi import (
     Builder,
     DownloadOptions,
     Logger,
+    PackedUploadOptions,
     Reader,
-    UploadOptions,
     generate_recovery_phrase,
     set_logger,
     uniffi_set_event_loop,
@@ -81,7 +81,7 @@ async def main():
     print("Connected to indexd")
 
     start = datetime.now(timezone.utc)
-    upload = await sdk.upload_packed(UploadOptions())
+    upload = sdk.upload_packed(PackedUploadOptions())
 
     i = 0
     data = None

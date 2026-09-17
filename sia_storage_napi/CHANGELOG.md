@@ -1,3 +1,59 @@
+## 0.10.1 (2026-09-15)
+
+### Features
+
+#### Add host-query support to the bindings
+
+Added optional `HostQuery` parameters to `Sdk.hosts` and `SharedSdk.hosts` in
+the N-API and UniFFI bindings.
+
+Native bindings expose location, protocol, country, limit, and offset filters.
+WASM now exposes location filtering and continues to enforce QUIC because
+browser transports do not support SiaMux. Its generated TypeScript declaration
+now correctly marks every `HostQuery` field as optional.
+
+#### Expose the optimal packed-upload size
+
+Added `PackedUpload.optimal_data_size` to the N-API and UniFFI bindings,
+matching the core SDK and WASM binding.
+
+## 0.10.0 (2026-09-14)
+
+### Breaking Changes
+
+- Remove contextual fields from several error variants to reduce `Error` enum size.
+
+#### Let a reconnecting user register a new app key
+
+When `reconnecting()` is true, `register` / `connect_pre_authorized` no longer fail just because the recovery phrase derives a different app key; a new application key will be registered instead.
+
+To let applications detect whether a recovery phrase matches an already-registered app key, this adds `matches_existing_app_key` (JS: `matchesExistingAppKey`).
+
+This removes the `BuilderError::WrongRecoveryPhrase` variant.
+
+#### Renamed the share URL methods on `Sdk`.
+
+`Sdk::share_object` and `Sdk::shared_object` are now `Sdk::object_share_url` and `Sdk::object_from_share_url`. The bindings change to match, so `shareObject` and `sharedObject` become `objectShareUrl` and `objectFromShareUrl`.
+
+### Features
+
+- Added sharing keys support to the ffi and napi bindings.
+
+#### Added `connect_pre_authorized` for connecting with a pre-authorized key.
+
+Applications can now bypass the interactive approval flow by connecting with a pre-authorized key that the indexer operator provisions out of band. `Builder::connect_pre_authorized(pre_authorized_key, mnemonic)` performs the connect, approval, and registration steps in one call and returns a ready SDK. The method is also exposed through the ffi, napi, and wasm bindings.
+
+#### Added `reconnecting` to the connection approval flow.
+
+After approval, `reconnecting()` reports whether the connect key already has an account for the application. When reconnecting, `register` and `connect_pre_authorized` fail with `WrongRecoveryPhrase` if the recovery phrase does not match the existing account.
+
+### Fixes
+
+- Added the HTTP status code to `AppApiError::Api` and removed the `Unauthorized` and `NotFound` variants
+- Increased default API timeout for slow indexers.
+- Retry failed shards up to three times before failing the download.
+- Added a method for truncating objects.
+
 ## 0.9.0 (2026-08-07)
 
 ### Breaking Changes

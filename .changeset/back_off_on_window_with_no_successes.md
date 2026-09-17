@@ -5,4 +5,4 @@ sia_storage_napi: patch
 sia_storage_wasm: patch
 ---
 
-# Retry failed shards up to three times before failing the download.
+# Back off the inflight limit on a window with no successes.
