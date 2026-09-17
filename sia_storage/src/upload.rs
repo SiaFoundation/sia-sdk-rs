@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use std::io;
 #[cfg(feature = "fs")]
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::app_client::{self, SlabPinParams};
@@ -61,8 +60,6 @@ struct ShardUpload {
     slab_index: usize,
     shard_index: usize,
     waiting: watch::Sender<usize>,
-    /// Set when this shard accepts a result.
-    won: Arc<AtomicBool>,
 }
 
 struct SectorUploadResult {
@@ -140,29 +137,6 @@ impl ShardAttempt {
                 Ok(result)
             }
             Err(e) => Err((self.host, e)),
-        }
-    }
-}
-
-/// Penalizes a losing initial attempt cancelled mid-RPC. Runs on drop
-/// because cancellation drops the future at its await.
-struct RacePenalty {
-    client: Hosts,
-    slab_index: usize,
-    shard_index: usize,
-    host_key: PublicKey,
-    won: Arc<AtomicBool>,
-    armed: bool,
-}
-
-impl Drop for RacePenalty {
-    fn drop(&mut self) {
-        if self.armed && self.won.load(Ordering::SeqCst) {
-            debug!(
-                "slab {} shard {} upload to host {} cancelled after losing a race",
-                self.slab_index, self.shard_index, self.host_key
-            );
-            self.client.add_failure(self.host_key);
         }
     }
 }
@@ -338,9 +312,6 @@ impl ShardUpload {
         write_timeout: Duration,
         permit: UploadPermit,
     ) {
-        // Only a lone attempt can lose to its racers.
-        let initial = tasks.is_empty();
-        let won = self.won.clone();
         let client = self.client.clone();
         let limiter = self.limiter.clone();
         let account_key = self.account_key.clone();
@@ -353,20 +324,11 @@ impl ShardUpload {
             let upload_permit = permit;
             let mut host = host;
             let host_key = host.host_key();
-            let mut race_penalty = RacePenalty {
-                client: client.clone(),
-                slab_index,
-                shard_index,
-                host_key,
-                won,
-                armed: initial,
-            };
             let sample = limiter.sample();
             let start = Instant::now();
             let result = client
                 .write_sector(host_key, &account_key.0, data, write_timeout)
                 .await;
-            race_penalty.armed = false;
             let elapsed = start.elapsed();
             // one failed completion, which a window sized to the limit
             // dilutes; enough hosts stalling at once is the pipeline
@@ -440,6 +402,9 @@ impl ShardUpload {
         drop(waiting_guard);
         let mut waiting_rx = self.waiting.subscribe();
         let mut tasks = JoinSet::new();
+        // Host of the lone attempt in flight, the only one a racer can beat.
+        // Cleared once it completes: a failure is penalized by the RPC itself.
+        let mut initial = Some(host.host_key());
         self.spawn_write(&mut tasks, host, UPLOAD_TIMEOUT, permit);
         let mut eligible = *waiting_rx.borrow_and_update() == 0;
         let mut last_event = Instant::now();
@@ -454,17 +419,23 @@ impl ShardUpload {
                     last_event = Instant::now();
                     match res?.accept() {
                         Ok(result) => {
-                            // Dropping the JoinSet cancels the losers. Only a lone
-                            // attempt still in its RPC is penalized.
-                            self.won.store(true, Ordering::SeqCst);
+                            if let Some(beaten) = initial.filter(|h| *h != result.sector.host_key) {
+                                debug!(
+                                    "slab {} shard {} upload to host {beaten} lost a race",
+                                    self.slab_index, self.shard_index
+                                );
+                                self.client.add_failure(beaten);
+                            }
                             return Ok(result);
                         }
                         Err((host, _)) => {
                             if tasks.is_empty() {
                                 let (host, permit) = self.acquire_host(Some(host)).await?;
+                                initial = Some(host.host_key());
                                 self.spawn_write(&mut tasks, host, UPLOAD_TIMEOUT, permit);
                             } else {
                                 let failed = host.into_host_key();
+                                initial = initial.filter(|h| *h != failed);
                                 self.hosts.lock().unwrap().retry(failed);
                             }
                         }
@@ -744,7 +715,6 @@ impl Upload {
                             shard_index,
                             hosts,
                             waiting,
-                            won: Arc::new(AtomicBool::new(false)),
                         };
                         shard_upload.upload_shard(waiting_guard).await
                     });
@@ -1189,7 +1159,6 @@ mod tests {
             slab_index: 0,
             shard_index: 0,
             waiting: waiting.clone(),
-            won: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1281,6 +1250,8 @@ mod tests {
 
     #[sia_core_derive::cross_target_test]
     async fn test_reserve_interleaves_a_lookahead_slab() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         // The limit stays at 2 (no completions). The gate admits `limit +
         // shards` of backlog — the in-flight target plus a slab of lookahead —
         // so two 4-shard slabs fit before it parks, giving the slow pipe one
