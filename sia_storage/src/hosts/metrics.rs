@@ -119,6 +119,16 @@ impl HostMetric {
         self.failure_rate.add_sample(false);
     }
 
+    /// Records an RPC that consumed its whole deadline without completing.
+    pub(super) fn add_timed_out(&mut self, transfer: Transfer, write: bool) {
+        self.failure_rate.add_sample(false);
+        if write {
+            self.rpc_write_avg.add_sample(transfer.rate());
+        } else {
+            self.rpc_read_avg.add_sample(transfer.rate());
+        }
+    }
+
     /// Combined read + write throughput average. `None` only when neither side
     /// has been sampled. Used by [`HostScore`] for the discovery preference
     /// (unsampled outranks sampled).
