@@ -77,9 +77,6 @@ struct CCallback {
     userdata: usize,
 }
 
-unsafe impl Send for CCallback {}
-unsafe impl Sync for CCallback {}
-
 impl CCallback {
     fn invoke(&self, progress: ShardProgress) {
         let mut host_key = [0u8; 32];
@@ -99,9 +96,6 @@ struct CLogger {
     cb: LogFn,
     userdata: usize,
 }
-
-unsafe impl Send for CLogger {}
-unsafe impl Sync for CLogger {}
 
 impl log::Log for CLogger {
     fn enabled(&self, _: &log::Metadata) -> bool {
