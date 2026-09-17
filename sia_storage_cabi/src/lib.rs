@@ -337,7 +337,12 @@ fn app_key_from_ptr(ptr: *const u8) -> AppKey {
     AppKey::import(buf)
 }
 
-fn cstr<'a>(ptr: *const c_char) -> Result<&'a str, std::str::Utf8Error> {
+/// # Safety
+/// `ptr` must be non null and point to a NUL terminated string.
+/// The result borrows that string rather than copying it, and `'a` is not tied
+/// to anything, so the caller has to choose a lifetime the C side actually
+/// keeps the memory alive for. Every caller here uses it before returning.
+unsafe fn cstr<'a>(ptr: *const c_char) -> Result<&'a str, std::str::Utf8Error> {
     unsafe { CStr::from_ptr(ptr) }.to_str()
 }
 
@@ -493,11 +498,11 @@ pub unsafe extern "C" fn sia_builder_new(
     err: *mut *mut c_char,
 ) -> i32 {
     guarded(err, || {
-        let url = match cstr(indexer_url) {
+        let url = match unsafe { cstr(indexer_url) } {
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid indexer url: {e}")),
         };
-        let meta_json = match cstr(app_meta_json) {
+        let meta_json = match unsafe { cstr(app_meta_json) } {
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid app metadata: {e}")),
         };
@@ -650,7 +655,7 @@ pub unsafe extern "C" fn sia_builder_register(
     err: *mut *mut c_char,
 ) -> i32 {
     guarded(err, || {
-        let phrase = match cstr(mnemonic) {
+        let phrase = match unsafe { cstr(mnemonic) } {
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid mnemonic: {e}")),
         };
@@ -946,7 +951,7 @@ pub unsafe extern "C" fn sia_sdk_object_from_share_url(
 ) -> i32 {
     guarded(err, || {
         let sdk = unsafe { &*sdk };
-        let url = match cstr(share_url) {
+        let url = match unsafe { cstr(share_url) } {
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid share url: {e}")),
         };
@@ -1645,7 +1650,7 @@ pub unsafe extern "C" fn sia_object_from_sealed_json(
 ) -> i32 {
     guarded(err, || {
         let sdk = unsafe { &*sdk };
-        let s = match cstr(json) {
+        let s = match unsafe { cstr(json) } {
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid sealed object json: {e}")),
         };
@@ -1759,7 +1764,7 @@ pub unsafe extern "C" fn sia_sdk_create_sharing_key(
 ) -> i32 {
     guarded(err, || {
         let sdk = unsafe { &*sdk };
-        let description = match cstr(description) {
+        let description = match unsafe { cstr(description) } {
             Ok(s) => s.to_string(),
             Err(e) => return set_err(err, SIA_ERR, format!("invalid description: {e}")),
         };
