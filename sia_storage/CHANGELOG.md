@@ -1,3 +1,14 @@
+## 0.12.1 (2026-09-17)
+
+### Fixes
+
+- Back off the download inflight limit when sector reads time out, instead of waiting for a goodput window that reads flat on a saturated link.
+- Back off the inflight limit on a window with no successes.
+
+#### Sample the download inflight controller per chunk rather than per sector read, and let it climb further before settling.
+
+The controller also backs off when reads time out, since a saturated link reads as flat goodput rather than as a decline. Timeouts count once per host and decay as windows complete, so neither one unreachable peer nor strays spread over a long download narrows the pipeline.
+
 ## 0.12.0 (2026-09-14)
 
 ### Breaking Changes
