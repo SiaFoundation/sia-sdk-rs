@@ -3,6 +3,7 @@
 //! See include/sia_storage.h for the C-side contract. Every extern function
 //! is panic-safe: panics are caught and reported as SIA_ERR.
 
+use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char};
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -204,26 +205,48 @@ fn runtime() -> &'static Runtime {
     })
 }
 
-fn set_err(err: *mut *mut c_char, code: i32, msg: impl AsRef<str>) -> i32 {
-    if !err.is_null() {
-        let s = CString::new(msg.as_ref()).unwrap_or_default();
-        unsafe { *err = s.into_raw() }
+/// The `char** err` out parameter, converted once per entry point so the
+/// helpers that report through it are ordinary safe functions.
+///
+/// `Cell` rather than `&mut` because the same slot is written from several
+/// arms of one call, and from a closure `guarded` also holds. It is `Copy` for
+/// the same reason. A null `err` becomes `None` and every write is dropped.
+#[derive(Clone, Copy)]
+struct ErrOut<'a>(Option<&'a Cell<*mut c_char>>);
+
+impl<'a> ErrOut<'a> {
+    /// # Safety
+    /// `err` may be null. Otherwise it must be writable for `'a`, which for
+    /// every caller here is the body of one entry point.
+    unsafe fn new(err: *mut *mut c_char) -> Self {
+        // Cell<T> is repr(transparent) over T, so this is a layout preserving
+        // cast, and as_ref gives None for null.
+        Self(unsafe { err.cast::<Cell<*mut c_char>>().as_ref() })
     }
+
+    /// Writes an owned message, replacing anything already there without
+    /// freeing it, which matches what the header promises.
+    fn set(self, msg: impl AsRef<str>) {
+        if let Some(slot) = self.0 {
+            let s = CString::new(msg.as_ref()).unwrap_or_default();
+            slot.set(s.into_raw());
+        }
+    }
+}
+
+fn set_err(err: ErrOut, code: i32, msg: impl AsRef<str>) -> i32 {
+    err.set(msg);
     code
 }
 
-fn set_cancelled(err: *mut *mut c_char) -> i32 {
+fn set_cancelled(err: ErrOut) -> i32 {
     set_err(err, SIA_ERR_CANCELLED, "operation cancelled")
 }
 
 /// Runs a future to completion on the shared runtime. Returns None if the
 /// cancel token fires first.
-fn block_on<F: Future>(cancel: *mut CancellationToken, fut: F) -> Option<F::Output> {
-    let cancel = if cancel.is_null() {
-        None
-    } else {
-        Some(unsafe { (*cancel).clone() })
-    };
+fn block_on<F: Future>(cancel: Option<&CancellationToken>, fut: F) -> Option<F::Output> {
+    let cancel = cancel.cloned();
     runtime().block_on(async move {
         match cancel {
             Some(tok) => tokio::select! {
@@ -236,7 +259,7 @@ fn block_on<F: Future>(cancel: *mut CancellationToken, fut: F) -> Option<F::Outp
     })
 }
 
-fn builder_error(err: *mut *mut c_char, e: BuilderError) -> i32 {
+fn builder_error(err: ErrOut, e: BuilderError) -> i32 {
     let code = match &e {
         BuilderError::RequestExpired => SIA_ERR_REQUEST_EXPIRED,
         BuilderError::Client(AppApiError::UserRejected) => SIA_ERR_USER_REJECTED,
@@ -248,7 +271,7 @@ fn builder_error(err: *mut *mut c_char, e: BuilderError) -> i32 {
 /// Maps the sharing errors a caller can act on to their own status codes, so Go
 /// can match them with errors.Is rather than on message text. Everything else
 /// keeps its message under SIA_ERR.
-fn sharing_error(err: *mut *mut c_char, e: SharingError) -> i32 {
+fn sharing_error(err: ErrOut, e: SharingError) -> i32 {
     let code = match &e {
         SharingError::ObjectNotAttached => SIA_ERR_OBJECT_NOT_ATTACHED,
         SharingError::KeyMismatch => SIA_ERR_KEY_MISMATCH,
@@ -325,13 +348,17 @@ fn make_download_options(c: &DownloadOptionsC) -> DownloadOptions {
     o
 }
 
-fn hash_from_ptr(ptr: *const u8) -> Hash256 {
+/// # Safety
+/// `ptr` must be non null and point to 32 readable bytes.
+unsafe fn hash_from_ptr(ptr: *const u8) -> Hash256 {
     let mut buf = [0u8; 32];
     buf.copy_from_slice(unsafe { std::slice::from_raw_parts(ptr, 32) });
     Hash256::new(buf)
 }
 
-fn app_key_from_ptr(ptr: *const u8) -> AppKey {
+/// # Safety
+/// `ptr` must be non null and point to 32 readable bytes.
+unsafe fn app_key_from_ptr(ptr: *const u8) -> AppKey {
     let mut buf = [0u8; 32];
     buf.copy_from_slice(unsafe { std::slice::from_raw_parts(ptr, 32) });
     AppKey::import(buf)
@@ -347,7 +374,7 @@ unsafe fn cstr<'a>(ptr: *const c_char) -> Result<&'a str, std::str::Utf8Error> {
 }
 
 /// Wraps an FFI entry point body, converting panics into SIA_ERR.
-fn guarded(err: *mut *mut c_char, body: impl FnOnce() -> i32) -> i32 {
+fn guarded(err: ErrOut, body: impl FnOnce() -> i32) -> i32 {
     match catch_unwind(AssertUnwindSafe(body)) {
         Ok(code) => code,
         Err(_) => set_err(err, SIA_ERR, "internal panic in sia_storage_cabi"),
@@ -356,7 +383,9 @@ fn guarded(err: *mut *mut c_char, body: impl FnOnce() -> i32) -> i32 {
 
 /// Starts a streaming upload: the returned handle owns the write half of an
 /// in-memory pipe and a task driving `upload` with the read half.
-fn start_upload<F, Fut>(out: *mut *mut FfiUpload, err: *mut *mut c_char, upload: F) -> i32
+/// # Safety
+/// `out` must be non null and writable. It receives an owned handle.
+unsafe fn start_upload<F, Fut>(out: *mut *mut FfiUpload, err: ErrOut, upload: F) -> i32
 where
     F: FnOnce(DuplexStream) -> Fut,
     Fut: Future<Output = Result<Object, String>> + Send + 'static,
@@ -380,10 +409,13 @@ where
 /// value and then dropping it on cancellation detaches the task rather than
 /// stopping it, so callers await `&mut` the handle they still own and decide
 /// what to do with it themselves.
-fn upload_result(
+/// # Safety
+/// `out` must be non null and writable. On success it receives an owned
+/// object.
+unsafe fn upload_result(
     joined: Result<Result<Object, String>, tokio::task::JoinError>,
     out: *mut *mut Object,
-    err: *mut *mut c_char,
+    err: ErrOut,
 ) -> i32 {
     match joined {
         Ok(Ok(obj)) => {
@@ -396,7 +428,12 @@ fn upload_result(
     }
 }
 
-fn start_download(reader: Pin<Box<dyn AsyncRead + Send>>, out: *mut *mut FfiDownload) -> i32 {
+/// # Safety
+/// `out` must be non null and writable. It receives an owned handle.
+unsafe fn start_download(
+    reader: Pin<Box<dyn AsyncRead + Send>>,
+    out: *mut *mut FfiDownload,
+) -> i32 {
     unsafe {
         *out = Box::into_raw(Box::new(FfiDownload {
             reader,
@@ -406,7 +443,9 @@ fn start_download(reader: Pin<Box<dyn AsyncRead + Send>>, out: *mut *mut FfiDown
     SIA_OK
 }
 
-fn start_packed(packed: PackedUpload, out: *mut *mut FfiPacked) -> i32 {
+/// # Safety
+/// `out` must be non null and writable. It receives an owned handle.
+unsafe fn start_packed(packed: PackedUpload, out: *mut *mut FfiPacked) -> i32 {
     let optimal_data_size = packed.optimal_data_size() as u64;
     unsafe {
         *out = Box::into_raw(Box::new(FfiPacked {
@@ -497,6 +536,7 @@ pub unsafe extern "C" fn sia_builder_new(
     out: *mut *mut FfiBuilder,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
         let url = match unsafe { cstr(indexer_url) } {
             Ok(s) => s,
@@ -557,13 +597,15 @@ pub unsafe extern "C" fn sia_builder_connect(
     out: *mut *mut Sdk,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let state = unsafe { (*b).0.lock() }.unwrap();
         let builder = match &*state {
             BuilderState::Disconnected(builder) => builder,
             _ => return set_err(err, SIA_ERR_INVALID_STATE, "builder is not disconnected"),
         };
-        let key = app_key_from_ptr(app_key);
+        let key = unsafe { app_key_from_ptr(app_key) };
         match block_on(cancel, builder.connected(&key)) {
             None => set_cancelled(err),
             Some(Ok(Some(sdk))) => {
@@ -588,6 +630,8 @@ pub unsafe extern "C" fn sia_builder_request_connection(
     response_url: *mut *mut c_char,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let mut state = unsafe { (*b).0.lock() }.unwrap();
         let builder = match std::mem::replace(&mut *state, BuilderState::Consumed) {
@@ -620,6 +664,8 @@ pub unsafe extern "C" fn sia_builder_wait_for_approval(
     cancel: *mut CancellationToken,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let mut state = unsafe { (*b).0.lock() }.unwrap();
         let builder = match std::mem::replace(&mut *state, BuilderState::Consumed) {
@@ -654,6 +700,8 @@ pub unsafe extern "C" fn sia_builder_register(
     out: *mut *mut Sdk,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let phrase = match unsafe { cstr(mnemonic) } {
             Ok(s) => s,
@@ -710,6 +758,8 @@ pub unsafe extern "C" fn sia_sdk_account(
     out_json: *mut *mut c_char,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         match block_on(cancel, sdk.account()) {
@@ -740,9 +790,11 @@ pub unsafe extern "C" fn sia_sdk_object(
     out: *mut *mut Object,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
-        let key = hash_from_ptr(id);
+        let key = unsafe { hash_from_ptr(id) };
         match block_on(cancel, sdk.object(&key)) {
             None => set_cancelled(err),
             Some(Ok(obj)) => {
@@ -771,6 +823,8 @@ pub unsafe extern "C" fn sia_sdk_object_events(
     out: *mut *mut FfiEvents,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let cursor = if has_cursor {
@@ -780,7 +834,7 @@ pub unsafe extern "C" fn sia_sdk_object_events(
             };
             Some(ObjectsCursor {
                 after,
-                id: hash_from_ptr(after_id),
+                id: unsafe { hash_from_ptr(after_id) },
             })
         } else {
             None
@@ -826,6 +880,8 @@ pub unsafe extern "C" fn sia_sdk_pin_object(
     cancel: *mut CancellationToken,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let obj = unsafe { &*obj };
@@ -849,6 +905,8 @@ pub unsafe extern "C" fn sia_sdk_update_object_metadata(
     cancel: *mut CancellationToken,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let obj = unsafe { &*obj };
@@ -872,9 +930,11 @@ pub unsafe extern "C" fn sia_sdk_delete_object(
     cancel: *mut CancellationToken,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
-        let key = hash_from_ptr(id);
+        let key = unsafe { hash_from_ptr(id) };
         match block_on(cancel, sdk.delete_object(&key)) {
             None => set_cancelled(err),
             Some(Ok(())) => SIA_OK,
@@ -893,6 +953,8 @@ pub unsafe extern "C" fn sia_sdk_prune_slabs(
     cancel: *mut CancellationToken,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         match block_on(cancel, sdk.prune_slabs()) {
@@ -916,6 +978,7 @@ pub unsafe extern "C" fn sia_sdk_object_share_url(
     out_url: *mut *mut c_char,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let obj = unsafe { &*obj };
@@ -949,6 +1012,8 @@ pub unsafe extern "C" fn sia_sdk_object_from_share_url(
     out: *mut *mut Object,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let url = match unsafe { cstr(share_url) } {
@@ -1114,6 +1179,7 @@ pub unsafe extern "C" fn sia_upload_start(
     out: *mut *mut FfiUpload,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
         let sdk = unsafe { &*sdk }.clone();
         let obj = unsafe { &*obj }.clone();
@@ -1121,11 +1187,13 @@ pub unsafe extern "C" fn sia_upload_start(
         if let Err(e) = options.validate() {
             return set_err(err, SIA_ERR, e.to_string());
         }
-        start_upload(out, err, move |reader| async move {
-            sdk.upload(obj, reader, options)
-                .await
-                .map_err(|e| e.to_string())
-        })
+        unsafe {
+            start_upload(out, err, move |reader| async move {
+                sdk.upload(obj, reader, options)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        }
     })
 }
 
@@ -1144,6 +1212,8 @@ pub unsafe extern "C" fn sia_upload_write(
     written: *mut usize,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let up = unsafe { &mut *up };
         if !written.is_null() {
@@ -1196,7 +1266,7 @@ pub unsafe extern "C" fn sia_upload_write(
                             return set_cancelled(err);
                         };
                         let mut out = std::ptr::null_mut();
-                        let code = upload_result(joined, &mut out, err);
+                        let code = unsafe { upload_result(joined, &mut out, err) };
                         if code == SIA_OK {
                             // Upload completed early without consuming all
                             // data; treat as an error to avoid silent loss.
@@ -1228,6 +1298,8 @@ pub unsafe extern "C" fn sia_upload_finish(
     out: *mut *mut Object,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let up = unsafe { &mut *up };
         if up.task.is_none() {
@@ -1245,7 +1317,7 @@ pub unsafe extern "C" fn sia_upload_finish(
             return set_cancelled(err);
         };
         up.task.take();
-        upload_result(joined, out, err)
+        unsafe { upload_result(joined, out, err) }
     })
 }
 
@@ -1278,6 +1350,7 @@ pub unsafe extern "C" fn sia_download_start(
     out: *mut *mut FfiDownload,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let obj = unsafe { &*obj };
@@ -1285,7 +1358,7 @@ pub unsafe extern "C" fn sia_download_start(
         // Download::new spawns tasks; enter the runtime context for the call.
         let _guard = runtime().enter();
         match sdk.download(obj, options) {
-            Ok(dl) => start_download(Box::pin(dl), out),
+            Ok(dl) => unsafe { start_download(Box::pin(dl), out) },
             Err(e) => set_err(err, SIA_ERR, e.to_string()),
         }
     })
@@ -1306,6 +1379,8 @@ pub unsafe extern "C" fn sia_download_read(
     n: *mut usize,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let dl = unsafe { &mut *dl };
         if let Some(e) = dl.pending_err.take() {
@@ -1380,12 +1455,13 @@ pub unsafe extern "C" fn sia_packed_upload_start(
     out: *mut *mut FfiPacked,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let options = make_packed_upload_options(unsafe { &*opts });
         let _guard = runtime().enter();
         match sdk.upload_packed(options) {
-            Ok(packed) => start_packed(packed, out),
+            Ok(packed) => unsafe { start_packed(packed, out) },
             Err(e) => set_err(err, SIA_ERR, e.to_string()),
         }
     })
@@ -1436,6 +1512,7 @@ pub unsafe extern "C" fn sia_packed_upload_add_begin(
     up: *mut FfiPacked,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
         let up = unsafe { &mut *up };
         if up.writer.is_some() || up.add_task.is_some() {
@@ -1469,6 +1546,8 @@ pub unsafe extern "C" fn sia_packed_upload_add_write(
     cancel: *mut CancellationToken,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let up = unsafe { &mut *up };
         let Some(writer) = up.writer.as_mut() else {
@@ -1508,6 +1587,8 @@ pub unsafe extern "C" fn sia_packed_upload_add_finish(
     written: *mut u64,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let up = unsafe { &mut *up };
         drop(up.writer.take()); // signal EOF for this object
@@ -1541,6 +1622,8 @@ pub unsafe extern "C" fn sia_packed_upload_finalize(
     out_len: *mut usize,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let up = unsafe { &mut *up };
         if up.writer.is_some() || up.add_task.is_some() {
@@ -1618,6 +1701,7 @@ pub unsafe extern "C" fn sia_object_seal_json(
     out_json: *mut *mut c_char,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let obj = unsafe { &*obj };
@@ -1648,6 +1732,7 @@ pub unsafe extern "C" fn sia_object_from_sealed_json(
     out: *mut *mut Object,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let s = match unsafe { cstr(json) } {
@@ -1688,7 +1773,14 @@ fn key_stats_c(s: &KeyStats) -> KeyStatsC {
 
 /// Hands a vector of objects out as a heap array of owned handles, the shape
 /// sia_object_array_free expects.
-fn write_object_array(objects: Vec<Object>, out_objs: *mut *mut *mut Object, out_len: *mut usize) {
+/// # Safety
+/// `out_objs` and `out_len` must be non null and writable. `out_objs`
+/// receives an owned array, released with sia_object_array_free.
+unsafe fn write_object_array(
+    objects: Vec<Object>,
+    out_objs: *mut *mut *mut Object,
+    out_len: *mut usize,
+) {
     let ptrs: Vec<*mut Object> = objects
         .into_iter()
         .map(|o| Box::into_raw(Box::new(o)))
@@ -1762,6 +1854,8 @@ pub unsafe extern "C" fn sia_sdk_create_sharing_key(
     out: *mut *mut SharingKey,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let description = match unsafe { cstr(description) } {
@@ -1810,6 +1904,8 @@ pub unsafe extern "C" fn sia_sdk_sharing_key(
     out_stats: *mut KeyStatsC,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let key = unsafe { &*key };
@@ -1845,6 +1941,8 @@ pub unsafe extern "C" fn sia_sdk_sharing_keys(
     out: *mut *mut FfiKeyRecords,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let (offset, limit) = paging(offset, limit);
@@ -1924,6 +2022,8 @@ pub unsafe extern "C" fn sia_sdk_share_object(
     cancel: *mut CancellationToken,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let key = unsafe { &*key };
@@ -1958,6 +2058,8 @@ pub unsafe extern "C" fn sia_sdk_shared_objects(
     out_len: *mut usize,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let key = unsafe { &*key };
@@ -1965,7 +2067,7 @@ pub unsafe extern "C" fn sia_sdk_shared_objects(
         match block_on(cancel, sdk.shared_objects(key, offset, limit)) {
             None => set_cancelled(err),
             Some(Ok(objects)) => {
-                write_object_array(objects, out_objs, out_len);
+                unsafe { write_object_array(objects, out_objs, out_len) };
                 SIA_OK
             }
             Some(Err(e)) => sharing_error(err, e),
@@ -1990,10 +2092,12 @@ pub unsafe extern "C" fn sia_sdk_unshare_object(
     cancel: *mut CancellationToken,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let key = unsafe { &*key };
-        let id = hash_from_ptr(object_id);
+        let id = unsafe { hash_from_ptr(object_id) };
         match block_on(cancel, sdk.unshare_object(key, &id)) {
             None => set_cancelled(err),
             Some(Ok(())) => SIA_OK,
@@ -2017,6 +2121,8 @@ pub unsafe extern "C" fn sia_sdk_revoke_sharing_key(
     cancel: *mut CancellationToken,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let sdk = unsafe { &*sdk };
         let key = unsafe { &*key };
@@ -2074,9 +2180,11 @@ pub unsafe extern "C" fn sia_mock_sdk(
     out: *mut *mut Sdk,
     err: *mut *mut c_char,
 ) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
         let m = unsafe { &*m };
-        let key = app_key_from_ptr(app_key);
+        let key = unsafe { app_key_from_ptr(app_key) };
         match block_on(cancel, m.network.sdk(key)) {
             None => set_cancelled(err),
             Some(Ok(sdk)) => {
