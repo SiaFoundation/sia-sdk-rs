@@ -90,9 +90,17 @@ pub(crate) struct SlabReader {
     data_shards: usize,
     encryption_key: EncryptionKey,
     shards: Vec<Vec<u8>>,
+    /// Contiguous landing area for incoming data. The object keystream is
+    /// applied to it in one call per fill, then the bytes are scattered into
+    /// the interleaved shard layout. Allocated once and reused, so a slab
+    /// costs no allocation here.
+    staging: Vec<u8>,
     length: usize,
     total_length: u64,
 }
+
+/// How much data is buffered before a single `apply_keystream` call.
+const STAGING_SIZE: usize = 1 << 20;
 
 pub(crate) struct ReadSlab {
     pub encryption_key: EncryptionKey,
@@ -107,6 +115,7 @@ impl SlabReader {
             data_shards,
             encryption_key: rand::random::<[u8; 32]>().into(),
             shards: vec![vec![0u8; SECTOR_SIZE]; total_shards],
+            staging: vec![0u8; STAGING_SIZE],
             length: 0,
             total_length: 0,
         }
@@ -162,27 +171,55 @@ impl SlabReader {
         let mut cipher = Chacha20Cipher::new_v1(data_key, self.length as u64, &self.encryption_key);
         let mut r = r.take(remaining as u64);
         let mut total_read = 0;
-        loop {
-            if self.length == self.optimal_data_size() {
+        let stripe_size = SEGMENT_SIZE * self.data_shards;
+        let mut read_err = None;
+
+        while self.length < self.optimal_data_size() {
+            // Fill the staging buffer, then encrypt it in one pass.
+            let want = STAGING_SIZE.min(self.optimal_data_size() - self.length);
+            let mut filled = 0;
+            while filled < want {
+                match r.read(&mut self.staging[filled..want]).await {
+                    Ok(0) => break,
+                    Ok(n) => filled += n,
+                    Err(e) => {
+                        read_err = Some(e);
+                        break;
+                    }
+                }
+            }
+            if filled == 0 {
                 break;
             }
 
-            // calculate current position in the interleaved layout
-            let stripe_size = SEGMENT_SIZE * self.data_shards;
-            let shard_index = (self.length % stripe_size) / SEGMENT_SIZE;
-            let byte_in_seg = self.length % SEGMENT_SIZE;
-            let seg_start = (self.length / stripe_size) * SEGMENT_SIZE;
+            let start_len = self.length;
+            cipher.apply_keystream(&mut self.staging[..filled]);
 
-            let segment =
-                &mut self.shards[shard_index][seg_start + byte_in_seg..seg_start + SEGMENT_SIZE];
-            let n = r.read(segment).await?;
-            if n == 0 {
+            let mut off = 0;
+            while off < filled {
+                let logical = start_len + off;
+                let shard_index = (logical % stripe_size) / SEGMENT_SIZE;
+                let byte_in_seg = logical % SEGMENT_SIZE;
+                let seg_start = (logical / stripe_size) * SEGMENT_SIZE;
+                let dst = seg_start + byte_in_seg;
+                let take = (SEGMENT_SIZE - byte_in_seg).min(filled - off);
+                self.shards[shard_index][dst..dst + take]
+                    .copy_from_slice(&self.staging[off..off + take]);
+                off += take;
+            }
+
+            self.length += filled;
+            self.total_length += filled as u64;
+            total_read += filled;
+
+            // A short fill means the reader is done, and an error still commits
+            // the bytes it already handed over before surfacing.
+            if read_err.is_some() || filled < want {
                 break;
             }
-            cipher.apply_keystream(&mut segment[..n]);
-            self.length += n;
-            self.total_length += n as u64;
-            total_read += n;
+        }
+        if let Some(e) = read_err {
+            return Err(e);
         }
         let slab = if self.length == self.optimal_data_size() {
             let length = mem::take(&mut self.length);
