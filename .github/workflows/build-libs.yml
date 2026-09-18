@@ -21,6 +21,14 @@ on:
   push:
     tags:
       - "sia_storage_cabi/v*"
+  # Also on pull requests that touch the C ABI or this workflow. Five platforms
+  # is too expensive to run on every push, but it has to run somewhere before
+  # merging, and a workflow that only exists on the default branch cannot be
+  # tested any other way.
+  pull_request:
+    paths:
+      - "sia_storage_cabi/**"
+      - ".github/workflows/build-libs.yml"
 
 permissions:
   contents: read
