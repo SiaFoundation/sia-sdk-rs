@@ -1,0 +1,132 @@
+name: Build C ABI archives
+
+# Builds the sia_storage_cabi static archives for every platform the Go
+# bindings declare, for committing into the Go bindings repository.
+#
+# The archives have to be committed somewhere a Go module can reach, because Go
+# modules have no build hooks: a consumer running `go build` cannot compile Rust
+# first. They live in the bindings repository under ffi/lib/, alongside the Go
+# code that links them.
+#
+# This job builds them and uploads them as artifacts. Getting them into the
+# bindings repository is a deliberate step: download the artifacts and commit
+# them, or extend this with a pull request step once the bindings repository is
+# published.
+#
+# Run it by hand, or on a tag, once the Rust side is at the revision you want to
+# ship.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "sia_storage_cabi/v*"
+  # Also on pull requests that touch the C ABI or this workflow. Five platforms
+  # is too expensive to run on every push, but it has to run somewhere before
+  # merging, and a workflow that only exists on the default branch cannot be
+  # tested any other way.
+  pull_request:
+    paths:
+      - "sia_storage_cabi/**"
+      - ".github/workflows/build-libs.yml"
+
+permissions:
+  contents: read
+
+env:
+  # Without this the archive carries debug info and roughly triples in size,
+  # which matters because every consumer downloads every platform.
+  RUSTFLAGS: "-C strip=debuginfo"
+
+jobs:
+  build:
+    name: ${{ matrix.goos }}_${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-latest,   target: aarch64-apple-darwin,       goos: darwin,  goarch: arm64, native: true }
+          - { runner: macos-latest,   target: x86_64-apple-darwin,        goos: darwin,  goarch: amd64, native: false }
+          - { runner: ubuntu-latest,  target: x86_64-unknown-linux-gnu,   goos: linux,   goarch: amd64, native: true }
+          - { runner: ubuntu-latest,  target: aarch64-unknown-linux-gnu,  goos: linux,   goarch: arm64, native: false }
+          # The Go bindings expect a GNU-style .a, and cgo on Windows uses
+          # mingw, so this is the gnu target rather than msvc.
+          - { runner: windows-latest, target: x86_64-pc-windows-gnu,      goos: windows, goarch: amd64, native: true }
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Setup Rust
+        run: |
+          rustup update stable
+          rustup target add ${{ matrix.target }}
+
+      # ring compiles C and assembly through cc-rs, so cross-compiling needs a
+      # toolchain for the target rather than just the Rust std for it.
+      - name: Setup cross toolchain (linux/arm64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      # Without a floor, the archive inherits the runner's SDK version as its
+      # minimum, and a consumer on an older macOS gets a link error rather than
+      # a warning. These are distributed binaries, so the floor has to be
+      # deliberate.
+      - name: Pin macOS deployment target
+        if: runner.os == 'macOS'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> $GITHUB_ENV
+
+      - name: Build archive
+        run: cargo build --release --target ${{ matrix.target }} -p sia_storage_cabi
+
+      # The link check below compiles a Go program. Runners ship a Go, but
+      # pinning it keeps this from drifting with the image.
+      - name: Setup Go
+        if: matrix.native
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.24"
+
+      # Building a Go library package never invokes the linker, so neither this
+      # repository's CI nor the bindings repository's can catch a missing or
+      # corrupt archive on its own. Only linking a program does. This runs on
+      # the platforms where the runner is native to the target.
+      - name: Link check
+        if: matrix.native
+        shell: bash
+        run: |
+          set -eu
+          work="$(mktemp -d)"
+          mkdir -p "$work/libs/${{ matrix.goos }}_${{ matrix.goarch }}"
+          cp "target/${{ matrix.target }}/release/libsia_storage_cabi.a" \
+             "$work/libs/${{ matrix.goos }}_${{ matrix.goarch }}/"
+          cp sia_storage_cabi/include/sia_storage.h "$work/"
+          cd "$work"
+          cat > go.mod <<'EOF'
+          module linkcheck
+
+          go 1.24
+          EOF
+          cat > main.go <<EOF
+          package main
+
+          /*
+          #cgo CFLAGS: -I\${SRCDIR}
+          #cgo LDFLAGS: \${SRCDIR}/libs/${{ matrix.goos }}_${{ matrix.goarch }}/libsia_storage_cabi.a
+          #include "sia_storage.h"
+          */
+          import "C"
+
+          func main() { _ = C.sia_generate_recovery_phrase }
+          EOF
+          go build -o /dev/null . && echo "links cleanly"
+
+      - name: Upload archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.goos }}_${{ matrix.goarch }}
+          path: target/${{ matrix.target }}/release/libsia_storage_cabi.a
+          if-no-files-found: error
