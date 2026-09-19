@@ -37,9 +37,11 @@ const SIA_ERR_CANCELLED: i32 = 5;
 const SIA_ERR_INVALID_STATE: i32 = 6;
 const SIA_ERR_OBJECT_NOT_ATTACHED: i32 = 7;
 const SIA_ERR_KEY_MISMATCH: i32 = 8;
-/// A required handle or out pointer was null. Returned instead of dereferencing
-/// it, so a caller that passes null gets an error rather than undefined
-/// behaviour.
+/// A required handle was missing. Returned instead of dereferencing it, so a
+/// caller that passes null gets an error rather than undefined behaviour. A
+/// handle that is present must still be live: this catches an absent handle,
+/// not a dangling one. Out parameters are not checked; they are written only
+/// on success, and passing a null one is undefined.
 const SIA_ERR_INVALID_HANDLE: i32 = 9;
 
 // Sized to keep several slabs' worth of data in flight so upload encoding is
