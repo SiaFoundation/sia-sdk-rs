@@ -93,7 +93,7 @@ impl CCallback {
             slab_index: progress.slab_index as u64,
             elapsed_us: progress.elapsed.as_micros() as u64,
         };
-        unsafe { (self.cb)(self.userdata, &c) }
+        unsafe { (self.cb)(self.userdata, &raw const c) }
     }
 }
 
@@ -1338,7 +1338,7 @@ pub unsafe extern "C" fn sia_upload_write(
                             return set_cancelled(err);
                         };
                         let mut out = std::ptr::null_mut();
-                        let code = unsafe { upload_result(joined, &mut out, err) };
+                        let code = unsafe { upload_result(joined, &raw mut out, err) };
                         if code == SIA_OK {
                             // Upload completed early without consuming all
                             // data; treat as an error to avoid silent loss.
@@ -2397,8 +2397,8 @@ mod tests {
                 mock,
                 seed.as_ptr(),
                 std::ptr::null_mut(),
-                &mut sdk,
-                &mut err,
+                &raw mut sdk,
+                &raw mut err,
             );
             assert_eq!(code, SIA_OK, "sia_mock_sdk: {}", take_err(err));
             assert!(!sdk.is_null());
@@ -2407,7 +2407,7 @@ mod tests {
             let opts = default_upload_options();
             let mut up = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
-            let code = sia_upload_start(sdk, obj, &opts, &mut up, &mut err);
+            let code = sia_upload_start(sdk, obj, &raw const opts, &raw mut up, &raw mut err);
             assert_eq!(code, SIA_OK, "sia_upload_start: {}", take_err(err));
 
             // Larger than one 4 MiB sector so the payload spans several shards
@@ -2420,8 +2420,8 @@ mod tests {
                 payload.as_ptr(),
                 payload.len(),
                 std::ptr::null_mut(),
-                &mut wrote,
-                &mut err,
+                &raw mut wrote,
+                &raw mut err,
             );
             assert_eq!(code, SIA_OK, "sia_upload_write: {}", take_err(err));
             assert_eq!(
@@ -2432,7 +2432,7 @@ mod tests {
 
             let mut uploaded = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
-            let code = sia_upload_finish(up, std::ptr::null_mut(), &mut uploaded, &mut err);
+            let code = sia_upload_finish(up, std::ptr::null_mut(), &raw mut uploaded, &raw mut err);
             assert_eq!(code, SIA_OK, "sia_upload_finish: {}", take_err(err));
             sia_upload_free(up);
             assert!(!uploaded.is_null());
@@ -2441,7 +2441,8 @@ mod tests {
             let dopts = default_download_options();
             let mut dl = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
-            let code = sia_download_start(sdk, uploaded, &dopts, &mut dl, &mut err);
+            let code =
+                sia_download_start(sdk, uploaded, &raw const dopts, &raw mut dl, &raw mut err);
             assert_eq!(code, SIA_OK, "sia_download_start: {}", take_err(err));
 
             let mut got = Vec::with_capacity(payload.len());
@@ -2454,8 +2455,8 @@ mod tests {
                     buf.as_mut_ptr(),
                     buf.len(),
                     std::ptr::null_mut(),
-                    &mut n,
-                    &mut err,
+                    &raw mut n,
+                    &raw mut err,
                 );
                 assert_eq!(code, SIA_OK, "sia_download_read: {}", take_err(err));
                 if n == 0 {
@@ -2489,8 +2490,8 @@ mod tests {
                 mock,
                 seed.as_ptr(),
                 std::ptr::null_mut(),
-                &mut sdk,
-                &mut err,
+                &raw mut sdk,
+                &raw mut err,
             );
             assert_eq!(code, SIA_OK, "sia_mock_sdk: {}", take_err(err));
 
@@ -2499,7 +2500,7 @@ mod tests {
             let mut up = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_upload_start(sdk, obj, &opts, &mut up, &mut err),
+                sia_upload_start(sdk, obj, &raw const opts, &raw mut up, &raw mut err),
                 SIA_OK,
                 "sia_upload_start: {}",
                 take_err(err)
@@ -2514,8 +2515,8 @@ mod tests {
                     payload.as_ptr(),
                     payload.len(),
                     std::ptr::null_mut(),
-                    &mut wrote,
-                    &mut err
+                    &raw mut wrote,
+                    &raw mut err
                 ),
                 SIA_OK,
                 "sia_upload_write: {}",
@@ -2530,7 +2531,7 @@ mod tests {
             let mut uploaded = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_upload_finish(up, std::ptr::null_mut(), &mut uploaded, &mut err),
+                sia_upload_finish(up, std::ptr::null_mut(), &raw mut uploaded, &raw mut err),
                 SIA_OK,
                 "sia_upload_finish: {}",
                 take_err(err)
@@ -2543,7 +2544,7 @@ mod tests {
             let mut dl = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_download_start(sdk, uploaded, &dopts, &mut dl, &mut err),
+                sia_download_start(sdk, uploaded, &raw const dopts, &raw mut dl, &raw mut err),
                 SIA_OK,
                 "sia_download_start: {}",
                 take_err(err)
@@ -2558,8 +2559,8 @@ mod tests {
                     buf.as_mut_ptr(),
                     buf.len(),
                     std::ptr::null_mut(),
-                    &mut n,
-                    &mut err,
+                    &raw mut n,
+                    &raw mut err,
                 );
                 if code != SIA_OK {
                     break take_err(err);
@@ -2628,8 +2629,8 @@ mod tests {
                     mock,
                     seed.as_ptr(),
                     std::ptr::null_mut(),
-                    &mut sdk,
-                    &mut err
+                    &raw mut sdk,
+                    &raw mut err
                 ),
                 SIA_OK,
                 "sia_mock_sdk: {}",
@@ -2646,8 +2647,8 @@ mod tests {
                     false,
                     0,
                     std::ptr::null_mut(),
-                    &mut key,
-                    &mut err,
+                    &raw mut key,
+                    &raw mut err,
                 ),
                 SIA_OK,
                 "sia_sdk_create_sharing_key: {}",
@@ -2675,9 +2676,9 @@ mod tests {
                     sdk,
                     key,
                     std::ptr::null_mut(),
-                    &mut out_desc,
-                    &mut stats,
-                    &mut err
+                    &raw mut out_desc,
+                    &raw mut stats,
+                    &raw mut err
                 ),
                 SIA_OK,
                 "sia_sdk_sharing_key: {}",
@@ -2693,7 +2694,14 @@ mod tests {
             let mut recs = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_sdk_sharing_keys(sdk, 0, 10, std::ptr::null_mut(), &mut recs, &mut err),
+                sia_sdk_sharing_keys(
+                    sdk,
+                    0,
+                    10,
+                    std::ptr::null_mut(),
+                    &raw mut recs,
+                    &raw mut err
+                ),
                 SIA_OK,
                 "sia_sdk_sharing_keys: {}",
                 take_err(err)
@@ -2707,9 +2715,9 @@ mod tests {
                 sia_key_records_at(
                     recs,
                     0,
-                    &mut listed_key,
-                    &mut listed_desc,
-                    &mut listed_stats
+                    &raw mut listed_key,
+                    &raw mut listed_desc,
+                    &raw mut listed_stats
                 ),
                 "index 0 is in range"
             );
@@ -2717,9 +2725,9 @@ mod tests {
                 !sia_key_records_at(
                     recs,
                     1,
-                    &mut listed_key,
-                    &mut listed_desc,
-                    &mut listed_stats
+                    &raw mut listed_key,
+                    &raw mut listed_desc,
+                    &raw mut listed_stats
                 ),
                 "an out of range index must report false rather than panic"
             );
@@ -2729,7 +2737,7 @@ mod tests {
 
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_sdk_revoke_sharing_key(sdk, key, std::ptr::null_mut(), &mut err),
+                sia_sdk_revoke_sharing_key(sdk, key, std::ptr::null_mut(), &raw mut err),
                 SIA_OK,
                 "sia_sdk_revoke_sharing_key: {}",
                 take_err(err)
@@ -2757,8 +2765,8 @@ mod tests {
                     mock,
                     seed.as_ptr(),
                     std::ptr::null_mut(),
-                    &mut sdk,
-                    &mut err
+                    &raw mut sdk,
+                    &raw mut err
                 ),
                 SIA_OK,
                 "sia_mock_sdk: {}",
@@ -2774,7 +2782,7 @@ mod tests {
             let mut up = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_upload_start(sdk, obj, &opts, &mut up, &mut err),
+                sia_upload_start(sdk, obj, &raw const opts, &raw mut up, &raw mut err),
                 SIA_OK,
                 "sia_upload_start: {}",
                 take_err(err)
@@ -2788,8 +2796,8 @@ mod tests {
                     payload.as_ptr(),
                     payload.len(),
                     std::ptr::null_mut(),
-                    &mut wrote,
-                    &mut err
+                    &raw mut wrote,
+                    &raw mut err
                 ),
                 SIA_OK,
                 "sia_upload_write: {}",
@@ -2798,7 +2806,7 @@ mod tests {
             let mut uploaded = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_upload_finish(up, std::ptr::null_mut(), &mut uploaded, &mut err),
+                sia_upload_finish(up, std::ptr::null_mut(), &raw mut uploaded, &raw mut err),
                 SIA_OK,
                 "sia_upload_finish: {}",
                 take_err(err)
@@ -2808,7 +2816,7 @@ mod tests {
             let mut json = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_object_seal_json(sdk, uploaded, &mut json, &mut err),
+                sia_object_seal_json(sdk, uploaded, &raw mut json, &raw mut err),
                 SIA_OK,
                 "sia_object_seal_json: {}",
                 take_err(err)
@@ -2834,7 +2842,7 @@ mod tests {
             let mut reopened = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_object_from_sealed_json(sdk, cjson.as_ptr(), &mut reopened, &mut err),
+                sia_object_from_sealed_json(sdk, cjson.as_ptr(), &raw mut reopened, &raw mut err),
                 SIA_OK,
                 "sia_object_from_sealed_json: {}",
                 take_err(err)
@@ -2861,7 +2869,7 @@ mod tests {
             let mut dl = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_download_start(sdk, reopened, &dopts, &mut dl, &mut err),
+                sia_download_start(sdk, reopened, &raw const dopts, &raw mut dl, &raw mut err),
                 SIA_OK,
                 "a round tripped object could not be downloaded: {}",
                 take_err(err)
@@ -2877,8 +2885,8 @@ mod tests {
                         buf.as_mut_ptr(),
                         buf.len(),
                         std::ptr::null_mut(),
-                        &mut n,
-                        &mut err
+                        &raw mut n,
+                        &raw mut err
                     ),
                     SIA_OK,
                     "sia_download_read: {}",
@@ -2916,8 +2924,8 @@ mod tests {
                     mock,
                     seed.as_ptr(),
                     std::ptr::null_mut(),
-                    &mut sdk,
-                    &mut err
+                    &raw mut sdk,
+                    &raw mut err
                 ),
                 SIA_OK,
                 "sia_mock_sdk: {}",
@@ -2929,7 +2937,7 @@ mod tests {
             let mut up = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_upload_start(sdk, obj, &opts, &mut up, &mut err),
+                sia_upload_start(sdk, obj, &raw const opts, &raw mut up, &raw mut err),
                 SIA_OK,
                 "sia_upload_start: {}",
                 take_err(err)
@@ -2948,8 +2956,8 @@ mod tests {
                 payload.as_ptr(),
                 payload.len(),
                 cancel,
-                &mut wrote,
-                &mut err,
+                &raw mut wrote,
+                &raw mut err,
             );
             let msg = take_err(err);
             assert_eq!(code, SIA_ERR_CANCELLED, "expected cancellation, got {msg}");
@@ -2965,8 +2973,8 @@ mod tests {
                     payload.as_ptr(),
                     payload.len(),
                     std::ptr::null_mut(),
-                    &mut wrote,
-                    &mut err
+                    &raw mut wrote,
+                    &raw mut err
                 ),
                 SIA_OK,
                 "the upload was not resumable after a cancelled write: {}",
@@ -2977,7 +2985,7 @@ mod tests {
             let mut uploaded = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_upload_finish(up, std::ptr::null_mut(), &mut uploaded, &mut err),
+                sia_upload_finish(up, std::ptr::null_mut(), &raw mut uploaded, &raw mut err),
                 SIA_OK,
                 "sia_upload_finish: {}",
                 take_err(err)
@@ -3007,8 +3015,8 @@ mod tests {
                     mock,
                     seed.as_ptr(),
                     std::ptr::null_mut(),
-                    &mut sdk,
-                    &mut err
+                    &raw mut sdk,
+                    &raw mut err
                 ),
                 SIA_OK,
                 "sia_mock_sdk: {}",
@@ -3020,7 +3028,7 @@ mod tests {
             let mut up = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_upload_start(sdk, obj, &opts, &mut up, &mut err),
+                sia_upload_start(sdk, obj, &raw const opts, &raw mut up, &raw mut err),
                 SIA_OK,
                 "sia_upload_start: {}",
                 take_err(err)
@@ -3030,7 +3038,7 @@ mod tests {
             sia_cancel_cancel(cancel);
             let mut uploaded = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
-            let code = sia_upload_finish(up, cancel, &mut uploaded, &mut err);
+            let code = sia_upload_finish(up, cancel, &raw mut uploaded, &raw mut err);
             let msg = take_err(err);
             assert_eq!(code, SIA_ERR_CANCELLED, "expected cancellation, got {msg}");
             assert!(
@@ -3042,7 +3050,7 @@ mod tests {
             // The task was taken and aborted, so the handle is spent rather
             // than left holding a live upload nobody is watching.
             let mut err = std::ptr::null_mut();
-            let code = sia_upload_finish(up, std::ptr::null_mut(), &mut uploaded, &mut err);
+            let code = sia_upload_finish(up, std::ptr::null_mut(), &raw mut uploaded, &raw mut err);
             let msg = take_err(err);
             assert_eq!(
                 code, SIA_ERR_INVALID_STATE,
@@ -3073,9 +3081,9 @@ mod tests {
                     evs,
                     0,
                     id.as_mut_ptr(),
-                    &mut deleted,
-                    &mut updated_at,
-                    &mut obj
+                    &raw mut deleted,
+                    &raw mut updated_at,
+                    &raw mut obj
                 ),
                 "index 0 of an empty list must be rejected"
             );
@@ -3098,7 +3106,7 @@ mod tests {
             let mut desc = std::ptr::null_mut();
             let mut stats = std::mem::zeroed::<KeyStatsC>();
             assert!(
-                !sia_key_records_at(recs, 0, &mut key, &mut desc, &mut stats),
+                !sia_key_records_at(recs, 0, &raw mut key, &raw mut desc, &raw mut stats),
                 "index 0 of an empty list must be rejected"
             );
             assert!(key.is_null(), "out params must be untouched when rejected");
@@ -3123,8 +3131,8 @@ mod tests {
                     mock,
                     seed.as_ptr(),
                     std::ptr::null_mut(),
-                    &mut sdk,
-                    &mut err
+                    &raw mut sdk,
+                    &raw mut err
                 ),
                 SIA_OK,
                 "sia_mock_sdk: {}",
@@ -3136,7 +3144,7 @@ mod tests {
             let mut up = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_upload_start(sdk, obj, &opts, &mut up, &mut err),
+                sia_upload_start(sdk, obj, &raw const opts, &raw mut up, &raw mut err),
                 SIA_OK,
                 "sia_upload_start: {}",
                 take_err(err)
@@ -3150,8 +3158,8 @@ mod tests {
                     payload.as_ptr(),
                     payload.len(),
                     std::ptr::null_mut(),
-                    &mut wrote,
-                    &mut err
+                    &raw mut wrote,
+                    &raw mut err
                 ),
                 SIA_OK,
                 "sia_upload_write: {}",
@@ -3165,7 +3173,7 @@ mod tests {
             let mut uploaded = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_upload_finish(up, std::ptr::null_mut(), &mut uploaded, &mut err),
+                sia_upload_finish(up, std::ptr::null_mut(), &raw mut uploaded, &raw mut err),
                 SIA_OK,
                 "sia_upload_finish: {}",
                 take_err(err)
@@ -3176,7 +3184,7 @@ mod tests {
             let mut dl = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
             assert_eq!(
-                sia_download_start(sdk, uploaded, &dopts, &mut dl, &mut err),
+                sia_download_start(sdk, uploaded, &raw const dopts, &raw mut dl, &raw mut err),
                 SIA_OK,
                 "sia_download_start: {}",
                 take_err(err)
@@ -3188,7 +3196,14 @@ mod tests {
             let mut buf = vec![0u8; 256 << 10];
             let mut n = 0usize;
             let mut err = std::ptr::null_mut();
-            let code = sia_download_read(dl, buf.as_mut_ptr(), buf.len(), cancel, &mut n, &mut err);
+            let code = sia_download_read(
+                dl,
+                buf.as_mut_ptr(),
+                buf.len(),
+                cancel,
+                &raw mut n,
+                &raw mut err,
+            );
             let msg = take_err(err);
             assert_eq!(code, SIA_ERR_CANCELLED, "expected cancellation, got {msg}");
 
