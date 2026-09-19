@@ -6,6 +6,13 @@
 //     sia_string_free.
 //   - Handles are opaque pointers owned by the caller and released with the
 //     matching *_free function.
+//   - Passing a null handle is reported rather than dereferenced. A fallible
+//     function returns SIA_ERR_INVALID_HANDLE without setting *err; a getter
+//     returns a zero value (0, false, or NULL); a void function does nothing.
+//     A *_free function accepts null and does nothing, as free(3) does.
+//     Non-null handles must still be live: this catches a missing handle, not
+//     a dangling one. Out parameters are not checked; they are written only on
+//     success, and passing a null one is undefined.
 //   - Blocking functions accept an optional sia_cancel_t. Cancelling the
 //     token unblocks the call with SIA_ERR_CANCELLED.
 //   - Timestamps are Unix microseconds (UTC).
@@ -30,6 +37,9 @@ enum {
 	SIA_ERR_INVALID_STATE = 6,
 	SIA_ERR_OBJECT_NOT_ATTACHED = 7,
 	SIA_ERR_KEY_MISMATCH = 8,
+	// A required handle was missing. A handle that is present must still be
+	// live: this catches an absent handle, not a dangling one.
+	SIA_ERR_INVALID_HANDLE = 9,
 };
 
 typedef struct sia_builder sia_builder_t;
