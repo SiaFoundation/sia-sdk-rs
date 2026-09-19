@@ -908,10 +908,7 @@ pub unsafe extern "C" fn sia_sdk_pin_object(
     let err = unsafe { ErrOut::new(err) };
     let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
-        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
-        let Some(obj) = (unsafe { obj.as_ref() }) else {
+        let (Some(sdk), Some(obj)) = (unsafe { (sdk.as_ref(), obj.as_ref()) }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
         match block_on(cancel, sdk.pin_object(obj)) {
@@ -937,10 +934,7 @@ pub unsafe extern "C" fn sia_sdk_update_object_metadata(
     let err = unsafe { ErrOut::new(err) };
     let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
-        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
-        let Some(obj) = (unsafe { obj.as_ref() }) else {
+        let (Some(sdk), Some(obj)) = (unsafe { (sdk.as_ref(), obj.as_ref()) }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
         match block_on(cancel, sdk.update_object_metadata(obj)) {
@@ -1017,10 +1011,7 @@ pub unsafe extern "C" fn sia_sdk_object_share_url(
 ) -> i32 {
     let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
-        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
-        let Some(obj) = (unsafe { obj.as_ref() }) else {
+        let (Some(sdk), Some(obj)) = (unsafe { (sdk.as_ref(), obj.as_ref()) }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
         let valid_until = match sia_storage::DateTime::from_timestamp_micros(valid_until_unix_us) {
@@ -1435,13 +1426,9 @@ pub unsafe extern "C" fn sia_download_start(
 ) -> i32 {
     let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
-        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
-        let Some(obj) = (unsafe { obj.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
-        let Some(opts) = (unsafe { opts.as_ref() }) else {
+        let (Some(sdk), Some(obj), Some(opts)) =
+            (unsafe { (sdk.as_ref(), obj.as_ref(), opts.as_ref()) })
+        else {
             return SIA_ERR_INVALID_HANDLE;
         };
         let options = make_download_options(opts);
@@ -1549,10 +1536,7 @@ pub unsafe extern "C" fn sia_packed_upload_start(
 ) -> i32 {
     let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
-        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
-        let Some(opts) = (unsafe { opts.as_ref() }) else {
+        let (Some(sdk), Some(opts)) = (unsafe { (sdk.as_ref(), opts.as_ref()) }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
         let options = make_packed_upload_options(opts);
@@ -1815,10 +1799,7 @@ pub unsafe extern "C" fn sia_object_seal_json(
 ) -> i32 {
     let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
-        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
-        let Some(obj) = (unsafe { obj.as_ref() }) else {
+        let (Some(sdk), Some(obj)) = (unsafe { (sdk.as_ref(), obj.as_ref()) }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
         let sealed = obj.seal(sdk.app_key());
@@ -2033,10 +2014,7 @@ pub unsafe extern "C" fn sia_sdk_sharing_key(
     let err = unsafe { ErrOut::new(err) };
     let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
-        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
-        let Some(key) = (unsafe { key.as_ref() }) else {
+        let (Some(sdk), Some(key)) = (unsafe { (sdk.as_ref(), key.as_ref()) }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
         match block_on(cancel, sdk.sharing_key(key)) {
@@ -2162,13 +2140,9 @@ pub unsafe extern "C" fn sia_sdk_share_object(
     let err = unsafe { ErrOut::new(err) };
     let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
-        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
-        let Some(key) = (unsafe { key.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
-        let Some(obj) = (unsafe { obj.as_ref() }) else {
+        let (Some(sdk), Some(key), Some(obj)) =
+            (unsafe { (sdk.as_ref(), key.as_ref(), obj.as_ref()) })
+        else {
             return SIA_ERR_INVALID_HANDLE;
         };
         match block_on(cancel, sdk.share_object(key, obj)) {
@@ -2204,10 +2178,7 @@ pub unsafe extern "C" fn sia_sdk_shared_objects(
     let err = unsafe { ErrOut::new(err) };
     let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
-        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
-        let Some(key) = (unsafe { key.as_ref() }) else {
+        let (Some(sdk), Some(key)) = (unsafe { (sdk.as_ref(), key.as_ref()) }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
         let (offset, limit) = paging(offset, limit);
@@ -2242,10 +2213,7 @@ pub unsafe extern "C" fn sia_sdk_unshare_object(
     let err = unsafe { ErrOut::new(err) };
     let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
-        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
-        let Some(key) = (unsafe { key.as_ref() }) else {
+        let (Some(sdk), Some(key)) = (unsafe { (sdk.as_ref(), key.as_ref()) }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
         let id = unsafe { hash_from_ptr(object_id) };
@@ -2275,10 +2243,7 @@ pub unsafe extern "C" fn sia_sdk_revoke_sharing_key(
     let err = unsafe { ErrOut::new(err) };
     let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
-        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
-        let Some(key) = (unsafe { key.as_ref() }) else {
+        let (Some(sdk), Some(key)) = (unsafe { (sdk.as_ref(), key.as_ref()) }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
         match block_on(cancel, sdk.revoke_sharing_key(key)) {
