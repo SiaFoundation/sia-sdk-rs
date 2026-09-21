@@ -22,14 +22,14 @@ pub(crate) struct UploadOptionsC {
 
 pub(crate) struct FfiUpload {
     pub(crate) writer: Option<DuplexStream>,
-    pub(crate) task: Option<JoinHandle<Result<Object, String>>>,
+    pub(crate) task: Option<JoinHandle<Result<Object, (i32, String)>>>,
 }
 
 pub(crate) struct FfiPacked {
     pub(crate) inner: Arc<tokio::sync::Mutex<Option<PackedUpload>>>,
     pub(crate) optimal_data_size: u64,
     pub(crate) writer: Option<DuplexStream>,
-    pub(crate) add_task: Option<JoinHandle<Result<u64, String>>>,
+    pub(crate) add_task: Option<JoinHandle<Result<u64, (i32, String)>>>,
 }
 
 pub(crate) fn make_upload_options(c: &UploadOptionsC) -> UploadOptions {
@@ -80,7 +80,7 @@ pub(crate) fn make_packed_upload_options(c: &UploadOptionsC) -> PackedUploadOpti
 pub(crate) unsafe fn start_upload<F, Fut>(out: *mut *mut FfiUpload, err: ErrOut, upload: F) -> i32
 where
     F: FnOnce(DuplexStream) -> Fut,
-    Fut: Future<Output = Result<Object, String>> + Send + 'static,
+    Fut: Future<Output = Result<Object, (i32, String)>> + Send + 'static,
 {
     let (writer, reader) = tokio::io::duplex(UPLOAD_PIPE_CAPACITY);
     let fut = upload(reader);
@@ -104,7 +104,7 @@ where
 /// # Safety
 /// - `out` must be non null and writable. On success it receives an owned object.
 pub(crate) unsafe fn upload_result(
-    joined: Result<Result<Object, String>, tokio::task::JoinError>,
+    joined: Result<Result<Object, (i32, String)>, tokio::task::JoinError>,
     out: *mut *mut Object,
     err: ErrOut,
 ) -> i32 {
@@ -113,7 +113,7 @@ pub(crate) unsafe fn upload_result(
             unsafe { *out = Box::into_raw(Box::new(obj)) }
             SIA_OK
         }
-        Ok(Err(msg)) => set_err(err, SIA_ERR, msg),
+        Ok(Err((code, msg))) => set_err(err, code, msg),
         Err(join_err) if join_err.is_cancelled() => set_cancelled(err),
         Err(join_err) => set_err(err, SIA_ERR, join_err.to_string()),
     }
@@ -167,13 +167,13 @@ pub unsafe extern "C" fn sia_upload_start(
         };
         let options = make_upload_options(opts);
         if let Err(e) = options.validate() {
-            return set_err(err, SIA_ERR, e.to_string());
+            return set_typed_err(err, &e);
         }
         unsafe {
             start_upload(out, err, move |reader| async move {
                 sdk.upload(obj, reader, options)
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| (status_for(&e), e.to_string()))
             })
         }
     })
@@ -352,7 +352,7 @@ pub unsafe extern "C" fn sia_packed_upload_start(
         let _guard = runtime().enter();
         match sdk.upload_packed(options) {
             Ok(packed) => unsafe { start_packed(packed, out) },
-            Err(e) => set_err(err, SIA_ERR, e.to_string()),
+            Err(e) => set_typed_err(err, &e),
         }
     })
 }
@@ -426,10 +426,16 @@ pub unsafe extern "C" fn sia_packed_upload_add_begin(
         let inner = up.inner.clone();
         let task = runtime().spawn(async move {
             let mut guard = inner.lock().await;
-            let packed = guard
-                .as_mut()
-                .ok_or_else(|| "upload already finalized".to_string())?;
-            packed.add(reader).await.map_err(|e| e.to_string())
+            let packed = guard.as_mut().ok_or_else(|| {
+                (
+                    SIA_ERR_INVALID_STATE,
+                    "upload already finalized".to_string(),
+                )
+            })?;
+            packed
+                .add(reader)
+                .await
+                .map_err(|e| (status_for(&e), e.to_string()))
         });
         up.writer = Some(writer);
         up.add_task = Some(task);
@@ -474,8 +480,8 @@ pub unsafe extern "C" fn sia_packed_upload_add_write(
                         Some(Ok(Ok(_))) => {
                             set_err(err, SIA_ERR, "add ended before all data was written")
                         }
-                        Some(Ok(Err(msg))) => set_err(err, SIA_ERR, msg),
-                        Some(Err(e)) => set_err(err, SIA_ERR, e.to_string()),
+                        Some(Ok(Err((code, msg)))) => set_err(err, code, msg),
+                        Some(Err(e)) => set_typed_err(err, &e),
                     },
                     None => set_err(err, SIA_ERR, "add task already consumed"),
                 }
@@ -513,7 +519,7 @@ pub unsafe extern "C" fn sia_packed_upload_add_finish(
                     unsafe { *written = n }
                     SIA_OK
                 }
-                Some(Ok(Err(msg))) => set_err(err, SIA_ERR, msg),
+                Some(Ok(Err((code, msg)))) => set_err(err, code, msg),
                 Some(Err(join_err)) if join_err.is_cancelled() => set_cancelled(err),
                 Some(Err(join_err)) => set_err(err, SIA_ERR, join_err.to_string()),
             },
@@ -597,12 +603,16 @@ pub unsafe extern "C" fn sia_packed_upload_finalize(
         }
         let inner = up.inner.clone();
         let result = block_on(cancel, async move {
-            let packed = inner
-                .lock()
+            let packed = inner.lock().await.take().ok_or_else(|| {
+                (
+                    SIA_ERR_INVALID_STATE,
+                    "upload already finalized".to_string(),
+                )
+            })?;
+            packed
+                .finalize()
                 .await
-                .take()
-                .ok_or_else(|| "upload already finalized".to_string())?;
-            packed.finalize().await.map_err(|e| e.to_string())
+                .map_err(|e| (status_for(&e), e.to_string()))
         });
         match result {
             None => set_cancelled(err),
@@ -619,7 +629,7 @@ pub unsafe extern "C" fn sia_packed_upload_finalize(
                 std::mem::forget(ptrs);
                 SIA_OK
             }
-            Some(Err(msg)) => set_err(err, SIA_ERR, msg),
+            Some(Err((code, msg))) => set_err(err, code, msg),
         }
     })
 }

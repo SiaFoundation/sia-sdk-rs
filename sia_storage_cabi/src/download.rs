@@ -87,7 +87,7 @@ pub unsafe extern "C" fn sia_download_start(
         let _guard = runtime().enter();
         match sdk.download(obj, options) {
             Ok(dl) => unsafe { start_download(Box::pin(dl), out) },
-            Err(e) => set_err(err, SIA_ERR, e.to_string()),
+            Err(e) => set_typed_err(err, &e),
         }
     })
 }
@@ -117,7 +117,7 @@ pub unsafe extern "C" fn sia_download_read(
             return SIA_ERR_INVALID_HANDLE;
         };
         if let Some(e) = dl.pending_err.take() {
-            return set_err(err, SIA_ERR, e.to_string());
+            return set_typed_err(err, &e);
         }
         let buf = unsafe { std::slice::from_raw_parts_mut(buf, cap) };
         let reader = &mut dl.reader;
@@ -160,7 +160,7 @@ pub unsafe extern "C" fn sia_download_read(
                 unsafe { *n = total }
                 SIA_OK
             }
-            Some(Err(e)) => set_err(err, SIA_ERR, e.to_string()),
+            Some(Err(e)) => set_typed_err(err, &e),
         }
     })
 }

@@ -260,7 +260,7 @@ pub unsafe extern "C" fn sia_object_from_sealed_json(
                 unsafe { *out = Box::into_raw(Box::new(obj)) }
                 SIA_OK
             }
-            Err(e) => set_err(err, SIA_ERR, e.to_string()),
+            Err(e) => set_typed_err(err, &e),
         }
     })
 }

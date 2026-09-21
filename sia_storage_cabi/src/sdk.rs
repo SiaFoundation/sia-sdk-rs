@@ -56,9 +56,9 @@ pub unsafe extern "C" fn sia_sdk_account(
                     unsafe { *out_json = CString::new(js).unwrap_or_default().into_raw() }
                     SIA_OK
                 }
-                Err(e) => set_err(err, SIA_ERR, e.to_string()),
+                Err(e) => set_typed_err(err, &e),
             },
-            Some(Err(e)) => set_err(err, SIA_ERR, e.to_string()),
+            Some(Err(e)) => set_typed_err(err, &e),
         }
     })
 }
@@ -94,7 +94,7 @@ pub unsafe extern "C" fn sia_sdk_object(
                 unsafe { *out = Box::into_raw(Box::new(obj)) }
                 SIA_OK
             }
-            Some(Err(e)) => set_err(err, SIA_ERR, e.to_string()),
+            Some(Err(e)) => set_typed_err(err, &e),
         }
     })
 }
@@ -162,7 +162,7 @@ pub unsafe extern "C" fn sia_sdk_object_events(
                 unsafe { *out = Box::into_raw(Box::new(FfiEvents(events))) }
                 SIA_OK
             }
-            Some(Err(e)) => set_err(err, SIA_ERR, e.to_string()),
+            Some(Err(e)) => set_typed_err(err, &e),
         }
     })
 }
@@ -192,7 +192,7 @@ pub unsafe extern "C" fn sia_sdk_pin_object(
         match block_on(cancel, sdk.pin_object(obj)) {
             None => set_cancelled(err),
             Some(Ok(())) => SIA_OK,
-            Some(Err(e)) => set_err(err, SIA_ERR, e.to_string()),
+            Some(Err(e)) => set_typed_err(err, &e),
         }
     })
 }
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn sia_sdk_update_object_metadata(
         match block_on(cancel, sdk.update_object_metadata(obj)) {
             None => set_cancelled(err),
             Some(Ok(())) => SIA_OK,
-            Some(Err(e)) => set_err(err, SIA_ERR, e.to_string()),
+            Some(Err(e)) => set_typed_err(err, &e),
         }
     })
 }
@@ -252,7 +252,7 @@ pub unsafe extern "C" fn sia_sdk_delete_object(
         match block_on(cancel, sdk.delete_object(&key)) {
             None => set_cancelled(err),
             Some(Ok(())) => SIA_OK,
-            Some(Err(e)) => set_err(err, SIA_ERR, e.to_string()),
+            Some(Err(e)) => set_typed_err(err, &e),
         }
     })
 }
@@ -279,7 +279,7 @@ pub unsafe extern "C" fn sia_sdk_prune_slabs(
         match block_on(cancel, sdk.prune_slabs()) {
             None => set_cancelled(err),
             Some(Ok(())) => SIA_OK,
-            Some(Err(e)) => set_err(err, SIA_ERR, e.to_string()),
+            Some(Err(e)) => set_typed_err(err, &e),
         }
     })
 }
@@ -317,7 +317,7 @@ pub unsafe extern "C" fn sia_sdk_object_share_url(
                 }
                 SIA_OK
             }
-            Err(e) => set_err(err, SIA_ERR, e.to_string()),
+            Err(e) => set_typed_err(err, &e),
         }
     })
 }
@@ -356,7 +356,7 @@ pub unsafe extern "C" fn sia_sdk_object_from_share_url(
                 unsafe { *out = Box::into_raw(Box::new(obj)) }
                 SIA_OK
             }
-            Some(Err(e)) => set_err(err, SIA_ERR, e.to_string()),
+            Some(Err(e)) => set_typed_err(err, &e),
         }
     })
 }

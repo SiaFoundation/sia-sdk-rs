@@ -40,6 +40,12 @@ enum {
 	// A required handle was missing. A handle that is present must still be
 	// live: this catches an absent handle, not a dangling one.
 	SIA_ERR_INVALID_HANDLE = 9,
+	// Not enough shards survived to satisfy the erasure coding, on either an
+	// upload or a download.
+	SIA_ERR_NOT_ENOUGH_SHARDS = 10,
+	// Host selection ran out of candidates. Reported even when it surfaces
+	// wrapped inside an upload or download failure.
+	SIA_ERR_NO_MORE_HOSTS = 11,
 };
 
 typedef struct sia_builder sia_builder_t;
