@@ -874,3 +874,130 @@ fn cancelled_read_returns_cancelled() {
         sia_mock_free(mock);
     }
 }
+
+/// An abandoned add must cost only its own object. Dropping the write half
+/// looks like a clean end of input, so the add task commits a short but valid
+/// object; without `sia_packed_upload_add_abort` removing it afterwards, a
+/// caller whose source failed part way could not tell that object apart from
+/// a complete one.
+#[test]
+fn aborted_add_leaves_no_object() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let seed = [31u8; 32];
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let mut packed = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
+            SIA_OK,
+            "sia_packed_upload_start: {}",
+            take_err(err)
+        );
+
+        // Three adds, of which the middle one is abandoned part way.
+        let sizes = [4096usize, 2048, 8192];
+        for (i, len) in sizes.iter().enumerate() {
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_packed_upload_add_begin(packed, &raw mut err),
+                SIA_OK,
+                "add_begin {i}: {}",
+                take_err(err)
+            );
+
+            let data = vec![b'a' + i as u8; *len];
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_packed_upload_add_write(
+                    packed,
+                    data.as_ptr(),
+                    data.len(),
+                    std::ptr::null_mut(),
+                    &raw mut err
+                ),
+                SIA_OK,
+                "add_write {i}: {}",
+                take_err(err)
+            );
+
+            let mut err = std::ptr::null_mut();
+            if i == 1 {
+                assert_eq!(
+                    sia_packed_upload_add_abort(packed, std::ptr::null_mut(), &raw mut err),
+                    SIA_OK,
+                    "add_abort: {}",
+                    take_err(err)
+                );
+            } else {
+                let mut written = 0u64;
+                assert_eq!(
+                    sia_packed_upload_add_finish(
+                        packed,
+                        std::ptr::null_mut(),
+                        &raw mut written,
+                        &raw mut err
+                    ),
+                    SIA_OK,
+                    "add_finish {i}: {}",
+                    take_err(err)
+                );
+                assert_eq!(written, *len as u64, "add {i} packed the wrong length");
+            }
+        }
+
+        // Aborting with nothing in progress is a state error, not a silent
+        // pop of the object the previous add committed.
+        let mut err = std::ptr::null_mut();
+        let code = sia_packed_upload_add_abort(packed, std::ptr::null_mut(), &raw mut err);
+        let msg = take_err(err);
+        assert_eq!(
+            code, SIA_ERR_INVALID_STATE,
+            "abort with no add in progress must report it, got {msg}"
+        );
+
+        let mut objs = std::ptr::null_mut();
+        let mut len = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_finalize(
+                packed,
+                std::ptr::null_mut(),
+                &raw mut objs,
+                &raw mut len,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_packed_upload_finalize: {}",
+            take_err(err)
+        );
+        assert_eq!(len, 2, "the abandoned add must contribute no object");
+
+        let slice = std::slice::from_raw_parts(objs, len);
+        assert_eq!(sia_object_size(slice[0]), 4096, "first object");
+        assert_eq!(sia_object_size(slice[1]), 8192, "third object");
+        for o in slice {
+            sia_object_free(*o);
+        }
+        sia_object_array_free(objs, len);
+
+        sia_packed_upload_free(packed);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
