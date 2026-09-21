@@ -999,9 +999,9 @@ mod test {
             .await
             .expect_err("erroring reader should fail the add");
 
-        // errored add left `partial.len()` bytes as dead padding in the slab;
-        // the packer stays usable and subsequent adds stay aligned.
-        assert_eq!(packed_upload.length(), partial.len() as u64);
+        // the failed add buffered less than a full fill, so nothing was
+        // committed; the packer stays usable and the next add starts at zero.
+        assert_eq!(packed_upload.length(), 0);
 
         packed_upload
             .add(Cursor::new(good.clone()))
@@ -1012,9 +1012,9 @@ mod test {
         // only the successful add registered an object
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].size(), good.len() as u64);
-        // the good object's bytes start *after* the padding from the errored add
+        // the errored add committed nothing, so the good object starts at zero
         assert_eq!(objects[0].slabs().len(), 1);
-        assert_eq!(objects[0].slabs()[0].offset, partial.len() as u32);
+        assert_eq!(objects[0].slabs()[0].offset, 0);
         assert_eq!(objects[0].slabs()[0].length, good.len() as u32);
 
         let mut output = BytesMut::zeroed(good.len());
