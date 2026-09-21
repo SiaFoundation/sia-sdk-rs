@@ -931,8 +931,10 @@ impl PackedUpload {
     /// If the reader errors part-way, it's safe to continue calling
     /// [add](Self::add); no object is registered for the failed call. Or call
     /// [finalize](Self::finalize) to collect the objects added so far. Bytes
-    /// read before the error remain in the current slab as padding and stay
-    /// counted in [length](Self::length) and [remaining](Self::remaining).
+    /// the failed read had buffered but not yet committed are dropped, since
+    /// no object references them. Whole buffers committed before the error
+    /// stay in the slab as padding, counted in [length](Self::length) and
+    /// [remaining](Self::remaining).
     pub async fn add<R: AsyncRead + Unpin>(&mut self, r: R) -> Result<u64, UploadError> {
         let object = Object::default();
         // buffer the reader since SlabReader reads 64 bytes at a time
