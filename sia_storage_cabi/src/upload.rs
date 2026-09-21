@@ -522,6 +522,52 @@ pub unsafe extern "C" fn sia_packed_upload_add_finish(
     })
 }
 
+/// Abandons the add in progress, discarding the object it would have produced.
+///
+/// The writer is dropped first, which the add task sees as a clean end of
+/// input, so it commits a short but otherwise valid object. That object is
+/// then removed. The bytes it contributed stay in the packed stream and are
+/// never referenced, which costs that much slab space but keeps every other
+/// object's offsets intact.
+///
+/// # Safety
+/// - `up` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_packed_upload_start` that has not been freed.
+/// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
+///   from `sia_cancel_new`.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_packed_upload_add_abort(
+    up: *mut FfiPacked,
+    cancel: *mut CancellationToken,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
+    guarded(err, || {
+        let Some(up) = (unsafe { up.as_mut() }) else {
+            return SIA_ERR_INVALID_HANDLE;
+        };
+        drop(up.writer.take()); // signal EOF so the add task can finish
+        let Some(task) = up.add_task.take() else {
+            return set_err(err, SIA_ERR_INVALID_STATE, "no add in progress");
+        };
+        // Only a task that succeeded pushed an object, so only then is there
+        // one to remove. A failed add left the object list untouched.
+        if !matches!(block_on(cancel, task), Some(Ok(Ok(_)))) {
+            return SIA_OK;
+        }
+        let inner = up.inner.clone();
+        runtime().block_on(async move {
+            if let Some(packed) = inner.lock().await.as_mut() {
+                packed.discard_last();
+            }
+        });
+        SIA_OK
+    })
+}
+
 /// # Safety
 /// - `up` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_packed_upload_start` that has not been freed.

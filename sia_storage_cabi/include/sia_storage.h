@@ -190,6 +190,12 @@ uint64_t sia_packed_upload_optimal_data_size(const sia_packed_upload_t* up);
 int32_t sia_packed_upload_add_begin(sia_packed_upload_t* up, char** err);
 int32_t sia_packed_upload_add_write(sia_packed_upload_t* up, const uint8_t* data, size_t len, sia_cancel_t* cancel, char** err);
 int32_t sia_packed_upload_add_finish(sia_packed_upload_t* up, sia_cancel_t* cancel, uint64_t* written, char** err);
+// Abandons the add in progress and discards the object it would have
+// produced, for a caller whose source failed part way. The bytes already
+// written stay in the packed stream and are never referenced, so the slab
+// still pays for them, but every other object's offsets are unaffected.
+// Returns SIA_ERR_INVALID_STATE when no add is in progress.
+int32_t sia_packed_upload_add_abort(sia_packed_upload_t* up, sia_cancel_t* cancel, char** err);
 // *out_objs receives a heap array of owned object handles. Free the array
 // (not the objects) with sia_object_array_free.
 int32_t sia_packed_upload_finalize(sia_packed_upload_t* up, sia_cancel_t* cancel, sia_object_t*** out_objs, size_t* out_len, char** err);
