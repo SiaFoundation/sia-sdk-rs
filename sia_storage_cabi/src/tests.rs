@@ -1001,3 +1001,54 @@ fn aborted_add_leaves_no_object() {
         sia_mock_free(mock);
     }
 }
+
+/// The two failure modes callers most need to branch on get status codes of
+/// their own, so the bindings do not have to recover them by matching on the
+/// message text. This pins the classification, including the nested case:
+/// QueueError::NoMoreHosts reaches the boundary wrapped inside an upload or
+/// download failure rather than on its own.
+#[test]
+fn error_status_classification() {
+    use sia_storage::{DownloadError, QueueError, UploadError};
+
+    assert_eq!(
+        status_for(&UploadError::NotEnoughShards(2, 3)),
+        SIA_ERR_NOT_ENOUGH_SHARDS,
+        "an upload short of shards"
+    );
+    assert_eq!(
+        status_for(&DownloadError::NotEnoughShards(1, 10)),
+        SIA_ERR_NOT_ENOUGH_SHARDS,
+        "a download short of shards"
+    );
+    assert_eq!(
+        status_for(&QueueError::NoMoreHosts),
+        SIA_ERR_NO_MORE_HOSTS,
+        "host selection out of candidates"
+    );
+
+    // Wrapped rather than outermost, which is how it actually arrives.
+    let wrapped = UploadError::from(QueueError::NoMoreHosts);
+    assert_eq!(
+        status_for(&wrapped),
+        SIA_ERR_NO_MORE_HOSTS,
+        "a queue failure inside an upload failure must still be recognised"
+    );
+
+    // The shape the download path actually produces: the AsyncRead impl boxes
+    // the error with io::Error::other, and io::Error::source skips the value
+    // it wraps, so walking source alone misses this.
+    let boxed = std::io::Error::other(DownloadError::NotEnoughShards(0, 10));
+    assert_eq!(
+        status_for(&boxed),
+        SIA_ERR_NOT_ENOUGH_SHARDS,
+        "a download error boxed in an io::Error must still be recognised"
+    );
+
+    // Anything else stays generic rather than being forced into a sentinel.
+    assert_eq!(
+        status_for(&QueueError::InsufficientHosts),
+        SIA_ERR,
+        "an unrelated queue error must not borrow another code"
+    );
+}

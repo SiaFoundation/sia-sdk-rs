@@ -3,7 +3,7 @@
 //! containment, the async bridge, argument conversion, and the callbacks that
 //! run outward into C.
 
-use sia_storage::{AppKey, Hash256, ShardProgress};
+use sia_storage::{AppKey, DownloadError, Hash256, QueueError, ShardProgress, UploadError};
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char};
 use std::future::Future;
@@ -36,6 +36,12 @@ pub(crate) const SIA_ERR_KEY_MISMATCH: i32 = 8;
 /// not a dangling one. Out parameters are not checked; they are written only
 /// on success, and passing a null one is undefined.
 pub(crate) const SIA_ERR_INVALID_HANDLE: i32 = 9;
+
+/// Not enough shards survived to satisfy the erasure coding.
+pub(crate) const SIA_ERR_NOT_ENOUGH_SHARDS: i32 = 10;
+
+/// Host selection ran out of candidates.
+pub(crate) const SIA_ERR_NO_MORE_HOSTS: i32 = 11;
 
 pub(crate) type ProgressFn = unsafe extern "C" fn(usize, *const ShardProgressC);
 
@@ -150,6 +156,56 @@ pub(crate) fn set_err(err: ErrOut, code: i32, msg: impl AsRef<str>) -> i32 {
 
 pub(crate) fn set_cancelled(err: ErrOut) -> i32 {
     set_err(err, SIA_ERR_CANCELLED, "operation cancelled")
+}
+
+/// Returns the status code for one error, ignoring anything it wraps.
+fn classify(e: &(dyn std::error::Error + 'static)) -> Option<i32> {
+    if e.downcast_ref::<UploadError>()
+        .is_some_and(|u| matches!(u, UploadError::NotEnoughShards(..)))
+        || e.downcast_ref::<DownloadError>()
+            .is_some_and(|d| matches!(d, DownloadError::NotEnoughShards(..)))
+    {
+        return Some(SIA_ERR_NOT_ENOUGH_SHARDS);
+    }
+    if e.downcast_ref::<QueueError>()
+        .is_some_and(|q| matches!(q, QueueError::NoMoreHosts))
+    {
+        return Some(SIA_ERR_NO_MORE_HOSTS);
+    }
+    None
+}
+
+/// Classifies an error into a status code, so that the two failure modes
+/// callers most need to branch on do not have to be recovered by matching on
+/// the message text.
+///
+/// The whole chain is walked, because `QueueError::NoMoreHosts` surfaces
+/// wrapped inside an upload or download error rather than on its own.
+pub(crate) fn status_for(e: &(dyn std::error::Error + 'static)) -> i32 {
+    let mut cur = Some(e);
+    while let Some(err) = cur {
+        if let Some(code) = classify(err) {
+            return code;
+        }
+        // io::Error::source returns the source of the error it wraps rather
+        // than that error itself, so walking source alone steps straight over
+        // the DownloadError that the AsyncRead impl boxes with
+        // io::Error::other. Reach it with get_ref instead.
+        if let Some(inner) = err
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+        {
+            cur = Some(inner);
+            continue;
+        }
+        cur = err.source();
+    }
+    SIA_ERR
+}
+
+/// set_err with the code taken from the error's type rather than assumed.
+pub(crate) fn set_typed_err(err: ErrOut, e: &(dyn std::error::Error + 'static)) -> i32 {
+    set_err(err, status_for(e), e.to_string())
 }
 
 /// Runs a future to completion on the shared runtime. Returns None if the
