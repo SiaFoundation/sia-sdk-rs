@@ -831,6 +831,52 @@ mod test {
             .expect("an expired key must still be revocable");
     }
 
+    /// Every sector an upload writes must carry the moment it was written.
+    /// The indexer rejects a pinned sector that is too old or too far ahead,
+    /// but only when the field is set, so leaving it unset silently skips a
+    /// check that every slab the Go engine pinned was subject to.
+    #[tokio::test]
+    async fn test_upload_stamps_uploaded_at() {
+        use chrono::Utc;
+
+        use crate::mock::MockNetwork;
+
+        let network = MockNetwork::new();
+        network.add_hosts(40);
+        let sdk = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("sdk creation failed");
+
+        let before = Utc::now();
+        let data: Vec<u8> = (0..(1 << 20)).map(|i| i as u8).collect();
+        let object = sdk
+            .upload(
+                Object::new(None),
+                std::io::Cursor::new(data),
+                UploadOptions::default(),
+            )
+            .await
+            .expect("upload failed");
+        let after = Utc::now();
+
+        assert!(!object.slabs.is_empty(), "the upload produced no slabs");
+        let mut sectors = 0;
+        for slab in &object.slabs {
+            for sector in &slab.sectors {
+                let t = sector
+                    .uploaded_at
+                    .expect("an uploaded sector must carry uploaded_at");
+                assert!(
+                    t >= before && t <= after,
+                    "uploaded_at {t:?} is outside the window the upload ran in"
+                );
+                sectors += 1;
+            }
+        }
+        assert!(sectors > 0, "no sectors to check");
+    }
+
     #[tokio::test]
     async fn test_mock_network_object_roundtrip() {
         use std::io::Cursor;

@@ -1013,6 +1013,7 @@ mod test {
             sectors.push(Sector {
                 root,
                 host_key: host_keys[i],
+                uploaded_at: None,
             });
         }
 

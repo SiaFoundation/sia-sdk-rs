@@ -25,6 +25,14 @@ pub struct Sector {
     pub root: Hash256,
     /// The public key of the host storing this sector.
     pub host_key: PublicKey,
+    /// When this sector was written to the host, or `None` for a sector whose
+    /// write this process did not perform.
+    ///
+    /// The indexer rejects a pinned sector older than its maximum upload age,
+    /// or too far in the future, but only when this is set. Leaving it unset
+    /// skips that check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uploaded_at: Option<DateTime<Utc>>,
 }
 
 /// The version of the slab
@@ -549,6 +557,42 @@ mod test {
     use super::*;
     use sia_core::hash_256;
 
+    /// The indexer only applies its upload age check when `uploadedAt` is
+    /// present, so the wire shape matters as much as the value.
+    #[test]
+    fn sector_serializes_uploaded_at_as_the_indexer_expects() {
+        use chrono::TimeZone;
+
+        let mut sector = Sector {
+            root: Hash256::new([1u8; 32]),
+            host_key: PublicKey::new([2u8; 32]),
+            uploaded_at: None,
+        };
+
+        let json = serde_json::to_string(&sector).unwrap();
+        assert!(
+            !json.contains("uploadedAt"),
+            "an unset timestamp must be omitted, not sent as null: {json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Sector>(&json).unwrap().uploaded_at,
+            None,
+            "a sector without the field must decode"
+        );
+
+        sector.uploaded_at = Some(Utc.timestamp_opt(1_700_000_000, 0).unwrap());
+        let json = serde_json::to_string(&sector).unwrap();
+        assert!(
+            json.contains(r#""uploadedAt":"2023-11-14T22:13:20Z""#),
+            "unexpected encoding: {json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Sector>(&json).unwrap(),
+            sector,
+            "the timestamp must survive a round trip"
+        );
+    }
+
     fn random_bytes_32() -> [u8; 32] {
         let mut buf = [0u8; 32];
         getrandom::fill(&mut buf).unwrap();
@@ -592,6 +636,7 @@ mod test {
             sectors: vec![Sector {
                 root: Hash256::new([1u8; 32]),
                 host_key: PublicKey::new([2u8; 32]),
+                uploaded_at: None,
             }],
             offset: 10,
             length: 100,
@@ -674,6 +719,7 @@ mod test {
                 sectors: vec![Sector {
                     root: sector_root.into(),
                     host_key: PublicKey::new(public_key),
+                    uploaded_at: None,
                 }],
                 offset: 131415,
                 length: 161718,
@@ -708,18 +754,21 @@ mod test {
                         "fb0a42cce246d6bb9716eb0e97579a1d0d5c2bb34d7234e9ae271d4fd8201b24"
                     ),
                     host_key: PublicKey::new(random_bytes_32()), // host key is not included in the digest
+                    uploaded_at: None,
                 },
                 Sector {
                     root: hash_256!(
                         "8125994daee38e1fbaf7a26c7935420ce055202f7175eae98d291ebe80f2b00e"
                     ),
                     host_key: PublicKey::new(random_bytes_32()), // host key is not included in the digest
+                    uploaded_at: None,
                 },
                 Sector {
                     root: hash_256!(
                         "54ee41b57b9439868b119b8fe1c6c602bd6b35e27d31400c5bb85912b60c9f0a"
                     ),
                     host_key: PublicKey::new(random_bytes_32()), // host key is not included in the digest
+                    uploaded_at: None,
                 },
             ],
             // length and offset are not included in the digest
@@ -809,6 +858,7 @@ mod test {
                 .map(|_| Sector {
                     root: random_bytes_32().into(),
                     host_key: PublicKey::new(random_bytes_32()),
+                    uploaded_at: None,
                 })
                 .collect(),
             offset: 0,

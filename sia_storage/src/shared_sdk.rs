@@ -271,6 +271,7 @@ mod tests {
                 sectors: vec![Sector {
                     root: Hash256::new([2u8; 32]),
                     host_key: host.public_key,
+                    uploaded_at: None,
                 }],
                 offset: 0,
                 length: 256,
@@ -377,6 +378,7 @@ mod tests {
                 sectors: vec![Sector {
                     root: Hash256::new([2u8; 32]),
                     host_key: host.public_key,
+                    uploaded_at: None,
                 }],
                 offset: 0,
                 length: 256,
