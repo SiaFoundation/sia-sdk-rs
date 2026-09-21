@@ -961,6 +961,17 @@ impl PackedUpload {
         self.add(tokio::fs::File::open(path).await?).await
     }
 
+    /// Discards the most recently added object, for a caller that decided
+    /// after the fact that the data it supplied was incomplete. Returns false
+    /// when no object has been added.
+    ///
+    /// The bytes that object contributed stay in the packed stream, so the
+    /// slab still pays for them, but nothing references them and every other
+    /// object's offsets are left untouched.
+    pub fn discard_last(&mut self) -> bool {
+        self.objects.pop().is_some()
+    }
+
     /// Finalizes the upload and returns the resulting objects. This will wait for all readers
     /// to finish and all slabs to be uploaded before returning. The resulting objects will contain the metadata needed to download the objects.
     ///
