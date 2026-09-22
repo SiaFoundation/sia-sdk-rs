@@ -2114,3 +2114,107 @@ fn object_truncate_shortens_and_copies() {
         sia_mock_free(mock);
     }
 }
+
+/// A slab id taken from an object fetches that slab back from the indexer,
+/// and the sectors it reports are the ones the object references.
+#[test]
+fn sdk_slab_fetches_by_id_from_an_object() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [89u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        // Two sectors' worth so the object has more than one slab to index.
+        let payload: Vec<u8> = (0..(9 << 20)).map(|i| (i % 251) as u8).collect();
+        let uploaded = upload_object_for_test(sdk, &payload);
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_pin_object(sdk, uploaded, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "sia_sdk_pin_object: {}",
+            take_err(err)
+        );
+
+        let count = sia_object_slab_count(uploaded);
+        assert!(count > 0, "an uploaded object must reference slabs");
+
+        let mut id = [0u8; 32];
+        assert!(
+            sia_object_slab_id_at(uploaded, 0, id.as_mut_ptr()),
+            "the first slab id must be readable"
+        );
+        assert_ne!(id, [0u8; 32], "a slab id must not be all zeroes");
+
+        let mut out = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_slab(
+                sdk,
+                id.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut out,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_sdk_slab: {}",
+            take_err(err)
+        );
+        let json = CStr::from_ptr(out).to_str().unwrap().to_string();
+        sia_string_free(out);
+        let slab: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+
+        // The fields a consumer decodes, and the identity that was asked for.
+        assert!(slab["encryptionKey"].is_string(), "encryptionKey: {slab}");
+        assert!(slab["minShards"].is_number(), "minShards: {slab}");
+        let sectors = slab["sectors"].as_array().expect("sectors array");
+        assert!(!sectors.is_empty(), "a pinned slab must have sectors");
+        assert!(sectors[0]["root"].is_string(), "root: {slab}");
+        assert!(sectors[0]["hostKey"].is_string(), "hostKey: {slab}");
+
+        // Out of range must report rather than write.
+        let mut untouched = [7u8; 32];
+        assert!(
+            !sia_object_slab_id_at(uploaded, count, untouched.as_mut_ptr()),
+            "an index past the end must return false"
+        );
+        assert_eq!(untouched, [7u8; 32], "a refused read must not write");
+        assert_eq!(sia_object_slab_count(std::ptr::null()), 0);
+        assert!(!sia_object_slab_id_at(
+            std::ptr::null(),
+            0,
+            untouched.as_mut_ptr()
+        ));
+
+        // An id nothing was pinned under is an error, not an empty result.
+        let mut out = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_ne!(
+            sia_sdk_slab(
+                sdk,
+                [0u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut out,
+                &raw mut err
+            ),
+            SIA_OK,
+            "an unknown slab id must fail"
+        );
+        let _ = take_err(err);
+
+        sia_object_free(uploaded);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}

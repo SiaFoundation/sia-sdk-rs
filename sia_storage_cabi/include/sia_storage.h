@@ -184,6 +184,12 @@ extern "C"
 	// above the current size copies it unchanged. o is untouched, so free both.
 	// Pin the result with sia_sdk_pin_object before the indexer knows about it.
 	sia_object_t *sia_object_truncate(const sia_object_t *o, uint64_t length);
+	// The ids of the slabs the object's data is spread across, which is what
+	// sia_sdk_slab takes. A slab id is derived from its contents rather than
+	// stored, so this is the only way to obtain one. sia_object_slab_id_at
+	// returns false when i is out of range, leaving out_id untouched.
+	size_t sia_object_slab_count(const sia_object_t *o);
+	bool sia_object_slab_id_at(const sia_object_t *o, size_t i, uint8_t out_id[32]);
 	void sia_object_id(const sia_object_t *o, uint8_t out[32]);
 	uint64_t sia_object_size(const sia_object_t *o);
 	uint64_t sia_object_encoded_size(const sia_object_t *o);
@@ -278,6 +284,12 @@ extern "C"
 	// goodForUpload. Free it with sia_string_free. It is JSON rather than a
 	// typed collection because a host's address list is variable length.
 	int32_t sia_sdk_hosts(const sia_sdk_t *sdk, const sia_host_query_t *query, sia_cancel_t *cancel, char **out_json, char **err);
+
+	// *out_json receives one pinned slab as a JSON object, with version, id,
+	// encryptionKey, minShards and sectors (each with root and hostKey). Free it
+	// with sia_string_free. encryptionKey is the slab's data key, so treat the
+	// result as secret.
+	int32_t sia_sdk_slab(const sia_sdk_t *sdk, const uint8_t id[32], sia_cancel_t *cancel, char **out_json, char **err);
 
 	int32_t sia_sdk_create_sharing_key(const sia_sdk_t *sdk, const char *description, bool has_expiry, int64_t expires_at_unix_us, sia_cancel_t *cancel, sia_sharing_key_t **out, char **err);
 	// *out_description receives an owned string. Free it with sia_string_free.
