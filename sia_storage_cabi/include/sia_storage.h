@@ -48,6 +48,8 @@ extern "C"
 		// Host selection ran out of candidates. Reported even when it surfaces
 		// wrapped inside an upload or download failure.
 		SIA_ERR_NO_MORE_HOSTS = 11,
+		// An overwrite started past the end of the object it was rewriting.
+		SIA_ERR_OUT_OF_RANGE = 12,
 	};
 
 	typedef struct sia_builder sia_builder_t;
@@ -100,6 +102,14 @@ extern "C"
 		uint64_t max_buffered_slabs; // 0 = default
 		sia_progress_cb_t on_shard;	 // may be NULL
 		uintptr_t userdata;
+		// When false, start_offset is ignored and the upload appends.
+		bool has_start_offset;
+		// Byte offset the written data overwrites from, instead of appending.
+		// Only the slabs covering the rewritten range are re-uploaded, and the
+		// object keeps its id. Starting past the end of the object returns
+		// SIA_ERR_OUT_OF_RANGE. sia_packed_upload_start rejects it outright
+		// with SIA_ERR_INVALID_STATE, since a packed add always appends.
+		uint64_t start_offset;
 	} sia_upload_options_t;
 
 	typedef struct
