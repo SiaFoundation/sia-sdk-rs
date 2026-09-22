@@ -105,8 +105,9 @@ extern "C"
 		// When false, start_offset is ignored and the upload appends.
 		bool has_start_offset;
 		// Byte offset the written data overwrites from, instead of appending.
-		// Only the slabs covering the rewritten range are re-uploaded, and the
-		// object keeps its id. Starting past the end of the object returns
+		// Only the slabs covering the rewritten range are re-uploaded, but the
+		// finished object still gets a new id, because an id is derived from
+		// the slabs. Starting past the end of the object returns
 		// SIA_ERR_OUT_OF_RANGE. sia_packed_upload_start rejects it outright
 		// with SIA_ERR_INVALID_STATE, since a packed add always appends.
 		uint64_t start_offset;

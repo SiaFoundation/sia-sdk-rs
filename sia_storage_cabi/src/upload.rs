@@ -21,7 +21,9 @@ pub(crate) struct UploadOptionsC {
     /// When false, `start_offset` is ignored and the upload appends.
     pub(crate) has_start_offset: bool,
     /// Byte offset the reader's data overwrites from, rather than appending.
-    /// Only the slabs covering the rewritten range are re-uploaded.
+    /// Only the slabs covering the rewritten range are re-uploaded, but the
+    /// finished object still has a new id, since an id is derived from its
+    /// slabs.
     pub(crate) start_offset: u64,
 }
 
