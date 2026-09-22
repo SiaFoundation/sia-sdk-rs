@@ -18,6 +18,11 @@ pub(crate) struct UploadOptionsC {
     pub(crate) max_buffered_slabs: u64,
     pub(crate) on_shard: Option<ProgressFn>,
     pub(crate) userdata: usize,
+    /// When false, `start_offset` is ignored and the upload appends.
+    pub(crate) has_start_offset: bool,
+    /// Byte offset the reader's data overwrites from, rather than appending.
+    /// Only the slabs covering the rewritten range are re-uploaded.
+    pub(crate) start_offset: u64,
 }
 
 pub(crate) struct FfiUpload {
@@ -41,6 +46,9 @@ pub(crate) fn make_upload_options(c: &UploadOptionsC) -> UploadOptions {
     if c.max_buffered_slabs > 0 {
         o.max_buffered_slabs = Some(c.max_buffered_slabs as usize);
     }
+    if c.has_start_offset {
+        o.start_offset = Some(c.start_offset);
+    }
     if let Some(cb) = c.on_shard {
         let cb = CCallback {
             cb,
@@ -53,7 +61,8 @@ pub(crate) fn make_upload_options(c: &UploadOptionsC) -> UploadOptions {
 
 /// Packed uploads take their own options type, which carries no `start_offset`
 /// because each object is appended into a shared slab rather than overwriting
-/// a range of its own.
+/// a range of its own. A caller that sets one is refused rather than having it
+/// silently dropped.
 pub(crate) fn make_packed_upload_options(c: &UploadOptionsC) -> PackedUploadOptions {
     let mut o = PackedUploadOptions::default();
     if c.set_redundancy {
@@ -348,6 +357,13 @@ pub unsafe extern "C" fn sia_packed_upload_start(
         let (Some(sdk), Some(opts)) = (unsafe { (sdk.as_ref(), opts.as_ref()) }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
+        if opts.has_start_offset {
+            return set_err(
+                err,
+                SIA_ERR_INVALID_STATE,
+                "a packed upload appends and cannot take a start offset",
+            );
+        }
         let options = make_packed_upload_options(opts);
         let _guard = runtime().enter();
         match sdk.upload_packed(options) {

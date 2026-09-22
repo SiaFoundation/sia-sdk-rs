@@ -43,6 +43,9 @@ pub(crate) const SIA_ERR_NOT_ENOUGH_SHARDS: i32 = 10;
 /// Host selection ran out of candidates.
 pub(crate) const SIA_ERR_NO_MORE_HOSTS: i32 = 11;
 
+/// An overwrite started past the end of the object it was rewriting.
+pub(crate) const SIA_ERR_OUT_OF_RANGE: i32 = 12;
+
 pub(crate) type ProgressFn = unsafe extern "C" fn(usize, *const ShardProgressC);
 
 pub(crate) type LogFn = unsafe extern "C" fn(usize, i32, *const c_char, *const c_char);
@@ -171,6 +174,11 @@ fn classify(e: &(dyn std::error::Error + 'static)) -> Option<i32> {
         .is_some_and(|q| matches!(q, QueueError::NoMoreHosts))
     {
         return Some(SIA_ERR_NO_MORE_HOSTS);
+    }
+    if e.downcast_ref::<UploadError>()
+        .is_some_and(|u| matches!(u, UploadError::OutOfRange(..)))
+    {
+        return Some(SIA_ERR_OUT_OF_RANGE);
     }
     None
 }

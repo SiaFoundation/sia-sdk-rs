@@ -7,6 +7,7 @@ use crate::sdk::*;
 use crate::shared_sdk::*;
 use crate::sharing::*;
 use crate::upload::*;
+use sia_storage::{Object, Sdk};
 use std::ffi::{CStr, CString, c_char};
 
 /// Consumes an out-param error message so a failed assertion can report
@@ -28,6 +29,8 @@ fn default_upload_options() -> UploadOptionsC {
         max_buffered_slabs: 0,
         on_shard: None,
         userdata: 0,
+        has_start_offset: false,
+        start_offset: 0,
     }
 }
 
@@ -1768,5 +1771,268 @@ fn hosts_reject_null_handles() {
             SIA_ERR_INVALID_HANDLE,
         );
         assert!(err.is_null(), "an absent handle sets no message");
+    }
+}
+
+/// Uploads `data` to a fresh object and returns the pinned result.
+unsafe fn upload_object_for_test(sdk: *const Sdk, data: &[u8]) -> *mut Object {
+    unsafe {
+        let obj = sia_object_new();
+        let opts = default_upload_options();
+        let mut up = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_start(sdk, obj, &raw const opts, &raw mut up, &raw mut err),
+            SIA_OK,
+            "sia_upload_start: {}",
+            take_err(err)
+        );
+        let mut wrote = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_write(
+                up,
+                data.as_ptr(),
+                data.len(),
+                std::ptr::null_mut(),
+                &raw mut wrote,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_upload_write: {}",
+            take_err(err)
+        );
+        let mut out = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_finish(up, std::ptr::null_mut(), &raw mut out, &raw mut err),
+            SIA_OK,
+            "sia_upload_finish: {}",
+            take_err(err)
+        );
+        sia_upload_free(up);
+        sia_object_free(obj);
+        out
+    }
+}
+
+/// Reads an object back in full.
+unsafe fn download_all(sdk: *const Sdk, obj: *const Object) -> Vec<u8> {
+    unsafe {
+        let dopts = default_download_options();
+        let mut dl = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_download_start(sdk, obj, &raw const dopts, &raw mut dl, &raw mut err),
+            SIA_OK,
+            "sia_download_start: {}",
+            take_err(err)
+        );
+        let mut got = Vec::new();
+        let mut buf = vec![0u8; 256 << 10];
+        loop {
+            let mut n = 0usize;
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_download_read(
+                    dl,
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    std::ptr::null_mut(),
+                    &raw mut n,
+                    &raw mut err
+                ),
+                SIA_OK,
+                "sia_download_read: {}",
+                take_err(err)
+            );
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        sia_download_free(dl);
+        got
+    }
+}
+
+/// start_offset rewrites a range in place rather than appending, and the
+/// bytes outside the range survive untouched.
+#[test]
+fn upload_start_offset_overwrites_in_place() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [71u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let original: Vec<u8> = (0..(6 << 20)).map(|i| (i % 251) as u8).collect();
+        let uploaded = upload_object_for_test(sdk, &original);
+        assert_eq!(sia_object_size(uploaded), original.len() as u64);
+
+        // Overwrite a window in the middle.
+        let at = 1 << 20;
+        let patch = vec![0xAAu8; 4096];
+        let mut opts = default_upload_options();
+        opts.has_start_offset = true;
+        opts.start_offset = at as u64;
+        let mut up = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_start(sdk, uploaded, &raw const opts, &raw mut up, &raw mut err),
+            SIA_OK,
+            "sia_upload_start with a start offset: {}",
+            take_err(err)
+        );
+        let mut wrote = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_write(
+                up,
+                patch.as_ptr(),
+                patch.len(),
+                std::ptr::null_mut(),
+                &raw mut wrote,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_upload_write: {}",
+            take_err(err)
+        );
+        let mut rewritten = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_finish(up, std::ptr::null_mut(), &raw mut rewritten, &raw mut err),
+            SIA_OK,
+            "sia_upload_finish: {}",
+            take_err(err)
+        );
+        sia_upload_free(up);
+
+        assert_eq!(
+            sia_object_size(rewritten),
+            original.len() as u64,
+            "an overwrite inside the object must not change its size"
+        );
+
+        let mut expected = original.clone();
+        expected[at..at + patch.len()].copy_from_slice(&patch);
+        let got = download_all(sdk, rewritten);
+        assert_eq!(got.len(), expected.len(), "length changed");
+        assert!(
+            got == expected,
+            "the rewritten range or its surroundings differ"
+        );
+
+        sia_object_free(rewritten);
+        sia_object_free(uploaded);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// An offset past the end of the object is the caller's mistake and gets its
+/// own status, so Go can branch on it without matching the message.
+#[test]
+fn upload_start_offset_past_the_end_is_out_of_range() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [73u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let original = vec![1u8; 4096];
+        let uploaded = upload_object_for_test(sdk, &original);
+
+        let mut opts = default_upload_options();
+        opts.has_start_offset = true;
+        opts.start_offset = original.len() as u64 + 1;
+        let mut up = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        let code = sia_upload_start(sdk, uploaded, &raw const opts, &raw mut up, &raw mut err);
+        // The range is only checked once the upload runs, so a failure may
+        // surface from either call.
+        let code = if code == SIA_OK {
+            let mut out = std::ptr::null_mut();
+            let mut err2 = std::ptr::null_mut();
+            let c = sia_upload_finish(up, std::ptr::null_mut(), &raw mut out, &raw mut err2);
+            sia_upload_free(up);
+            err = err2;
+            c
+        } else {
+            code
+        };
+        assert_eq!(
+            code,
+            SIA_ERR_OUT_OF_RANGE,
+            "an offset past the end must classify: {}",
+            take_err(err)
+        );
+
+        sia_object_free(uploaded);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// A packed add always appends, so a start offset there is refused rather
+/// than quietly dropped.
+#[test]
+fn packed_upload_refuses_a_start_offset() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [79u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let mut opts = default_upload_options();
+        opts.has_start_offset = true;
+        opts.start_offset = 64;
+        let mut packed = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
+            SIA_ERR_INVALID_STATE,
+        );
+        assert!(
+            take_err(err).contains("start offset"),
+            "the refusal must say why"
+        );
+
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
     }
 }
