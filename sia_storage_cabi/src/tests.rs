@@ -1323,3 +1323,194 @@ fn shared_sdk_reads_what_the_owner_shared() {
         sia_mock_free(mock);
     }
 }
+
+/// A recipient downloads a shared object, and the transfer survives the shared
+/// SDK being freed underneath it. That outliving is deliberate: the download
+/// clones the token refresh so it stays funded for longer than a token's five
+/// minute validity.
+///
+/// What this pins down is that freeing the handle mid transfer is safe and the
+/// download still completes correctly. It does not exercise the refresh
+/// itself, since a transfer this short never outlives the tokens it started
+/// with.
+#[test]
+fn shared_sdk_download_outlives_the_handle() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [43u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let payload: Vec<u8> = (0..(5 << 20)).map(|i| (i % 241) as u8).collect();
+        let obj = sia_object_new();
+        let opts = default_upload_options();
+        let mut up = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_start(sdk, obj, &raw const opts, &raw mut up, &raw mut err),
+            SIA_OK,
+            "sia_upload_start: {}",
+            take_err(err)
+        );
+        let mut wrote = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_write(
+                up,
+                payload.as_ptr(),
+                payload.len(),
+                std::ptr::null_mut(),
+                &raw mut wrote,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_upload_write: {}",
+            take_err(err)
+        );
+        let mut uploaded = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_finish(up, std::ptr::null_mut(), &raw mut uploaded, &raw mut err),
+            SIA_OK,
+            "sia_upload_finish: {}",
+            take_err(err)
+        );
+        sia_upload_free(up);
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_pin_object(sdk, uploaded, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "sia_sdk_pin_object: {}",
+            take_err(err)
+        );
+
+        let desc = CString::new("download key").unwrap();
+        let mut key = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_create_sharing_key(
+                sdk,
+                desc.as_ptr(),
+                false,
+                0,
+                std::ptr::null_mut(),
+                &raw mut key,
+                &raw mut err,
+            ),
+            SIA_OK,
+            "sia_sdk_create_sharing_key: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_share_object(sdk, key, uploaded, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "sia_sdk_share_object: {}",
+            take_err(err)
+        );
+
+        let mut seed = [0u8; 32];
+        sia_sharing_key_export(key, seed.as_mut_ptr());
+        let mut shared = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_shared_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut shared,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_shared_sdk: {}",
+            take_err(err)
+        );
+
+        // The recipient works from the object the key handed it, not the
+        // owner's handle.
+        let mut objs = std::ptr::null_mut();
+        let mut len = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_shared_sdk_objects(
+                shared,
+                0,
+                0,
+                std::ptr::null_mut(),
+                &raw mut objs,
+                &raw mut len,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_shared_sdk_objects: {}",
+            take_err(err)
+        );
+        assert_eq!(len, 1);
+
+        let dopts = default_download_options();
+        let mut dl = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_shared_sdk_download_start(
+                shared,
+                *objs,
+                &raw const dopts,
+                &raw mut dl,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_shared_sdk_download_start: {}",
+            take_err(err)
+        );
+
+        // Everything the recipient held is released before a single byte is
+        // read. Only the download keeps the transfer alive from here.
+        sia_object_array_free(objs, len);
+        sia_shared_sdk_free(shared);
+
+        let mut got = Vec::with_capacity(payload.len());
+        let mut buf = vec![0u8; 256 << 10];
+        loop {
+            let mut n = 0usize;
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_download_read(
+                    dl,
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    std::ptr::null_mut(),
+                    &raw mut n,
+                    &raw mut err,
+                ),
+                SIA_OK,
+                "sia_download_read after the shared sdk was freed: {}",
+                take_err(err)
+            );
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        sia_download_free(dl);
+
+        assert_eq!(got.len(), payload.len(), "downloaded a different length");
+        assert!(got == payload, "downloaded bytes differ from the upload");
+
+        sia_object_free(uploaded);
+        sia_object_free(obj);
+        sia_sharing_key_free(key);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}

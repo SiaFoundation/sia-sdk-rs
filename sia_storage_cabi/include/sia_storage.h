@@ -278,6 +278,10 @@ extern "C"
 	// *out_objs receives a heap array of owned object handles. Free the array
 	// (not the objects) with sia_object_array_free.
 	int32_t sia_shared_sdk_objects(const sia_shared_sdk_t *sdk, uint64_t offset, uint64_t limit, sia_cancel_t *cancel, sia_object_t ***out_objs, size_t *out_len, char **err);
+	// Reads with sia_download_read and frees with sia_download_free, like a
+	// download started from a sia_sdk_t. It keeps its own token refresh alive,
+	// so it stays usable after sia_shared_sdk_free.
+	int32_t sia_shared_sdk_download_start(const sia_shared_sdk_t *sdk, const sia_object_t *obj, const sia_download_options_t *opts, sia_download_t **out, char **err);
 
 // The mock backend is compiled only into a library built with the `mock` cargo
 // feature, so these are declared only when the consumer opts in with

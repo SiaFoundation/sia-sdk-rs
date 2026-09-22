@@ -1,5 +1,6 @@
 use crate::abi::*;
 use crate::builder::builder_error;
+use crate::download::{DownloadOptionsC, FfiDownload, make_download_options, start_download};
 use crate::object::write_object_array;
 use crate::sharing::{KeyStatsC, key_stats_c};
 use sia_storage::{Object, SharedSdk};
@@ -174,6 +175,50 @@ pub unsafe extern "C" fn sia_shared_sdk_objects(
                 SIA_OK
             }
             Some(Err(e)) => set_typed_err(err, &e),
+        }
+    })
+}
+
+/// Streams a shared object's data, paying hosts with the account tokens the
+/// sharing key's owner funds. The handle is an ordinary download, read with
+/// `sia_download_read` and released with `sia_download_free`.
+///
+/// It keeps the token refresh alive on its own, so it outlives
+/// `sia_shared_sdk_free` and stays usable for transfers longer than a token's
+/// five minute validity.
+///
+/// # Safety
+/// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_shared_sdk_connect` or `sia_mock_shared_sdk` that has not been freed.
+/// - `obj` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_shared_sdk_object`, `sia_shared_sdk_objects` or any other call returning an object,
+///   that has not been freed.
+/// - `opts` must be non null and point to an initialised struct.
+/// - `out` must be non null and writable. On success it receives an owned handle that must be
+///   released with `sia_download_free`.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_shared_sdk_download_start(
+    sdk: *const SharedSdk,
+    obj: *const Object,
+    opts: *const DownloadOptionsC,
+    out: *mut *mut FfiDownload,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    guarded(err, || {
+        let (Some(sdk), Some(obj), Some(opts)) =
+            (unsafe { (sdk.as_ref(), obj.as_ref(), opts.as_ref()) })
+        else {
+            return SIA_ERR_INVALID_HANDLE;
+        };
+        let options = make_download_options(opts);
+        // Download::new spawns tasks; enter the runtime context for the call.
+        let _guard = runtime().enter();
+        match sdk.download(obj, options) {
+            Ok(dl) => unsafe { start_download(Box::pin(dl), out) },
+            Err(e) => set_typed_err(err, &e),
         }
     })
 }
