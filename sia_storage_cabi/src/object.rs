@@ -18,6 +18,28 @@ pub unsafe extern "C" fn sia_object_new() -> *mut Object {
     Box::into_raw(Box::new(Object::default()))
 }
 
+/// Returns a copy of `o` shortened to `length` bytes.
+///
+/// The last retained slab is shortened to end at `length` and any slab past it
+/// is dropped. A `length` at or above the object's current size copies it
+/// unchanged. The original is untouched, so the caller frees both.
+///
+/// This only rewrites the object's slab list. The result has to be pinned with
+/// `sia_sdk_pin_object` before the indexer knows about it, and the sectors the
+/// dropped slabs referenced stay where they are until they are pruned.
+///
+/// # Safety
+/// - `o` may be null, which returns null. Otherwise it must be a live handle from
+///   `sia_object_new` or any call that returns an object, that has not been freed.
+/// - The result is an owned handle that must be released with `sia_object_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_object_truncate(o: *const Object, length: u64) -> *mut Object {
+    let Some(o) = (unsafe { o.as_ref() }) else {
+        return std::ptr::null_mut();
+    };
+    Box::into_raw(Box::new(o.truncate(length)))
+}
+
 /// # Safety
 /// - `o` may be null. Otherwise it must come from `sia_object_new` or any call that returns an
 ///   object and must not be used again after this returns.

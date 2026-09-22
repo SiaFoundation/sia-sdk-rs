@@ -179,6 +179,11 @@ extern "C"
 
 	sia_object_t *sia_object_new(void);
 	void sia_object_free(sia_object_t *o);
+	// A copy of o shortened to length bytes, or NULL when o is NULL. The last
+	// retained slab is shortened and any slab past it is dropped; a length at or
+	// above the current size copies it unchanged. o is untouched, so free both.
+	// Pin the result with sia_sdk_pin_object before the indexer knows about it.
+	sia_object_t *sia_object_truncate(const sia_object_t *o, uint64_t length);
 	void sia_object_id(const sia_object_t *o, uint8_t out[32]);
 	uint64_t sia_object_size(const sia_object_t *o);
 	uint64_t sia_object_encoded_size(const sia_object_t *o);
