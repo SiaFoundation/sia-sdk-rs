@@ -60,6 +60,7 @@ extern "C"
 	typedef struct sia_cancel sia_cancel_t;
 	typedef struct sia_sharing_key sia_sharing_key_t;
 	typedef struct sia_key_records sia_key_records_t;
+	typedef struct sia_shared_sdk sia_shared_sdk_t;
 	typedef struct sia_mock sia_mock_t;
 
 	// The indexer's snapshot of what a sharing key grants access to.
@@ -261,6 +262,18 @@ extern "C"
 	// from hosts for up to five more minutes.
 	int32_t sia_sdk_revoke_sharing_key(const sia_sdk_t *sdk, const sia_sharing_key_t *key, sia_cancel_t *cancel, char **err);
 
+	// The recipient side of a sharing key. sia_sdk_* above is the owner's half,
+	// authenticated with the app key; these authenticate with the sharing key
+	// itself and need no account. A shared SDK is read only: it cannot upload,
+	// pin or delete.
+	//
+	// seed is the whole credential, the 32 bytes sia_sharing_key_export writes.
+	// There is no registration or approval step.
+	int32_t sia_shared_sdk_connect(const char *indexer_url, const uint8_t seed[32], sia_cancel_t *cancel, sia_shared_sdk_t **out, char **err);
+	// Safe to call while a download started from this handle is still running;
+	// the download keeps its own token refresh alive.
+	void sia_shared_sdk_free(sia_shared_sdk_t *sdk);
+
 // The mock backend is compiled only into a library built with the `mock` cargo
 // feature, so these are declared only when the consumer opts in with
 // -DSIA_STORAGE_MOCK. A production archive does not export them and linking
@@ -275,6 +288,9 @@ extern "C"
 	sia_mock_t *sia_mock_new(size_t num_hosts);
 	void sia_mock_free(sia_mock_t *m);
 	int32_t sia_mock_sdk(const sia_mock_t *m, const uint8_t app_key[32], sia_cancel_t *cancel, sia_sdk_t **out, char **err);
+	// The recipient half, served by the same mock network. Release with
+	// sia_shared_sdk_free.
+	int32_t sia_mock_shared_sdk(const sia_mock_t *m, const uint8_t seed[32], sia_cancel_t *cancel, sia_shared_sdk_t **out, char **err);
 	// Drops every sector the mock hosts hold, so downloading an object that was
 	// already uploaded fails the way it would if the hosts had lost the data.
 	void sia_mock_clear_sectors(const sia_mock_t *m);
