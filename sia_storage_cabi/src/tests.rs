@@ -2229,3 +2229,77 @@ fn sdk_slab_fetches_by_id_from_an_object() {
         sia_mock_free(mock);
     }
 }
+
+/// Scans `text` for every `sia_*` name immediately followed by `(`, which is
+/// what a declaration or a definition looks like and what a prose mention of
+/// one does not.
+fn sia_symbols_called_in(text: &str) -> std::collections::BTreeSet<String> {
+    let bytes = text.as_bytes();
+    let mut found = std::collections::BTreeSet::new();
+    let mut i = 0;
+    while let Some(rel) = text[i..].find("sia_") {
+        let start = i + rel;
+        let mut end = start;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_lowercase()
+                || bytes[end].is_ascii_digit()
+                || bytes[end] == b'_')
+        {
+            end += 1;
+        }
+        if bytes.get(end) == Some(&b'(') {
+            found.insert(text[start..end].to_string());
+        }
+        i = start + 4;
+    }
+    found
+}
+
+/// The header is hand maintained, so nothing but this keeps it in step with
+/// what the crate exports. A declaration with no export fails at link time in
+/// a consumer's project; an export with no declaration is invisible to every C
+/// caller.
+///
+/// Must stay under the `mock` feature: this scans the header as text, so the
+/// `#ifdef SIA_STORAGE_MOCK` block always counts as declared.
+#[test]
+fn header_declares_exactly_what_the_crate_exports() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let header = std::fs::read_to_string(root.join("include/sia_storage.h"))
+        .expect("the vendored header must be readable");
+    let declared = sia_symbols_called_in(&header);
+
+    // Read the directory rather than listing modules, so a new file cannot
+    // add an export this test never looks at.
+    let mut exported = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(root.join("src")).expect("src must be readable") {
+        let path = entry.expect("readable entry").path();
+        if path.extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("source must be readable");
+        for (i, _) in src.match_indices("extern \"C\" fn ") {
+            let rest = &src[i + "extern \"C\" fn ".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
+                .collect();
+            if name.starts_with("sia_") {
+                exported.insert(name);
+            }
+        }
+    }
+
+    assert!(
+        !declared.is_empty() && !exported.is_empty(),
+        "the scan found nothing, so it is broken rather than passing"
+    );
+
+    let missing_decl: Vec<_> = exported.difference(&declared).collect();
+    let missing_export: Vec<_> = declared.difference(&exported).collect();
+    assert!(
+        missing_decl.is_empty() && missing_export.is_empty(),
+        "header and exports disagree.\n  exported but not declared (unreachable from C): {missing_decl:?}\n  declared but not exported (links will fail): {missing_export:?}"
+    );
+}
