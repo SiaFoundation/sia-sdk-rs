@@ -100,7 +100,7 @@ pub(crate) struct SlabReader {
 }
 
 /// How much data is buffered before a single `apply_keystream` call.
-const READ_BUFFER_SIZE: usize = 1 << 20;
+const READ_BUFFER_SIZE: usize = 64 << 10;
 
 pub(crate) struct ReadSlab {
     pub encryption_key: EncryptionKey,
