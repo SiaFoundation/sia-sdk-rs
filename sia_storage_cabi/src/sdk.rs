@@ -360,3 +360,58 @@ pub unsafe extern "C" fn sia_sdk_object_from_share_url(
         }
     })
 }
+
+/// Retrieves a pinned slab from the indexer by its id, as a JSON object.
+///
+/// It carries `version`, `id`, `encryptionKey`, `minShards` and `sectors`,
+/// each sector with its `root` and `hostKey`. JSON rather than a typed struct
+/// because the sector list is variable length, the same reason
+/// `sia_sdk_hosts` returns JSON.
+///
+/// The `encryptionKey` is the slab's data key. Treat the result as secret:
+/// anyone holding it and the sector roots can recover the slab's contents.
+///
+/// # Safety
+/// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_builder_connect`, `sia_builder_register` or `sia_mock_sdk` that has not been freed.
+/// - `id` must be readable for 32 bytes.
+/// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
+///   from `sia_cancel_new`.
+/// - `out_json` must be non null and writable. On success it receives an owned string that must be
+///   released with `sia_string_free`.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_sdk_slab(
+    sdk: *const Sdk,
+    id: *const u8,
+    cancel: *mut CancellationToken,
+    out_json: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
+    guarded(err, || {
+        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
+            return SIA_ERR_INVALID_HANDLE;
+        };
+        let id = unsafe { hash_from_ptr(id) };
+        match block_on(cancel, sdk.slab(&id)) {
+            None => set_cancelled(err),
+            Some(Ok(slab)) => {
+                let json = match serde_json::to_string(&slab) {
+                    Ok(j) => j,
+                    Err(e) => return set_err(err, SIA_ERR, format!("failed to encode slab: {e}")),
+                };
+                match CString::new(json) {
+                    Ok(s) => {
+                        unsafe { *out_json = s.into_raw() }
+                        SIA_OK
+                    }
+                    Err(e) => set_err(err, SIA_ERR, format!("failed to encode slab: {e}")),
+                }
+            }
+            Some(Err(e)) => set_typed_err(err, &e),
+        }
+    })
+}

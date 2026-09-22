@@ -18,6 +18,43 @@ pub unsafe extern "C" fn sia_object_new() -> *mut Object {
     Box::into_raw(Box::new(Object::default()))
 }
 
+/// The number of slabs the object's data is spread across.
+///
+/// # Safety
+/// - `o` may be null, which returns 0. Otherwise it must be a live handle from `sia_object_new` or
+///   any call that returns an object, that has not been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_object_slab_count(o: *const Object) -> usize {
+    unsafe { o.as_ref() }.map_or(0, |o| o.slabs().len())
+}
+
+/// Writes the id of the object's `i`th slab, the id `sia_sdk_slab` takes.
+///
+/// The id is derived from the slab's contents rather than stored, so this is
+/// the only way to obtain one without reimplementing that hash.
+///
+/// # Safety
+/// - `o` may be null, which returns false. Otherwise it must be a live handle from
+///   `sia_object_new` or any call that returns an object, that has not been freed.
+/// - `out_id` must be writable for 32 bytes. It is left untouched when this returns false,
+///   which happens when `i` is out of range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_object_slab_id_at(
+    o: *const Object,
+    i: usize,
+    out_id: *mut u8,
+) -> bool {
+    let Some(o) = (unsafe { o.as_ref() }) else {
+        return false;
+    };
+    let Some(slab) = o.slabs().get(i) else {
+        return false;
+    };
+    let id: [u8; 32] = slab.digest().into();
+    unsafe { std::ptr::copy_nonoverlapping(id.as_ptr(), out_id, 32) };
+    true
+}
+
 /// Returns a copy of `o` shortened to `length` bytes.
 ///
 /// The last retained slab is shortened to end at `length` and any slab past it
