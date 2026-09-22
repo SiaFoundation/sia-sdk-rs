@@ -1,5 +1,6 @@
 use crate::abi::*;
 use crate::download::*;
+use crate::hosts::*;
 use crate::mock::*;
 use crate::object::*;
 use crate::sdk::*;
@@ -1512,5 +1513,260 @@ fn shared_sdk_download_outlives_the_handle() {
         sia_sharing_key_free(key);
         sia_sdk_free(sdk);
         sia_mock_free(mock);
+    }
+}
+
+fn no_host_filters() -> HostQueryC {
+    HostQueryC {
+        has_location: false,
+        latitude: 0.0,
+        longitude: 0.0,
+        offset: 0,
+        limit: 0,
+        country: std::ptr::null(),
+    }
+}
+
+/// Every HostQuery field survives the crossing. This tests the conversion
+/// directly rather than through the mock, because the mock's indexer honours
+/// only offset and limit and ignores location, protocol and country, so a
+/// round trip through it would prove nothing about those three.
+#[test]
+fn host_query_marshals_every_field() {
+    unsafe {
+        let q = no_host_filters();
+        let out = make_host_query(&q).expect("an empty query is valid");
+        assert!(
+            out.location.is_none(),
+            "no location means no proximity sort"
+        );
+        assert_eq!(
+            out.protocol,
+            Some(sia_storage::Protocol::SiaMux),
+            "listings are always scoped to the only protocol we can dial"
+        );
+        assert!(out.country.is_none());
+        assert!(out.offset.is_none(), "0 means the indexer's default");
+        assert!(out.limit.is_none());
+
+        let mut q = no_host_filters();
+        q.has_location = true;
+        q.latitude = 52.37;
+        q.longitude = 4.90;
+        q.offset = 20;
+        q.limit = 5;
+        let country = CString::new("NL").unwrap();
+        q.country = country.as_ptr();
+        let out = make_host_query(&q).expect("a full query is valid");
+        let loc = out.location.expect("location must cross");
+        assert_eq!(loc.latitude, 52.37);
+        assert_eq!(loc.longitude, 4.90);
+        assert_eq!(out.offset, Some(20));
+        assert_eq!(out.limit, Some(5));
+        assert_eq!(out.country.as_deref(), Some("NL"));
+        assert_eq!(out.protocol, Some(sia_storage::Protocol::SiaMux));
+
+        // has_location false must win over whatever the coords hold.
+        let mut q = no_host_filters();
+        q.latitude = 1.0;
+        q.longitude = 2.0;
+        let out = make_host_query(&q).unwrap();
+        assert!(
+            out.location.is_none(),
+            "has_location false must ignore the coords"
+        );
+    }
+}
+
+/// The listing crosses as JSON in the shape a consumer decodes, and the paging
+/// the mock does honour reaches it.
+#[test]
+fn sdk_hosts_lists_as_json() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [61u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let fetch = |q: &HostQueryC| -> serde_json::Value {
+            let mut out = std::ptr::null_mut();
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_sdk_hosts(
+                    sdk,
+                    &raw const *q,
+                    std::ptr::null_mut(),
+                    &raw mut out,
+                    &raw mut err
+                ),
+                SIA_OK,
+                "sia_sdk_hosts: {}",
+                take_err(err)
+            );
+            let json = CStr::from_ptr(out).to_str().unwrap().to_string();
+            sia_string_free(out);
+            serde_json::from_str(&json).expect("hosts must be valid JSON")
+        };
+
+        let all = fetch(&no_host_filters());
+        let hosts = all.as_array().expect("a JSON array");
+        assert_eq!(hosts.len(), 40, "every mock host should be listed");
+
+        // The field names a consumer decodes into, not just "it parsed".
+        let first = &hosts[0];
+        assert!(first["publicKey"].is_string(), "publicKey: {first}");
+        assert!(
+            first["goodForUpload"].is_boolean(),
+            "goodForUpload: {first}"
+        );
+        assert!(first["countryCode"].is_string(), "countryCode: {first}");
+        let addrs = first["addresses"].as_array().expect("addresses array");
+        assert!(!addrs.is_empty(), "a host must carry an address");
+        assert!(addrs[0]["protocol"].is_string(), "protocol: {first}");
+        assert!(addrs[0]["address"].is_string(), "address: {first}");
+
+        let mut q = no_host_filters();
+        q.limit = 5;
+        assert_eq!(fetch(&q).as_array().unwrap().len(), 5, "limit must apply");
+        q.offset = 38;
+        q.limit = 10;
+        assert_eq!(
+            fetch(&q).as_array().unwrap().len(),
+            2,
+            "offset must skip, and a limit past the end must not wrap"
+        );
+
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// The recipient sees the hosts serving the key's objects, scoped to the key.
+#[test]
+fn shared_sdk_hosts_are_scoped_to_the_key() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [67u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let desc = CString::new("host listing key").unwrap();
+        let mut key = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_create_sharing_key(
+                sdk,
+                desc.as_ptr(),
+                false,
+                0,
+                std::ptr::null_mut(),
+                &raw mut key,
+                &raw mut err,
+            ),
+            SIA_OK,
+            "sia_sdk_create_sharing_key: {}",
+            take_err(err)
+        );
+        let mut seed = [0u8; 32];
+        sia_sharing_key_export(key, seed.as_mut_ptr());
+
+        let mut shared = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_shared_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut shared,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_shared_sdk: {}",
+            take_err(err)
+        );
+
+        let q = no_host_filters();
+        let mut out = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_shared_sdk_hosts(
+                shared,
+                &raw const q,
+                std::ptr::null_mut(),
+                &raw mut out,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_shared_sdk_hosts: {}",
+            take_err(err)
+        );
+        let json = CStr::from_ptr(out).to_str().unwrap().to_string();
+        sia_string_free(out);
+        let hosts: serde_json::Value =
+            serde_json::from_str(&json).expect("hosts must be valid JSON");
+        let hosts = hosts.as_array().expect("a JSON array");
+        assert!(
+            !hosts.is_empty(),
+            "a key with tokens must see the hosts serving it"
+        );
+        assert!(hosts[0]["publicKey"].is_string());
+
+        sia_shared_sdk_free(shared);
+        sia_sharing_key_free(key);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// Both listings report a missing handle rather than dereferencing it.
+#[test]
+fn hosts_reject_null_handles() {
+    unsafe {
+        let q = no_host_filters();
+        let mut out = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_hosts(
+                std::ptr::null(),
+                &raw const q,
+                std::ptr::null_mut(),
+                &raw mut out,
+                &raw mut err
+            ),
+            SIA_ERR_INVALID_HANDLE,
+        );
+        assert_eq!(
+            sia_shared_sdk_hosts(
+                std::ptr::null(),
+                &raw const q,
+                std::ptr::null_mut(),
+                &raw mut out,
+                &raw mut err
+            ),
+            SIA_ERR_INVALID_HANDLE,
+        );
+        assert!(err.is_null(), "an absent handle sets no message");
     }
 }

@@ -112,6 +112,25 @@ extern "C"
 		uintptr_t userdata;
 	} sia_download_options_t;
 
+	// Filters for a host listing. A zeroed struct with a NULL country applies no
+	// filters. offset and limit follow the usual convention where 0 means the
+	// indexer's default paging.
+	//
+	// There is no protocol filter: listings are always scoped to SiaMux, which
+	// is the only protocol this library's transport can dial.
+	typedef struct
+	{
+		// When false, latitude and longitude are ignored and hosts come back in
+		// the indexer's order rather than sorted by proximity.
+		bool has_location;
+		double latitude;
+		double longitude;
+		uint64_t offset;
+		uint64_t limit;
+		// ISO 3166-1 alpha-2, or NULL for no country filter.
+		const char *country;
+	} sia_host_query_t;
+
 	void sia_string_free(char *s);
 
 	// Installs a process-wide logger bridging the Rust `log` crate.
@@ -239,6 +258,12 @@ extern "C"
 	// Writes the public half, by which the indexer identifies the key. Safe to log.
 	void sia_sharing_key_public_key(const sia_sharing_key_t *key, uint8_t out[32]);
 
+	// *out_json receives a JSON array of hosts, each with publicKey, addresses
+	// (protocol and address), countryCode, latitude, longitude and
+	// goodForUpload. Free it with sia_string_free. It is JSON rather than a
+	// typed collection because a host's address list is variable length.
+	int32_t sia_sdk_hosts(const sia_sdk_t *sdk, const sia_host_query_t *query, sia_cancel_t *cancel, char **out_json, char **err);
+
 	int32_t sia_sdk_create_sharing_key(const sia_sdk_t *sdk, const char *description, bool has_expiry, int64_t expires_at_unix_us, sia_cancel_t *cancel, sia_sharing_key_t **out, char **err);
 	// *out_description receives an owned string. Free it with sia_string_free.
 	int32_t sia_sdk_sharing_key(const sia_sdk_t *sdk, const sia_sharing_key_t *key, sia_cancel_t *cancel, char **out_description, sia_key_stats_t *out_stats, char **err);
@@ -282,6 +307,8 @@ extern "C"
 	// download started from a sia_sdk_t. It keeps its own token refresh alive,
 	// so it stays usable after sia_shared_sdk_free.
 	int32_t sia_shared_sdk_download_start(const sia_shared_sdk_t *sdk, const sia_object_t *obj, const sia_download_options_t *opts, sia_download_t **out, char **err);
+	// The hosts serving this key's objects, in the same shape as sia_sdk_hosts.
+	int32_t sia_shared_sdk_hosts(const sia_shared_sdk_t *sdk, const sia_host_query_t *query, sia_cancel_t *cancel, char **out_json, char **err);
 
 // The mock backend is compiled only into a library built with the `mock` cargo
 // feature, so these are declared only when the consumer opts in with

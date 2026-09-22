@@ -10,6 +10,7 @@
 mod abi;
 mod builder;
 mod download;
+mod hosts;
 // Gated here rather than on each item inside. With the module always
 // compiled, every mock entry point needed its own attribute, and forgetting
 // one on a new function would ship mock code in a production archive.
