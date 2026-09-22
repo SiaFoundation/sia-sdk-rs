@@ -17,6 +17,7 @@ mod download;
 mod mock;
 mod object;
 mod sdk;
+mod shared_sdk;
 mod sharing;
 mod upload;
 

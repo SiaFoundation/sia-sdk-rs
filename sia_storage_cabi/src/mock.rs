@@ -1,7 +1,7 @@
 use crate::abi::*;
 use crate::builder::builder_error;
-use sia_storage::Sdk;
 use sia_storage::mock::MockNetwork;
+use sia_storage::{Sdk, SharedSdk};
 use std::ffi::c_char;
 use tokio_util::sync::CancellationToken;
 
@@ -60,6 +60,46 @@ pub unsafe extern "C" fn sia_mock_sdk(
         };
         let key = unsafe { app_key_from_ptr(app_key) };
         match block_on(cancel, m.network.sdk(key)) {
+            None => set_cancelled(err),
+            Some(Ok(sdk)) => {
+                unsafe { *out = Box::into_raw(Box::new(sdk)) }
+                SIA_OK
+            }
+            Some(Err(e)) => builder_error(err, e),
+        }
+    })
+}
+
+/// Builds a SharedSdk served by the mock network, as the recipient of the
+/// sharing key derived from `seed`. The result is an ordinary handle and is
+/// released with `sia_shared_sdk_free` like any other.
+///
+/// # Safety
+/// - `m` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_mock_new` that has not been freed.
+/// - `seed` must be readable for 32 bytes.
+/// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
+///   from `sia_cancel_new`.
+/// - `out` must be non null and writable. On success it receives an owned handle that must be
+///   released with `sia_shared_sdk_free`.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_mock_shared_sdk(
+    m: *const FfiMock,
+    seed: *const u8,
+    cancel: *mut CancellationToken,
+    out: *mut *mut SharedSdk,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
+    guarded(err, || {
+        let Some(m) = (unsafe { m.as_ref() }) else {
+            return SIA_ERR_INVALID_HANDLE;
+        };
+        let seed = unsafe { seed_from_ptr(seed) };
+        match block_on(cancel, m.network.shared_sdk(seed)) {
             None => set_cancelled(err),
             Some(Ok(sdk)) => {
                 unsafe { *out = Box::into_raw(Box::new(sdk)) }

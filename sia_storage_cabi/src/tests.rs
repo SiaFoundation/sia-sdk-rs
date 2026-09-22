@@ -3,6 +3,7 @@ use crate::download::*;
 use crate::mock::*;
 use crate::object::*;
 use crate::sdk::*;
+use crate::shared_sdk::*;
 use crate::sharing::*;
 use crate::upload::*;
 use std::ffi::{CStr, CString, c_char};
@@ -1051,4 +1052,95 @@ fn error_status_classification() {
         SIA_ERR,
         "an unrelated queue error must not borrow another code"
     );
+}
+
+/// A recipient holding only a seed can reach the indexer with no account of
+/// its own, and freeing the handle is clean.
+#[test]
+fn shared_sdk_connects_with_only_a_seed() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let owner_seed = [21u8; 32];
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                owner_seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let desc = CString::new("recipient key").unwrap();
+        let mut key = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_create_sharing_key(
+                sdk,
+                desc.as_ptr(),
+                false,
+                0,
+                std::ptr::null_mut(),
+                &raw mut key,
+                &raw mut err,
+            ),
+            SIA_OK,
+            "sia_sdk_create_sharing_key: {}",
+            take_err(err)
+        );
+
+        // The seed travels to the recipient out of band; it is all they get.
+        let mut shared_seed = [0u8; 32];
+        sia_sharing_key_export(key, shared_seed.as_mut_ptr());
+
+        let mut shared = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_shared_sdk(
+                mock,
+                shared_seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut shared,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_shared_sdk: {}",
+            take_err(err)
+        );
+        assert!(!shared.is_null(), "connecting must yield a handle");
+
+        sia_shared_sdk_free(shared);
+        sia_sharing_key_free(key);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// Every fallible entry point reports a missing handle rather than
+/// dereferencing it, and free accepts null the way free(3) does.
+#[test]
+fn shared_sdk_rejects_null_handles() {
+    unsafe {
+        let seed = [7u8; 32];
+        let mut out = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_shared_sdk(
+                std::ptr::null(),
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut out,
+                &raw mut err
+            ),
+            SIA_ERR_INVALID_HANDLE,
+        );
+        assert!(err.is_null(), "an absent handle sets no message");
+
+        sia_shared_sdk_free(std::ptr::null_mut());
+    }
 }
