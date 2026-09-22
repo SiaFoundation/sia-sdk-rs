@@ -1926,6 +1926,17 @@ fn upload_start_offset_overwrites_in_place() {
             "an overwrite inside the object must not change its size"
         );
 
+        // An id is derived from the object's slabs, and an overwrite replaces
+        // the ones covering its range, so the result is a different object.
+        let mut before = [0u8; 32];
+        let mut after = [0u8; 32];
+        sia_object_id(uploaded, before.as_mut_ptr());
+        sia_object_id(rewritten, after.as_mut_ptr());
+        assert_ne!(
+            before, after,
+            "rewriting slabs must move the id, whatever the docs once said"
+        );
+
         let mut expected = original.clone();
         expected[at..at + patch.len()].copy_from_slice(&patch);
         let got = download_all(sdk, rewritten);
