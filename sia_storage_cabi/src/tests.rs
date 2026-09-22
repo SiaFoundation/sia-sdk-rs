@@ -2036,3 +2036,81 @@ fn packed_upload_refuses_a_start_offset() {
         sia_mock_free(mock);
     }
 }
+
+/// Truncation shortens the object, leaves the original alone, and the result
+/// downloads as the leading prefix of what was uploaded.
+#[test]
+fn object_truncate_shortens_and_copies() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [83u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let original: Vec<u8> = (0..(6 << 20)).map(|i| (i % 251) as u8).collect();
+        let uploaded = upload_object_for_test(sdk, &original);
+
+        let cut = 1_000_000u64;
+        let short = sia_object_truncate(uploaded, cut);
+        assert!(!short.is_null());
+        assert_eq!(sia_object_size(short), cut, "truncate must resize");
+        assert_eq!(
+            sia_object_size(uploaded),
+            original.len() as u64,
+            "the original must be untouched"
+        );
+
+        // The bytes have to be the real prefix, not just the right length.
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_pin_object(sdk, short, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "sia_sdk_pin_object: {}",
+            take_err(err)
+        );
+        let got = download_all(sdk, short);
+        assert_eq!(got.len(), cut as usize, "downloaded a different length");
+        assert!(
+            got == original[..cut as usize],
+            "the truncated object must download as the original's prefix"
+        );
+
+        // At or past the current size it is a plain copy.
+        let same = sia_object_truncate(uploaded, original.len() as u64);
+        assert_eq!(sia_object_size(same), original.len() as u64);
+        let longer = sia_object_truncate(uploaded, original.len() as u64 * 2);
+        assert_eq!(
+            sia_object_size(longer),
+            original.len() as u64,
+            "a length past the end must not grow the object"
+        );
+
+        // Truncating to nothing is legal and yields an empty object.
+        let empty = sia_object_truncate(uploaded, 0);
+        assert_eq!(sia_object_size(empty), 0);
+
+        assert!(
+            sia_object_truncate(std::ptr::null(), 0).is_null(),
+            "a null object must return null rather than be dereferenced"
+        );
+
+        sia_object_free(empty);
+        sia_object_free(longer);
+        sia_object_free(same);
+        sia_object_free(short);
+        sia_object_free(uploaded);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
