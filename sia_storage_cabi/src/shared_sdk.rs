@@ -1,6 +1,8 @@
 use crate::abi::*;
 use crate::builder::builder_error;
-use sia_storage::SharedSdk;
+use crate::object::write_object_array;
+use crate::sharing::{KeyStatsC, key_stats_c};
+use sia_storage::{Object, SharedSdk};
 use std::ffi::c_char;
 use tokio_util::sync::CancellationToken;
 
@@ -61,4 +63,117 @@ pub unsafe extern "C" fn sia_shared_sdk_free(sdk: *mut SharedSdk) {
     if !sdk.is_null() {
         drop(unsafe { Box::from_raw(sdk) });
     }
+}
+
+/// Fetches the indexer's current stats for the sharing key this handle holds.
+///
+/// # Safety
+/// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_shared_sdk_connect` or `sia_mock_shared_sdk` that has not been freed.
+/// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
+///   from `sia_cancel_new`.
+/// - `out_stats` must be non null and writable.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_shared_sdk_stats(
+    sdk: *const SharedSdk,
+    cancel: *mut CancellationToken,
+    out_stats: *mut KeyStatsC,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
+    guarded(err, || {
+        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
+            return SIA_ERR_INVALID_HANDLE;
+        };
+        match block_on(cancel, sdk.stats()) {
+            None => set_cancelled(err),
+            Some(Ok(stats)) => {
+                unsafe { *out_stats = key_stats_c(&stats) }
+                SIA_OK
+            }
+            Some(Err(e)) => set_typed_err(err, &e),
+        }
+    })
+}
+
+/// Retrieves and decrypts one object the sharing key grants access to.
+///
+/// # Safety
+/// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_shared_sdk_connect` or `sia_mock_shared_sdk` that has not been freed.
+/// - `id` must be readable for 32 bytes.
+/// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
+///   from `sia_cancel_new`.
+/// - `out` must be non null and writable. On success it receives an owned handle that must be
+///   released with `sia_object_free`.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_shared_sdk_object(
+    sdk: *const SharedSdk,
+    id: *const u8,
+    cancel: *mut CancellationToken,
+    out: *mut *mut Object,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
+    guarded(err, || {
+        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
+            return SIA_ERR_INVALID_HANDLE;
+        };
+        let key = unsafe { hash_from_ptr(id) };
+        match block_on(cancel, sdk.object(&key)) {
+            None => set_cancelled(err),
+            Some(Ok(obj)) => {
+                unsafe { *out = Box::into_raw(Box::new(obj)) }
+                SIA_OK
+            }
+            Some(Err(e)) => set_typed_err(err, &e),
+        }
+    })
+}
+
+/// Lists and decrypts a page of the objects the sharing key grants access to.
+/// Pass 0 for offset or limit to use the indexer's default paging.
+///
+/// # Safety
+/// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_shared_sdk_connect` or `sia_mock_shared_sdk` that has not been freed.
+/// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
+///   from `sia_cancel_new`.
+/// - `out_objs` must be non null and writable. On success it receives an owned array that must be
+///   released with `sia_object_array_free`.
+/// - `out_len` must be non null and writable.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_shared_sdk_objects(
+    sdk: *const SharedSdk,
+    offset: u64,
+    limit: u64,
+    cancel: *mut CancellationToken,
+    out_objs: *mut *mut *mut Object,
+    out_len: *mut usize,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
+    guarded(err, || {
+        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
+            return SIA_ERR_INVALID_HANDLE;
+        };
+        let (offset, limit) = paging(offset, limit);
+        match block_on(cancel, sdk.objects(offset, limit)) {
+            None => set_cancelled(err),
+            Some(Ok(objects)) => {
+                unsafe { write_object_array(objects, out_objs, out_len) };
+                SIA_OK
+            }
+            Some(Err(e)) => set_typed_err(err, &e),
+        }
+    })
 }

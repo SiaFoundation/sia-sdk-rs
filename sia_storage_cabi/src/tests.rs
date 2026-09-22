@@ -1144,3 +1144,182 @@ fn shared_sdk_rejects_null_handles() {
         sia_shared_sdk_free(std::ptr::null_mut());
     }
 }
+
+/// The whole recipient path: the owner uploads and attaches an object, then a
+/// recipient holding only the seed lists it, fetches it by id, and sees the
+/// key's stats. Nothing here touches the owner's SDK.
+#[test]
+fn shared_sdk_reads_what_the_owner_shared() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [31u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        // Spans more than one sector so the object has several shards.
+        let payload: Vec<u8> = (0..(5 << 20)).map(|i| (i % 251) as u8).collect();
+        let obj = sia_object_new();
+        let opts = default_upload_options();
+        let mut up = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_start(sdk, obj, &raw const opts, &raw mut up, &raw mut err),
+            SIA_OK,
+            "sia_upload_start: {}",
+            take_err(err)
+        );
+        let mut wrote = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_write(
+                up,
+                payload.as_ptr(),
+                payload.len(),
+                std::ptr::null_mut(),
+                &raw mut wrote,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_upload_write: {}",
+            take_err(err)
+        );
+        let mut uploaded = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_finish(up, std::ptr::null_mut(), &raw mut uploaded, &raw mut err),
+            SIA_OK,
+            "sia_upload_finish: {}",
+            take_err(err)
+        );
+        sia_upload_free(up);
+
+        // Attaching goes through the indexer, which only knows objects that
+        // have been pinned.
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_pin_object(sdk, uploaded, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "sia_sdk_pin_object: {}",
+            take_err(err)
+        );
+
+        let desc = CString::new("shared with a recipient").unwrap();
+        let mut key = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_create_sharing_key(
+                sdk,
+                desc.as_ptr(),
+                false,
+                0,
+                std::ptr::null_mut(),
+                &raw mut key,
+                &raw mut err,
+            ),
+            SIA_OK,
+            "sia_sdk_create_sharing_key: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_share_object(sdk, key, uploaded, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "sia_sdk_share_object: {}",
+            take_err(err)
+        );
+
+        let mut seed = [0u8; 32];
+        sia_sharing_key_export(key, seed.as_mut_ptr());
+        let mut shared = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_shared_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut shared,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_shared_sdk: {}",
+            take_err(err)
+        );
+
+        let mut objs = std::ptr::null_mut();
+        let mut len = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_shared_sdk_objects(
+                shared,
+                0,
+                0,
+                std::ptr::null_mut(),
+                &raw mut objs,
+                &raw mut len,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_shared_sdk_objects: {}",
+            take_err(err)
+        );
+        assert_eq!(len, 1, "the key has exactly one object attached");
+
+        let listed = *objs;
+        assert_eq!(
+            sia_object_size(listed),
+            payload.len() as u64,
+            "the recipient must decrypt the object's real size"
+        );
+        let mut id = [0u8; 32];
+        sia_object_id(listed, id.as_mut_ptr());
+
+        // Fetching the same object by id must agree with the listing.
+        let mut one = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_shared_sdk_object(
+                shared,
+                id.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut one,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_shared_sdk_object: {}",
+            take_err(err)
+        );
+        let mut id2 = [0u8; 32];
+        sia_object_id(one, id2.as_mut_ptr());
+        assert_eq!(id, id2, "by id must return the object that was asked for");
+        assert_eq!(sia_object_size(one), payload.len() as u64);
+
+        let mut stats = std::mem::zeroed::<KeyStatsC>();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_shared_sdk_stats(shared, std::ptr::null_mut(), &raw mut stats, &raw mut err),
+            SIA_OK,
+            "sia_shared_sdk_stats: {}",
+            take_err(err)
+        );
+        assert_eq!(stats.object_count, 1, "stats must see the attached object");
+
+        sia_object_free(one);
+        sia_object_array_free(objs, len);
+        sia_shared_sdk_free(shared);
+        sia_object_free(uploaded);
+        sia_sharing_key_free(key);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
