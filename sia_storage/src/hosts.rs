@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use chrono::Utc;
-use log::debug;
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use sia_core::rhp4::{AccountToken, HostPrices, SECTOR_SIZE};
 use sia_core::signing::{PrivateKey, PublicKey};
@@ -17,6 +17,7 @@ use tokio::task::JoinSet;
 use crate::hosts::metrics::{HostMetric, HostScore, RPCAverage, Transfer};
 use crate::rhp4::{Client, HostEndpoint, Transport};
 use crate::time::{Duration, Elapsed, Instant, timeout};
+use crate::{AppKey, app_client};
 
 mod metrics;
 
@@ -250,6 +251,14 @@ impl<T> HostCache<T> {
     }
 }
 
+/// Where a host list is refreshed from, and when it last was.
+struct HostRefresher {
+    app_key: Arc<AppKey>,
+    api_client: app_client::Client,
+    min_time_between_refresh: Duration,
+    last_refresh: tokio::sync::Mutex<Option<Instant>>,
+}
+
 /// Errors that can occur during host RPCs.
 #[derive(Debug, Error)]
 pub enum RPCError {
@@ -283,6 +292,7 @@ pub(crate) struct Hosts {
     transport: Client,
     price_cache: Arc<HostCache<HostPrices>>,
     hosts: Arc<HostList>,
+    refresher: Option<Arc<HostRefresher>>,
 
     global_write_avg: Arc<RwLock<RPCAverage>>,
     global_read_avg: Arc<RwLock<RPCAverage>>,
@@ -294,10 +304,90 @@ impl Hosts {
             transport,
             hosts: Arc::new(HostList::new()),
             price_cache: Arc::new(HostCache::new()),
+            refresher: None,
 
             global_write_avg: Arc::new(RwLock::new(RPCAverage::default())),
             global_read_avg: Arc::new(RwLock::new(RPCAverage::default())),
         }
+    }
+
+    /// A [`Hosts`] that refreshes its list from the indexer `api_client`
+    /// points at, rather than relying on its owner to keep it current. It
+    /// refetches no more than once every `min_time_between_refresh`.
+    pub fn with_refresher(
+        transport: Client,
+        app_key: Arc<AppKey>,
+        api_client: app_client::Client,
+        min_time_between_refresh: Duration,
+    ) -> Self {
+        Self {
+            refresher: Some(Arc::new(HostRefresher {
+                app_key,
+                api_client,
+                min_time_between_refresh,
+                last_refresh: tokio::sync::Mutex::new(None),
+            })),
+            ..Self::new(transport)
+        }
+    }
+
+    /// Replaces the host list with the indexer's current one, unless it was
+    /// already refreshed within the refresher's minimum interval or this list
+    /// has no refresher, in which case it is left alone.
+    pub async fn refresh(&self) -> Result<(), app_client::Error> {
+        let Some(refresher) = self.refresher.as_ref() else {
+            return Ok(());
+        };
+        let mut last_refresh = refresher.last_refresh.lock().await;
+        if last_refresh.is_some_and(|at| at.elapsed() < refresher.min_time_between_refresh) {
+            return Ok(());
+        }
+        *last_refresh = Some(Instant::now());
+        self.replace(refresher.api_client.all_hosts(&refresher.app_key.0).await?);
+        Ok(())
+    }
+
+    /// Refreshes the host list if fewer than `required` hosts are eligible for
+    /// upload, so an upload doesn't fail against a list that went stale while
+    /// the indexer was unreachable or had nothing good for upload. Returns how
+    /// many hosts are eligible afterwards.
+    ///
+    /// Best effort: a refresh that fails is logged and the caller proceeds
+    /// with the list it has.
+    pub async fn ensure_upload_hosts(&self, required: usize) -> usize {
+        let available = self.available_for_upload();
+        if available >= required {
+            return available;
+        }
+        debug!("fewer than {required} hosts available for upload, refreshing");
+        if let Err(err) = self.refresh().await {
+            warn!("on-demand host refresh failed: {err}");
+        }
+        self.available_for_upload()
+    }
+
+    /// Swaps in a freshly fetched host list and warms connections to the hosts
+    /// that are good for upload.
+    fn replace(&self, all_hosts: Vec<Host>) {
+        let good_for_upload: Vec<_> = all_hosts
+            .iter()
+            .filter(|h| h.good_for_upload)
+            .map(|h| HostEndpoint {
+                public_key: h.public_key,
+                addresses: h.addresses.clone(),
+            })
+            .collect();
+        debug!(
+            "Refreshed hosts: total {}, good for upload {}",
+            all_hosts.len(),
+            good_for_upload.len()
+        );
+        self.update(all_hosts, true);
+
+        let hosts = self.clone();
+        maybe_spawn!(async move {
+            hosts.warm_connections(good_for_upload).await;
+        });
     }
 
     fn host_endpoint(&self, host_key: PublicKey) -> Result<HostEndpoint, RPCError> {
@@ -694,6 +784,60 @@ mod test {
         let mut seed = [0u8; 32];
         getrandom::fill(&mut seed).unwrap();
         PrivateKey::from_seed(&seed).public_key()
+    }
+
+    /// A [`Hosts`] with an empty list that refreshes from `api`, no more often
+    /// than `min_time_between_refresh`.
+    fn hosts_with_refresher(
+        api: &crate::app_client::mock::Client,
+        min_time_between_refresh: Duration,
+    ) -> Hosts {
+        Hosts::with_refresher(
+            Client::mock(),
+            Arc::new(AppKey::import([1u8; 32])),
+            app_client::Client::Mock(api.clone()),
+            min_time_between_refresh,
+        )
+    }
+
+    fn upload_host() -> Host {
+        Host {
+            public_key: random_pubkey(),
+            addresses: vec![],
+            country_code: String::new(),
+            latitude: 0.0,
+            longitude: 0.0,
+            good_for_upload: true,
+        }
+    }
+
+    // An upload that finds too few hosts refetches the list rather than
+    // failing against one that went stale while the indexer was unreachable or
+    // had nothing good for upload.
+    #[sia_core_derive::cross_target_test]
+    async fn test_ensure_upload_hosts_refetches_when_short() {
+        let api = crate::app_client::mock::Client::new();
+        api.add_hosts(vec![upload_host(), upload_host()]);
+        let hosts = hosts_with_refresher(&api, Duration::from_secs(10));
+
+        assert_eq!(hosts.available_for_upload(), 0);
+        assert_eq!(hosts.ensure_upload_hosts(2).await, 2);
+    }
+
+    // Uploads against an indexer that has nothing to offer must not refetch
+    // the list for every slab attempt.
+    #[sia_core_derive::cross_target_test]
+    async fn test_ensure_upload_hosts_is_rate_limited() {
+        let api = crate::app_client::mock::Client::new();
+        let hosts = hosts_with_refresher(&api, Duration::from_secs(10));
+        assert_eq!(hosts.ensure_upload_hosts(1).await, 0);
+
+        api.add_hosts(vec![upload_host()]);
+        assert_eq!(
+            hosts.ensure_upload_hosts(1).await,
+            0,
+            "a second refresh within the rate limit should be skipped"
+        );
     }
 
     #[sia_core_derive::cross_target_test]

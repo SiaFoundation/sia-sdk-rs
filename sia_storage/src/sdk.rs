@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use log::{debug, warn};
+use log::warn;
 use reqwest::IntoUrl;
 use sia_core::signing::PrivateKey;
 use sia_core::types::Hash256;
@@ -14,7 +14,7 @@ use url::Url;
 use crate::app_client::PinObjectError::UnpinnedSlab;
 use crate::app_client::{self, KeyResponse, SLAB_PIN_BATCH_SIZE, SlabPinParams};
 use crate::hosts::Hosts;
-use crate::rhp4::{Client, HostEndpoint};
+use crate::rhp4::Client;
 use crate::sharing::{self, KeyRecord, KeyRequest, Nonce, SharingError, SharingKey};
 use crate::task::AbortOnDropHandle;
 use crate::time::Duration;
@@ -69,54 +69,11 @@ pub struct Sdk {
     _refresh_task: Arc<AbortOnDropHandle<()>>,
 }
 
+/// Shortest time between host list refreshes, whether the schedule or an
+/// upload asked for one.
+const MIN_TIME_BETWEEN_REFRESH: Duration = Duration::from_secs(10);
+
 impl Sdk {
-    async fn refresh_hosts(
-        app_key: &AppKey,
-        api_client: &app_client::Client,
-        hosts: &Hosts,
-    ) -> Result<(), app_client::Error> {
-        const PAGE_SIZE: usize = 100;
-        let mut all_hosts = Vec::new();
-        for i in (0..).step_by(PAGE_SIZE) {
-            let page = api_client
-                .hosts(
-                    &app_key.0,
-                    HostQuery {
-                        offset: Some(i),
-                        limit: Some(PAGE_SIZE as u64),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            let done = page.len() < PAGE_SIZE;
-            all_hosts.extend(page);
-            if done {
-                break;
-            }
-        }
-
-        let good_for_upload: Vec<_> = all_hosts
-            .iter()
-            .filter(|h| h.good_for_upload)
-            .map(|h| HostEndpoint {
-                public_key: h.public_key,
-                addresses: h.addresses.clone(),
-            })
-            .collect();
-
-        debug!(
-            "Refreshed hosts: total {}, good for upload {}",
-            all_hosts.len(),
-            good_for_upload.len()
-        );
-        hosts.update(all_hosts, true);
-        let hosts = hosts.clone();
-        maybe_spawn!(async move {
-            hosts.warm_connections(good_for_upload).await;
-        });
-        Ok(())
-    }
-
     /// Creates a new SDK instance.
     pub(crate) async fn new(
         api_client: app_client::Client,
@@ -131,14 +88,14 @@ impl Sdk {
         transport: Client,
         app_key: Arc<AppKey>,
     ) -> Result<Self, BuilderError> {
-        let hosts = Hosts::new(transport);
-        Self::refresh_hosts(&app_key, &api_client, &hosts).await?;
-        let refresh_task = Self::spawn_refresh_task(
+        let hosts = Hosts::with_refresher(
+            transport,
             app_key.clone(),
             api_client.clone(),
-            hosts.clone(),
-            Duration::from_secs(10 * 60),
+            MIN_TIME_BETWEEN_REFRESH,
         );
+        hosts.refresh().await?;
+        let refresh_task = Self::spawn_refresh_task(hosts.clone(), Duration::from_secs(10 * 60));
         Ok(Self {
             app_key,
             api_client,
@@ -148,16 +105,11 @@ impl Sdk {
     }
 
     /// Spawns a background task that refreshes the host list at the given interval.
-    fn spawn_refresh_task(
-        app_key: Arc<AppKey>,
-        api_client: app_client::Client,
-        hosts: Hosts,
-        interval: Duration,
-    ) -> AbortOnDropHandle<()> {
+    fn spawn_refresh_task(hosts: Hosts, interval: Duration) -> AbortOnDropHandle<()> {
         AbortOnDropHandle::new(maybe_spawn!(async move {
             loop {
                 crate::time::sleep(interval).await;
-                if let Err(err) = Self::refresh_hosts(&app_key, &api_client, &hosts).await {
+                if let Err(err) = hosts.refresh().await {
                     warn!("failed to refresh hosts: {err}");
                 }
             }
@@ -985,7 +937,14 @@ mod test {
 
         let app_key = Arc::new(AppKey::import(random_seed()));
         let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();
-        let hosts = Hosts::new(crate::rhp4::Client::mock());
+        // no minimum between refreshes, so the short interval under test is
+        // the only thing pacing them
+        let hosts = Hosts::with_refresher(
+            crate::rhp4::Client::mock(),
+            app_key.clone(),
+            client.clone(),
+            Duration::ZERO,
+        );
 
         // helper: seed one good-for-upload host so available_for_upload() == 1
         let add_upload_host = |hosts: &Hosts| {
@@ -1005,7 +964,7 @@ mod test {
         // verify initial refresh replaces hosts
         add_upload_host(&hosts);
         assert_eq!(hosts.available_for_upload(), 1);
-        Sdk::refresh_hosts(&app_key, &client, &hosts).await.unwrap();
+        hosts.refresh().await.unwrap();
         assert_eq!(
             hosts.available_for_upload(),
             0,
@@ -1015,8 +974,7 @@ mod test {
         // spawn the periodic refresh task with a short interval
         add_upload_host(&hosts);
         assert_eq!(hosts.available_for_upload(), 1);
-        let handle =
-            Sdk::spawn_refresh_task(app_key.clone(), client.clone(), hosts.clone(), INTERVAL);
+        let handle = Sdk::spawn_refresh_task(hosts.clone(), INTERVAL);
 
         // wait for periodic refresh to run
         tokio::time::sleep(WAIT).await;

@@ -595,9 +595,6 @@ impl Upload {
     ) -> Result<Self, UploadError> {
         options.validate()?;
         let total_shards = options.data_shards as usize + options.parity_shards as usize;
-        if client.available_for_upload() < total_shards {
-            return Err(QueueError::InsufficientHosts.into());
-        }
         let erasure_coder =
             ErasureCoder::new(options.data_shards as usize, options.parity_shards as usize)
                 .map_err(|e| {
@@ -680,6 +677,10 @@ impl Upload {
             }
 
             for attempt in 1..=MAX_SLAB_ATTEMPTS {
+                if client.ensure_upload_hosts(total_shards).await < total_shards {
+                    return Err(QueueError::InsufficientHosts.into());
+                }
+
                 // No pre-assignment of hosts: each shard picks its host
                 // just-in-time via the slab's `HostQueue`, which scores by
                 // `throughput / (inflight + 1)`. This disperses load across
