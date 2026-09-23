@@ -326,7 +326,7 @@ pub struct DownloadOptions {
     ///
     /// Each chunk is around 1MiB in memory.
     ///
-    /// Defaults to 10% of system memory when unset.
+    /// Defaults to 10% of system memory or 1GB, whichever is lower.
     pub max_buffered_chunks: Option<usize>,
     /// Byte offset to start downloading from.
     pub offset: u64,
@@ -369,7 +369,7 @@ pub struct UploadOptions {
     /// of more memory usage.
     ///
     /// At least one fully-encoded slab must be in memory. Defaults to
-    /// 10% of system memory.
+    /// 10% of system memory or 1GB, whichever is lower.
     pub max_buffered_slabs: Option<usize>,
 
     /// Optional callback to receive progress updates for each uploaded shard.
@@ -554,7 +554,8 @@ impl From<PackedUploadOptions> for UploadOptions {
 }
 
 /// Calculates the default budget for memory usage of uploads
-/// and downloads based on the system's memory.
+/// and downloads based on the system's memory or 1GB, whichever
+/// is lower.
 #[cfg(not(target_arch = "wasm32"))]
 fn default_memory_budget() -> u64 {
     let mut sys = sysinfo::System::new();
@@ -565,7 +566,7 @@ fn default_memory_budget() -> u64 {
         Some(limits) => sys.total_memory().min(limits.total_memory),
         None => sys.total_memory(),
     };
-    total / 10
+    (total / 10).min(10u64.pow(9))
 }
 
 /// Estimates the on-network encoded size of data after erasure coding.

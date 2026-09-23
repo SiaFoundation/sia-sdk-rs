@@ -157,7 +157,7 @@ fn default_slabs_in_memory(slab_size: usize) -> usize {
 
 #[cfg(target_arch = "wasm32")]
 fn default_slabs_in_memory(_slab_size: usize) -> usize {
-    2
+    3
 }
 
 /// Gates concurrent shard uploads at the [`InflightController`]'s current
