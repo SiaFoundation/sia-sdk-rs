@@ -575,6 +575,7 @@ pub(crate) struct Upload {
     api_client: app_client::Client,
     app_key: Arc<AppKey>,
     erasure_coder: Arc<ErasureCoder>,
+    total_shards: usize,
     slab_buffer: Option<SlabReader>,
     /// Adaptive limit on shards in flight and buffered slabs
     limiter: Arc<UploadLimiter>,
@@ -613,6 +614,7 @@ impl Upload {
                 options.parity_shards as usize,
             )),
             erasure_coder: Arc::new(erasure_coder),
+            total_shards,
             limiter: Arc::new(UploadLimiter::new(
                 INITIAL_INFLIGHT,
                 MIN_INFLIGHT,
@@ -622,6 +624,14 @@ impl Upload {
             slab_tasks: VecDeque::new(),
             shard_uploaded: options.shard_uploaded,
         })
+    }
+
+    /// Errors if the host list can't cover a slab, refreshing it first.
+    async fn ensure_hosts(&self) -> Result<(), UploadError> {
+        if self.client.ensure_upload_hosts(self.total_shards).await < self.total_shards {
+            return Err(QueueError::InsufficientHosts.into());
+        }
+        Ok(())
     }
 
     async fn spawn_slab(&mut self, slab: ReadSlab) -> Result<(), UploadError> {
@@ -677,10 +687,6 @@ impl Upload {
             }
 
             for attempt in 1..=MAX_SLAB_ATTEMPTS {
-                if client.ensure_upload_hosts(total_shards).await < total_shards {
-                    return Err(QueueError::InsufficientHosts.into());
-                }
-
                 // No pre-assignment of hosts: each shard picks its host
                 // just-in-time via the slab's `HostQueue`, which scores by
                 // `throughput / (inflight + 1)`. This disperses load across
@@ -798,6 +804,8 @@ impl Upload {
         data_key: EncryptionKey,
         mut reader: R,
     ) -> Result<u64, UploadError> {
+        // checked before anything is consumed, so a failure never drops a slab
+        self.ensure_hosts().await?;
         let mut total_length: u64 = 0;
         loop {
             let (n, slab) = self
@@ -822,6 +830,7 @@ impl Upload {
     pub(crate) async fn finish(mut self) -> Result<Vec<Slab>, UploadError> {
         let last_slab = self.slab_buffer.take().unwrap().finish();
         if let Some(slab) = last_slab {
+            self.ensure_hosts().await?;
             self.spawn_slab(slab).await?;
         }
         let mut slabs = Vec::with_capacity(self.slab_tasks.len());

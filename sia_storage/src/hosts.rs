@@ -311,9 +311,8 @@ impl Hosts {
         }
     }
 
-    /// A [`Hosts`] that refreshes its list from the indexer `api_client`
-    /// points at, rather than relying on its owner to keep it current. It
-    /// refetches no more than once every `min_time_between_refresh`.
+    /// A [`Hosts`] that refreshes its list from the indexer, no more often
+    /// than `min_time_between_refresh`.
     pub fn with_refresher(
         transport: Client,
         app_key: Arc<AppKey>,
@@ -331,9 +330,8 @@ impl Hosts {
         }
     }
 
-    /// Replaces the host list with the indexer's current one, unless it was
-    /// already refreshed within the refresher's minimum interval or this list
-    /// has no refresher, in which case it is left alone.
+    /// Replaces the host list with the indexer's current one. Does nothing if
+    /// there is no refresher or one ran within `min_time_between_refresh`.
     pub async fn refresh(&self) -> Result<(), app_client::Error> {
         let Some(refresher) = self.refresher.as_ref() else {
             return Ok(());
@@ -347,13 +345,9 @@ impl Hosts {
         Ok(())
     }
 
-    /// Refreshes the host list if fewer than `required` hosts are eligible for
-    /// upload, so an upload doesn't fail against a list that went stale while
-    /// the indexer was unreachable or had nothing good for upload. Returns how
-    /// many hosts are eligible afterwards.
-    ///
-    /// Best effort: a refresh that fails is logged and the caller proceeds
-    /// with the list it has.
+    /// Refreshes the list if fewer than `required` hosts are eligible for
+    /// upload and returns how many are afterwards. A failed refresh is logged,
+    /// not returned.
     pub async fn ensure_upload_hosts(&self, required: usize) -> usize {
         let available = self.available_for_upload();
         if available >= required {
@@ -366,8 +360,8 @@ impl Hosts {
         self.available_for_upload()
     }
 
-    /// Swaps in a freshly fetched host list and warms connections to the hosts
-    /// that are good for upload.
+    /// Swaps in a freshly fetched host list and warms the upload-eligible
+    /// hosts.
     fn replace(&self, all_hosts: Vec<Host>) {
         let good_for_upload: Vec<_> = all_hosts
             .iter()
@@ -786,8 +780,7 @@ mod test {
         PrivateKey::from_seed(&seed).public_key()
     }
 
-    /// A [`Hosts`] with an empty list that refreshes from `api`, no more often
-    /// than `min_time_between_refresh`.
+    /// A [`Hosts`] with an empty list that refreshes from `api`.
     fn hosts_with_refresher(
         api: &crate::app_client::mock::Client,
         min_time_between_refresh: Duration,
@@ -811,9 +804,6 @@ mod test {
         }
     }
 
-    // An upload that finds too few hosts refetches the list rather than
-    // failing against one that went stale while the indexer was unreachable or
-    // had nothing good for upload.
     #[sia_core_derive::cross_target_test]
     async fn test_ensure_upload_hosts_refetches_when_short() {
         let api = crate::app_client::mock::Client::new();
@@ -824,8 +814,6 @@ mod test {
         assert_eq!(hosts.ensure_upload_hosts(2).await, 2);
     }
 
-    // Uploads against an indexer that has nothing to offer must not refetch
-    // the list for every slab attempt.
     #[sia_core_derive::cross_target_test]
     async fn test_ensure_upload_hosts_is_rate_limited() {
         let api = crate::app_client::mock::Client::new();

@@ -69,8 +69,7 @@ pub struct Sdk {
     _refresh_task: Arc<AbortOnDropHandle<()>>,
 }
 
-/// Shortest time between host list refreshes, whether the schedule or an
-/// upload asked for one.
+/// Shortest time between host list refreshes, however they were triggered.
 const MIN_TIME_BETWEEN_REFRESH: Duration = Duration::from_secs(10);
 
 impl Sdk {
@@ -937,8 +936,7 @@ mod test {
 
         let app_key = Arc::new(AppKey::import(random_seed()));
         let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();
-        // no minimum between refreshes, so the short interval under test is
-        // the only thing pacing them
+        // no minimum between refreshes, so INTERVAL is the only pacing
         let hosts = Hosts::with_refresher(
             crate::rhp4::Client::mock(),
             app_key.clone(),

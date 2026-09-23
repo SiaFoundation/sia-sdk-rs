@@ -292,8 +292,7 @@ impl From<&SealedObject> for PinObjectRequest {
     }
 }
 
-/// Requests successive pages of a host listing until one comes back short,
-/// which is how the indexer signals the end of the listing.
+/// Requests pages until one comes back short, which ends the listing.
 async fn drain_pages<T, F, Fut>(page: F) -> Result<Vec<T>, Error>
 where
     F: Fn(HostQuery) -> Fut,
@@ -431,7 +430,7 @@ impl Client {
         }
     }
 
-    /// Drains [`Client::hosts`], page by page, into the app's full host list.
+    /// Every host the indexer has for this app.
     pub(crate) async fn all_hosts(&self, app_key: &PrivateKey) -> Result<Vec<Host>, Error> {
         drain_pages(|query| self.hosts(app_key, query)).await
     }
