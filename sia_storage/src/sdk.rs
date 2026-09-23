@@ -14,7 +14,7 @@ use url::Url;
 use crate::app_client::PinObjectError::UnpinnedSlab;
 use crate::app_client::{self, KeyResponse, SLAB_PIN_BATCH_SIZE, SlabPinParams};
 use crate::hosts::Hosts;
-use crate::rhp4::{Client, HostEndpoint};
+use crate::rhp4::Client;
 use crate::sharing::{self, KeyRecord, KeyRequest, Nonce, SharingError, SharingKey};
 use crate::task::AbortOnDropHandle;
 use crate::time::Duration;
@@ -95,25 +95,12 @@ impl Sdk {
             }
         }
 
-        let good_for_upload: Vec<_> = all_hosts
-            .iter()
-            .filter(|h| h.good_for_upload)
-            .map(|h| HostEndpoint {
-                public_key: h.public_key,
-                addresses: h.addresses.clone(),
-            })
-            .collect();
-
         debug!(
             "Refreshed hosts: total {}, good for upload {}",
             all_hosts.len(),
-            good_for_upload.len()
+            all_hosts.iter().filter(|h| h.good_for_upload).count()
         );
         hosts.update(all_hosts, true);
-        let hosts = hosts.clone();
-        maybe_spawn!(async move {
-            hosts.warm_connections(good_for_upload).await;
-        });
         Ok(())
     }
 
@@ -957,7 +944,6 @@ mod test {
         const INTERVAL: Duration = Duration::from_millis(200);
         const WAIT: Duration = Duration::from_millis(500);
 
-        // API returns hosts with good_for_upload=false so warm_connections is a no-op
         let hosts: Vec<Host> = (0..3)
             .map(|_| Host {
                 public_key: PrivateKey::from_seed(&random_seed()).public_key(),

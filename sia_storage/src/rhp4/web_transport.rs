@@ -12,7 +12,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -24,7 +24,7 @@ use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
 use tokio::io::{AsyncRead, ReadBuf};
-use tokio::sync::{OnceCell, Semaphore};
+use tokio::sync::{Semaphore, watch};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -46,10 +46,11 @@ extern "C" {
 /// The WebTransport URL path for the RHP4 protocol.
 const RHP4_PATH: &str = "/sia/rhp/v4";
 
-/// Maximum concurrent in-flight dials. Chrome caps pending HTTP/3
-/// connections; gating dials here prevents the browser from rejecting or
-/// stalling when many hosts are contacted at once.
-const MAX_PENDING_CONNS: usize = 64;
+/// Maximum concurrent in-flight dials.
+const MAX_PENDING_CONNS: usize = 4;
+
+/// Timeout for establishing a WebTransport session to one address.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Timeout for opening a bidirectional stream on an established connection.
 /// Independent of the per-RPC timeout so a hung `create_bidirectional_stream`
@@ -151,10 +152,14 @@ async fn connect(addr: &str) -> Result<Connection, Error> {
 
 // --- Stream ---
 
+/// One bidirectional stream carrying a single RPC. Reads go through
+/// [`AsyncRead`]; writes bypass poll entirely via [`Stream::write_all_async`].
 struct Stream {
     reader: web_sys::ReadableStreamDefaultReader,
     pending_read: Option<JsFuture>,
-    buf: Vec<u8>,
+    /// Unread tail of the last chunk from `reader`, as a view into the JS
+    /// chunk rather than a copy.
+    leftover: Option<Uint8Array>,
     writer: web_sys::WritableStreamDefaultWriter,
 }
 
@@ -166,7 +171,7 @@ impl Stream {
         Self {
             reader,
             pending_read: None,
-            buf: Vec::new(),
+            leftover: None,
             writer,
         }
     }
@@ -198,9 +203,21 @@ impl Drop for Stream {
     }
 }
 
+/// Copies as much of `chunk` as fits into `buf`, straight from JS memory,
+/// and returns the unread tail as a view into the same chunk.
+fn fill_from_chunk(chunk: Uint8Array, buf: &mut ReadBuf<'_>) -> Option<Uint8Array> {
+    let len = chunk.length();
+    let n = len.min(buf.remaining() as u32);
+    chunk
+        .subarray(0, n)
+        .copy_to(buf.initialize_unfilled_to(n as usize));
+    buf.advance(n as usize);
+    (n < len).then(|| chunk.subarray(n, len))
+}
+
 /// AsyncRead for reading RPC responses. The JS `reader.read()` returns
-/// large chunks naturally, which are buffered in `self.buf`. Writes bypass
-/// poll entirely via write_all_async.
+/// large chunks naturally; whatever the caller's buffer cannot take is kept
+/// in `self.leftover` for the next poll.
 impl AsyncRead for Stream {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -209,10 +226,8 @@ impl AsyncRead for Stream {
     ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
 
-        if !this.buf.is_empty() {
-            let n = this.buf.len().min(buf.remaining());
-            buf.put_slice(&this.buf[..n]);
-            this.buf.drain(..n);
+        if let Some(chunk) = this.leftover.take() {
+            this.leftover = fill_from_chunk(chunk, buf);
             return Poll::Ready(Ok(()));
         }
 
@@ -230,24 +245,21 @@ impl AsyncRead for Stream {
             return Poll::Ready(Ok(()));
         }
 
-        let data = Uint8Array::new(&chunk.value()).to_vec();
-        let n = data.len().min(buf.remaining());
-        buf.put_slice(&data[..n]);
-        if n < data.len() {
-            this.buf = data[n..].to_vec();
-        }
-
+        this.leftover = fill_from_chunk(Uint8Array::new(&chunk.value()), buf);
         Poll::Ready(Ok(()))
     }
 }
 
 // --- Client with connection pooling ---
 
-type ConnCell = Rc<OnceCell<Rc<Connection>>>;
+/// `None` while the dial is in flight.
+type DialOutcome = Option<Result<Rc<Connection>, String>>;
+
+type PoolEntry = watch::Receiver<DialOutcome>;
 
 #[derive(Clone)]
 pub struct Client {
-    pool: Rc<RefCell<HashMap<PublicKey, ConnCell>>>,
+    pool: Rc<RefCell<HashMap<PublicKey, PoolEntry>>>,
     dial_sema: Rc<Semaphore>,
 }
 
@@ -265,65 +277,106 @@ impl Client {
         }
     }
 
-    /// Get a pooled connection or create a new one. If a pooled connection
-    /// turns out to be stale, the RPC method will call [`evict`] and the
-    /// next call will establish a fresh connection.
+    /// Returns the pooled connection for the host, dialing it if necessary.
     async fn connection(&self, host: &HostEndpoint) -> Result<Rc<Connection>, Error> {
-        let cell = if let Some(cell) = self.pool.borrow().get(&host.public_key) {
-            cell.clone()
-        } else {
-            self.pool
-                .borrow_mut()
-                .entry(host.public_key)
-                .or_insert_with(|| Rc::new(OnceCell::new()))
-                .clone()
-        };
-        let conn = cell
-            .get_or_try_init(|| async {
-                // Gate concurrent dials to stay under Chrome's pending-connection cap.
-                let _permit = self
-                    .dial_sema
-                    .acquire()
-                    .await
-                    .map_err(|e| Error::Transport(format!("dial semaphore closed: {e}")))?;
+        let mut entry = self.dial(host)?;
+        let outcome = entry
+            .wait_for(|outcome| outcome.is_some())
+            .await
+            .map_err(|_| Error::Transport("dial task exited without a result".into()))?
+            .clone()
+            .expect("wait_for returned a settled outcome");
+        outcome.map_err(Error::Transport)
+    }
 
-                // Connect to first available QUIC address
-                let mut last_err = None;
-                for addr in &host.addresses {
-                    if addr.protocol != Protocol::QUIC {
-                        continue;
-                    }
-                    match connect(&addr.address).await {
-                        Ok(conn) => return Ok(Rc::new(conn)),
-                        Err(e) => {
-                            debug!("[WT] connect to {} failed: {e}", addr.address);
-                            last_err = Some(e);
-                        }
-                    }
+    /// Returns the host's pool entry, starting a dial if the host has none.
+    fn dial(&self, host: &HostEndpoint) -> Result<PoolEntry, Error> {
+        let key = host.public_key;
+        if let Some(entry) = self.pool.borrow().get(&key) {
+            return Ok(entry.clone());
+        }
+        let addresses: Vec<String> = host
+            .addresses
+            .iter()
+            .filter(|addr| addr.protocol == Protocol::QUIC)
+            .map(|addr| addr.address.clone())
+            .collect();
+        if addresses.is_empty() {
+            return Err(Error::Transport(format!(
+                "no QUIC/WebTransport address for host {key}"
+            )));
+        }
+
+        let (tx, rx) = watch::channel(None);
+        self.pool.borrow_mut().insert(key, rx.clone());
+        let client = self.clone();
+        let entry = rx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = client.dial_addresses(&addresses).await;
+            match &result {
+                Ok(conn) => client.watch_closed(key, conn),
+                Err(e) => {
+                    debug!("[WT] dial of host {key} failed: {e}");
+                    client.evict(&key, &entry);
                 }
-
-                Err(last_err.unwrap_or_else(|| {
-                    Error::Transport(format!(
-                        "no QUIC/WebTransport address for host {}",
-                        host.public_key
-                    ))
-                }))
-            })
-            .await?
-            .clone();
-        Ok(conn)
+            }
+            let _ = tx.send(Some(result.map_err(|e| e.to_string())));
+        });
+        Ok(rx)
     }
 
-    fn evict(&self, host_key: &PublicKey) {
-        self.pool.borrow_mut().remove(host_key);
+    /// Connects to the first address that accepts a WebTransport session.
+    async fn dial_addresses(&self, addresses: &[String]) -> Result<Rc<Connection>, Error> {
+        let _permit = self
+            .dial_sema
+            .acquire()
+            .await
+            .map_err(|e| Error::Transport(format!("dial semaphore closed: {e}")))?;
+        let mut last_err = None;
+        for addr in addresses {
+            let result = timeout(CONNECT_TIMEOUT, connect(addr))
+                .await
+                .unwrap_or_else(|_| Err(Error::Transport("WebTransport connect: timeout".into())));
+            match result {
+                Ok(conn) => return Ok(Rc::new(conn)),
+                Err(e) => {
+                    debug!("[WT] connect to {addr} failed: {e}");
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.expect("at least one address was tried"))
     }
 
-    /// Returns true if the error indicates the connection is broken and
-    /// should be evicted from the pool. Transport and I/O errors mean the
-    /// session is dead; RPC-level errors (e.g. insufficient funds) are
-    /// application errors on an otherwise healthy connection.
-    fn should_evict(err: &Error) -> bool {
-        matches!(err, Error::Transport(_) | Error::Io(_))
+    /// Evicts the host once its session's `closed` promise settles.
+    fn watch_closed(&self, key: PublicKey, conn: &Rc<Connection>) {
+        let closed = conn.transport.closed();
+        let conn = Rc::downgrade(conn);
+        let pool = Rc::downgrade(&self.pool);
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = JsFuture::from(closed).await;
+            let Some(pool) = Weak::upgrade(&pool) else {
+                return;
+            };
+            let is_current = pool.borrow().get(&key).is_some_and(|entry| {
+                matches!(&*entry.borrow(), Some(Ok(pooled)) if conn.ptr_eq(&Rc::downgrade(pooled)))
+            });
+            if is_current {
+                debug!("[WT] session to host {key} closed; evicting");
+                pool.borrow_mut().remove(&key);
+            }
+        });
+    }
+
+    /// Removes the host's entry if it is still `entry`.
+    fn evict(&self, key: &PublicKey, entry: &PoolEntry) {
+        let mut pool = self.pool.borrow_mut();
+        if pool
+            .get(key)
+            .is_some_and(|current| current.same_channel(entry))
+        {
+            pool.remove(key);
+        }
     }
 }
 
@@ -331,27 +384,19 @@ impl Client {
 // then send the whole buffer with write_all_async in one JS Promise.
 //
 // RPC reads: use AsyncRead on Stream directly. The JS reader.read() already
-// returns large chunks from the network buffer, which Stream stores in
-// self.buf and serves to subsequent poll_read calls without further JS calls.
+// returns large chunks from the network buffer, which Stream keeps a view of
+// in self.leftover and serves to subsequent poll_read calls without further
+// JS calls.
 impl Transport for Client {
     async fn host_prices(&self, host: &HostEndpoint) -> Result<(HostPrices, Duration), Error> {
         let conn = self.connection(host).await?;
-        let result: Result<(HostPrices, Duration), Error> = async {
-            let mut stream = conn.open_stream().await?;
-            let mut buf = Vec::new();
-            let req = RPCSettings::send_request(&mut buf).await?;
-            let start = Instant::now();
-            stream.write_all_async(&buf).await?;
-            let resp = req.complete(&mut stream).await?;
-            Ok((resp.settings.prices, start.elapsed()))
-        }
-        .await;
-        if let Err(e) = &result
-            && Self::should_evict(e)
-        {
-            self.evict(&host.public_key);
-        }
-        result
+        let mut stream = conn.open_stream().await?;
+        let mut buf = Vec::new();
+        let req = RPCSettings::send_request(&mut buf).await?;
+        let start = Instant::now();
+        stream.write_all_async(&buf).await?;
+        let resp = req.complete(&mut stream).await?;
+        Ok((resp.settings.prices, start.elapsed()))
     }
 
     async fn write_sector(
@@ -363,22 +408,13 @@ impl Transport for Client {
     ) -> Result<(Hash256, Duration), Error> {
         let token = AccountToken::new(account_key, host.public_key);
         let conn = self.connection(host).await?;
-        let result: Result<(Hash256, Duration), Error> = async {
-            let mut stream = conn.open_stream().await?;
-            let mut buf = Vec::new();
-            let req = RPCWriteSector::send_request(&mut buf, prices, token, data.clone()).await?;
-            let start = Instant::now();
-            stream.write_all_async(&buf).await?;
-            let resp = req.complete(&mut stream).await?;
-            Ok((resp.root, start.elapsed()))
-        }
-        .await;
-        if let Err(e) = &result
-            && Self::should_evict(e)
-        {
-            self.evict(&host.public_key);
-        }
-        result
+        let mut stream = conn.open_stream().await?;
+        let mut buf = Vec::new();
+        let req = RPCWriteSector::send_request(&mut buf, prices, token, data.clone()).await?;
+        let start = Instant::now();
+        stream.write_all_async(&buf).await?;
+        let resp = req.complete(&mut stream).await?;
+        Ok((resp.root, start.elapsed()))
     }
 
     async fn read_sector(
@@ -391,23 +427,14 @@ impl Transport for Client {
         length: usize,
     ) -> Result<(Bytes, Duration), Error> {
         let conn = self.connection(host).await?;
-        let result: Result<(Bytes, Duration), Error> = async {
-            let mut stream = conn.open_stream().await?;
-            let mut buf = Vec::new();
-            let req =
-                RPCReadSector::send_request(&mut buf, prices, token, root, offset, length).await?;
-            let start = Instant::now();
-            stream.write_all_async(&buf).await?;
-            let resp = req.complete(&mut stream).await?;
-            Ok((resp.data, start.elapsed()))
-        }
-        .await;
-        if let Err(e) = &result
-            && Self::should_evict(e)
-        {
-            self.evict(&host.public_key);
-        }
-        result
+        let mut stream = conn.open_stream().await?;
+        let mut buf = Vec::new();
+        let req =
+            RPCReadSector::send_request(&mut buf, prices, token, root, offset, length).await?;
+        let start = Instant::now();
+        stream.write_all_async(&buf).await?;
+        let resp = req.complete(&mut stream).await?;
+        Ok((resp.data, start.elapsed()))
     }
 }
 
