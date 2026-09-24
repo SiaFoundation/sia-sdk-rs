@@ -9,9 +9,7 @@ authors = ["The Sia Foundation"]
 publish = false
 
 [lib]
-# staticlib is what Go's cgo links. cdylib is what every other language with a
-# C FFI loads at runtime, so both are built.
-crate-type = ["staticlib", "cdylib"]
+crate-type = ["staticlib"]
 
 [features]
 # Adds an in-memory host transport alongside the real one, plus the sia_mock_*
