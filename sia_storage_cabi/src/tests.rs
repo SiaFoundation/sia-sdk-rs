@@ -2515,3 +2515,111 @@ fn cancelled_add_abort_reports_cancelled_and_stays_retryable() {
         sia_mock_free(mock);
     }
 }
+
+/// A cancelled add_finish leaves the add in progress rather than detaching it,
+/// so a retry consumes the same task and reports what it wrote. Detaching left
+/// the object's fate to whichever of the task and finalize reached the mutex
+/// first, which a caller getting SIA_ERR_CANCELLED could not observe.
+#[test]
+fn cancelled_add_finish_stays_retryable() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [103u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let mut packed = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
+            SIA_OK,
+            "sia_packed_upload_start: {}",
+            take_err(err)
+        );
+
+        let payload = vec![b'p'; 4096];
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_begin(packed, &raw mut err),
+            SIA_OK,
+            "add_begin: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_write(
+                packed,
+                payload.as_ptr(),
+                payload.len(),
+                std::ptr::null_mut(),
+                &raw mut err
+            ),
+            SIA_OK,
+            "add_write: {}",
+            take_err(err)
+        );
+
+        // Finish with a token that has already fired.
+        let cancel = sia_cancel_new();
+        sia_cancel_cancel(cancel);
+        let mut n = 0u64;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_finish(packed, cancel, &raw mut n, &raw mut err),
+            SIA_ERR_CANCELLED,
+            "a cancelled finish must report cancellation"
+        );
+        let _ = take_err(err);
+        sia_cancel_free(cancel);
+
+        // The task was not detached, so the same add finishes on retry.
+        let mut n = 0u64;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_finish(packed, std::ptr::null_mut(), &raw mut n, &raw mut err),
+            SIA_OK,
+            "retrying the finish: {}",
+            take_err(err)
+        );
+        assert_eq!(
+            n,
+            payload.len() as u64,
+            "the retry reports what the add wrote"
+        );
+
+        let mut objs = std::ptr::null_mut();
+        let mut len = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_finalize(
+                packed,
+                std::ptr::null_mut(),
+                &raw mut objs,
+                &raw mut len,
+                &raw mut err
+            ),
+            SIA_OK,
+            "finalize: {}",
+            take_err(err)
+        );
+        assert_eq!(len, 1, "the object landed exactly once");
+        assert_eq!(sia_object_size(*objs), payload.len() as u64);
+
+        sia_object_array_free(objs, len);
+        sia_packed_upload_free(packed);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}

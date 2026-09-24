@@ -494,16 +494,19 @@ pub unsafe extern "C" fn sia_packed_upload_add_write(
             Some(Ok(())) => SIA_OK,
             Some(Err(_)) => {
                 up.writer = None;
-                match up.add_task.take() {
-                    Some(task) => match block_on(cancel, task) {
-                        None => set_cancelled(err),
-                        Some(Ok(Ok(_))) => {
-                            set_err(err, SIA_ERR, "add ended before all data was written")
-                        }
-                        Some(Ok(Err((code, msg)))) => set_err(err, code, msg),
-                        Some(Err(e)) => set_typed_err(err, &e),
-                    },
-                    None => set_err(err, SIA_ERR, "add task already consumed"),
+                if up.add_task.is_none() {
+                    return set_err(err, SIA_ERR, "add task already consumed");
+                }
+                // Owned across cancellation, as in add_finish above.
+                let task = up.add_task.as_mut().expect("checked above");
+                let Some(joined) = block_on(cancel, task) else {
+                    return set_cancelled(err);
+                };
+                up.add_task.take();
+                match joined {
+                    Ok(Ok(_)) => set_err(err, SIA_ERR, "add ended before all data was written"),
+                    Ok(Err((code, msg))) => set_err(err, code, msg),
+                    Err(e) => set_typed_err(err, &e),
                 }
             }
         }
@@ -532,18 +535,29 @@ pub unsafe extern "C" fn sia_packed_upload_add_finish(
             return SIA_ERR_INVALID_HANDLE;
         };
         drop(up.writer.take()); // signal EOF for this object
-        match up.add_task.take() {
-            Some(task) => match block_on(cancel, task) {
-                None => set_cancelled(err),
-                Some(Ok(Ok(n))) => {
-                    unsafe { *written = n }
-                    SIA_OK
-                }
-                Some(Ok(Err((code, msg)))) => set_err(err, code, msg),
-                Some(Err(join_err)) if join_err.is_cancelled() => set_cancelled(err),
-                Some(Err(join_err)) => set_err(err, SIA_ERR, join_err.to_string()),
-            },
-            None => set_err(err, SIA_ERR_INVALID_STATE, "no add in progress"),
+        if up.add_task.is_none() {
+            return set_err(err, SIA_ERR_INVALID_STATE, "no add in progress");
+        }
+
+        // Awaited by reference, so cancelling leaves the task owned and the
+        // state still "add in progress" for the next finish or abort to
+        // consume. Dropping the handle would detach it, and whether the object
+        // landed would then come down to whether the task or finalize reached
+        // the mutex first, which the caller cannot observe.
+        let task = up.add_task.as_mut().expect("checked above");
+        let Some(joined) = block_on(cancel, task) else {
+            return set_cancelled(err);
+        };
+        up.add_task.take();
+
+        match joined {
+            Ok(Ok(n)) => {
+                unsafe { *written = n }
+                SIA_OK
+            }
+            Ok(Err((code, msg))) => set_err(err, code, msg),
+            Err(join_err) if join_err.is_cancelled() => set_cancelled(err),
+            Err(join_err) => set_err(err, SIA_ERR, join_err.to_string()),
         }
     })
 }
