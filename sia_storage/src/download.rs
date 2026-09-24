@@ -92,7 +92,7 @@ fn default_chunks_in_memory() -> usize {
 
 #[cfg(target_arch = "wasm32")]
 fn default_chunks_in_memory() -> usize {
-    32
+    128
 }
 
 struct AwaitingRecovery {

@@ -908,7 +908,6 @@ mod test {
         const INTERVAL: Duration = Duration::from_millis(200);
         const WAIT: Duration = Duration::from_millis(500);
 
-        // API returns hosts with good_for_upload=false so warm_connections is a no-op
         let hosts: Vec<Host> = (0..3)
             .map(|_| Host {
                 public_key: PrivateKey::from_seed(&random_seed()).public_key(),

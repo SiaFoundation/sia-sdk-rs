@@ -90,14 +90,39 @@ pub(crate) struct SlabReader {
     data_shards: usize,
     encryption_key: EncryptionKey,
     shards: Vec<Vec<u8>>,
+    /// Contiguous landing area for incoming data. The object keystream is
+    /// applied to it in one call per fill, then the bytes are scattered into
+    /// the interleaved shard layout. Allocated once and reused, so a slab
+    /// costs no allocation here.
+    read_buffer: Vec<u8>,
     length: usize,
     total_length: u64,
 }
+
+/// How much data is buffered before a single `apply_keystream` call.
+const READ_BUFFER_SIZE: usize = 64 << 10;
 
 pub(crate) struct ReadSlab {
     pub encryption_key: EncryptionKey,
     pub length: usize,
     pub shards: Vec<Vec<u8>>,
+}
+
+/// Reads as many bytes as possible from `r` into `buf`, stopping at end of
+/// input. Returns the number of bytes read.
+///
+/// This is distinct from `read_exact`, which reports an unexpected end of input
+/// when it cannot fill the buffer.
+async fn fill_buf<R: AsyncRead + Unpin>(r: &mut R, buf: &mut [u8]) -> io::Result<usize> {
+    let mut read_total = 0;
+    while read_total < buf.len() {
+        let n = r.read(&mut buf[read_total..]).await?;
+        if n == 0 {
+            break;
+        }
+        read_total += n;
+    }
+    Ok(read_total)
 }
 
 impl SlabReader {
@@ -107,6 +132,7 @@ impl SlabReader {
             data_shards,
             encryption_key: rand::random::<[u8; 32]>().into(),
             shards: vec![vec![0u8; SECTOR_SIZE]; total_shards],
+            read_buffer: vec![0u8; READ_BUFFER_SIZE],
             length: 0,
             total_length: 0,
         }
@@ -155,34 +181,48 @@ impl SlabReader {
         data_key: EncryptionKey,
         r: &mut R,
     ) -> io::Result<(usize, Option<ReadSlab>)> {
-        let remaining = self.optimal_data_size() - self.length;
-        if remaining == 0 {
+        if self.length == self.optimal_data_size() {
             return Ok((0, None));
         }
         let mut cipher = Chacha20Cipher::new_v1(data_key, self.length as u64, &self.encryption_key);
-        let mut r = r.take(remaining as u64);
         let mut total_read = 0;
-        loop {
-            if self.length == self.optimal_data_size() {
+        let stripe_size = SEGMENT_SIZE * self.data_shards;
+
+        while self.length < self.optimal_data_size() {
+            // Fill the buffer, then encrypt it in one pass. `want` never
+            // exceeds what is left of the slab, so the reader is never taken
+            // past the boundary.
+            let remaining = self.optimal_data_size() - self.length;
+            let want = remaining.min(self.read_buffer.len());
+            let filled = fill_buf(r, &mut self.read_buffer[..want]).await?;
+            if filled == 0 {
                 break;
             }
 
-            // calculate current position in the interleaved layout
-            let stripe_size = SEGMENT_SIZE * self.data_shards;
-            let shard_index = (self.length % stripe_size) / SEGMENT_SIZE;
-            let byte_in_seg = self.length % SEGMENT_SIZE;
-            let seg_start = (self.length / stripe_size) * SEGMENT_SIZE;
+            let start_len = self.length;
+            cipher.apply_keystream(&mut self.read_buffer[..filled]);
 
-            let segment =
-                &mut self.shards[shard_index][seg_start + byte_in_seg..seg_start + SEGMENT_SIZE];
-            let n = r.read(segment).await?;
-            if n == 0 {
+            let mut off = 0;
+            while off < filled {
+                let logical = start_len + off;
+                let shard_index = (logical % stripe_size) / SEGMENT_SIZE;
+                let byte_in_seg = logical % SEGMENT_SIZE;
+                let seg_start = (logical / stripe_size) * SEGMENT_SIZE;
+                let dst = seg_start + byte_in_seg;
+                let take = (SEGMENT_SIZE - byte_in_seg).min(filled - off);
+                self.shards[shard_index][dst..dst + take]
+                    .copy_from_slice(&self.read_buffer[off..off + take]);
+                off += take;
+            }
+
+            self.length += filled;
+            self.total_length += filled as u64;
+            total_read += filled;
+
+            // A short fill means the reader is done.
+            if filled < want {
                 break;
             }
-            cipher.apply_keystream(&mut segment[..n]);
-            self.length += n;
-            self.total_length += n as u64;
-            total_read += n;
         }
         let slab = if self.length == self.optimal_data_size() {
             let length = mem::take(&mut self.length);

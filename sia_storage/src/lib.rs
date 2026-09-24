@@ -326,7 +326,7 @@ pub struct DownloadOptions {
     ///
     /// Each chunk is around 1MiB in memory.
     ///
-    /// Defaults to 10% of system memory when unset.
+    /// Defaults to 10% of system memory or 1GB, whichever is lower.
     pub max_buffered_chunks: Option<usize>,
     /// Byte offset to start downloading from.
     pub offset: u64,
@@ -369,7 +369,7 @@ pub struct UploadOptions {
     /// of more memory usage.
     ///
     /// At least one fully-encoded slab must be in memory. Defaults to
-    /// 10% of system memory.
+    /// 10% of system memory or 1GB, whichever is lower.
     pub max_buffered_slabs: Option<usize>,
 
     /// Optional callback to receive progress updates for each uploaded shard.
@@ -554,7 +554,8 @@ impl From<PackedUploadOptions> for UploadOptions {
 }
 
 /// Calculates the default budget for memory usage of uploads
-/// and downloads based on the system's memory.
+/// and downloads based on the system's memory or 1GB, whichever
+/// is lower.
 #[cfg(not(target_arch = "wasm32"))]
 fn default_memory_budget() -> u64 {
     let mut sys = sysinfo::System::new();
@@ -565,7 +566,7 @@ fn default_memory_budget() -> u64 {
         Some(limits) => sys.total_memory().min(limits.total_memory),
         None => sys.total_memory(),
     };
-    total / 10
+    (total / 10).min(10u64.pow(9))
 }
 
 /// Estimates the on-network encoded size of data after erasure coding.
@@ -1003,9 +1004,9 @@ mod test {
             .await
             .expect_err("erroring reader should fail the add");
 
-        // errored add left `partial.len()` bytes as dead padding in the slab;
-        // the packer stays usable and subsequent adds stay aligned.
-        assert_eq!(packed_upload.length(), partial.len() as u64);
+        // the failed add buffered less than a full fill, so nothing was
+        // committed; the packer stays usable and the next add starts at zero.
+        assert_eq!(packed_upload.length(), 0);
 
         packed_upload
             .add(Cursor::new(good.clone()))
@@ -1016,9 +1017,9 @@ mod test {
         // only the successful add registered an object
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].size(), good.len() as u64);
-        // the good object's bytes start *after* the padding from the errored add
+        // the errored add committed nothing, so the good object starts at zero
         assert_eq!(objects[0].slabs().len(), 1);
-        assert_eq!(objects[0].slabs()[0].offset, partial.len() as u32);
+        assert_eq!(objects[0].slabs()[0].offset, 0);
         assert_eq!(objects[0].slabs()[0].length, good.len() as u32);
 
         let mut output = BytesMut::zeroed(good.len());

@@ -11,8 +11,6 @@ use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
 use thiserror::Error;
-use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
 
 use crate::hosts::metrics::{HostMetric, HostScore, RPCAverage, Transfer};
 use crate::rhp4::{Client, HostEndpoint, Transport};
@@ -340,8 +338,11 @@ impl Hosts {
         if last_refresh.is_some_and(|at| at.elapsed() < refresher.min_time_between_refresh) {
             return Ok(());
         }
+        // recorded after the fetch, so anyone waiting on the lock sees a recent
+        // refresh, and on failure too, so a down indexer isn't retried per slab
+        let result = refresher.api_client.all_hosts(&refresher.app_key.0).await;
         *last_refresh = Some(Instant::now());
-        self.replace(refresher.api_client.all_hosts(&refresher.app_key.0).await?);
+        self.replace(result?);
         Ok(())
     }
 
@@ -363,25 +364,12 @@ impl Hosts {
     /// Swaps in a freshly fetched host list and warms the upload-eligible
     /// hosts.
     fn replace(&self, all_hosts: Vec<Host>) {
-        let good_for_upload: Vec<_> = all_hosts
-            .iter()
-            .filter(|h| h.good_for_upload)
-            .map(|h| HostEndpoint {
-                public_key: h.public_key,
-                addresses: h.addresses.clone(),
-            })
-            .collect();
         debug!(
             "Refreshed hosts: total {}, good for upload {}",
             all_hosts.len(),
-            good_for_upload.len()
+            all_hosts.iter().filter(|h| h.good_for_upload).count()
         );
         self.update(all_hosts, true);
-
-        let hosts = self.clone();
-        maybe_spawn!(async move {
-            hosts.warm_connections(good_for_upload).await;
-        });
     }
 
     fn host_endpoint(&self, host_key: PublicKey) -> Result<HostEndpoint, RPCError> {
@@ -491,57 +479,6 @@ impl Hosts {
             .avg()
             .map(|rate| Duration::from_secs_f64(bytes as f64 / *rate))
             .unwrap_or_else(|| DEFAULT.estimate_duration(bytes))
-    }
-
-    /// Warms connections to the given hosts by prefetching their prices. This can help seed
-    /// the RPC performance metrics for new hosts before they're used for actual uploads
-    /// or downloads.
-    pub async fn warm_connections(&self, hosts: Vec<HostEndpoint>) {
-        let hosts_len = hosts.len();
-        let mut warmed_conns: usize = 0;
-        let mut inflight_scans = JoinSet::new();
-        let sema = Arc::new(Semaphore::new(15));
-        for host in hosts {
-            let transport = self.transport.clone();
-            let price_cache = self.price_cache.clone();
-            let hosts = self.hosts.clone();
-
-            let sema = sema.clone();
-            join_set_spawn!(inflight_scans, async move {
-                let _permit = sema.acquire().await.unwrap();
-                let start = Instant::now();
-
-                match Self::fetch_prices(
-                    transport,
-                    &price_cache,
-                    &hosts,
-                    &host,
-                    Duration::from_secs(1),
-                    false,
-                )
-                .await
-                {
-                    Ok((_, pulled)) if pulled => {
-                        debug!(
-                            "warmed connection to host {} in {:?}",
-                            host.public_key,
-                            start.elapsed()
-                        );
-                        true
-                    }
-                    _ => false,
-                }
-            });
-        }
-
-        while let Some(res) = inflight_scans.join_next().await {
-            if let Ok(warmed) = res
-                && warmed
-            {
-                warmed_conns += 1;
-            }
-        }
-        debug!("warmed {warmed_conns}/{hosts_len} connections");
     }
 
     async fn fetch_prices(
