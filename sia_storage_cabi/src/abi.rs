@@ -325,7 +325,7 @@ pub unsafe extern "C" fn sia_cancel_new() -> *mut CancellationToken {
 /// - `c` may be null, which makes the call uncancellable. Otherwise it must be a live token from
 ///   `sia_cancel_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sia_cancel_cancel(c: *mut CancellationToken) {
+pub unsafe extern "C" fn sia_cancel_cancel(c: *const CancellationToken) {
     if let Some(c) = unsafe { c.as_ref() } {
         c.cancel()
     }
