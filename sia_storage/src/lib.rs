@@ -944,6 +944,66 @@ mod test {
         assert_eq!(output.freeze(), non_empty);
     }
 
+    /// discard_last drops the object a caller decided against, leaving the
+    /// ones around it untouched. Its data stays in the slab and is still
+    /// stored, but no object points at it, so nothing can read it.
+    #[tokio::test]
+    async fn test_packed_discard_last() {
+        let app_key = Arc::new(AppKey::import(random_seed()));
+        let hosts = Hosts::new(Client::mock());
+        hosts.update(
+            (0..60)
+                .map(|_| Host {
+                    public_key: PrivateKey::from_seed(&random_seed()).public_key(),
+                    addresses: vec![NetAddress {
+                        protocol: sia_core::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                })
+                .collect(),
+            true,
+        );
+
+        let mut packed = PackedUpload::new(
+            hosts.clone(),
+            app_client::Client::mock(),
+            app_key.clone(),
+            PackedUploadOptions::default(),
+        )
+        .unwrap();
+
+        assert!(
+            !packed.discard_last(),
+            "with nothing added there is nothing to discard"
+        );
+
+        let keep: Bytes = Bytes::from_static(b"the object that stays");
+        let regret: Bytes = Bytes::from_static(b"the object the caller changed its mind about");
+        packed.add(Cursor::new(keep.clone())).await.unwrap();
+        packed.add(Cursor::new(regret.clone())).await.unwrap();
+
+        let packed_len = packed.length();
+        assert!(packed.discard_last(), "the second add is discardable");
+        assert_eq!(
+            packed.length(),
+            packed_len,
+            "discarding drops the object, not the bytes it contributed"
+        );
+
+        let objects = packed.finalize().await.expect("finalize");
+        assert_eq!(objects.len(), 1, "only the kept object is registered");
+        assert_eq!(objects[0].size(), keep.len() as u64);
+        assert_eq!(
+            objects[0].slabs()[0].offset,
+            0,
+            "the kept object is where it was before the discard"
+        );
+    }
+
     #[sia_core_derive::cross_target_test]
     async fn test_upload_packed_add_error_is_recoverable() {
         let app_key = Arc::new(AppKey::import(random_seed()));

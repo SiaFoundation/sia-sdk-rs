@@ -965,9 +965,10 @@ impl PackedUpload {
     /// after the fact that the data it supplied was incomplete. Returns false
     /// when no object has been added.
     ///
-    /// The bytes that object contributed stay in the packed stream, so the
-    /// slab still pays for them, but nothing references them and every other
-    /// object's offsets are left untouched.
+    /// Only the object record is dropped. Its data was already written into
+    /// the slab and is still stored, taking up space no object points at, so
+    /// nothing can read it. Reclaiming that space would shift every later
+    /// object's offset, which is why it is left where it is.
     pub fn discard_last(&mut self) -> bool {
         self.objects.pop().is_some()
     }
