@@ -15,6 +15,13 @@
 //     success, and passing a null one is undefined.
 //   - Blocking functions accept an optional sia_cancel_t. Cancelling the
 //     token unblocks the call with SIA_ERR_CANCELLED.
+//   - Threading: every handle may be moved between threads freely. Whether it
+//     may be used from two at once is what the pointer's constness says. A
+//     call taking a const handle may run concurrently with other const calls
+//     on the same handle; a call taking a non-const one needs exclusive use of
+//     it, so serialise those yourself. sia_cancel_cancel is const for exactly
+//     this reason: cancelling from another thread is how a blocked call is
+//     meant to be unblocked.
 //   - Timestamps are Unix microseconds (UTC).
 #ifndef SIA_STORAGE_H
 #define SIA_STORAGE_H
@@ -152,7 +159,7 @@ extern "C"
 	char *sia_generate_recovery_phrase(void);
 
 	sia_cancel_t *sia_cancel_new(void);
-	void sia_cancel_cancel(sia_cancel_t *c);
+	void sia_cancel_cancel(const sia_cancel_t *c);
 	void sia_cancel_free(sia_cancel_t *c);
 
 	// app_meta_json: {"appID":"<hex>","name":...,"description":...,"serviceURL":...,
