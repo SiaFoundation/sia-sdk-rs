@@ -8,7 +8,7 @@ use tokio_stream::StreamExt;
 
 use crate::{DownloadOptions, Host, HostQuery, PinnedObject, Sdk, io};
 
-fn seed_from_buffer(seed: Buffer) -> Result<[u8; 32]> {
+pub(crate) fn seed_from_buffer(seed: Buffer) -> Result<[u8; 32]> {
     seed.as_ref()
         .try_into()
         .map_err(|_| Error::from_reason("seed must be 32 bytes"))
@@ -214,7 +214,7 @@ impl Sdk {
 /// cannot upload, pin, or delete. Downloads are paid for by the key's owner.
 #[napi]
 pub struct SharedSdk {
-    inner: sia_storage::SharedSdk,
+    pub(crate) inner: sia_storage::SharedSdk,
 }
 
 #[napi]
