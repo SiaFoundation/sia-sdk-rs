@@ -2383,3 +2383,135 @@ fn upload_start_accepts_a_null_object() {
         sia_mock_free(mock);
     }
 }
+
+/// A cancelled abort says so, and leaves the add observable rather than
+/// detaching it: the writer is already gone, so a second abort finishes the
+/// job and the object still goes. Reporting SIA_OK here would tell a caller
+/// the object was discarded when it was not.
+#[test]
+fn cancelled_add_abort_reports_cancelled_and_stays_retryable() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [101u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let mut packed = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
+            SIA_OK,
+            "sia_packed_upload_start: {}",
+            take_err(err)
+        );
+
+        // One object that stays, then one the caller abandons.
+        let keep = vec![b'k'; 4096];
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_begin(packed, &raw mut err),
+            SIA_OK,
+            "add_begin: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_write(
+                packed,
+                keep.as_ptr(),
+                keep.len(),
+                std::ptr::null_mut(),
+                &raw mut err
+            ),
+            SIA_OK,
+            "add_write: {}",
+            take_err(err)
+        );
+        let mut n = 0u64;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_finish(packed, std::ptr::null_mut(), &raw mut n, &raw mut err),
+            SIA_OK,
+            "add_finish: {}",
+            take_err(err)
+        );
+
+        let regret = vec![b'r'; 2048];
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_begin(packed, &raw mut err),
+            SIA_OK,
+            "add_begin 2: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_write(
+                packed,
+                regret.as_ptr(),
+                regret.len(),
+                std::ptr::null_mut(),
+                &raw mut err
+            ),
+            SIA_OK,
+            "add_write 2: {}",
+            take_err(err)
+        );
+
+        // Abort with a token that has already fired.
+        let cancel = sia_cancel_new();
+        sia_cancel_cancel(cancel);
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_abort(packed, cancel, &raw mut err),
+            SIA_ERR_CANCELLED,
+            "a cancelled abort must not report success"
+        );
+        let _ = take_err(err);
+        sia_cancel_free(cancel);
+
+        // The add was not detached, so a retry completes it and discards.
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_abort(packed, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "retrying the abort: {}",
+            take_err(err)
+        );
+
+        let mut objs = std::ptr::null_mut();
+        let mut len = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_finalize(
+                packed,
+                std::ptr::null_mut(),
+                &raw mut objs,
+                &raw mut len,
+                &raw mut err
+            ),
+            SIA_OK,
+            "finalize: {}",
+            take_err(err)
+        );
+        assert_eq!(len, 1, "only the kept object survives the abort");
+        assert_eq!(sia_object_size(*objs), keep.len() as u64);
+
+        sia_object_array_free(objs, len);
+        sia_packed_upload_free(packed);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}

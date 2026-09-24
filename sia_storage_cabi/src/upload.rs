@@ -576,12 +576,24 @@ pub unsafe extern "C" fn sia_packed_upload_add_abort(
             return SIA_ERR_INVALID_HANDLE;
         };
         drop(up.writer.take()); // signal EOF so the add task can finish
-        let Some(task) = up.add_task.take() else {
+        if up.add_task.is_none() {
             return set_err(err, SIA_ERR_INVALID_STATE, "no add in progress");
+        }
+
+        // Awaited by reference, so a cancelled abort leaves the task owned
+        // rather than detaching it. The writer is already gone, so the add is
+        // finishing either way; keeping the handle lets a second abort observe
+        // it and still drop the object. Aborting the task instead would leave
+        // whether the object landed unknowable.
+        let task = up.add_task.as_mut().expect("checked above");
+        let Some(joined) = block_on(cancel, task) else {
+            return set_cancelled(err);
         };
+        up.add_task.take();
+
         // Only a task that succeeded pushed an object, so only then is there
         // one to remove. A failed add left the object list untouched.
-        if !matches!(block_on(cancel, task), Some(Ok(Ok(_)))) {
+        if !matches!(joined, Ok(Ok(_))) {
             return SIA_OK;
         }
         let inner = up.inner.clone();
