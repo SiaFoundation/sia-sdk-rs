@@ -583,7 +583,7 @@ mod native_tests {
     }
 
     #[tokio::test]
-    async fn test_init_shares_client_across_apps() {
+    async fn test_for_app_uses_fresh_ephemeral_keys() {
         let server = reconnecting_approval_server();
         expect_app_key_check(&server, MNEMONIC, 204);
 
