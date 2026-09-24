@@ -2303,3 +2303,83 @@ fn header_declares_exactly_what_the_crate_exports() {
         "header and exports disagree.\n  exported but not declared (unreachable from C): {missing_decl:?}\n  declared but not exported (links will fail): {missing_export:?}"
     );
 }
+
+/// A null object uploads into a fresh one, so the common case owns a single
+/// handle rather than an empty object it has to remember to free alongside the
+/// different object finish hands back.
+#[test]
+fn upload_start_accepts_a_null_object() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [97u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let payload: Vec<u8> = (0..(5 << 20)).map(|i| (i % 251) as u8).collect();
+        let opts = default_upload_options();
+        let mut up = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_start(
+                sdk,
+                std::ptr::null(),
+                &raw const opts,
+                &raw mut up,
+                &raw mut err
+            ),
+            SIA_OK,
+            "a null object must start a fresh upload: {}",
+            take_err(err)
+        );
+        let mut wrote = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_write(
+                up,
+                payload.as_ptr(),
+                payload.len(),
+                std::ptr::null_mut(),
+                &raw mut wrote,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_upload_write: {}",
+            take_err(err)
+        );
+        let mut obj = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_finish(up, std::ptr::null_mut(), &raw mut obj, &raw mut err),
+            SIA_OK,
+            "sia_upload_finish: {}",
+            take_err(err)
+        );
+        sia_upload_free(up);
+
+        assert_eq!(sia_object_size(obj), payload.len() as u64);
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_pin_object(sdk, obj, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "sia_sdk_pin_object: {}",
+            take_err(err)
+        );
+        let got = download_all(sdk, obj);
+        assert!(got == payload, "the fresh object must round trip");
+
+        sia_object_free(obj);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}

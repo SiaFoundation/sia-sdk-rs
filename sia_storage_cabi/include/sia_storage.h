@@ -209,8 +209,12 @@ extern "C"
 	void sia_events_free(sia_events_t *evs);
 
 	// The upload streams data pushed via sia_upload_write. Call sia_upload_finish
-	// to signal EOF and wait for completion; it returns the updated object.
-	// sia_upload_free aborts the upload if it is still running.
+	// to signal EOF and wait for completion; it returns the finished object.
+	//
+	// Pass a NULL obj to upload into a fresh object, which is the common case.
+	// Pass an existing one only to overwrite part of it, with start_offset set.
+	// An object passed here is borrowed rather than consumed: it is still the
+	// caller's to free, and the object finish returns is a different one.
 	//
 	// *written always reports how many bytes of data reached the upload, on every
 	// status including SIA_ERR_CANCELLED. A cancelled write is not an error the
@@ -218,7 +222,8 @@ extern "C"
 	// be NULL if the caller does not want the count, but then a cancelled write
 	// cannot be resumed safely.
 	//
-	// sia_upload_finish consumes the upload whatever it returns. On
+	// sia_upload_finish leaves the upload unusable whatever it returns, but does
+	// not release it: call sia_upload_free afterwards either way. On
 	// SIA_ERR_CANCELLED it aborts the transfer rather than leaving it running, so
 	// a cancelled finish yields no object and uploads nothing further.
 	int32_t sia_upload_start(const sia_sdk_t *sdk, const sia_object_t *obj, const sia_upload_options_t *opts, sia_upload_t **out, char **err);
