@@ -105,6 +105,7 @@ impl Sdk {
     }
 
     /// Creates a new SDK instance.
+    #[cfg(test)]
     pub(crate) async fn new(
         api_client: app_client::Client,
         app_key: Arc<AppKey>,
