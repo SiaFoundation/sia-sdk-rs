@@ -87,14 +87,26 @@ pub(crate) struct CLogger {
     pub(crate) userdata: usize,
 }
 
+/// Builds a C string, replacing any interior NUL. A NUL cannot cross as data,
+/// but dropping the text around it loses the whole record.
+pub(crate) fn lossy_cstring(s: impl Into<Vec<u8>>) -> CString {
+    let mut bytes: Vec<u8> = s.into();
+    for b in &mut bytes {
+        if *b == 0 {
+            *b = b'?';
+        }
+    }
+    CString::new(bytes).expect("every NUL was replaced")
+}
+
 impl log::Log for CLogger {
     fn enabled(&self, _: &log::Metadata) -> bool {
         true
     }
 
     fn log(&self, record: &log::Record) {
-        let target = CString::new(record.target()).unwrap_or_default();
-        let msg = CString::new(record.args().to_string()).unwrap_or_default();
+        let target = lossy_cstring(record.target());
+        let msg = lossy_cstring(record.args().to_string());
         unsafe {
             (self.cb)(
                 self.userdata,
