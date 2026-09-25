@@ -279,6 +279,11 @@ extern "C"
 	int32_t sia_packed_upload_add_abort(sia_packed_upload_t *up, sia_cancel_t *cancel, char **err);
 	// *out_objs receives a heap array of owned object handles. Free the array
 	// (not the objects) with sia_object_array_free.
+	//
+	// finalize consumes the upload whatever it returns, as sia_upload_finish
+	// does. On SIA_ERR_CANCELLED it abandons the slabs still in flight and
+	// yields no objects. Release the handle with sia_packed_upload_free either
+	// way.
 	int32_t sia_packed_upload_finalize(sia_packed_upload_t *up, sia_cancel_t *cancel, sia_object_t ***out_objs, size_t *out_len, char **err);
 	void sia_object_array_free(sia_object_t **objs, size_t len);
 	void sia_packed_upload_free(sia_packed_upload_t *up);
