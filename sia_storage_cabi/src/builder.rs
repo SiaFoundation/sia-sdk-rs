@@ -5,16 +5,31 @@ use sia_storage::{
 };
 use std::ffi::{CString, c_char};
 use std::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) enum BuilderState {
     Disconnected(Builder<DisconnectedState>),
     Requesting(Builder<RequestingApprovalState>),
+    /// A wait a cancelled call left running. The wait is a poll loop over the
+    /// status URL and holds no state of its own, so the next call reattaches
+    /// rather than discarding a request the user may already have approved.
+    Waiting(JoinHandle<Result<Builder<ApprovedState>, BuilderError>>),
     Approved(Builder<ApprovedState>),
     Consumed,
 }
 
 pub(crate) struct FfiBuilder(pub(crate) Mutex<BuilderState>);
+
+impl Drop for FfiBuilder {
+    fn drop(&mut self) {
+        // Otherwise a wait nobody is coming back for keeps polling the indexer
+        // until the request expires.
+        if let Ok(BuilderState::Waiting(task)) = self.0.get_mut() {
+            task.abort();
+        }
+    }
+}
 
 #[derive(serde::Deserialize)]
 pub(crate) struct AppMetadataIn {
@@ -206,20 +221,27 @@ pub unsafe extern "C" fn sia_builder_wait_for_approval(
             return SIA_ERR_INVALID_HANDLE;
         };
         let mut state = b.0.lock().unwrap();
-        let builder = match std::mem::replace(&mut *state, BuilderState::Consumed) {
-            BuilderState::Requesting(builder) => builder,
+        let mut task = match std::mem::replace(&mut *state, BuilderState::Consumed) {
+            BuilderState::Requesting(builder) => runtime().spawn(builder.wait_for_approval()),
+            BuilderState::Waiting(task) => task,
             other => {
                 *state = other;
                 return set_err(err, SIA_ERR_INVALID_STATE, "no connection request");
             }
         };
-        match block_on(cancel, builder.wait_for_approval()) {
-            None => set_cancelled(err),
-            Some(Ok(approved)) => {
+        // Awaited by reference, so a cancelled wait leaves the task owned
+        // rather than detaching it.
+        let Some(joined) = block_on(cancel, &mut task) else {
+            *state = BuilderState::Waiting(task);
+            return set_cancelled(err);
+        };
+        match joined {
+            Ok(Ok(approved)) => {
                 *state = BuilderState::Approved(approved);
                 SIA_OK
             }
-            Some(Err(e)) => builder_error(err, e),
+            Ok(Err(e)) => builder_error(err, e),
+            Err(e) => set_err(err, SIA_ERR, format!("waiting for approval: {e}")),
         }
     })
 }
