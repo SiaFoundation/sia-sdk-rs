@@ -270,6 +270,10 @@ extern "C"
 	uint64_t sia_packed_upload_length(const sia_packed_upload_t *up);
 	uint64_t sia_packed_upload_optimal_data_size(const sia_packed_upload_t *up);
 	int32_t sia_packed_upload_add_begin(sia_packed_upload_t *up, char **err);
+	// Any status other than SIA_OK ends the add, SIA_ERR_CANCELLED included.
+	// Part of the buffer may already be in the stream and there is no count to
+	// resume from, unlike sia_upload_write. Call add_abort to discard the
+	// object and add it again from the start.
 	int32_t sia_packed_upload_add_write(sia_packed_upload_t *up, const uint8_t *data, size_t len, sia_cancel_t *cancel, char **err);
 	int32_t sia_packed_upload_add_finish(sia_packed_upload_t *up, sia_cancel_t *cancel, uint64_t *written, char **err);
 	// Abandons the add in progress and discards the object it would have
