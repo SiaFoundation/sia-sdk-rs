@@ -644,6 +644,9 @@ pub unsafe extern "C" fn sia_packed_upload_add_abort(
     })
 }
 
+/// Consumes the upload whatever it returns, cancellation included: a cancelled
+/// finalize abandons the slabs still in flight and yields no objects.
+///
 /// # Safety
 /// - `up` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_packed_upload_start` that has not been freed.
@@ -671,14 +674,17 @@ pub unsafe extern "C" fn sia_packed_upload_finalize(
         if up.writer.is_some() || up.add_task.is_some() {
             return set_err(err, SIA_ERR_INVALID_STATE, "an add is still in progress");
         }
-        let inner = up.inner.clone();
+        // Taken before the future, so which side of the lock the token fires
+        // on does not decide whether the upload survives. No add is in
+        // progress by the check above, so nothing else holds it.
+        let Ok(mut guard) = up.inner.try_lock() else {
+            return set_err(err, SIA_ERR_INVALID_STATE, "the upload is in use");
+        };
+        let Some(packed) = guard.take() else {
+            return set_err(err, SIA_ERR_INVALID_STATE, "upload already finalized");
+        };
+        drop(guard);
         let result = block_on(cancel, async move {
-            let packed = inner.lock().await.take().ok_or_else(|| {
-                (
-                    SIA_ERR_INVALID_STATE,
-                    "upload already finalized".to_string(),
-                )
-            })?;
             packed
                 .finalize()
                 .await
