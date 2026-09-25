@@ -281,6 +281,10 @@ extern "C"
 	// *out_objs receives a heap array of owned object handles. Free the array
 	// (not the objects) with sia_object_array_free.
 	//
+	// finalize refuses with SIA_ERR_INVALID_STATE while an add is attached,
+	// which a cancelled add_finish or add_abort leaves it, so retry that call
+	// first. Refusing costs nothing: the upload is untouched.
+	//
 	// finalize consumes the upload whatever it returns, as sia_upload_finish
 	// does. On SIA_ERR_CANCELLED it abandons the slabs still in flight and
 	// yields no objects. Release the handle with sia_packed_upload_free either
