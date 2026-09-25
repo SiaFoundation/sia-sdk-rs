@@ -1,5 +1,5 @@
 use crate::abi::*;
-use crate::object::sia_object_free;
+use crate::object::{sia_object_free, write_object_array};
 use sia_storage::{Object, PackedUpload, PackedUploadOptions, Sdk, UploadOptions};
 use std::ffi::c_char;
 use std::future::Future;
@@ -105,9 +105,11 @@ pub(crate) fn make_packed_upload_options(c: &UploadOptionsC) -> PackedUploadOpti
 
 /// Starts a streaming upload: the returned handle owns the write half of an
 /// in-memory pipe and a task driving `upload` with the read half.
+///
+/// Always succeeds, so there is nothing to report through an `err` slot.
 /// # Safety
 /// - `out` must be non null and writable. It receives an owned handle.
-pub(crate) unsafe fn start_upload<F, Fut>(out: *mut *mut FfiUpload, err: ErrOut, upload: F) -> i32
+pub(crate) unsafe fn start_upload<F, Fut>(out: *mut *mut FfiUpload, upload: F) -> i32
 where
     F: FnOnce(DuplexStream) -> Fut,
     Fut: Future<Output = Result<Object, (i32, String)>> + Send + 'static,
@@ -121,7 +123,6 @@ where
             task: Some(task),
         }));
     }
-    let _ = err;
     SIA_OK
 }
 
@@ -204,7 +205,7 @@ pub unsafe extern "C" fn sia_upload_start(
             return set_typed_err(err, &e);
         }
         unsafe {
-            start_upload(out, err, move |reader| async move {
+            start_upload(out, move |reader| async move {
                 sdk.upload(obj, reader, options)
                     .await
                     .map_err(|e| (status_for(&e), e.to_string()))
@@ -242,7 +243,11 @@ pub unsafe extern "C" fn sia_upload_write(
             unsafe { *written = 0 }
         }
         let Some(writer) = up.writer.as_mut() else {
-            return set_err(err, SIA_ERR_INVALID_STATE, "upload already finished");
+            return set_err(
+                err,
+                SIA_ERR_INVALID_STATE,
+                "upload is no longer accepting data",
+            );
         };
         // A C caller with nothing to send may well pass NULL, which
         // from_raw_parts rejects even for an empty slice.
@@ -336,7 +341,7 @@ pub unsafe extern "C" fn sia_upload_finish(
             return SIA_ERR_INVALID_HANDLE;
         };
         if up.task.is_none() {
-            return set_err(err, SIA_ERR_INVALID_STATE, "upload already finished");
+            return set_err(err, SIA_ERR_INVALID_STATE, "upload has already ended");
         }
         drop(up.writer.take()); // signal EOF
 
@@ -522,6 +527,7 @@ pub unsafe extern "C" fn sia_packed_upload_add_write(
                 match joined {
                     Ok(Ok(_)) => set_err(err, SIA_ERR, "add ended before all data was written"),
                     Ok(Err((code, msg))) => set_err(err, code, msg),
+                    Err(e) if e.is_cancelled() => set_cancelled(err),
                     Err(e) => set_typed_err(err, &e),
                 }
             }
@@ -679,16 +685,7 @@ pub unsafe extern "C" fn sia_packed_upload_finalize(
         match result {
             None => set_cancelled(err),
             Some(Ok(objects)) => {
-                let ptrs: Vec<*mut Object> = objects
-                    .into_iter()
-                    .map(|o| Box::into_raw(Box::new(o)))
-                    .collect();
-                let mut ptrs = ptrs.into_boxed_slice();
-                unsafe {
-                    *out_len = ptrs.len();
-                    *out_objs = ptrs.as_mut_ptr();
-                }
-                std::mem::forget(ptrs);
+                unsafe { write_object_array(objects, out_objs, out_len) }
                 SIA_OK
             }
             Some(Err((code, msg))) => set_err(err, code, msg),

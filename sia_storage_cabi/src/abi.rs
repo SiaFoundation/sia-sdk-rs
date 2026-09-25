@@ -280,7 +280,8 @@ pub(crate) fn guarded(err: ErrOut, body: impl FnOnce() -> i32) -> i32 {
 }
 
 /// # Safety
-/// - `s` must be non null and writable.
+/// - `s` may be null, which does nothing. Otherwise it must be a string this library returned
+///   that has not already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_string_free(s: *mut c_char) {
     if !s.is_null() {
@@ -328,7 +329,7 @@ pub unsafe extern "C" fn sia_cancel_new() -> *mut CancellationToken {
 }
 
 /// # Safety
-/// - `c` may be null, which makes the call uncancellable. Otherwise it must be a live token from
+/// - `c` may be null, which does nothing. Otherwise it must be a live token from
 ///   `sia_cancel_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_cancel_cancel(c: *const CancellationToken) {
@@ -338,8 +339,8 @@ pub unsafe extern "C" fn sia_cancel_cancel(c: *const CancellationToken) {
 }
 
 /// # Safety
-/// - `c` may be null, which makes the call uncancellable. Otherwise it must be a live token from
-///   `sia_cancel_new`.
+/// - `c` may be null, which does nothing. Otherwise it must come from `sia_cancel_new` and must
+///   not be used again after this returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_cancel_free(c: *mut CancellationToken) {
     if !c.is_null() {
