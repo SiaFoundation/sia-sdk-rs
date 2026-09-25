@@ -4,6 +4,7 @@ use sia_storage::{Object, PackedUpload, PackedUploadOptions, Sdk, UploadOptions}
 use std::ffi::c_char;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -37,6 +38,24 @@ pub(crate) struct FfiPacked {
     pub(crate) optimal_data_size: u64,
     pub(crate) writer: Option<DuplexStream>,
     pub(crate) add_task: Option<JoinHandle<Result<u64, (i32, String)>>>,
+    /// Last values read while the lock was free. An add holds it from
+    /// add_begin until EOF, which only the caller can send, so reading through
+    /// the lock would deadlock the thread driving the add.
+    pub(crate) remaining: AtomicU64,
+    pub(crate) length: AtomicU64,
+}
+
+/// Reads one figure without waiting on an add. While an add holds the lock,
+/// the snapshot from before it began is the honest answer.
+fn packed_stat(up: &FfiPacked, snapshot: &AtomicU64, read: impl Fn(&PackedUpload) -> u64) -> u64 {
+    match up.inner.try_lock() {
+        Ok(guard) => {
+            let value = guard.as_ref().map(read).unwrap_or(0);
+            snapshot.store(value, Ordering::Relaxed);
+            value
+        }
+        Err(_) => snapshot.load(Ordering::Relaxed),
+    }
 }
 
 pub(crate) fn make_upload_options(c: &UploadOptionsC) -> UploadOptions {
@@ -140,6 +159,8 @@ pub(crate) unsafe fn start_packed(packed: PackedUpload, out: *mut *mut FfiPacked
             optimal_data_size,
             writer: None,
             add_task: None,
+            remaining: AtomicU64::new(optimal_data_size),
+            length: AtomicU64::new(0),
         }));
     }
     SIA_OK
@@ -385,14 +406,7 @@ pub unsafe extern "C" fn sia_packed_upload_remaining(up: *const FfiPacked) -> u6
     let Some(up) = (unsafe { up.as_ref() }) else {
         return 0;
     };
-    runtime().block_on(async {
-        up.inner
-            .lock()
-            .await
-            .as_ref()
-            .map(|p| p.remaining())
-            .unwrap_or(0)
-    })
+    packed_stat(up, &up.remaining, |p| p.remaining())
 }
 
 /// # Safety
@@ -403,14 +417,7 @@ pub unsafe extern "C" fn sia_packed_upload_length(up: *const FfiPacked) -> u64 {
     let Some(up) = (unsafe { up.as_ref() }) else {
         return 0;
     };
-    runtime().block_on(async {
-        up.inner
-            .lock()
-            .await
-            .as_ref()
-            .map(|p| p.length())
-            .unwrap_or(0)
-    })
+    packed_stat(up, &up.length, |p| p.length())
 }
 
 /// # Safety
