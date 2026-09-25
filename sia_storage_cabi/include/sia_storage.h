@@ -94,12 +94,13 @@ extern "C"
 	} sia_shard_progress_t;
 
 	// Invoked from arbitrary Rust runtime threads. Implementations must be
-	// thread-safe, must not call back into this library, and must not retain or
-	// mutate the pointed-to data past the call.
-	typedef void (*sia_progress_cb_t)(uintptr_t userdata, sia_shard_progress_t *progress);
+	// thread-safe, must not call back into this library, and must not retain
+	// the pointed-to data past the call.
+	typedef void (*sia_progress_cb_t)(uintptr_t userdata, const sia_shard_progress_t *progress);
 
 	// level: 1=error 2=warn 3=info 4=debug 5=trace
-	typedef void (*sia_log_cb_t)(uintptr_t userdata, int32_t level, char *target, char *message);
+	// target and message are borrowed for the call, under the same terms.
+	typedef void (*sia_log_cb_t)(uintptr_t userdata, int32_t level, const char *target, const char *message);
 
 	typedef struct
 	{
