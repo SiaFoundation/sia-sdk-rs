@@ -293,10 +293,9 @@ pub unsafe extern "C" fn sia_upload_write(
                 up.writer = None;
                 match up.task.take() {
                     Some(mut task) => {
-                        let Some(joined) = block_on(cancel, &mut task) else {
-                            task.abort();
-                            return set_cancelled(err);
-                        };
+                        // The task has already ended, so this join is
+                        // immediate and needs no cancellation token.
+                        let joined = runtime().block_on(&mut task);
                         let mut out = std::ptr::null_mut();
                         let code = unsafe { upload_result(joined, &raw mut out, err) };
                         if code == SIA_OK {
