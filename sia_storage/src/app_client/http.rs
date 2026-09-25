@@ -875,6 +875,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_requests_compression() {
+        // `[]` encoded with each supported content encoding
+        const EMPTY_LISTS: &[(&str, &[u8])] = &[
+            (
+                "gzip",
+                &[
+                    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x8b, 0x8e, 0x05,
+                    0x00, 0x29, 0xbb, 0x4c, 0x0d, 0x02, 0x00, 0x00, 0x00,
+                ],
+            ),
+            (
+                "zstd",
+                &[
+                    0x28, 0xb5, 0x2f, 0xfd, 0x04, 0x58, 0x11, 0x00, 0x00, 0x5b, 0x5d, 0x56, 0x1f,
+                    0x7f, 0x61,
+                ],
+            ),
+        ];
+
+        for (encoding, body) in EMPTY_LISTS {
+            let server = Server::run();
+            server.expect(
+                Expectation::matching(all_of![
+                    request::method_path("GET", "/hosts"),
+                    request::headers(contains((
+                        "accept-encoding",
+                        all_of![matches(r"\bgzip\b"), matches(r"\bzstd\b")]
+                    ))),
+                ])
+                .respond_with(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-encoding", *encoding)
+                        .body(body.to_vec())
+                        .unwrap(),
+                ),
+            );
+
+            let app_key = PrivateKey::from_seed(&rand::random());
+            let client = Client::new(server.url("/").to_string()).unwrap();
+            let hosts = client
+                .hosts(&app_key, HostQuery::default())
+                .await
+                .unwrap_or_else(|e| panic!("{encoding}: {e}"));
+            assert!(hosts.is_empty(), "{encoding}");
+        }
+    }
+
+    #[tokio::test]
     async fn test_hosts_with_additional_filters() {
         let server = Server::run();
         server.expect(
