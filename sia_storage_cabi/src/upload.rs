@@ -171,9 +171,9 @@ pub(crate) unsafe fn start_packed(packed: PackedUpload, out: *mut *mut FfiPacked
 /// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_builder_connect`, `sia_builder_register` or `sia_mock_sdk` that has not been freed.
 /// - `obj` may be null, which uploads into a fresh object. Otherwise it must be a live handle
-///   from `sia_object_new` or any call that returns an object, that has not been freed. It is
-///   borrowed, not consumed: the caller still frees it, and `sia_upload_finish` returns a
-///   different object.
+///   from `sia_object_new` or any call that returns an object, that has not been freed. Without
+///   a start offset the data is appended to its slabs. It is borrowed, not consumed: the caller
+///   still frees it, and `sia_upload_finish` returns a different object.
 /// - `opts` must be non null and point to an initialised struct.
 /// - `out` must be non null and writable. On success it receives an owned handle that must be
 ///   released with `sia_upload_free`.
