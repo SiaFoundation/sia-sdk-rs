@@ -243,6 +243,11 @@ pub unsafe extern "C" fn sia_upload_write(
         let Some(writer) = up.writer.as_mut() else {
             return set_err(err, SIA_ERR_INVALID_STATE, "upload already finished");
         };
+        // A C caller with nothing to send may well pass NULL, which
+        // from_raw_parts rejects even for an empty slice.
+        if len == 0 {
+            return SIA_OK;
+        }
         let buf = unsafe { std::slice::from_raw_parts(data, len) };
 
         // Written from inside the future and read after it is dropped, so a
@@ -495,6 +500,9 @@ pub unsafe extern "C" fn sia_packed_upload_add_write(
         let Some(writer) = up.writer.as_mut() else {
             return set_err(err, SIA_ERR_INVALID_STATE, "no add in progress");
         };
+        if len == 0 {
+            return SIA_OK;
+        }
         let buf = unsafe { std::slice::from_raw_parts(data, len) };
         match block_on(cancel, writer.write_all(buf)) {
             None => set_cancelled(err),

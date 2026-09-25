@@ -2773,3 +2773,169 @@ fn cancelled_wait_for_approval_reattaches() {
         sia_builder_free(builder);
     }
 }
+
+/// A C caller with nothing to send passes a null pointer and a zero length.
+/// The writes take it as a no-op, and the read refuses rather than answering
+/// with the value that means EOF.
+#[test]
+fn empty_buffers_are_not_read_as_end_of_stream() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let seed = [23u8; 32];
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let mut up = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_start(
+                sdk,
+                std::ptr::null(),
+                &raw const opts,
+                &raw mut up,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_upload_start: {}",
+            take_err(err)
+        );
+
+        let mut wrote = 7usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_write(
+                up,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut wrote,
+                &raw mut err
+            ),
+            SIA_OK,
+            "an empty write: {}",
+            take_err(err)
+        );
+        assert_eq!(wrote, 0, "nothing was written");
+
+        // The upload still takes real data afterwards.
+        let payload = vec![9u8; 4096];
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_write(
+                up,
+                payload.as_ptr(),
+                payload.len(),
+                std::ptr::null_mut(),
+                &raw mut wrote,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_upload_write: {}",
+            take_err(err)
+        );
+        assert_eq!(wrote, payload.len());
+
+        let mut uploaded = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_finish(up, std::ptr::null_mut(), &raw mut uploaded, &raw mut err),
+            SIA_OK,
+            "sia_upload_finish: {}",
+            take_err(err)
+        );
+        sia_upload_free(up);
+
+        let mut packed = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
+            SIA_OK,
+            "sia_packed_upload_start: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_begin(packed, &raw mut err),
+            SIA_OK,
+            "sia_packed_upload_add_begin: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_write(
+                packed,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut err
+            ),
+            SIA_OK,
+            "an empty add write: {}",
+            take_err(err)
+        );
+        sia_packed_upload_free(packed);
+
+        let dopts = default_download_options();
+        let mut dl = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_download_start(sdk, uploaded, &raw const dopts, &raw mut dl, &raw mut err),
+            SIA_OK,
+            "sia_download_start: {}",
+            take_err(err)
+        );
+
+        let mut n = 7usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_download_read(
+                dl,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut n,
+                &raw mut err
+            ),
+            SIA_ERR,
+            "a read with no room must not report the value that means EOF"
+        );
+        take_err(err);
+        assert_eq!(n, 7, "a rejected read leaves the out param alone");
+
+        // The download is still good for a real read.
+        let mut buf = vec![0u8; 8192];
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_download_read(
+                dl,
+                buf.as_mut_ptr(),
+                buf.len(),
+                std::ptr::null_mut(),
+                &raw mut n,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_download_read: {}",
+            take_err(err)
+        );
+        assert_eq!(n, payload.len(), "the object is one short read");
+
+        sia_download_free(dl);
+        sia_object_free(uploaded);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
