@@ -1,4 +1,5 @@
 use crate::abi::*;
+use crate::builder::*;
 use crate::download::*;
 use crate::hosts::*;
 use crate::mock::*;
@@ -2726,5 +2727,49 @@ fn packed_getters_do_not_wait_on_an_add() {
         sia_packed_upload_free(packed);
         sia_sdk_free(sdk);
         sia_mock_free(mock);
+    }
+}
+
+/// A wait a cancelled call left running stays attached to the handle, so a Go
+/// caller polling with a deadline does not throw away a request the user may
+/// already have approved.
+#[test]
+fn cancelled_wait_for_approval_reattaches() {
+    let (approve, approved) = tokio::sync::oneshot::channel::<()>();
+    let waiting = runtime().spawn(async move {
+        let _ = approved.await;
+        Err(sia_storage::BuilderError::RequestExpired)
+    });
+    // Stands in for a builder that has a request out. Nothing outside the
+    // crate can reach this state without an indexer to talk to.
+    let builder = Box::into_raw(Box::new(FfiBuilder(std::sync::Mutex::new(
+        BuilderState::Waiting(waiting),
+    ))));
+
+    unsafe {
+        let cancel = sia_cancel_new();
+        sia_cancel_cancel(cancel);
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_wait_for_approval(builder, cancel, &raw mut err),
+            SIA_ERR_CANCELLED,
+            "{}",
+            take_err(err)
+        );
+        sia_cancel_free(cancel);
+
+        // The wait outlived the cancelled call, so the approval it is still
+        // watching for lands on the very next one.
+        approve.send(()).expect("the wait is still running");
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_wait_for_approval(builder, std::ptr::null_mut(), &raw mut err),
+            SIA_ERR_REQUEST_EXPIRED,
+            "a cancelled wait must be resumable, not leave the builder consumed: {}",
+            take_err(err)
+        );
+        take_err(err);
+
+        sia_builder_free(builder);
     }
 }

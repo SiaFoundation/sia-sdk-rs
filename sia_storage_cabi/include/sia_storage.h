@@ -168,6 +168,9 @@ extern "C"
 	void sia_builder_free(sia_builder_t *b);
 	// Returns SIA_ERR_UNAUTHORIZED when the app key is not authorized.
 	int32_t sia_builder_connect(sia_builder_t *b, const uint8_t app_key[32], sia_cancel_t *cancel, sia_sdk_t **out, char **err);
+	// Cancelling request_connection or register consumes the builder; the flow
+	// starts again from a new one. Cancelling wait_for_approval only stops
+	// waiting, and calling it again reattaches to the same request.
 	int32_t sia_builder_request_connection(sia_builder_t *b, sia_cancel_t *cancel, char **response_url, char **err);
 	int32_t sia_builder_wait_for_approval(sia_builder_t *b, sia_cancel_t *cancel, char **err);
 	int32_t sia_builder_register(sia_builder_t *b, const char *mnemonic, sia_cancel_t *cancel, sia_sdk_t **out, char **err);
