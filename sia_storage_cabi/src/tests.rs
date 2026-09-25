@@ -3869,3 +3869,601 @@ unsafe fn add_one_object(packed: *mut FfiPacked, data: &[u8]) {
         assert_eq!(n, data.len() as u64, "add_finish reports what it packed");
     }
 }
+
+/// The plain SDK entry points against the mock. Each is a thin wrapper, but
+/// nothing called them, so a swapped argument or a mismarshalled id would
+/// have reached the Go suite before this one.
+#[test]
+fn the_sdk_object_entry_points_round_trip() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let seed = [101u8; 32];
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let payload = vec![11u8; 8192];
+        let obj = upload_bytes(sdk, std::ptr::null(), &opts, &payload);
+
+        let meta = b"content-type: application/octet-stream";
+        sia_object_set_metadata(obj, meta.as_ptr(), meta.len());
+
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_pin_object(sdk, obj, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "sia_sdk_pin_object: {}",
+            take_err(err)
+        );
+
+        let mut id = [0u8; 32];
+        sia_object_id(obj, id.as_mut_ptr());
+
+        // Fetched back by id.
+        let mut fetched = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_object(
+                sdk,
+                id.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut fetched,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_sdk_object: {}",
+            take_err(err)
+        );
+        assert_eq!(sia_object_size(fetched), payload.len() as u64);
+        let mut buf = vec![0u8; meta.len()];
+        assert_eq!(
+            sia_object_metadata(fetched, buf.as_mut_ptr(), buf.len()),
+            meta.len(),
+            "the metadata crossed with the object"
+        );
+        assert_eq!(buf, meta, "and came back unchanged");
+
+        // Metadata updated in place on the indexer.
+        let replaced = b"content-type: text/plain";
+        sia_object_set_metadata(fetched, replaced.as_ptr(), replaced.len());
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_update_object_metadata(sdk, fetched, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "sia_sdk_update_object_metadata: {}",
+            take_err(err)
+        );
+
+        // A share url resolves back to the same object without an app key.
+        let mut url = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        let valid_until = 4_102_444_800_000_000i64; // 2100-01-01
+        assert_eq!(
+            sia_sdk_object_share_url(sdk, obj, valid_until, &raw mut url, &raw mut err),
+            SIA_OK,
+            "sia_sdk_object_share_url: {}",
+            take_err(err)
+        );
+        assert!(!url.is_null(), "a share url must come back");
+        let mut shared = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_object_from_share_url(
+                sdk,
+                url,
+                std::ptr::null_mut(),
+                &raw mut shared,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_sdk_object_from_share_url: {}",
+            take_err(err)
+        );
+        assert_eq!(sia_object_size(shared), payload.len() as u64);
+        sia_string_free(url);
+
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_prune_slabs(sdk, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "sia_sdk_prune_slabs: {}",
+            take_err(err)
+        );
+
+        // Deleted, and then no longer fetchable.
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_delete_object(sdk, id.as_ptr(), std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "sia_sdk_delete_object: {}",
+            take_err(err)
+        );
+        let mut gone = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_ne!(
+            sia_sdk_object(
+                sdk,
+                id.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut gone,
+                &raw mut err
+            ),
+            SIA_OK,
+            "a deleted object must not still fetch"
+        );
+        let _ = take_err(err);
+
+        sia_object_free(shared);
+        sia_object_free(fetched);
+        sia_object_free(obj);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// `sia_sdk_object_events` across the boundary. The cursor truncation test
+/// lives in `sia_storage`; this covers the marshalling either side of it,
+/// where `has_cursor` and `after_id` go out and owned objects come back.
+#[test]
+fn object_events_page_through_the_abi() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let seed = [103u8; 32];
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        for i in 0..3u8 {
+            let payload = vec![i + 1; 4096 * (i as usize + 1)];
+            let obj = upload_bytes(sdk, std::ptr::null(), &opts, &payload);
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_sdk_pin_object(sdk, obj, std::ptr::null_mut(), &raw mut err),
+                SIA_OK,
+                "pin {i}: {}",
+                take_err(err)
+            );
+            sia_object_free(obj);
+        }
+
+        // First page, no cursor.
+        let mut evs = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_object_events(
+                sdk,
+                false,
+                0,
+                std::ptr::null(),
+                1,
+                std::ptr::null_mut(),
+                &raw mut evs,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_sdk_object_events: {}",
+            take_err(err)
+        );
+        assert_eq!(sia_events_len(evs), 1, "asked for one event");
+
+        let mut first_id = [0u8; 32];
+        let mut deleted = true;
+        let mut updated_at = 0i64;
+        let mut obj = std::ptr::null_mut();
+        assert!(
+            sia_events_at(
+                evs,
+                0,
+                first_id.as_mut_ptr(),
+                &raw mut deleted,
+                &raw mut updated_at,
+                &raw mut obj
+            ),
+            "the event must be readable"
+        );
+        assert!(!deleted, "a pin is not a deletion");
+        assert!(updated_at > 0, "the timestamp must cross as microseconds");
+        assert!(!obj.is_null(), "a pin event carries its object");
+        assert!(sia_object_size(obj) > 0, "and the object is the real one");
+        sia_object_free(obj);
+        sia_events_free(evs);
+
+        // Second page, resuming from that event.
+        let mut rest = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_object_events(
+                sdk,
+                true,
+                updated_at,
+                first_id.as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut rest,
+                &raw mut err
+            ),
+            SIA_OK,
+            "the cursored page: {}",
+            take_err(err)
+        );
+        let len = sia_events_len(rest);
+        assert!(len > 0, "two events remain after the first");
+        for i in 0..len {
+            let mut id = [0u8; 32];
+            let mut deleted = false;
+            let mut updated_at = 0i64;
+            let mut obj = std::ptr::null_mut();
+            assert!(
+                sia_events_at(
+                    rest,
+                    i,
+                    id.as_mut_ptr(),
+                    &raw mut deleted,
+                    &raw mut updated_at,
+                    &raw mut obj
+                ),
+                "event {i} must be readable"
+            );
+            assert_ne!(
+                id, first_id,
+                "the cursor must not replay the event it was built from"
+            );
+            if !obj.is_null() {
+                sia_object_free(obj);
+            }
+        }
+        sia_events_free(rest);
+
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// A ranged download. `offset` and `has_length` are the only options with a
+/// meaning beyond a default, and nothing set either.
+#[test]
+fn download_honours_offset_and_length() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let seed = [107u8; 32];
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let payload: Vec<u8> = (0..(1 << 20)).map(|i| (i % 251) as u8).collect();
+        let obj = upload_bytes(sdk, std::ptr::null(), &opts, &payload);
+
+        let offset = 1000usize;
+        let length = 4096usize;
+        let mut dopts = default_download_options();
+        dopts.offset = offset as u64;
+        dopts.has_length = true;
+        dopts.length = length as u64;
+
+        let mut dl = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_download_start(sdk, obj, &raw const dopts, &raw mut dl, &raw mut err),
+            SIA_OK,
+            "sia_download_start: {}",
+            take_err(err)
+        );
+
+        let mut got = Vec::new();
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let mut n = 0usize;
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_download_read(
+                    dl,
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    std::ptr::null_mut(),
+                    &raw mut n,
+                    &raw mut err
+                ),
+                SIA_OK,
+                "sia_download_read: {}",
+                take_err(err)
+            );
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        sia_download_free(dl);
+
+        assert_eq!(got.len(), length, "the range bounds what the read returns");
+        assert_eq!(
+            got,
+            payload[offset..offset + length],
+            "and it is the bytes at that offset"
+        );
+
+        sia_object_free(obj);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// A sealed object is encrypted under the app key that sealed it. Opening one
+/// with the wrong key is the mistake a consumer persisting these will make,
+/// and it has a status code of its own so Go can match on it.
+#[test]
+fn a_sealed_object_refuses_the_wrong_key_and_bad_json() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut owner = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [109u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut owner,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+        let mut stranger = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [113u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut stranger,
+                &raw mut err
+            ),
+            SIA_OK,
+            "a second sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let payload = vec![13u8; 4096];
+        let obj = upload_bytes(owner, std::ptr::null(), &opts, &payload);
+
+        let mut json = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_object_seal_json(owner, obj, &raw mut json, &raw mut err),
+            SIA_OK,
+            "sia_object_seal_json: {}",
+            take_err(err)
+        );
+
+        // The key that sealed it opens it.
+        let mut opened = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_object_from_sealed_json(owner, json, &raw mut opened, &raw mut err),
+            SIA_OK,
+            "the owner's own key: {}",
+            take_err(err)
+        );
+        assert_eq!(sia_object_size(opened), payload.len() as u64);
+        sia_object_free(opened);
+
+        // Another key does not. SIA_ERR_KEY_MISMATCH belongs to sharing keys,
+        // so this arrives as a plain error and the message is what says why.
+        let mut refused = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_object_from_sealed_json(stranger, json, &raw mut refused, &raw mut err),
+            SIA_ERR,
+            "another app key must not open it"
+        );
+        let message = take_err(err);
+        assert!(
+            message.contains("signature"),
+            "the refusal must say the seal did not verify, got {message:?}"
+        );
+        sia_string_free(json);
+
+        // Neither does something that is not a sealed object.
+        let garbage = CString::new("{\"not\": \"a sealed object\"}").unwrap();
+        let mut rejected = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_ne!(
+            sia_object_from_sealed_json(owner, garbage.as_ptr(), &raw mut rejected, &raw mut err),
+            SIA_OK,
+            "malformed json must be reported, not decoded"
+        );
+        let message = take_err(err);
+        assert!(!message.is_empty(), "and it must say what went wrong");
+
+        sia_object_free(obj);
+        sia_sdk_free(stranger);
+        sia_sdk_free(owner);
+        sia_mock_free(mock);
+    }
+}
+
+/// The slow host controls exist for the Go benchmark and nothing in Rust
+/// called them, so a mistake in the count to key mapping would have shown up
+/// only there. Transfers still complete with them set, and after a reset.
+#[test]
+fn the_mock_slow_host_controls_are_callable() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [127u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        // More than the slab can lose, so the transfer has to route around
+        // them rather than simply not picking them.
+        sia_mock_set_slow_hosts(mock, 5, 1);
+        let opts = default_upload_options();
+        let payload = vec![17u8; 4096];
+        let obj = upload_bytes(sdk, std::ptr::null(), &opts, &payload);
+        assert_eq!(sia_object_size(obj), payload.len() as u64);
+
+        sia_mock_reset_slow_hosts(mock);
+        let again = upload_bytes(sdk, std::ptr::null(), &opts, &payload);
+        assert_eq!(sia_object_size(again), payload.len() as u64);
+
+        // Null is accepted, as everywhere else on the surface.
+        sia_mock_set_slow_hosts(std::ptr::null(), 1, 1);
+        sia_mock_reset_slow_hosts(std::ptr::null());
+
+        sia_object_free(again);
+        sia_object_free(obj);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// The header says a const handle may be used from several threads at once
+/// and a compile time assertion pins the Rust side. This runs it.
+#[test]
+fn const_sdk_calls_run_concurrently() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let seed = [131u8; 32];
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let shared = sdk as usize;
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let sdk = shared as *const sia_storage::Sdk;
+                    let mut seen = [0u8; 32];
+                    for _ in 0..50 {
+                        let mut key = [0u8; 32];
+                        sia_sdk_app_key(sdk, key.as_mut_ptr());
+                        let mut json = std::ptr::null_mut();
+                        let mut err = std::ptr::null_mut();
+                        let code =
+                            sia_sdk_account(sdk, std::ptr::null_mut(), &raw mut json, &raw mut err);
+                        assert_eq!(code, SIA_OK, "sia_sdk_account from another thread");
+                        assert!(!json.is_null());
+                        sia_string_free(json);
+                        seen = key;
+                    }
+                    seen
+                })
+            })
+            .collect();
+
+        for t in threads {
+            let seen = t.join().expect("a const call panicked on another thread");
+            assert_eq!(seen, seed, "every thread reads the same app key");
+        }
+
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// `CLogger` is the second place the crate calls into C. Driving it directly
+/// rather than through `sia_set_logger`, which installs a process wide logger
+/// once and would decide the level for every other test in this binary.
+#[test]
+fn the_logger_bridge_reaches_c() {
+    use std::sync::Mutex;
+
+    static SEEN: Mutex<Vec<(i32, String, String)>> = Mutex::new(Vec::new());
+
+    unsafe extern "C" fn on_log(
+        userdata: usize,
+        level: i32,
+        target: *const c_char,
+        message: *const c_char,
+    ) {
+        assert_eq!(userdata, 0xfeed, "the userdata must cross untouched");
+        let target = unsafe { CStr::from_ptr(target) }
+            .to_string_lossy()
+            .into_owned();
+        let message = unsafe { CStr::from_ptr(message) }
+            .to_string_lossy()
+            .into_owned();
+        SEEN.lock().unwrap().push((level, target, message));
+    }
+
+    let logger = CLogger {
+        cb: on_log,
+        userdata: 0xfeed,
+    };
+    log::Log::log(
+        &logger,
+        &log::Record::builder()
+            .level(log::Level::Warn)
+            .target("sia_storage::upload")
+            .args(format_args!("slab {} shard {}", 2, 7))
+            .build(),
+    );
+
+    let seen = SEEN.lock().unwrap();
+    assert_eq!(seen.len(), 1, "the record must reach the callback");
+    let (level, target, message) = &seen[0];
+    assert_eq!(*level, 2, "warn is 2 on the header's scale");
+    assert_eq!(target, "sia_storage::upload");
+    assert_eq!(
+        message, "slab 2 shard 7",
+        "the record is formatted, not raw"
+    );
+}
