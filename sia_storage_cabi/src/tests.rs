@@ -228,12 +228,17 @@ fn download_fails_when_sectors_are_gone() {
                 &raw mut err,
             );
             if code != SIA_OK {
-                break take_err(err);
+                break (code, take_err(err));
             }
             assert_ne!(n, 0, "download reported a clean EOF after sector loss");
         };
         sia_download_free(dl);
 
+        let (read_code, read_err) = read_err;
+        assert_eq!(
+            read_code, SIA_ERR_NOT_ENOUGH_SHARDS,
+            "the Go side maps the code, not the message: {read_err}"
+        );
         assert!(
             read_err.contains("not enough shards"),
             "expected a shard recovery failure, got {read_err}"
