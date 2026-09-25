@@ -13,13 +13,24 @@ use url::Url;
 use crate::app_client::{self, Client};
 use crate::object_encryption::hkdf;
 use crate::time::Duration;
-use crate::{AppID, AppKey, AppMetadata, Sdk};
+use crate::{AppID, AppKey, AppMetadata, Sdk, SharedSdk, SharingKey, rhp4};
+
+/// The state of an SDK builder whose host connection pool is shared by every
+/// app and [SharedSdk] derived from it, whatever their indexer.
+pub struct InitializedState;
 
 /// The initial state of the SDK builder, before connecting to the indexd service.
-pub struct DisconnectedState;
+pub struct DisconnectedState {
+    client: Client,
+    ephemeral_key: PrivateKey,
+    app_meta: AppMetadata,
+}
 
 /// The state of the SDK builder after requesting approval for the application.
 pub struct RequestingApprovalState {
+    client: Client,
+    ephemeral_key: PrivateKey,
+    app_meta: AppMetadata,
     response_url: Url,
     register_url: Url,
     status_url: Url,
@@ -28,6 +39,9 @@ pub struct RequestingApprovalState {
 
 /// The state of the SDK builder after the application has been approved.
 pub struct ApprovedState {
+    client: Client,
+    ephemeral_key: PrivateKey,
+    app_meta: AppMetadata,
     register_url: Url,
     user_secret: Hash256,
     reconnecting: bool,
@@ -35,10 +49,8 @@ pub struct ApprovedState {
 
 /// A builder for creating an SDK instance.
 pub struct Builder<S> {
-    ephemeral_key: PrivateKey,
     state: S,
-    client: Client,
-    app_meta: AppMetadata,
+    transport: rhp4::Client,
 }
 
 /// Errors that can occur during the SDK building process.
@@ -71,8 +83,71 @@ pub enum BuilderError {
     PreAuthorizedKeyRejected(String),
 }
 
+impl Builder<InitializedState> {
+    /// Creates a builder whose host connection pool is shared by every app and
+    /// [SharedSdk] derived from it. The pool is freed once the builder and all
+    /// of them are dropped.
+    ///
+    /// # Example
+    /// ```rust
+    /// use sia_storage::{AppMetadata, Builder, app_id};
+    ///
+    /// const APP_META: AppMetadata = AppMetadata {
+    ///     id: app_id!("a9f0bda1b97b7d44ae6369ac830851a115311bb59aa2d848beda6ae95d10ad18"),
+    ///     name: "My App",
+    ///     description: "My App Description",
+    ///     service_url: "https://myapp.com",
+    ///     logo_url: Some("https://myapp.com/logo.png"),
+    ///     callback_url: Some("https://myapp.com/callback"),
+    /// };
+    ///
+    /// let builder = Builder::init();
+    /// let app = builder
+    ///     .for_app("https://sia.storage", APP_META)
+    ///     .expect("failed to create builder");
+    /// ```
+    pub fn init() -> Self {
+        Self {
+            state: InitializedState,
+            transport: rhp4::Client::new(),
+        }
+    }
+
+    /// Returns a [`Builder<DisconnectedState>`](Builder) for `app_meta` on
+    /// `indexer_url` that shares this builder's host connection pool.
+    pub fn for_app<U: IntoUrl>(
+        &self,
+        indexer_url: U,
+        app_meta: AppMetadata,
+    ) -> Result<Builder<DisconnectedState>, BuilderError> {
+        Ok(Builder::with_backends(
+            Client::new(indexer_url)?,
+            self.transport.clone(),
+            app_meta,
+        ))
+    }
+
+    /// Connects to `indexer_url` as the recipient of the sharing key derived
+    /// from `seed`, sharing this builder's host connection pool.
+    pub async fn for_sharing_key<U: IntoUrl>(
+        &self,
+        indexer_url: U,
+        seed: [u8; 32],
+    ) -> Result<SharedSdk, BuilderError> {
+        SharedSdk::with_backends(
+            Client::new(indexer_url)?,
+            self.transport.clone(),
+            SharingKey::import(seed),
+        )
+        .await
+    }
+}
+
 impl Builder<DisconnectedState> {
     /// Creates a new SDK builder with the provided indexer URL.
+    ///
+    /// A shorthand for [Builder::init] followed by [Builder::for_app]. To share
+    /// a host connection pool across multiple apps, call those directly instead.
     ///
     /// After creating the builder, call [Builder::connected] to attempt
     /// to connect using an existing app key, or [Builder::request_connection]
@@ -94,13 +169,18 @@ impl Builder<DisconnectedState> {
     /// let builder = Builder::new("https://sia.storage", APP_META).expect("failed to create builder");
     /// ```
     pub fn new<U: IntoUrl>(indexer_url: U, app_meta: AppMetadata) -> Result<Self, BuilderError> {
-        let client = Client::new(indexer_url)?;
-        Ok(Self {
-            ephemeral_key: PrivateKey::from_seed(&random::<[u8; 32]>()),
-            state: DisconnectedState,
-            client,
-            app_meta,
-        })
+        Builder::init().for_app(indexer_url, app_meta)
+    }
+
+    fn with_backends(client: Client, transport: rhp4::Client, app_meta: AppMetadata) -> Self {
+        Self {
+            state: DisconnectedState {
+                client,
+                ephemeral_key: PrivateKey::from_seed(&random::<[u8; 32]>()),
+                app_meta,
+            },
+            transport,
+        }
     }
 
     /// Attempts to connect using the provided app key.
@@ -111,11 +191,20 @@ impl Builder<DisconnectedState> {
     /// # Arguments
     /// * `app_key` - The application key used for authentication.
     pub async fn connected(&self, app_key: &AppKey) -> Result<Option<Sdk>, BuilderError> {
-        let connected = self.client.check_app_authenticated(&app_key.0).await?;
+        let connected = self
+            .state
+            .client
+            .check_app_authenticated(&app_key.0)
+            .await?;
         if !connected {
             return Ok(None);
         }
-        let sdk = Sdk::new(self.client.clone(), Arc::new(app_key.clone())).await?;
+        let sdk = Sdk::with_backends(
+            self.state.client.clone(),
+            self.transport.clone(),
+            Arc::new(app_key.clone()),
+        )
+        .await?;
         Ok(Some(sdk))
     }
 
@@ -142,10 +231,11 @@ impl Builder<DisconnectedState> {
         Seed::new(mnemonic)?;
 
         let resp = self
+            .state
             .client
             .request_app_connection_pre_authorized(
-                &self.ephemeral_key,
-                &self.app_meta,
+                &self.state.ephemeral_key,
+                &self.state.app_meta,
                 pre_authorized_key,
             )
             .await
@@ -159,8 +249,9 @@ impl Builder<DisconnectedState> {
         // The indexer approves a valid pre-authorized request synchronously, so
         // the user secret is available on the first status check.
         let status = self
+            .state
             .client
-            .check_request_status(&self.ephemeral_key, Url::parse(&resp.status_url)?)
+            .check_request_status(&self.state.ephemeral_key, Url::parse(&resp.status_url)?)
             .await?
             .ok_or_else(|| {
                 BuilderError::PreAuthorizedKeyRejected(
@@ -168,15 +259,21 @@ impl Builder<DisconnectedState> {
                 )
             })?;
 
-        let private_key = derive_app_key(mnemonic, &self.app_meta.id, &status.user_secret)?;
-        self.client
+        let private_key = derive_app_key(mnemonic, &self.state.app_meta.id, &status.user_secret)?;
+        self.state
+            .client
             .register_app(
-                &self.ephemeral_key,
+                &self.state.ephemeral_key,
                 &private_key,
                 Url::parse(&resp.register_url)?,
             )
             .await?;
-        Sdk::new(self.client, Arc::new(AppKey(private_key))).await
+        Sdk::with_backends(
+            self.state.client,
+            self.transport,
+            Arc::new(AppKey(private_key)),
+        )
+        .await
     }
 
     /// Requests a new connection for the application.
@@ -187,19 +284,21 @@ impl Builder<DisconnectedState> {
         self,
     ) -> Result<Builder<RequestingApprovalState>, BuilderError> {
         let resp = self
+            .state
             .client
-            .request_app_connection(&self.ephemeral_key, &self.app_meta)
+            .request_app_connection(&self.state.ephemeral_key, &self.state.app_meta)
             .await?;
         Ok(Builder {
-            ephemeral_key: self.ephemeral_key,
-            app_meta: self.app_meta,
             state: RequestingApprovalState {
+                client: self.state.client,
+                ephemeral_key: self.state.ephemeral_key,
+                app_meta: self.state.app_meta,
                 response_url: Url::parse(&resp.response_url)?,
                 register_url: Url::parse(&resp.register_url)?,
                 status_url: Url::parse(&resp.status_url)?,
                 expiration: resp.expiration,
             },
-            client: self.client,
+            transport: self.transport,
         })
     }
 }
@@ -225,19 +324,21 @@ impl Builder<RequestingApprovalState> {
             }
 
             if let Some(status) = self
+                .state
                 .client
-                .check_request_status(&self.ephemeral_key, self.state.status_url.clone())
+                .check_request_status(&self.state.ephemeral_key, self.state.status_url.clone())
                 .await?
             {
                 return Ok(Builder {
-                    ephemeral_key: self.ephemeral_key,
                     state: ApprovedState {
+                        client: self.state.client,
+                        ephemeral_key: self.state.ephemeral_key,
+                        app_meta: self.state.app_meta,
                         register_url: self.state.register_url.clone(),
                         user_secret: status.user_secret,
                         reconnecting: status.reconnecting,
                     },
-                    app_meta: self.app_meta,
-                    client: self.client,
+                    transport: self.transport,
                 });
             }
             sleep(Duration::from_secs(5)).await;
@@ -267,8 +368,13 @@ impl Builder<ApprovedState> {
     /// # Errors
     /// Returns [BuilderError] if the recovery phrase is invalid or the check fails.
     pub async fn matches_existing_app_key(&self, mnemonic: &str) -> Result<bool, BuilderError> {
-        let private_key = derive_app_key(mnemonic, &self.app_meta.id, &self.state.user_secret)?;
-        Ok(self.client.check_app_authenticated(&private_key).await?)
+        let private_key =
+            derive_app_key(mnemonic, &self.state.app_meta.id, &self.state.user_secret)?;
+        Ok(self
+            .state
+            .client
+            .check_app_authenticated(&private_key)
+            .await?)
     }
 
     /// Completes the registration process and returns an SDK instance.
@@ -283,15 +389,22 @@ impl Builder<ApprovedState> {
     /// # Errors
     /// Returns [BuilderError] if the registration fails or the SDK cannot be created.
     pub async fn register(self, mnemonic: &str) -> Result<Sdk, BuilderError> {
-        let private_key = derive_app_key(mnemonic, &self.app_meta.id, &self.state.user_secret)?;
-        self.client
+        let private_key =
+            derive_app_key(mnemonic, &self.state.app_meta.id, &self.state.user_secret)?;
+        self.state
+            .client
             .register_app(
-                &self.ephemeral_key,
+                &self.state.ephemeral_key,
                 &private_key,
                 self.state.register_url.clone(),
             )
             .await?;
-        Sdk::new(self.client, Arc::new(AppKey(private_key))).await
+        Sdk::with_backends(
+            self.state.client,
+            self.transport,
+            Arc::new(AppKey(private_key)),
+        )
+        .await
     }
 }
 
@@ -467,5 +580,24 @@ mod native_tests {
             .unwrap();
         let key = derive_app_key(OTHER_MNEMONIC, &APP_META.id, &USER_SECRET).unwrap();
         assert_eq!(sdk.app_key().public_key(), key.public_key());
+    }
+
+    #[tokio::test]
+    async fn test_for_app_uses_fresh_ephemeral_keys() {
+        let server = reconnecting_approval_server();
+        expect_app_key_check(&server, MNEMONIC, 204);
+
+        let builder = Builder::init();
+        let first = builder
+            .for_app(server.url("/").to_string(), APP_META)
+            .unwrap();
+        let second = builder
+            .for_app(server.url("/").to_string(), APP_META)
+            .unwrap();
+        assert!(first.state.ephemeral_key.public_key() != second.state.ephemeral_key.public_key());
+
+        let builder = second.request_connection().await.unwrap();
+        let builder = builder.wait_for_approval().await.unwrap();
+        assert!(builder.matches_existing_app_key(MNEMONIC).await.unwrap());
     }
 }

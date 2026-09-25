@@ -5,7 +5,8 @@ use sia_core::signing::{PrivateKey, Signature};
 use sia_storage::{self, Hash256};
 use thiserror::Error;
 
-use crate::{AppMetadata, Sdk, spawn};
+use crate::sharing::seed_from_vec;
+use crate::{AppMetadata, Sdk, SharedSdk, spawn};
 
 #[derive(Debug, Error, uniffi::Error)]
 #[uniffi(flat_error)]
@@ -148,7 +149,92 @@ pub enum BuilderError {
     Custom(String),
 }
 
+/// Converts FFI app metadata into the `'static` form [sia_storage] expects.
+fn storage_app_meta(app_meta: AppMetadata) -> Result<sia_storage::AppMetadata, BuilderError> {
+    if app_meta.id.len() != 32 {
+        return Err(BuilderError::Custom("app ID must be 32 bytes".to_string()));
+    }
+    let app_id = Hash256::from(<[u8; 32]>::try_from(app_meta.id).unwrap());
+    Ok(sia_storage::AppMetadata {
+        id: app_id,
+        // sad, but required in FFI-land to make app meta compile-time const
+        // friendly in native-land.
+        name: Box::leak(app_meta.name.into_boxed_str()),
+        description: Box::leak(app_meta.description.into_boxed_str()),
+        service_url: Box::leak(app_meta.service_url.into_boxed_str()),
+        logo_url: app_meta
+            .logo_url
+            .map(|s| Box::leak(s.into_boxed_str()) as &'static str),
+        callback_url: app_meta
+            .callback_url
+            .map(|s| Box::leak(s.into_boxed_str()) as &'static str),
+    })
+}
+
+/// Holds the host connection pool shared by every [Builder] and [SharedSdk]
+/// created from it, whatever their indexer.
+#[derive(uniffi::Object)]
+pub struct SharedBuilder {
+    inner: Arc<sia_storage::Builder<sia_storage::InitializedState>>,
+}
+
+impl Default for SharedBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[uniffi::export]
+impl SharedBuilder {
+    /// Creates a builder with a new host connection pool. The pool is freed
+    /// once the builder and everything created from it are dropped.
+    #[uniffi::constructor]
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(sia_storage::Builder::init()),
+        }
+    }
+
+    /// Returns a [Builder] for `app_meta` on `indexer_url` that shares this
+    /// builder's host connection pool.
+    pub fn for_app(
+        &self,
+        indexer_url: String,
+        app_meta: AppMetadata,
+    ) -> Result<Arc<Builder>, BuilderError> {
+        let builder = self
+            .inner
+            .for_app(indexer_url, storage_app_meta(app_meta)?)?;
+        Ok(Arc::new(Builder::disconnected(builder)))
+    }
+
+    /// Connects to `indexer_url` as the recipient of the sharing key derived
+    /// from `seed`, sharing this builder's host connection pool.
+    pub async fn for_sharing_key(
+        &self,
+        indexer_url: String,
+        seed: Vec<u8>,
+    ) -> Result<Arc<SharedSdk>, crate::Error> {
+        let seed = seed_from_vec(seed)?;
+        let builder = self.inner.clone();
+        let inner = spawn(async move {
+            builder
+                .for_sharing_key(indexer_url, seed)
+                .await
+                .map_err(|e| crate::Error::Custom(e.to_string()))
+        })
+        .await??;
+        Ok(Arc::new(SharedSdk { inner }))
+    }
+}
+
 impl Builder {
+    fn disconnected(builder: sia_storage::Builder<sia_storage::DisconnectedState>) -> Self {
+        Builder {
+            state: Arc::new(Mutex::new(Some(BuilderState::Disconnected(builder)))),
+        }
+    }
+
     async fn with_state_transition<F, Fut, R>(&self, f: F) -> Result<R, BuilderError>
     where
         R: Send + 'static,
@@ -196,30 +282,13 @@ impl Builder {
     /// After creating the builder, call [Builder::connected] to attempt
     /// to connect using an existing app key, or [Builder::request_connection]
     /// to request a new connection.
+    ///
+    /// Use [SharedBuilder] instead to share a host connection pool across
+    /// multiple apps and [SharedSdk]s.
     #[uniffi::constructor]
     pub fn new(indexer_url: String, app_meta: AppMetadata) -> Result<Self, BuilderError> {
-        if app_meta.id.len() != 32 {
-            return Err(BuilderError::Custom("app ID must be 32 bytes".to_string()));
-        }
-        let app_id = Hash256::from(<[u8; 32]>::try_from(app_meta.id).unwrap());
-        let app_meta = sia_storage::AppMetadata {
-            id: app_id,
-            // sad, but required in FFI-land to make app meta compile-time const
-            // friendly in native-land.
-            name: Box::leak(app_meta.name.into_boxed_str()),
-            description: Box::leak(app_meta.description.into_boxed_str()),
-            service_url: Box::leak(app_meta.service_url.into_boxed_str()),
-            logo_url: app_meta
-                .logo_url
-                .map(|s| Box::leak(s.into_boxed_str()) as &'static str),
-            callback_url: app_meta
-                .callback_url
-                .map(|s| Box::leak(s.into_boxed_str()) as &'static str),
-        };
-        let builder = sia_storage::Builder::new(indexer_url, app_meta)?;
-        Ok(Builder {
-            state: Arc::new(Mutex::new(Some(BuilderState::Disconnected(builder)))),
-        })
+        let builder = sia_storage::Builder::new(indexer_url, storage_app_meta(app_meta)?)?;
+        Ok(Builder::disconnected(builder))
     }
 
     /// Attempts to connect using the provided app key.

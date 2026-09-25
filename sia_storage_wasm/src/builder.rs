@@ -2,7 +2,8 @@ use std::cell::RefCell;
 
 use sia_core::signing::PrivateKey;
 use sia_storage::{
-    ApprovedState, Builder as StorageBuilder, DisconnectedState, RequestingApprovalState,
+    ApprovedState, Builder as StorageBuilder, DisconnectedState, InitializedState,
+    RequestingApprovalState,
 };
 use wasm_bindgen::prelude::*;
 
@@ -10,6 +11,7 @@ use crate::app_key::AppKey;
 use crate::helpers::{make_app_metadata, to_js_err};
 use crate::run_local;
 use crate::sdk::Sdk;
+use crate::sharing::{SharedSdk, seed_from_hex};
 
 enum BuilderState {
     Disconnected(StorageBuilder<DisconnectedState>),
@@ -18,14 +20,82 @@ enum BuilderState {
     Finalized,
 }
 
+/// Holds the host connection pool shared by every `Builder` and `SharedSdk`
+/// created from it, whatever their indexer.
+#[wasm_bindgen]
+pub struct SharedBuilder {
+    inner: StorageBuilder<InitializedState>,
+}
+
+impl Default for SharedBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[wasm_bindgen]
+impl SharedBuilder {
+    /// Creates a builder with a new host connection pool. The pool is freed
+    /// once the builder and everything created from it are freed.
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> SharedBuilder {
+        Self {
+            inner: StorageBuilder::init(),
+        }
+    }
+
+    /// Returns a `Builder` for `app` on `indexerUrl` that shares this
+    /// builder's host connection pool.
+    #[wasm_bindgen(js_name = "forApp")]
+    pub fn for_app(
+        &self,
+        indexer_url: &str,
+        #[wasm_bindgen(unchecked_param_type = "AppMetadata")] app: JsValue,
+    ) -> Result<Builder, JsError> {
+        let meta = make_app_metadata(&app)?;
+        let builder = self.inner.for_app(indexer_url, meta).map_err(to_js_err)?;
+        Ok(Builder::disconnected(builder))
+    }
+
+    /// Connects to `indexerUrl` as the recipient of the sharing key derived
+    /// from `seed`, which is the hex string the key's owner handed out, sharing
+    /// this builder's host connection pool.
+    #[wasm_bindgen(js_name = "forSharingKey")]
+    pub async fn for_sharing_key(
+        &self,
+        indexer_url: String,
+        seed: String,
+    ) -> Result<SharedSdk, JsError> {
+        let seed = seed_from_hex(&seed)?;
+        let inner = self
+            .inner
+            .for_sharing_key(indexer_url, seed)
+            .await
+            .map_err(to_js_err)?;
+        Ok(SharedSdk { inner })
+    }
+}
+
 /// SDK Builder — handles the connection and registration flow with an indexer.
 #[wasm_bindgen]
 pub struct Builder {
     state: RefCell<Option<BuilderState>>,
 }
 
+impl Builder {
+    fn disconnected(builder: StorageBuilder<DisconnectedState>) -> Self {
+        Builder {
+            state: RefCell::new(Some(BuilderState::Disconnected(builder))),
+        }
+    }
+}
+
 #[wasm_bindgen]
 impl Builder {
+    /// Creates a new SDK builder with the provided indexer URL.
+    ///
+    /// Use `SharedBuilder` instead to share a host connection pool across
+    /// multiple apps and `SharedSdk`s.
     #[wasm_bindgen(constructor)]
     pub fn new(
         indexer_url: &str,
@@ -33,9 +103,7 @@ impl Builder {
     ) -> Result<Builder, JsError> {
         let meta = make_app_metadata(&app)?;
         let builder = StorageBuilder::new(indexer_url, meta).map_err(to_js_err)?;
-        Ok(Builder {
-            state: RefCell::new(Some(BuilderState::Disconnected(builder))),
-        })
+        Ok(Builder::disconnected(builder))
     }
 
     /// Attempts to connect using an existing AppKey.

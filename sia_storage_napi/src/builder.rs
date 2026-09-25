@@ -5,7 +5,8 @@ use napi_derive::napi;
 use sia_core::signing::{PrivateKey, Signature};
 use sia_storage::Hash256;
 
-use crate::{AppMetadata, Sdk};
+use crate::sharing::seed_from_buffer;
+use crate::{AppMetadata, Sdk, SharedSdk};
 
 /// An AppKey is used to sign requests to the indexer.
 ///
@@ -90,7 +91,81 @@ pub struct Builder {
     state: Arc<Mutex<Option<BuilderState>>>,
 }
 
+/// Converts napi app metadata into the `'static` form `sia_storage` expects.
+fn storage_app_meta(app_meta: AppMetadata) -> Result<sia_storage::AppMetadata> {
+    if app_meta.id.len() != 32 {
+        return Err(Error::from_reason("app ID must be 32 bytes"));
+    }
+    let app_id = Hash256::from(<[u8; 32]>::try_from(app_meta.id.as_ref()).unwrap());
+    Ok(sia_storage::AppMetadata {
+        id: app_id,
+        name: Box::leak(app_meta.name.into_boxed_str()),
+        description: Box::leak(app_meta.description.into_boxed_str()),
+        service_url: Box::leak(app_meta.service_url.into_boxed_str()),
+        logo_url: app_meta
+            .logo_url
+            .map(|s| Box::leak(s.into_boxed_str()) as &'static str),
+        callback_url: app_meta
+            .callback_url
+            .map(|s| Box::leak(s.into_boxed_str()) as &'static str),
+    })
+}
+
+/// Holds the host connection pool shared by every `Builder` and `SharedSdk`
+/// created from it, whatever their indexer.
+#[napi]
+pub struct SharedBuilder {
+    inner: sia_storage::Builder<sia_storage::InitializedState>,
+}
+
+impl Default for SharedBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[napi]
+impl SharedBuilder {
+    /// Creates a builder with a new host connection pool. The pool is freed
+    /// once the builder and everything created from it are garbage collected.
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: sia_storage::Builder::init(),
+        }
+    }
+
+    /// Returns a `Builder` for `appMeta` on `indexerUrl` that shares this
+    /// builder's host connection pool.
+    #[napi]
+    pub fn for_app(&self, indexer_url: String, app_meta: AppMetadata) -> Result<Builder> {
+        let builder = self
+            .inner
+            .for_app(indexer_url, storage_app_meta(app_meta)?)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(Builder::disconnected(builder))
+    }
+
+    /// Connects to `indexerUrl` as the recipient of the sharing key derived
+    /// from `seed`, sharing this builder's host connection pool.
+    #[napi]
+    pub async fn for_sharing_key(&self, indexer_url: String, seed: Buffer) -> Result<SharedSdk> {
+        let inner = self
+            .inner
+            .for_sharing_key(indexer_url, seed_from_buffer(seed)?)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(SharedSdk { inner })
+    }
+}
+
 impl Builder {
+    fn disconnected(builder: sia_storage::Builder<sia_storage::DisconnectedState>) -> Self {
+        Builder {
+            state: Arc::new(Mutex::new(Some(BuilderState::Disconnected(builder)))),
+        }
+    }
+
     async fn with_state_transition<F, Fut, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(BuilderState) -> Fut,
@@ -118,29 +193,14 @@ impl Builder {
 #[napi]
 impl Builder {
     /// Creates a new SDK builder with the provided indexer URL.
+    ///
+    /// Use `SharedBuilder` instead to share a host connection pool across
+    /// multiple apps and `SharedSdk`s.
     #[napi(constructor)]
     pub fn new(indexer_url: String, app_meta: AppMetadata) -> Result<Self> {
-        if app_meta.id.len() != 32 {
-            return Err(Error::from_reason("app ID must be 32 bytes"));
-        }
-        let app_id = Hash256::from(<[u8; 32]>::try_from(app_meta.id.as_ref()).unwrap());
-        let app_meta = sia_storage::AppMetadata {
-            id: app_id,
-            name: Box::leak(app_meta.name.into_boxed_str()),
-            description: Box::leak(app_meta.description.into_boxed_str()),
-            service_url: Box::leak(app_meta.service_url.into_boxed_str()),
-            logo_url: app_meta
-                .logo_url
-                .map(|s| Box::leak(s.into_boxed_str()) as &'static str),
-            callback_url: app_meta
-                .callback_url
-                .map(|s| Box::leak(s.into_boxed_str()) as &'static str),
-        };
-        let builder = sia_storage::Builder::new(indexer_url, app_meta)
+        let builder = sia_storage::Builder::new(indexer_url, storage_app_meta(app_meta)?)
             .map_err(|e| Error::from_reason(e.to_string()))?;
-        Ok(Builder {
-            state: Arc::new(Mutex::new(Some(BuilderState::Disconnected(builder)))),
-        })
+        Ok(Builder::disconnected(builder))
     }
 
     /// Attempts to connect using the provided app key.
