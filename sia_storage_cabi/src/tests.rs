@@ -3381,3 +3381,37 @@ fn cancelled_finalize_consumes_the_upload() {
         sia_mock_free(mock);
     }
 }
+
+/// A panic inside one builder call poisons the mutex. Later calls must still
+/// report the builder's real state rather than the poison, since `guarded`
+/// turns the latter into an opaque "internal panic".
+///
+/// The panic below prints to stderr. That is the test doing its setup.
+#[test]
+fn a_poisoned_builder_still_reports_its_state() {
+    let builder = Box::into_raw(Box::new(FfiBuilder(std::sync::Mutex::new(
+        BuilderState::Consumed,
+    ))));
+    let handle = unsafe { &*builder };
+
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = handle.0.lock().unwrap();
+        panic!("poisoning the builder the way a panic mid-call would");
+    }));
+    assert!(handle.0.is_poisoned(), "the setup must poison the mutex");
+
+    unsafe {
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_wait_for_approval(builder, std::ptr::null_mut(), &raw mut err),
+            SIA_ERR_INVALID_STATE,
+            "a poisoned builder must still answer for its state"
+        );
+        let message = take_err(err);
+        assert!(
+            message.contains("no connection request"),
+            "the state, not the poison, got {message:?}"
+        );
+        sia_builder_free(builder);
+    }
+}
