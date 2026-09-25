@@ -7,6 +7,8 @@ pub(crate) struct FfiEvent {
     pub(crate) deleted: bool,
     pub(crate) updated_at_us: i64,
     pub(crate) object: Option<Box<Object>>,
+    /// Whether the object has already been handed to the caller.
+    pub(crate) taken: bool,
 }
 
 pub(crate) struct FfiEvents(pub(crate) Vec<FfiEvent>);
@@ -195,7 +197,9 @@ pub unsafe extern "C" fn sia_events_len(evs: *const FfiEvents) -> usize {
 /// - `deleted` must be non null and writable.
 /// - `updated_at_unix_us` must be non null and writable.
 /// - `obj` must be non null and writable. On success it receives an owned handle that must be
-///   released with `sia_object_free`.
+///   released with `sia_object_free`. It is null for a deletion, which has no object.
+///
+/// Each index may be read once, since the read transfers the object out. A repeat returns false.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_events_at(
     evs: *mut FfiEvents,
@@ -215,6 +219,12 @@ pub unsafe extern "C" fn sia_events_at(
     let Some(ev) = evs.0.get_mut(i) else {
         return false;
     };
+    // A second read would otherwise report a null object with deleted false,
+    // which is a deletion event in every respect the caller can see.
+    if ev.taken {
+        return false;
+    }
+    ev.taken = true;
     unsafe {
         std::slice::from_raw_parts_mut(id_out, 32).copy_from_slice(&ev.id);
         *deleted = ev.deleted;

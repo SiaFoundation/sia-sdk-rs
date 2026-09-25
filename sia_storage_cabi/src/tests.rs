@@ -3021,3 +3021,65 @@ fn logger_level_zero_is_off() {
     assert_eq!(level_filter(5), log::LevelFilter::Trace);
     assert_eq!(level_filter(99), log::LevelFilter::Trace, "past the scale");
 }
+
+/// Reading an index twice must be reported. The read moves the object out, so
+/// a repeat would otherwise answer with a null object and deleted false,
+/// which is exactly what a deletion event looks like.
+#[test]
+fn events_at_rejects_a_second_read() {
+    unsafe {
+        let evs = Box::into_raw(Box::new(FfiEvents(vec![FfiEvent {
+            id: [3u8; 32],
+            deleted: false,
+            updated_at_us: 1_700_000_000_000_000,
+            object: Some(Box::new(Object::default())),
+            taken: false,
+        }])));
+
+        let mut id = [0u8; 32];
+        let mut deleted = true;
+        let mut updated_at = 0i64;
+        let mut obj = std::ptr::null_mut();
+        assert!(
+            sia_events_at(
+                evs,
+                0,
+                id.as_mut_ptr(),
+                &raw mut deleted,
+                &raw mut updated_at,
+                &raw mut obj
+            ),
+            "the first read must succeed"
+        );
+        assert_eq!(id, [3u8; 32]);
+        assert!(!deleted);
+        assert_eq!(updated_at, 1_700_000_000_000_000);
+        assert!(!obj.is_null(), "the object transfers on the first read");
+        sia_object_free(obj);
+
+        // A live address rather than a bare sentinel, so an out param the call
+        // wrote would be visible without inventing an invalid pointer.
+        let mut untouched = Object::default();
+        let mut id2 = [0u8; 32];
+        let mut deleted2 = true;
+        let mut updated_at2 = 7i64;
+        let mut obj2: *mut Object = &raw mut untouched;
+        assert!(
+            !sia_events_at(
+                evs,
+                0,
+                id2.as_mut_ptr(),
+                &raw mut deleted2,
+                &raw mut updated_at2,
+                &raw mut obj2
+            ),
+            "the second read must not pass for a deletion"
+        );
+        assert_eq!(id2, [0u8; 32], "out params must be untouched when rejected");
+        assert!(deleted2);
+        assert_eq!(updated_at2, 7);
+        assert_eq!(obj2, &raw mut untouched);
+
+        sia_events_free(evs);
+    }
+}

@@ -217,7 +217,7 @@ extern "C"
 
 	size_t sia_events_len(const sia_events_t *evs);
 	// Transfers ownership of the event's object (NULL for deletions) to the
-	// caller. Call at most once per index. Returns false when i is out of range,
+	// caller. Returns false when i is out of range or has already been read,
 	// leaving every out param untouched.
 	bool sia_events_at(sia_events_t *evs, size_t i, uint8_t id_out[32], bool *deleted, int64_t *updated_at_unix_us, sia_object_t **obj);
 	void sia_events_free(sia_events_t *evs);

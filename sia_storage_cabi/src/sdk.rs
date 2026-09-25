@@ -156,6 +156,7 @@ pub unsafe extern "C" fn sia_sdk_object_events(
                             deleted: ev.deleted,
                             updated_at_us: ev.updated_at.timestamp_micros(),
                             object: ev.object.map(Box::new),
+                            taken: false,
                         }
                     })
                     .collect();
