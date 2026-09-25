@@ -3459,3 +3459,23 @@ fn abort_reports_a_panicked_add() {
         sia_packed_upload_free(packed);
     }
 }
+
+/// A log record carrying a NUL used to arrive at the callback as an empty
+/// string, taking the rest of the message with it.
+#[test]
+fn a_log_record_survives_an_interior_nul() {
+    assert_eq!(
+        lossy_cstring("slab 3\0 shard 7").to_bytes(),
+        b"slab 3? shard 7"
+    );
+    assert_eq!(
+        lossy_cstring("nothing to replace").to_bytes(),
+        b"nothing to replace"
+    );
+    assert_eq!(lossy_cstring("\0").to_bytes(), b"?", "a lone NUL");
+    assert_eq!(
+        lossy_cstring("").to_bytes(),
+        b"",
+        "an empty record stays empty"
+    );
+}
