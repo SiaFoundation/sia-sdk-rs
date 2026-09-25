@@ -226,7 +226,8 @@ extern "C"
 	// to signal EOF and wait for completion; it returns the finished object.
 	//
 	// Pass a NULL obj to upload into a fresh object, which is the common case.
-	// Pass an existing one only to overwrite part of it, with start_offset set.
+	// Pass an existing one with start_offset to overwrite part of it, or
+	// without one to append the data to its slabs.
 	// An object passed here is borrowed rather than consumed: it is still the
 	// caller's to free, and the object finish returns is a different one.
 	//

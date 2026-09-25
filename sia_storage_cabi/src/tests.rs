@@ -3479,3 +3479,98 @@ fn a_log_record_survives_an_interior_nul() {
         "an empty record stays empty"
     );
 }
+
+/// An existing object without a start offset is appended to, not replaced.
+/// The Go bindings always hand over an object handle, so this is the path a
+/// caller reaches by forgetting the offset rather than an exotic one.
+#[test]
+fn upload_into_an_existing_object_appends() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let seed = [71u8; 32];
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let first = vec![1u8; 4096];
+        let base = upload_bytes(sdk, std::ptr::null(), &opts, &first);
+        assert_eq!(sia_object_size(base), first.len() as u64);
+
+        // Same object handed back in, no start offset.
+        let second = vec![2u8; 2048];
+        let grown = upload_bytes(sdk, base, &opts, &second);
+        assert_eq!(
+            sia_object_size(grown),
+            (first.len() + second.len()) as u64,
+            "the new data must land after what the object already held"
+        );
+        assert_eq!(
+            sia_object_size(base),
+            first.len() as u64,
+            "the object passed in is borrowed and left alone"
+        );
+
+        sia_object_free(grown);
+        sia_object_free(base);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// Runs one upload to completion and hands back the finished object.
+unsafe fn upload_bytes(
+    sdk: *mut sia_storage::Sdk,
+    obj: *const Object,
+    opts: &UploadOptionsC,
+    data: &[u8],
+) -> *mut Object {
+    unsafe {
+        let mut up = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_start(sdk, obj, &raw const *opts, &raw mut up, &raw mut err),
+            SIA_OK,
+            "sia_upload_start: {}",
+            take_err(err)
+        );
+
+        let mut wrote = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_write(
+                up,
+                data.as_ptr(),
+                data.len(),
+                std::ptr::null_mut(),
+                &raw mut wrote,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_upload_write: {}",
+            take_err(err)
+        );
+
+        let mut out = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_finish(up, std::ptr::null_mut(), &raw mut out, &raw mut err),
+            SIA_OK,
+            "sia_upload_finish: {}",
+            take_err(err)
+        );
+        sia_upload_free(up);
+        out
+    }
+}
