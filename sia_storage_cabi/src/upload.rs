@@ -216,10 +216,11 @@ pub unsafe extern "C" fn sia_upload_start(
 /// # Safety
 /// - `up` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_upload_start` that has not been freed.
-/// - `data` must be readable for `len` bytes.
+/// - `data` must be readable for `len` bytes. A `len` of 0 is a no-op and `data` is not read.
 /// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
 ///   from `sia_cancel_new`.
-/// - `written` must be non null and writable.
+/// - `written` may be null, which discards the count and leaves a cancelled write unresumable.
+///   Otherwise it must be writable, and is written on every status including `SIA_ERR_CANCELLED`.
 /// - `err` may be null. Otherwise it receives an owned message on failure that must be released
 ///   with `sia_string_free`.
 #[unsafe(no_mangle)]
@@ -478,7 +479,7 @@ pub unsafe extern "C" fn sia_packed_upload_add_begin(
 /// # Safety
 /// - `up` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_packed_upload_start` that has not been freed.
-/// - `data` must be readable for `len` bytes.
+/// - `data` must be readable for `len` bytes. A `len` of 0 is a no-op and `data` is not read.
 /// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
 ///   from `sia_cancel_new`.
 /// - `err` may be null. Otherwise it receives an owned message on failure that must be released
