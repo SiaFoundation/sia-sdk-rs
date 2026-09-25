@@ -831,6 +831,59 @@ mod test {
             .expect("an expired key must still be revocable");
     }
 
+    /// A cursor must not replay the event it was built from, even after the
+    /// round trip through the C ABI's microseconds.
+    #[tokio::test]
+    async fn test_object_events_cursor_survives_microsecond_truncation() {
+        use chrono::DateTime;
+
+        use crate::mock::MockNetwork;
+
+        let network = MockNetwork::new();
+        network.add_hosts(40);
+        let sdk = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("sdk creation failed");
+
+        for i in 0..3u8 {
+            let data: Vec<u8> = (0..(1 << 20)).map(|j| (j as u8) ^ i).collect();
+            let object = sdk
+                .upload(
+                    Object::new(None),
+                    std::io::Cursor::new(data),
+                    UploadOptions::default(),
+                )
+                .await
+                .expect("upload failed");
+            sdk.pin_object(&object).await.expect("pin failed");
+        }
+
+        let first = sdk
+            .object_events(None, Some(1))
+            .await
+            .expect("first page failed");
+        assert_eq!(first.len(), 1, "asked for one event");
+
+        // Exactly what the C ABI does to the cursor: out as microseconds,
+        // back in from microseconds.
+        let crossed = DateTime::from_timestamp_micros(first[0].updated_at.timestamp_micros())
+            .expect("representable");
+        let cursor = ObjectsCursor {
+            after: crossed,
+            id: first[0].id,
+        };
+
+        let rest = sdk
+            .object_events(Some(cursor), None)
+            .await
+            .expect("second page failed");
+        assert!(
+            !rest.iter().any(|e| e.id == first[0].id),
+            "the cursor replayed the event it was built from"
+        );
+    }
+
     #[tokio::test]
     async fn test_mock_network_object_roundtrip() {
         use std::io::Cursor;

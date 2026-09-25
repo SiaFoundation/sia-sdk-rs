@@ -22,6 +22,22 @@ use crate::{
     Account, App, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, PinnedSlab, SealedObject,
 };
 
+/// The moment, truncated to microseconds.
+///
+/// The C ABI carries timestamps as Unix microseconds. A finer stored value
+/// makes the object event cursor replay its own event, since the cursor comes
+/// back truncated and so compares strictly smaller.
+fn now_micros() -> DateTime<Utc> {
+    to_micros(Utc::now())
+}
+
+/// Split from [`now_micros`] so it can be tested against an injected value.
+/// Whether the clock produces nanoseconds at all is platform dependent.
+fn to_micros(t: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::from_timestamp_micros(t.timestamp_micros())
+        .expect("a timestamp from the clock is representable in microseconds")
+}
+
 const MOCK_AUTHORITY: &str = "mock.indexd";
 
 #[derive(Debug)]
@@ -220,7 +236,7 @@ impl Client {
             object.id(),
             StoredObject {
                 sealed: Some(object.clone()),
-                updated_at: Utc::now(),
+                updated_at: now_micros(),
             },
         );
         Ok(())
@@ -231,7 +247,7 @@ impl Client {
         match state.objects.get_mut(key) {
             Some(stored) => {
                 stored.sealed = None;
-                stored.updated_at = Utc::now();
+                stored.updated_at = now_micros();
             }
             None => {
                 return Err(Error::Api(
@@ -766,5 +782,49 @@ impl StoredSharingKey {
             .take(limit.map_or(usize::MAX, |l| l as usize))
             .filter_map(|id| self.attached.get(&id).cloned())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::{now_micros, to_micros};
+    use chrono::DateTime;
+
+    /// The invariant the object event cursor depends on.
+    #[test]
+    fn to_micros_drops_the_nanoseconds() {
+        let t = DateTime::from_timestamp_nanos(1_700_000_000_123_456_789);
+        assert_ne!(
+            t.timestamp_subsec_nanos() % 1_000,
+            0,
+            "the fixture must actually carry nanoseconds"
+        );
+
+        let truncated = to_micros(t);
+        assert_eq!(
+            truncated.timestamp_subsec_nanos() % 1_000,
+            0,
+            "the C ABI cannot carry {truncated:?}"
+        );
+        assert_eq!(
+            truncated.timestamp_micros(),
+            t.timestamp_micros(),
+            "truncation must not move the timestamp"
+        );
+
+        // The comparison the cursor performs. Before truncation the stored
+        // value is strictly greater than the cursor built from it, which is
+        // what replayed the event.
+        assert!(t > to_micros(t), "the untruncated value is the problem");
+        assert!(
+            !(truncated > to_micros(truncated)),
+            "a truncated value must compare equal to its own round trip"
+        );
+    }
+
+    #[test]
+    fn now_micros_is_truncated() {
+        let t = now_micros();
+        assert_eq!(t.timestamp_subsec_nanos() % 1_000, 0);
     }
 }
