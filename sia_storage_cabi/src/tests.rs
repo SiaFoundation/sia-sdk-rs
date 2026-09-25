@@ -2592,6 +2592,28 @@ fn cancelled_add_finish_stays_retryable() {
         let _ = take_err(err);
         sia_cancel_free(cancel);
 
+        // The add is still attached, so finalize refuses rather than dropping
+        // the object the add is about to land.
+        let mut objs = std::ptr::null_mut();
+        let mut len = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_finalize(
+                packed,
+                std::ptr::null_mut(),
+                &raw mut objs,
+                &raw mut len,
+                &raw mut err
+            ),
+            SIA_ERR_INVALID_STATE,
+            "finalize must not run with an add attached"
+        );
+        let message = take_err(err);
+        assert!(
+            message.contains("add is still in progress"),
+            "the refusal must say why, got {message:?}"
+        );
+
         // The task was not detached, so the same add finishes on retry.
         let mut n = 0u64;
         let mut err = std::ptr::null_mut();
