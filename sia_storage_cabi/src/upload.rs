@@ -491,6 +491,10 @@ pub unsafe extern "C" fn sia_packed_upload_add_begin(
 ///   from `sia_cancel_new`.
 /// - `err` may be null. Otherwise it receives an owned message on failure that must be released
 ///   with `sia_string_free`.
+///
+/// Any status other than `SIA_OK` ends the add. Part of the buffer may already
+/// be in the stream and no count is reported, so the object has to be discarded
+/// with `sia_packed_upload_add_abort` and added again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_packed_upload_add_write(
     up: *mut FfiPacked,

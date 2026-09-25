@@ -3729,3 +3729,143 @@ fn the_progress_callback_reaches_c() {
         sia_mock_free(mock);
     }
 }
+
+/// A cancelled add_write ends the add: some of the buffer may already be in
+/// the stream and no count comes back, so the only way on is add_abort. This
+/// walks that recovery and shows the upload still takes objects afterwards.
+#[test]
+fn a_cancelled_add_write_recovers_through_abort() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let seed = [97u8; 32];
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let mut packed = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
+            SIA_OK,
+            "sia_packed_upload_start: {}",
+            take_err(err)
+        );
+
+        let kept = vec![1u8; 4096];
+        add_one_object(packed, &kept);
+
+        // The add the caller gives up on.
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_begin(packed, &raw mut err),
+            SIA_OK,
+            "add_begin: {}",
+            take_err(err)
+        );
+        let cancel = sia_cancel_new();
+        sia_cancel_cancel(cancel);
+        let abandoned = vec![2u8; 8192];
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_write(
+                packed,
+                abandoned.as_ptr(),
+                abandoned.len(),
+                cancel,
+                &raw mut err
+            ),
+            SIA_ERR_CANCELLED,
+            "a cancelled add_write"
+        );
+        let _ = take_err(err);
+        sia_cancel_free(cancel);
+
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_abort(packed, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "abort is the way out of a cancelled write: {}",
+            take_err(err)
+        );
+
+        // The upload is still good, which is what makes abort a recovery
+        // rather than a teardown.
+        let after = vec![3u8; 2048];
+        add_one_object(packed, &after);
+
+        let mut objs = std::ptr::null_mut();
+        let mut len = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_finalize(
+                packed,
+                std::ptr::null_mut(),
+                &raw mut objs,
+                &raw mut len,
+                &raw mut err
+            ),
+            SIA_OK,
+            "finalize: {}",
+            take_err(err)
+        );
+        assert_eq!(len, 2, "the abandoned object must not be registered");
+        let listed = std::slice::from_raw_parts(objs, len);
+        assert_eq!(sia_object_size(listed[0]), kept.len() as u64);
+        assert_eq!(sia_object_size(listed[1]), after.len() as u64);
+
+        for o in listed {
+            sia_object_free(*o);
+        }
+        sia_object_array_free(objs, len);
+        sia_packed_upload_free(packed);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// Adds one object to a packed upload and waits for it to land.
+unsafe fn add_one_object(packed: *mut FfiPacked, data: &[u8]) {
+    unsafe {
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_begin(packed, &raw mut err),
+            SIA_OK,
+            "add_begin: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_write(
+                packed,
+                data.as_ptr(),
+                data.len(),
+                std::ptr::null_mut(),
+                &raw mut err
+            ),
+            SIA_OK,
+            "add_write: {}",
+            take_err(err)
+        );
+        let mut n = 0u64;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_finish(packed, std::ptr::null_mut(), &raw mut n, &raw mut err),
+            SIA_OK,
+            "add_finish: {}",
+            take_err(err)
+        );
+        assert_eq!(n, data.len() as u64, "add_finish reports what it packed");
+    }
+}
