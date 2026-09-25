@@ -22,8 +22,9 @@ time, and an export with no declaration is one the bindings cannot reach.
 cargo build -p sia_storage_cabi --release
 ```
 
-That produces the `staticlib` cgo links, and nothing else. The release
-profile carries no debug info, so there is nothing to strip.
+That produces the `staticlib` cgo links, and nothing else. It carries about
+4 MB of the standard library's own debug info, which `-C strip=debuginfo`
+does not remove from a staticlib, so a strip step buys nothing.
 
 The crate is `publish = false`, so there is no crates.io release to depend on.
 Depend on the Go bindings instead.
