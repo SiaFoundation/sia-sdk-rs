@@ -250,6 +250,10 @@ extern "C"
 	// object's data is exhausted, then add_finish (which reports the number of
 	// bytes packed). finalize returns the packed objects.
 	int32_t sia_packed_upload_start(const sia_sdk_t *sdk, const sia_upload_options_t *opts, sia_packed_upload_t **out, char **err);
+	// Both return immediately, including while an add is in progress. During an
+	// add they report the figures from before it began, since the bytes it will
+	// contribute are not settled until add_finish. Call them between adds for
+	// an exact answer.
 	uint64_t sia_packed_upload_remaining(const sia_packed_upload_t *up);
 	uint64_t sia_packed_upload_length(const sia_packed_upload_t *up);
 	uint64_t sia_packed_upload_optimal_data_size(const sia_packed_upload_t *up);

@@ -2623,3 +2623,105 @@ fn cancelled_add_finish_stays_retryable() {
         sia_mock_free(mock);
     }
 }
+
+/// The getters answer during an add. They used to take the same lock the add
+/// holds from add_begin until EOF, so a caller asking "does the next object
+/// fit?" from the thread driving the add waited for an EOF only it could send.
+#[test]
+fn packed_getters_do_not_wait_on_an_add() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [107u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let mut packed = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
+            SIA_OK,
+            "sia_packed_upload_start: {}",
+            take_err(err)
+        );
+
+        let slab = sia_packed_upload_optimal_data_size(packed);
+        assert!(slab > 0);
+        assert_eq!(sia_packed_upload_remaining(packed), slab);
+        assert_eq!(sia_packed_upload_length(packed), 0);
+
+        let payload = vec![b'g'; 8192];
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_begin(packed, &raw mut err),
+            SIA_OK,
+            "add_begin: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_write(
+                packed,
+                payload.as_ptr(),
+                payload.len(),
+                std::ptr::null_mut(),
+                &raw mut err
+            ),
+            SIA_OK,
+            "add_write: {}",
+            take_err(err)
+        );
+
+        // Wait for the add task to actually hold the lock, so what follows
+        // tests the contended path instead of racing it. The pipe is 16 MiB,
+        // so the write above returned without yielding and the task may not
+        // have reached its lock yet. Once it has, it keeps it until EOF, which
+        // only this thread can send, so there is no race the other way.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while (*packed).inner.try_lock().is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the add task never took the lock"
+            );
+            std::thread::yield_now();
+        }
+
+        assert_eq!(
+            sia_packed_upload_remaining(packed),
+            slab,
+            "during an add the figures are the ones from before it began"
+        );
+        assert_eq!(sia_packed_upload_length(packed), 0);
+
+        let mut n = 0u64;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_finish(packed, std::ptr::null_mut(), &raw mut n, &raw mut err),
+            SIA_OK,
+            "add_finish: {}",
+            take_err(err)
+        );
+
+        // Settled once the add is done.
+        assert_eq!(sia_packed_upload_length(packed), payload.len() as u64);
+        assert_eq!(
+            sia_packed_upload_remaining(packed),
+            slab - payload.len() as u64
+        );
+
+        sia_packed_upload_free(packed);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
