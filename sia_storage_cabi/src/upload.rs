@@ -630,9 +630,15 @@ pub unsafe extern "C" fn sia_packed_upload_add_abort(
         up.add_task.take();
 
         // Only a task that succeeded pushed an object, so only then is there
-        // one to remove. A failed add left the object list untouched.
-        if !matches!(joined, Ok(Ok(_))) {
-            return SIA_OK;
+        // one to remove. A failed or cancelled add left the list untouched,
+        // which is the abort's own goal, so both are a success. A panicked one
+        // is a bug and gets a message, as add_finish gives it.
+        match joined {
+            Ok(Ok(_)) => {}
+            Err(join_err) if !join_err.is_cancelled() => {
+                return set_err(err, SIA_ERR, join_err.to_string());
+            }
+            _ => return SIA_OK,
         }
         let inner = up.inner.clone();
         runtime().block_on(async move {
