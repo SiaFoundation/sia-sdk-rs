@@ -3415,3 +3415,47 @@ fn a_poisoned_builder_still_reports_its_state() {
         sia_builder_free(builder);
     }
 }
+
+/// A panicked add is a bug, so abort says so rather than reporting the
+/// success it reports for an add that merely failed. add_finish already does.
+///
+/// The panic below prints to stderr. That is the task under test.
+#[test]
+fn abort_reports_a_panicked_add() {
+    use std::sync::atomic::AtomicU64;
+
+    let task = runtime().spawn(async { panic!("the add task went down") });
+    let packed = Box::into_raw(Box::new(FfiPacked {
+        inner: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        optimal_data_size: 0,
+        writer: None,
+        add_task: Some(task),
+        remaining: AtomicU64::new(0),
+        length: AtomicU64::new(0),
+    }));
+
+    unsafe {
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_abort(packed, std::ptr::null_mut(), &raw mut err),
+            SIA_ERR,
+            "a panicked add must not be folded into success"
+        );
+        let message = take_err(err);
+        assert!(
+            message.contains("panic"),
+            "the abort must say the task panicked, got {message:?}"
+        );
+
+        // The add is consumed either way, so a second abort has none left.
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_abort(packed, std::ptr::null_mut(), &raw mut err),
+            SIA_ERR_INVALID_STATE,
+            "the panicked add is still consumed"
+        );
+        take_err(err);
+
+        sia_packed_upload_free(packed);
+    }
+}
