@@ -3596,3 +3596,136 @@ unsafe fn upload_bytes(
         out
     }
 }
+
+/// `CCallback::invoke` is the only place this crate calls into C, and it does
+/// it from runtime threads. A layout or convention mistake here would surface
+/// as a wild write inside the caller rather than as a failed status.
+#[test]
+fn the_progress_callback_reaches_c() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Tally {
+        calls: AtomicUsize,
+        bytes: AtomicU64,
+        blank_host_keys: AtomicUsize,
+        max_shard_index: AtomicU64,
+    }
+
+    unsafe extern "C" fn on_shard(userdata: usize, progress: *const ShardProgressC) {
+        let tally = unsafe { &*(userdata as *const Tally) };
+        let p = unsafe { &*progress };
+        tally.calls.fetch_add(1, Ordering::Relaxed);
+        tally.bytes.fetch_add(p.shard_size, Ordering::Relaxed);
+        if p.host_key == [0u8; 32] {
+            tally.blank_host_keys.fetch_add(1, Ordering::Relaxed);
+        }
+        tally
+            .max_shard_index
+            .fetch_max(p.shard_index, Ordering::Relaxed);
+    }
+
+    unsafe {
+        let mock = sia_mock_new(40);
+        let seed = [83u8; 32];
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let uploaded = Tally::default();
+        let mut opts = default_upload_options();
+        opts.on_shard = Some(on_shard);
+        opts.userdata = &raw const uploaded as usize;
+
+        // Past one 4 MiB sector, so the erasure coder runs and every shard of
+        // the slab reports separately.
+        let payload: Vec<u8> = (0..(9 << 20)).map(|i| (i % 251) as u8).collect();
+        let obj = upload_bytes(sdk, std::ptr::null(), &opts, &payload);
+
+        // One slab of ten data and twenty parity shards, each a 4 MiB sector.
+        // Exact figures, because a misread struct gives plausible-looking
+        // garbage rather than an obvious zero.
+        assert_eq!(
+            uploaded.calls.load(Ordering::Relaxed),
+            30,
+            "one event per shard of the slab"
+        );
+        assert_eq!(
+            uploaded.bytes.load(Ordering::Relaxed),
+            30 * (4 << 20),
+            "shard_size must be the sector size"
+        );
+        assert_eq!(
+            uploaded.max_shard_index.load(Ordering::Relaxed),
+            29,
+            "shard_index must run to the slab's width"
+        );
+        assert_eq!(
+            uploaded.blank_host_keys.load(Ordering::Relaxed),
+            0,
+            "every event must carry the host it came from"
+        );
+
+        // The same bridge on the download side.
+        let read = Tally::default();
+        let mut dopts = default_download_options();
+        dopts.on_shard = Some(on_shard);
+        dopts.userdata = &raw const read as usize;
+
+        let mut dl = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_download_start(sdk, obj, &raw const dopts, &raw mut dl, &raw mut err),
+            SIA_OK,
+            "sia_download_start: {}",
+            take_err(err)
+        );
+        let mut buf = vec![0u8; 256 << 10];
+        loop {
+            let mut n = 0usize;
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_download_read(
+                    dl,
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    std::ptr::null_mut(),
+                    &raw mut n,
+                    &raw mut err
+                ),
+                SIA_OK,
+                "sia_download_read: {}",
+                take_err(err)
+            );
+            if n == 0 {
+                break;
+            }
+        }
+        sia_download_free(dl);
+
+        assert!(
+            read.calls.load(Ordering::Relaxed) > 0,
+            "the download never called back into C"
+        );
+        assert_eq!(
+            read.blank_host_keys.load(Ordering::Relaxed),
+            0,
+            "every event must carry the host it came from"
+        );
+
+        sia_object_free(obj);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
