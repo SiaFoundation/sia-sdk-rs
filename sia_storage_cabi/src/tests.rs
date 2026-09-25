@@ -2939,3 +2939,74 @@ fn empty_buffers_are_not_read_as_end_of_stream() {
         sia_mock_free(mock);
     }
 }
+
+/// A caller that does not want the byte count passes NULL for it. The header
+/// allows that, so nothing may write through the pointer.
+#[test]
+fn upload_write_accepts_a_null_written() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let seed = [31u8; 32];
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let mut up = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_start(
+                sdk,
+                std::ptr::null(),
+                &raw const opts,
+                &raw mut up,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_upload_start: {}",
+            take_err(err)
+        );
+
+        let payload = vec![5u8; 4096];
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_write(
+                up,
+                payload.as_ptr(),
+                payload.len(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_upload_write: {}",
+            take_err(err)
+        );
+
+        let mut uploaded = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_finish(up, std::ptr::null_mut(), &raw mut uploaded, &raw mut err),
+            SIA_OK,
+            "sia_upload_finish: {}",
+            take_err(err)
+        );
+        sia_upload_free(up);
+        assert_eq!(sia_object_size(uploaded), payload.len() as u64);
+
+        sia_object_free(uploaded);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
