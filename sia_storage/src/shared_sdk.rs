@@ -54,25 +54,7 @@ impl SharedSdk {
         hosts: &Hosts,
         tokens: &RwLock<HashMap<PublicKey, AccountToken>>,
     ) -> Result<(), app_client::Error> {
-        const PAGE_SIZE: usize = 100;
-        let mut shared = Vec::new();
-        for offset in (0..).step_by(PAGE_SIZE) {
-            let page = api_client
-                .shared_hosts(
-                    &sharing_key.0,
-                    HostQuery {
-                        offset: Some(offset),
-                        limit: Some(PAGE_SIZE as u64),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            let done = page.len() < PAGE_SIZE;
-            shared.extend(page);
-            if done {
-                break;
-            }
-        }
+        let shared = api_client.all_shared_hosts(&sharing_key.0).await?;
 
         let mut host_list = Vec::with_capacity(shared.len());
         let mut token_map = HashMap::with_capacity(shared.len());
