@@ -1279,7 +1279,7 @@ fn shared_sdk_reads_what_the_owner_shared() {
         );
         assert_eq!(len, 1, "the key has exactly one object attached");
 
-        let listed = *objs;
+        let listed = std::slice::from_raw_parts(objs, len)[0];
         assert_eq!(
             sia_object_size(listed),
             payload.len() as u64,
@@ -1461,6 +1461,7 @@ fn shared_sdk_download_outlives_the_handle() {
             take_err(err)
         );
         assert_eq!(len, 1);
+        let listed = std::slice::from_raw_parts(objs, len)[0];
 
         let dopts = default_download_options();
         let mut dl = std::ptr::null_mut();
@@ -1468,7 +1469,7 @@ fn shared_sdk_download_outlives_the_handle() {
         assert_eq!(
             sia_shared_sdk_download_start(
                 shared,
-                *objs,
+                listed,
                 &raw const dopts,
                 &raw mut dl,
                 &raw mut err
@@ -2507,7 +2508,8 @@ fn cancelled_add_abort_reports_cancelled_and_stays_retryable() {
             take_err(err)
         );
         assert_eq!(len, 1, "only the kept object survives the abort");
-        assert_eq!(sia_object_size(*objs), keep.len() as u64);
+        let listed = std::slice::from_raw_parts(objs, len)[0];
+        assert_eq!(sia_object_size(listed), keep.len() as u64);
 
         sia_object_array_free(objs, len);
         sia_packed_upload_free(packed);
@@ -2615,7 +2617,8 @@ fn cancelled_add_finish_stays_retryable() {
             take_err(err)
         );
         assert_eq!(len, 1, "the object landed exactly once");
-        assert_eq!(sia_object_size(*objs), payload.len() as u64);
+        let listed = std::slice::from_raw_parts(objs, len)[0];
+        assert_eq!(sia_object_size(listed), payload.len() as u64);
 
         sia_object_array_free(objs, len);
         sia_packed_upload_free(packed);
