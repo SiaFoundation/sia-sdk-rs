@@ -23,7 +23,3 @@ tokio-util = "0.7.19"
 log = { version = "0.4.33", features = ["std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-
-# A workspace member's own [profile.release] is ignored, so the debug info that
-# would otherwise triple the committed archive is stripped by the Go repo's
-# Makefile instead, which is the consumer that pays for the size.
