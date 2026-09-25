@@ -3088,3 +3088,71 @@ fn events_at_rejects_a_second_read() {
         sia_events_free(evs);
     }
 }
+
+/// The header mirrors these five structs by hand, and the symbol parity test
+/// only covers function names. A field added, reordered or resized shifts
+/// every offset past it, which C reads as whatever now sits there.
+///
+/// The offsets are the C layout of the header's declarations on a 64 bit
+/// target, which is what the Go bindings ship archives for.
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn header_structs_keep_their_layout() {
+    use std::mem::{align_of, offset_of, size_of};
+
+    // sia_shard_progress_t
+    assert_eq!(size_of::<ShardProgressC>(), 64, "sia_shard_progress_t");
+    assert_eq!(align_of::<ShardProgressC>(), 8, "sia_shard_progress_t");
+    assert_eq!(offset_of!(ShardProgressC, host_key), 0);
+    assert_eq!(offset_of!(ShardProgressC, shard_size), 32);
+    assert_eq!(offset_of!(ShardProgressC, shard_index), 40);
+    assert_eq!(offset_of!(ShardProgressC, slab_index), 48);
+    assert_eq!(offset_of!(ShardProgressC, elapsed_us), 56);
+
+    // sia_upload_options_t
+    assert_eq!(size_of::<UploadOptionsC>(), 48, "sia_upload_options_t");
+    assert_eq!(align_of::<UploadOptionsC>(), 8, "sia_upload_options_t");
+    assert_eq!(offset_of!(UploadOptionsC, data_shards), 0);
+    assert_eq!(offset_of!(UploadOptionsC, parity_shards), 1);
+    assert_eq!(offset_of!(UploadOptionsC, set_redundancy), 2);
+    assert_eq!(offset_of!(UploadOptionsC, max_buffered_slabs), 8);
+    assert_eq!(offset_of!(UploadOptionsC, on_shard), 16);
+    assert_eq!(offset_of!(UploadOptionsC, userdata), 24);
+    assert_eq!(offset_of!(UploadOptionsC, has_start_offset), 32);
+    assert_eq!(offset_of!(UploadOptionsC, start_offset), 40);
+
+    // sia_download_options_t
+    assert_eq!(size_of::<DownloadOptionsC>(), 48, "sia_download_options_t");
+    assert_eq!(align_of::<DownloadOptionsC>(), 8, "sia_download_options_t");
+    assert_eq!(offset_of!(DownloadOptionsC, offset), 0);
+    assert_eq!(offset_of!(DownloadOptionsC, has_length), 8);
+    assert_eq!(offset_of!(DownloadOptionsC, length), 16);
+    assert_eq!(offset_of!(DownloadOptionsC, max_buffered_chunks), 24);
+    assert_eq!(offset_of!(DownloadOptionsC, on_shard), 32);
+    assert_eq!(offset_of!(DownloadOptionsC, userdata), 40);
+
+    // sia_key_stats_t
+    assert_eq!(size_of::<KeyStatsC>(), 56, "sia_key_stats_t");
+    assert_eq!(align_of::<KeyStatsC>(), 8, "sia_key_stats_t");
+    assert_eq!(offset_of!(KeyStatsC, object_count), 0);
+    assert_eq!(offset_of!(KeyStatsC, object_size), 8);
+    assert_eq!(offset_of!(KeyStatsC, pinned_data), 16);
+    assert_eq!(offset_of!(KeyStatsC, pinned_size), 24);
+    assert_eq!(offset_of!(KeyStatsC, created_at_unix_us), 32);
+    assert_eq!(offset_of!(KeyStatsC, has_expiry), 40);
+    assert_eq!(offset_of!(KeyStatsC, expires_at_unix_us), 48);
+
+    // sia_host_query_t
+    assert_eq!(size_of::<HostQueryC>(), 48, "sia_host_query_t");
+    assert_eq!(align_of::<HostQueryC>(), 8, "sia_host_query_t");
+    assert_eq!(offset_of!(HostQueryC, has_location), 0);
+    assert_eq!(offset_of!(HostQueryC, latitude), 8);
+    assert_eq!(offset_of!(HostQueryC, longitude), 16);
+    assert_eq!(offset_of!(HostQueryC, offset), 24);
+    assert_eq!(offset_of!(HostQueryC, limit), 32);
+    assert_eq!(offset_of!(HostQueryC, country), 40);
+
+    // A NULL callback must be the all-zero pattern a zeroed C struct has.
+    let zeroed: UploadOptionsC = unsafe { std::mem::zeroed() };
+    assert!(zeroed.on_shard.is_none(), "NULL must read as no callback");
+}
