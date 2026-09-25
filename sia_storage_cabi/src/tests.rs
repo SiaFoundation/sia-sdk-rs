@@ -2698,7 +2698,13 @@ fn packed_getters_do_not_wait_on_an_add() {
         // have reached its lock yet. Once it has, it keeps it until EOF, which
         // only this thread can send, so there is no race the other way.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while (*packed).inner.try_lock().is_ok() {
+        while packed
+            .as_ref()
+            .expect("live handle")
+            .inner
+            .try_lock()
+            .is_ok()
+        {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the add task never took the lock"
