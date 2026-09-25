@@ -1,3 +1,22 @@
+## 0.7.1 (2026-09-25)
+
+### Fixes
+
+- Apply the object keystream in bulk rather than per 64-byte segment.
+- Back off the download inflight limit when sector reads time out, instead of waiting for a goodput window that reads flat on a saturated link.
+- Back off the inflight limit on a window with no successes.
+- Improved WebTransport connection pooling due to Chrome connection limits.
+- Increased parallelism during WebTransport downloads and uploads.
+- Refresh the host list when an upload finds too few hosts, rather than leaving uploads failing until the next scheduled refresh.
+
+#### Return an error from `encoded_size` when data shards is zero
+
+Zero data shards divided by zero in the core SDK. In Node that aborted the process, and in WASM it threw an opaque `unreachable` error. The bindings now return a "data shards cannot be zero" error instead. The UniFFI `encoded_size` now throws, so Swift callers need `try`.
+
+#### Sample the download inflight controller per chunk rather than per sector read, and let it climb further before settling.
+
+The controller also backs off when reads time out, since a saturated link reads as flat goodput rather than as a decline. Timeouts count once per host and decay as windows complete, so neither one unreachable peer nor strays spread over a long download narrows the pipeline.
+
 ## 0.7.0 (2026-09-15)
 
 ### Breaking Changes
