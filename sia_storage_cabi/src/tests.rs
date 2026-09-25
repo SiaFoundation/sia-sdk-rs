@@ -3162,3 +3162,84 @@ fn header_structs_keep_their_layout() {
     let zeroed: UploadOptionsC = unsafe { std::mem::zeroed() };
     assert!(zeroed.on_shard.is_none(), "NULL must read as no callback");
 }
+
+/// The pipe only breaks once the upload task has ended, so the write reports
+/// what actually stopped the upload rather than the broken pipe. Five hosts
+/// cannot satisfy the default ten of thirty, so the task fails on the first
+/// slab and the writer finds the read half gone.
+#[test]
+fn a_failed_upload_reports_its_own_error_through_the_write() {
+    unsafe {
+        let mock = sia_mock_new(5);
+        let seed = [41u8; 32];
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let mut up = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_upload_start(
+                sdk,
+                std::ptr::null(),
+                &raw const opts,
+                &raw mut up,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_upload_start: {}",
+            take_err(err)
+        );
+
+        // Keep writing until the task's failure reaches the writer. The pipe
+        // buffers, so the first writes land before the break shows up.
+        let chunk = vec![7u8; 1 << 20];
+        let mut code = SIA_OK;
+        let mut message = String::new();
+        for _ in 0..80 {
+            let mut err = std::ptr::null_mut();
+            let mut wrote = 0usize;
+            code = sia_upload_write(
+                up,
+                chunk.as_ptr(),
+                chunk.len(),
+                std::ptr::null_mut(),
+                &raw mut wrote,
+                &raw mut err,
+            );
+            if code != SIA_OK {
+                message = take_err(err);
+                break;
+            }
+        }
+
+        assert_ne!(code, SIA_OK, "an upload with five hosts must not succeed");
+        assert_ne!(
+            code, SIA_ERR_CANCELLED,
+            "nothing cancelled this write: {message}"
+        );
+        // On the message rather than the status because the queue's
+        // "not enough hosts to start" has no code of its own. It is still
+        // what proves the task's error crossed, not the broken pipe.
+        assert!(
+            message.contains("not enough initial hosts"),
+            "the write must carry the upload's own error, got {message:?}"
+        );
+
+        sia_upload_free(up);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
