@@ -233,6 +233,9 @@ extern "C"
 	// be NULL if the caller does not want the count, but then a cancelled write
 	// cannot be resumed safely.
 	//
+	// A len of 0 is a no-op returning SIA_OK, whatever data is, and the same
+	// holds for sia_packed_upload_add_write.
+	//
 	// sia_upload_finish leaves the upload unusable whatever it returns, but does
 	// not release it: call sia_upload_free afterwards either way. On
 	// SIA_ERR_CANCELLED it aborts the transfer rather than leaving it running, so
@@ -244,8 +247,9 @@ extern "C"
 
 	// sia_download_read blocks until at least one byte is available and then
 	// opportunistically fills as much of buf as is ready without blocking again.
-	// *n == 0 signals EOF. sia_download_free cancels any in-flight recovery; it
-	// must not race a blocked sia_download_read — cancel first.
+	// *n == 0 signals EOF, so a cap of 0 is rejected with SIA_ERR rather than
+	// read as one. sia_download_free cancels any in-flight recovery; it must not
+	// race a blocked sia_download_read — cancel first.
 	int32_t sia_download_start(const sia_sdk_t *sdk, const sia_object_t *obj, const sia_download_options_t *opts, sia_download_t **out, char **err);
 	int32_t sia_download_read(sia_download_t *dl, uint8_t *buf, size_t cap, sia_cancel_t *cancel, size_t *n, char **err);
 	void sia_download_free(sia_download_t *dl);

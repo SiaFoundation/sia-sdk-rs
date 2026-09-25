@@ -119,6 +119,11 @@ pub unsafe extern "C" fn sia_download_read(
         if let Some(e) = dl.pending_err.take() {
             return set_typed_err(err, &e);
         }
+        // Reporting zero bytes read would say EOF, so there is no honest
+        // answer to give for a buffer with no room in it.
+        if cap == 0 {
+            return set_err(err, SIA_ERR, "read buffer is empty");
+        }
         let buf = unsafe { std::slice::from_raw_parts_mut(buf, cap) };
         let reader = &mut dl.reader;
         let result = block_on(cancel, async {
