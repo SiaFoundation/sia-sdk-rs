@@ -21,6 +21,17 @@ pub(crate) enum BuilderState {
 
 pub(crate) struct FfiBuilder(pub(crate) Mutex<BuilderState>);
 
+impl FfiBuilder {
+    /// Takes the state, ignoring poisoning. A poisoned mutex only means an
+    /// earlier call panicked while holding it, and what it left behind is one
+    /// of the ordinary states, which the caller is told about as usual.
+    fn state(&self) -> std::sync::MutexGuard<'_, BuilderState> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 impl Drop for FfiBuilder {
     fn drop(&mut self) {
         // Otherwise a wait nobody is coming back for keeps polling the indexer
@@ -140,7 +151,7 @@ pub unsafe extern "C" fn sia_builder_connect(
         let Some(b) = (unsafe { b.as_ref() }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        let state = b.0.lock().unwrap();
+        let state = b.state();
         let builder = match &*state {
             BuilderState::Disconnected(builder) => builder,
             _ => return set_err(err, SIA_ERR_INVALID_STATE, "builder is not disconnected"),
@@ -180,7 +191,7 @@ pub unsafe extern "C" fn sia_builder_request_connection(
         let Some(b) = (unsafe { b.as_ref() }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        let mut state = b.0.lock().unwrap();
+        let mut state = b.state();
         let builder = match std::mem::replace(&mut *state, BuilderState::Consumed) {
             BuilderState::Disconnected(builder) => builder,
             other => {
@@ -220,7 +231,7 @@ pub unsafe extern "C" fn sia_builder_wait_for_approval(
         let Some(b) = (unsafe { b.as_ref() }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        let mut state = b.0.lock().unwrap();
+        let mut state = b.state();
         let mut task = match std::mem::replace(&mut *state, BuilderState::Consumed) {
             BuilderState::Requesting(builder) => runtime().spawn(builder.wait_for_approval()),
             BuilderState::Waiting(task) => task,
@@ -274,7 +285,7 @@ pub unsafe extern "C" fn sia_builder_register(
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid mnemonic: {e}")),
         };
-        let mut state = b.0.lock().unwrap();
+        let mut state = b.state();
         let builder = match std::mem::replace(&mut *state, BuilderState::Consumed) {
             BuilderState::Approved(builder) => builder,
             other => {
