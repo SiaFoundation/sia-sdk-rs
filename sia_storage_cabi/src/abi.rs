@@ -288,20 +288,26 @@ pub unsafe extern "C" fn sia_string_free(s: *mut c_char) {
     }
 }
 
-/// # Safety
-/// - This function is only callable across the C ABI and takes no pointers.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn sia_set_logger(cb: Option<LogFn>, userdata: usize, max_level: i32) {
-    let Some(cb) = cb else { return };
-    let level = match max_level {
+/// Maps the header's level scale onto a filter. 0 is off, as a caller asking
+/// for no logging would expect, and anything past the scale saturates.
+pub(crate) fn level_filter(max_level: i32) -> log::LevelFilter {
+    match max_level {
+        i32::MIN..=0 => log::LevelFilter::Off,
         1 => log::LevelFilter::Error,
         2 => log::LevelFilter::Warn,
         3 => log::LevelFilter::Info,
         4 => log::LevelFilter::Debug,
         _ => log::LevelFilter::Trace,
-    };
+    }
+}
+
+/// # Safety
+/// - This function is only callable across the C ABI and takes no pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_set_logger(cb: Option<LogFn>, userdata: usize, max_level: i32) {
+    let Some(cb) = cb else { return };
     if log::set_boxed_logger(Box::new(CLogger { cb, userdata })).is_ok() {
-        log::set_max_level(level);
+        log::set_max_level(level_filter(max_level));
     }
 }
 
