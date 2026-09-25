@@ -3243,3 +3243,70 @@ fn a_failed_upload_reports_its_own_error_through_the_write() {
         sia_mock_free(mock);
     }
 }
+
+/// Starting an add on a finalized upload is refused by the call that made the
+/// mistake, rather than accepted and failed later by add_write or add_finish.
+#[test]
+fn add_begin_after_finalize_is_refused() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let seed = [53u8; 32];
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let mut packed = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
+            SIA_OK,
+            "sia_packed_upload_start: {}",
+            take_err(err)
+        );
+
+        let mut objs = std::ptr::null_mut();
+        let mut len = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_finalize(
+                packed,
+                std::ptr::null_mut(),
+                &raw mut objs,
+                &raw mut len,
+                &raw mut err
+            ),
+            SIA_OK,
+            "finalize: {}",
+            take_err(err)
+        );
+        sia_object_array_free(objs, len);
+
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_begin(packed, &raw mut err),
+            SIA_ERR_INVALID_STATE,
+            "add_begin must refuse a finalized upload"
+        );
+        let message = take_err(err);
+        assert!(
+            message.contains("finalized"),
+            "the refusal must say why, got {message:?}"
+        );
+
+        sia_packed_upload_free(packed);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}

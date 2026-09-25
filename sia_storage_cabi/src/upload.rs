@@ -459,6 +459,9 @@ pub unsafe extern "C" fn sia_packed_upload_add_begin(
         if up.writer.is_some() || up.add_task.is_some() {
             return set_err(err, SIA_ERR_INVALID_STATE, "an add is already in progress");
         }
+        if up.inner.try_lock().is_ok_and(|packed| packed.is_none()) {
+            return set_err(err, SIA_ERR_INVALID_STATE, "upload already finalized");
+        }
         let (writer, reader) = tokio::io::duplex(UPLOAD_PIPE_CAPACITY);
         let inner = up.inner.clone();
         let task = runtime().spawn(async move {
