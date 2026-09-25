@@ -154,6 +154,9 @@ extern "C"
 
 	// Installs a process-wide logger bridging the Rust `log` crate.
 	// May only be called once; subsequent calls are ignored.
+	//
+	// max_level uses the level scale above and admits everything at or below
+	// it. 0 or less logs nothing, and a value past 5 is treated as 5.
 	void sia_set_logger(sia_log_cb_t cb, uintptr_t userdata, int32_t max_level);
 
 	// Returns a new BIP-39 12-word recovery phrase. Free with sia_string_free.

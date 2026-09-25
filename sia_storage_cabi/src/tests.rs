@@ -3010,3 +3010,14 @@ fn upload_write_accepts_a_null_written() {
         sia_mock_free(mock);
     }
 }
+
+/// A caller passing 0 means no logging. It used to be the one value that
+/// turned everything on, since the filter fell through to Trace.
+#[test]
+fn logger_level_zero_is_off() {
+    assert_eq!(level_filter(0), log::LevelFilter::Off);
+    assert_eq!(level_filter(-1), log::LevelFilter::Off);
+    assert_eq!(level_filter(1), log::LevelFilter::Error);
+    assert_eq!(level_filter(5), log::LevelFilter::Trace);
+    assert_eq!(level_filter(99), log::LevelFilter::Trace, "past the scale");
+}
