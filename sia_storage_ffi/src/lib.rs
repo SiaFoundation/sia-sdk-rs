@@ -1207,7 +1207,7 @@ impl Sdk {
 
     /// Unpins slabs not used by any object on the account.
     ///
-    /// `before` prunes only slabs orphaned before that time. Omitting it leaves
+    /// `before` prunes only slabs pinned before that time. Omitting it leaves
     /// the cutoff to the indexer.
     pub async fn prune_slabs(&self, before: Option<SystemTime>) -> Result<(), Error> {
         let before = before.map(Into::into);

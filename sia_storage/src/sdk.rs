@@ -284,9 +284,9 @@ impl Sdk {
     /// referenced by objects.
     ///
     /// # Arguments
-    /// * `before` - prune only slabs orphaned before this time. `None` leaves
-    ///   the cutoff to the indexer, which keeps recently orphaned slabs so an
-    ///   upload in progress is not pruned out from under itself.
+    /// * `before` - prune only slabs pinned before this time. `None` leaves the
+    ///   cutoff to the indexer, which spares recently pinned slabs so an upload
+    ///   in progress is not pruned out from under itself.
     pub async fn prune_slabs(&self, before: Option<DateTime<Utc>>) -> Result<(), Error> {
         self.api_client
             .prune_slabs(&self.app_key.0, before)

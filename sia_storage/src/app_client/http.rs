@@ -267,7 +267,7 @@ impl Client {
 
     /// Unpins slabs not used by any object on the account.
     ///
-    /// `before` prunes only slabs orphaned before that time. Without it the
+    /// `before` prunes only slabs pinned before that time. Without it the
     /// indexer applies its own cutoff.
     pub(crate) async fn prune_slabs(
         &self,
