@@ -282,9 +282,14 @@ impl Sdk {
     /// Prunes unused slabs from the indexer. This helps to free up
     /// storage space by removing slabs that are no longer
     /// referenced by objects.
-    pub async fn prune_slabs(&self) -> Result<(), Error> {
+    ///
+    /// # Arguments
+    /// * `before` - prune only slabs orphaned before this time. `None` leaves
+    ///   the cutoff to the indexer, which keeps recently orphaned slabs so an
+    ///   upload in progress is not pruned out from under itself.
+    pub async fn prune_slabs(&self, before: Option<DateTime<Utc>>) -> Result<(), Error> {
         self.api_client
-            .prune_slabs(&self.app_key.0)
+            .prune_slabs(&self.app_key.0, before)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())
@@ -861,7 +866,7 @@ mod test {
 
         // Simulate an imported object whose slabs have not been pinned by this
         // account. pin_object should pin them and retry.
-        sdk.prune_slabs().await.expect("prune failed");
+        sdk.prune_slabs(None).await.expect("prune failed");
         assert_eq!(network.pinned_slabs(), 0);
         sdk.pin_object(&object).await.expect("pin failed");
         assert_eq!(network.pinned_slabs(), object.slabs().len());
@@ -887,7 +892,7 @@ mod test {
             .expect("delete failed");
         assert!(sdk.object(&object.id()).await.is_err());
 
-        sdk.prune_slabs().await.expect("prune failed");
+        sdk.prune_slabs(None).await.expect("prune failed");
         assert_eq!(network.pinned_slabs(), 0);
     }
 
