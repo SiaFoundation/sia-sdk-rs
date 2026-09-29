@@ -301,7 +301,13 @@ impl Client {
             .collect())
     }
 
-    pub(crate) async fn prune_slabs(&self, _: &PrivateKey) -> Result<(), Error> {
+    /// `before` is accepted and ignored: a mock slab carries no pin time to
+    /// compare it against, so every orphan is pruned.
+    pub(crate) async fn prune_slabs(
+        &self,
+        _: &PrivateKey,
+        _before: Option<DateTime<Utc>>,
+    ) -> Result<(), Error> {
         let mut state = self.state.write().unwrap();
         let referenced: HashSet<Hash256> = state
             .objects

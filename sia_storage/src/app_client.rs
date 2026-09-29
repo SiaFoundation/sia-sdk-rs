@@ -517,11 +517,15 @@ impl Client {
     }
 
     /// Unpins slabs not used by any object on the account.
-    pub(crate) async fn prune_slabs(&self, app_key: &PrivateKey) -> Result<(), Error> {
+    pub(crate) async fn prune_slabs(
+        &self,
+        app_key: &PrivateKey,
+        before: Option<DateTime<Utc>>,
+    ) -> Result<(), Error> {
         match self {
-            Self::Http(c) => c.prune_slabs(app_key).await,
+            Self::Http(c) => c.prune_slabs(app_key, before).await,
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(c) => c.prune_slabs(app_key).await,
+            Self::Mock(c) => c.prune_slabs(app_key, before).await,
         }
     }
 

@@ -266,8 +266,20 @@ impl Client {
     }
 
     /// Unpins slabs not used by any object on the account.
-    pub(crate) async fn prune_slabs(&self, app_key: &PrivateKey) -> Result<(), Error> {
-        self.post_json::<(), EmptyResponse>("slabs/prune", app_key, None)
+    ///
+    /// `before` prunes only slabs orphaned before that time. Without it the
+    /// indexer applies its own cutoff.
+    pub(crate) async fn prune_slabs(
+        &self,
+        app_key: &PrivateKey,
+        before: Option<DateTime<Utc>>,
+    ) -> Result<(), Error> {
+        let mut url = self.url.join("slabs/prune")?;
+        if let Some(before) = before {
+            url.query_pairs_mut()
+                .append_pair("before", &before.to_rfc3339()); // indexd expects RFC3339
+        }
+        post_json::<(), EmptyResponse>(&self.client, url, app_key, None)
             .await
             .map(|_| ())
     }
@@ -1031,7 +1043,32 @@ mod tests {
 
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string()).unwrap();
-        client.prune_slabs(&app_key).await.unwrap();
+        client.prune_slabs(&app_key, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_prune_slabs_before() {
+        let server = Server::run();
+
+        // The cutoff has to reach indexd as RFC3339, and the signature covers
+        // the path only, so adding it to the query does not disturb auth.
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/slabs/prune"),
+                request::query(url_decoded(contains((
+                    "before",
+                    "2025-09-09T23:10:46.898399+00:00"
+                )))),
+            ])
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let before = DateTime::parse_from_rfc3339("2025-09-09T16:10:46.898399-07:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        client.prune_slabs(&app_key, Some(before)).await.unwrap();
     }
 
     #[tokio::test]
