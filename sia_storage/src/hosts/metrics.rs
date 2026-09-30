@@ -1,7 +1,7 @@
 use std::fmt::Display;
 use std::ops::Deref;
 
-use crate::time::Duration;
+use crate::time::{Duration, Instant};
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct RPCAverage(Option<TransferRate>); // exponential moving average of throughput in bytes/sec
@@ -44,29 +44,75 @@ impl PartialEq for RPCAverage {
 
 impl Eq for RPCAverage {}
 
+/// Exponential moving average of failure rate, halved once per
+/// [`Self::HALF_LIFE`] of wall clock.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct FailureRate(Option<f64>); // exponential moving average of failure rate
+pub(crate) struct FailureRate {
+    /// The average as it stood at `updated_at`.
+    value: Option<f64>,
+    /// When `value` was written, advanced by whole half lives as it decays.
+    /// `None` exactly when `value` is, since `Instant` has no zero.
+    updated_at: Option<Instant>,
+}
 
 impl FailureRate {
     const ALPHA: f64 = 0.2;
 
+    /// The rate halves once per half life whether or not samples arrive.
+    const HALF_LIFE: Duration = Duration::from_secs(60);
+
+    /// Rates below this read as failure free, so a decayed host rejoins the
+    /// unsampled bucket instead of sitting just above zero forever.
+    const ZERO_THRESHOLD: f64 = 0.01;
+
     pub(super) fn add_sample(&mut self, success: bool) {
         let sample = if success { 0.0 } else { 1.0 };
-        match self.0 {
-            Some(rate) => {
-                self.0 = Some(Self::ALPHA * sample + (1.0 - Self::ALPHA) * rate);
+        let now = Instant::now();
+        match (self.value, self.updated_at) {
+            (Some(value), Some(updated_at)) => {
+                let (decayed, stamp) = Self::decay(value, updated_at, now);
+                self.value = Some(Self::ALPHA * sample + (1.0 - Self::ALPHA) * decayed);
+                self.updated_at = Some(stamp);
             }
-            None => {
-                self.0 = Some(sample);
+            _ => {
+                self.value = Some(sample);
+                self.updated_at = Some(now);
             }
         }
     }
 
-    // Computes the failure rate as an integer percentage (0-100)
+    /// Halves `value` once per whole half life between `updated_at` and `now`,
+    /// returning the decayed value and the stamp advanced by exactly those
+    /// half lives, so the remainder carries rather than being discarded.
+    fn decay(value: f64, updated_at: Instant, now: Instant) -> (f64, Instant) {
+        let elapsed = now.saturating_duration_since(updated_at);
+        let half_lives = elapsed.as_nanos() / Self::HALF_LIFE.as_nanos();
+        match u32::try_from(half_lives) {
+            Ok(n) if n <= 1024 => (
+                value * 2f64.powi(-(n as i32)),
+                updated_at + Self::HALF_LIFE * n,
+            ),
+            // Past a thousand half lives the value is zero to f64 precision,
+            // and the exponent would overflow i32.
+            _ => (0.0, now),
+        }
+    }
+
+    /// Computes the failure rate as an integer percentage (0-100), decayed for
+    /// the time since the last sample.
+    ///
+    /// Takes `&self` because host selection reads it under a read guard and so
+    /// cannot write the decay back; the stored value is only ever advanced by
+    /// [`Self::add_sample`].
     pub(crate) fn rate(&self) -> i64 {
-        match self.0 {
-            Some(rate) => (rate * 100.0).round() as i64,
-            None => 0, // presume no failures if no samples
+        let (Some(value), Some(updated_at)) = (self.value, self.updated_at) else {
+            return 0; // presume no failures if no samples
+        };
+        let (decayed, _) = Self::decay(value, updated_at, Instant::now());
+        if decayed < Self::ZERO_THRESHOLD {
+            0
+        } else {
+            (decayed * 100.0).round() as i64
         }
     }
 }
@@ -344,6 +390,52 @@ impl_transfer!(TransferRate, TransferPace);
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// The decay is what lets a host demoted out of the selection set recover,
+    /// since not being selected is why it stops being sampled.
+    ///
+    /// Instants are built by adding to a base rather than subtracting from
+    /// now: on wasm the clock starts near zero at page load, so subtracting
+    /// minutes from it is not safe.
+    #[sia_core_derive::cross_target_test]
+    fn test_failure_rate_decays_over_time() {
+        let base = Instant::now();
+        let half_life = FailureRate::HALF_LIFE;
+
+        let (value, _) = FailureRate::decay(1.0, base, base);
+        assert_eq!(value, 1.0, "no elapsed time leaves the value alone");
+
+        let (value, _) = FailureRate::decay(1.0, base, base + half_life);
+        assert_eq!(value, 0.5, "one half life halves the value");
+
+        let (value, _) = FailureRate::decay(1.0, base, base + half_life * 3);
+        assert_eq!(value, 0.125, "three half lives halve it three times");
+
+        let (value, _) = FailureRate::decay(1.0, base, base + half_life / 2);
+        assert_eq!(value, 1.0, "a partial half life does not decay at all");
+
+        // The stamp advances by whole half lives only, so the leftover is
+        // carried into the next call instead of being thrown away.
+        let (_, stamp) = FailureRate::decay(1.0, base, base + half_life * 2 + half_life / 2);
+        assert_eq!(stamp, base + half_life * 2, "the remainder carries");
+    }
+
+    /// A rate that has decayed to near zero must read as exactly zero, so the
+    /// host rejoins the unsampled bucket rather than sitting just above it.
+    #[sia_core_derive::cross_target_test]
+    fn test_failure_rate_zero_threshold() {
+        let below = FailureRate {
+            value: Some(FailureRate::ZERO_THRESHOLD / 2.0),
+            updated_at: Some(Instant::now()),
+        };
+        assert_eq!(below.rate(), 0, "below the threshold reads as failure free");
+
+        let above = FailureRate {
+            value: Some(0.5),
+            updated_at: Some(Instant::now()),
+        };
+        assert_eq!(above.rate(), 50, "above it reports the percentage");
+    }
 
     #[sia_core_derive::cross_target_test]
     fn test_failure_rate() {
