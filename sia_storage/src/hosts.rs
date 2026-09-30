@@ -574,7 +574,8 @@ impl Hosts {
             self.record_read_sample(host_key, bytes, elapsed);
             Ok(data)
         })
-        .await?
+        .await
+        .inspect_err(|_| self.hosts.add_failure(host_key))?
     }
 }
 
@@ -762,6 +763,90 @@ mod test {
             hosts.ensure_upload_hosts(1).await,
             0,
             "a second refresh within the rate limit should be skipped"
+        );
+    }
+
+    /// A timing out sector RPC must cost the host a failure sample.
+    ///
+    /// Without one its rate stays 0, and `HostScore` ranks an unsampled host
+    /// above every measured one as a discovery preference, so the host that
+    /// just timed out is picked first again.
+    ///
+    /// Each RPC gets its own host, so each starts unsampled and the assertion
+    /// cannot be satisfied by the other RPC's failure.
+    #[tokio::test]
+    async fn test_sector_rpc_timeout_records_a_host_failure() {
+        let write_host = random_pubkey();
+        let read_host = random_pubkey();
+        let transport = crate::rhp4::mock::Client::new();
+        // Far longer than the timeout the RPCs get, so Elapsed always wins
+        // rather than the test depending on scheduling.
+        transport.set_slow_hosts([write_host, read_host], Duration::from_secs(30));
+
+        let entry = |public_key| Host {
+            public_key,
+            addresses: vec![sia_core::types::v2::NetAddress {
+                protocol: sia_core::types::v2::Protocol::QUIC,
+                address: "localhost:9984".to_string(),
+            }],
+            country_code: String::new(),
+            latitude: 0.0,
+            longitude: 0.0,
+            good_for_upload: true,
+        };
+        let hosts = Hosts::new(Client::Mock(transport));
+        hosts.update(vec![entry(write_host), entry(read_host)], true);
+
+        let rate = |hk| {
+            hosts
+                .hosts
+                .metrics
+                .read()
+                .unwrap()
+                .get(&hk)
+                .expect("host has metrics")
+                .failure_rate()
+        };
+        assert_eq!(rate(write_host), 0, "an unsampled host starts at zero");
+        assert_eq!(rate(read_host), 0, "an unsampled host starts at zero");
+
+        let account = PrivateKey::from_seed(&[7u8; 32]);
+        let err = hosts
+            .write_sector(
+                write_host,
+                &account,
+                bytes::Bytes::from(vec![0u8; 4096]),
+                Duration::from_millis(50),
+            )
+            .await
+            .expect_err("a 30 second host cannot answer in 50ms");
+        assert!(
+            matches!(err, RPCError::Elapsed(_)),
+            "expected the timeout, got {err:?}"
+        );
+        assert!(
+            rate(write_host) > 0,
+            "the write timeout left the host unsampled, so it stays top ranked"
+        );
+
+        let err = hosts
+            .read_sector(
+                read_host,
+                AccountToken::new(&account, read_host),
+                Hash256::new([0u8; 32]),
+                0,
+                4096,
+                Duration::from_millis(50),
+            )
+            .await
+            .expect_err("a 30 second host cannot answer in 50ms");
+        assert!(
+            matches!(err, RPCError::Elapsed(_)),
+            "expected the timeout, got {err:?}"
+        );
+        assert!(
+            rate(read_host) > 0,
+            "the read timeout left the host unsampled, so it stays top ranked"
         );
     }
 
