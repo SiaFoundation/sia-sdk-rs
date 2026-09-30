@@ -66,6 +66,13 @@ impl FailureRate {
     const ZERO_THRESHOLD: f64 = 0.01;
 
     pub(super) fn add_sample(&mut self, success: bool) {
+        // A success against a rate already under the threshold leaves it
+        // under, however much time has passed, and `rate` reports both as
+        // zero. Returning here keeps the clock off the path every successful
+        // sector RPC takes.
+        if success && self.value.is_some_and(|v| v < Self::ZERO_THRESHOLD) {
+            return;
+        }
         let sample = if success { 0.0 } else { 1.0 };
         let now = Instant::now();
         match (self.value, self.updated_at) {
@@ -108,6 +115,12 @@ impl FailureRate {
         let (Some(value), Some(updated_at)) = (self.value, self.updated_at) else {
             return 0; // presume no failures if no samples
         };
+        // Decay only shrinks the value, so one already under the threshold
+        // cannot come back over it. Host selection scores every candidate on
+        // every pick, so this keeps the clock out of that loop too.
+        if value < Self::ZERO_THRESHOLD {
+            return 0;
+        }
         let (decayed, _) = Self::decay(value, updated_at, Instant::now());
         if decayed < Self::ZERO_THRESHOLD {
             0
