@@ -186,7 +186,7 @@ impl SharedSdk {
 // Types the download options, which wasm_bindgen otherwise emits as any.
 #[wasm_bindgen(typescript_custom_section)]
 const _: &str = r#"
-interface SharedSdk {
+export interface SharedSdk {
     download(object: PinnedObject, options?: DownloadOptions): ReadableStream;
 }
 "#;
