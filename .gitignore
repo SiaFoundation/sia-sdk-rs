@@ -1,3 +1,12 @@
 **/target
 .vscode
 .DS_Store
+# Produced by `wasm-pack build`, which the WASM typecheck needs locally.
+sia_storage_wasm/pkg
+node_modules
+
+# Produced by `napi build`, which the napi typecheck needs locally.
+sia_storage_napi/examples/index.js
+sia_storage_napi/examples/index.d.ts
+sia_storage_napi/examples/*.node
+package-lock.json

@@ -353,7 +353,7 @@ impl Sdk {
 
 #[wasm_bindgen(typescript_custom_section)]
 const _: &str = r#"
-interface Sdk {
+export interface Sdk {
     download(object: PinnedObject, options?: DownloadOptions): ReadableStream;
     upload(object: PinnedObject, source: ReadableStream, options?: UploadOptions): Promise<PinnedObject>;
     uploadPacked(options?: PackedUploadOptions): PackedUpload;
