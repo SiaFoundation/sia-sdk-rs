@@ -141,10 +141,7 @@ impl Client {
         let http_status = resp.status();
         match http_status {
             StatusCode::OK => {
-                let Ok(status) = Self::handle_response::<AuthConnectStatusResponse>(resp).await
-                else {
-                    return Err(Error::Format("invalid response format".to_string()));
-                };
+let status = Self::handle_response::<AuthConnectStatusResponse>(resp).await?;
                 if !status.approved {
                     return Ok(None);
                 }
