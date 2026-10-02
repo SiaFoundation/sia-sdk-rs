@@ -18,6 +18,25 @@ mod web_transport;
 #[cfg(any(test, feature = "mock"))]
 pub(crate) mod mock;
 
+#[cfg(not(target_arch = "wasm32"))]
+static DEFAULT_CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(Client::new);
+
+#[cfg(target_arch = "wasm32")]
+std::thread_local! {
+    static DEFAULT_CLIENT: std::cell::LazyCell<Client> = std::cell::LazyCell::new(Client::new);
+}
+
+pub(crate) fn default_client() -> Client {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        DEFAULT_CLIENT.clone()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        DEFAULT_CLIENT.with(|client| (**client).clone())
+    }
+}
+
 /// The transport used to talk to hosts. One real backend exists per
 /// target. The `mock` feature adds an in-memory backend alongside it.
 #[derive(Clone)]

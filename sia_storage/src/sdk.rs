@@ -14,7 +14,7 @@ use url::Url;
 use crate::app_client::PinObjectError::UnpinnedSlab;
 use crate::app_client::{self, KeyResponse, SLAB_PIN_BATCH_SIZE, SlabPinParams};
 use crate::hosts::Hosts;
-use crate::rhp4::Client;
+use crate::rhp4::{Client, default_client};
 use crate::sharing::{self, KeyRecord, KeyRequest, Nonce, SharingError, SharingKey};
 use crate::task::AbortOnDropHandle;
 use crate::time::Duration;
@@ -78,7 +78,7 @@ impl Sdk {
         api_client: app_client::Client,
         app_key: Arc<AppKey>,
     ) -> Result<Self, BuilderError> {
-        Self::with_backends(api_client, Client::new(), app_key).await
+        Self::with_backends(api_client, default_client(), app_key).await
     }
 
     /// Creates a new SDK instance with the provided backends
