@@ -79,12 +79,18 @@ impl HostList {
     /// wins first, and unsampled hosts get discovery priority. Used by the
     /// download path so concurrent slab downloads spread initial picks
     /// across less-busy hosts.
-    fn prioritize<H, F>(&self, items: &mut [H], f: F)
+    ///
+    /// Hosts this SDK has no address for are dropped rather than sorted to
+    /// the back. Reading from one could only ever fail with
+    /// [`RPCError::UnknownHost`], so leaving it in hides a shortage that is
+    /// already certain behind a run of doomed attempts.
+    fn prioritize<H, F>(&self, items: &mut Vec<H>, f: F)
     where
         F: Fn(&H) -> &PublicKey,
     {
         let metrics = self.metrics.read().unwrap();
         let host_info = self.hosts.read().unwrap();
+        items.retain(|item| host_info.contains_key(f(item)));
         let score_for = |k: &PublicKey| -> Option<HostScore> {
             let metric = metrics.get(k)?;
             let inflight = host_info
@@ -386,7 +392,7 @@ impl Hosts {
     /// Sorts a list of hosts according to their priority in the client's
     /// preferred hosts queue. The function `f` is used to extract the
     /// public key from each item.
-    pub fn prioritize<H, F>(&self, hosts: &mut [H], f: F)
+    pub fn prioritize<H, F>(&self, hosts: &mut Vec<H>, f: F)
     where
         F: Fn(&H) -> &PublicKey,
     {

@@ -185,6 +185,11 @@ impl SlabRecovery<AwaitingRecovery> {
             .collect::<Vec<_>>();
         client.prioritize(&mut sectors, |task| &task.sector.host_key);
 
+        let min_shards = slab.slab.min_shards as usize;
+        if sectors.len() < min_shards {
+            return Err(DownloadError::NotEnoughShards(sectors.len(), min_shards));
+        }
+
         // Reserve inflight slots for the top `min_shards` hosts now, while
         // we still hold the synchronous call frame. `Download::new` queues
         // many `SlabRecovery::new` calls back-to-back; without this, all of
@@ -192,7 +197,6 @@ impl SlabRecovery<AwaitingRecovery> {
         // snapshot and pile onto the same fastest hosts. The guards travel
         // into the spawned read tasks via `recover_shards` and drop with
         // them; failure/timeout retries reserve on demand from `remaining`.
-        let min_shards = slab.slab.min_shards as usize;
         let sectors = sectors
             .into_iter()
             .enumerate()
@@ -1288,6 +1292,46 @@ mod test {
             matches!(err, DownloadError::NotEnoughShards(..)),
             "expected NotEnoughShards, got {err:?}"
         );
+    }
+
+    /// A sector whose host this SDK has no address for can never be read, so
+    /// the shortage is known before a single attempt. Without the drop in
+    /// `prioritize` those sectors stay in the queue and the same failure only
+    /// surfaces per sector, after a run of doomed reads.
+    #[sia_core_derive::cross_target_test]
+    async fn test_recovery_fails_immediately_when_hosts_are_unreachable() {
+        let (hosts, app_key, slab) = racing_setup(Duration::from_millis(0)).await;
+        let min_shards = slab.min_shards as usize;
+
+        // Every host the slab was written to is now gone from the SDK, so none
+        // of its sectors has an address to dial.
+        hosts.update(Vec::new(), true);
+
+        let controller = Arc::new(InflightController::new(
+            INITIAL_INFLIGHT,
+            MIN_INFLIGHT,
+            100,
+            10,
+        ));
+        let permit = controller.sample();
+        let err = SlabRecovery::new(
+            hosts.clone(),
+            controller,
+            app_key.clone(),
+            permit,
+            racing_chunk(&slab),
+            RACE_WINDOW,
+            watch::channel(0).0,
+        )
+        .err()
+        .expect("unreachable hosts should fail before any read");
+        match err {
+            DownloadError::NotEnoughShards(have, need) => {
+                assert_eq!(have, 0, "no sector had a reachable host");
+                assert_eq!(need, min_shards);
+            }
+            e => panic!("expected NotEnoughShards, got {e:?}"),
+        }
     }
 
     #[sia_core_derive::cross_target_test]
