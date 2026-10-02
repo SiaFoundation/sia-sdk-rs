@@ -119,6 +119,13 @@ impl HostMetric {
         self.failure_rate.add_sample(false);
     }
 
+    /// The failure rate as an integer percentage. Zero for an unsampled host,
+    /// which [`HostScore`] deliberately treats as good.
+    #[cfg(test)]
+    pub(super) fn failure_rate(&self) -> i64 {
+        self.failure_rate.rate()
+    }
+
     /// Combined read + write throughput average. `None` only when neither side
     /// has been sampled. Used by [`HostScore`] for the discovery preference
     /// (unsampled outranks sampled).

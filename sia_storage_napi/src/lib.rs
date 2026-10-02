@@ -1022,10 +1022,13 @@ impl Sdk {
     }
 
     /// Unpins slabs not used by any object on the account.
+    ///
+    /// `before` prunes only slabs pinned before that time. Omitting it leaves
+    /// the cutoff to the indexer.
     #[napi]
-    pub async fn prune_slabs(&self) -> Result<()> {
+    pub async fn prune_slabs(&self, before: Option<DateTime<Utc>>) -> Result<()> {
         self.inner
-            .prune_slabs()
+            .prune_slabs(before)
             .await
             .map_err(|e| Error::from_reason(e.to_string()))
     }

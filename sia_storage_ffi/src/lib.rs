@@ -1206,10 +1206,14 @@ impl Sdk {
     }
 
     /// Unpins slabs not used by any object on the account.
-    pub async fn prune_slabs(&self) -> Result<(), Error> {
+    ///
+    /// `before` prunes only slabs pinned before that time. Omitting it leaves
+    /// the cutoff to the indexer.
+    pub async fn prune_slabs(&self, before: Option<SystemTime>) -> Result<(), Error> {
+        let before = before.map(Into::into);
         let sdk = self.inner.clone();
         spawn(async move {
-            sdk.prune_slabs().await?;
+            sdk.prune_slabs(before).await?;
             Ok(())
         })
         .await?

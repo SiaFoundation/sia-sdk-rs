@@ -335,10 +335,17 @@ impl Sdk {
     }
 
     /// Prunes unused slabs from the indexer.
+    ///
+    /// `before` prunes only slabs pinned before that date. Omitting it leaves
+    /// the cutoff to the indexer.
     #[wasm_bindgen(js_name = "pruneSlabs")]
-    pub async fn prune_slabs(&self) -> Result<(), JsError> {
+    pub async fn prune_slabs(&self, before: Option<js_sys::Date>) -> Result<(), JsError> {
+        let before = match before {
+            Some(d) => Some(ms_to_chrono(d.get_time())?),
+            None => None,
+        };
         let sdk = self.inner.clone();
-        run_local(async move { sdk.prune_slabs().await })
+        run_local(async move { sdk.prune_slabs(before).await })
             .await
             .map_err(to_js_err)
     }

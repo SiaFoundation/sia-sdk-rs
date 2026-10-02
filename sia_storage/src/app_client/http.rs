@@ -266,8 +266,20 @@ impl Client {
     }
 
     /// Unpins slabs not used by any object on the account.
-    pub(crate) async fn prune_slabs(&self, app_key: &PrivateKey) -> Result<(), Error> {
-        self.post_json::<(), EmptyResponse>("slabs/prune", app_key, None)
+    ///
+    /// `before` prunes only slabs pinned before that time. Without it the
+    /// indexer applies its own cutoff.
+    pub(crate) async fn prune_slabs(
+        &self,
+        app_key: &PrivateKey,
+        before: Option<DateTime<Utc>>,
+    ) -> Result<(), Error> {
+        let mut url = self.url.join("slabs/prune")?;
+        if let Some(before) = before {
+            url.query_pairs_mut()
+                .append_pair("before", &before.to_rfc3339()); // indexd expects RFC3339
+        }
+        post_json::<(), EmptyResponse>(&self.client, url, app_key, None)
             .await
             .map(|_| ())
     }
@@ -875,6 +887,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_requests_compression() {
+        // `[]` encoded with each supported content encoding
+        const EMPTY_LISTS: &[(&str, &[u8])] = &[
+            (
+                "gzip",
+                &[
+                    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x8b, 0x8e, 0x05,
+                    0x00, 0x29, 0xbb, 0x4c, 0x0d, 0x02, 0x00, 0x00, 0x00,
+                ],
+            ),
+            (
+                "zstd",
+                &[
+                    0x28, 0xb5, 0x2f, 0xfd, 0x04, 0x58, 0x11, 0x00, 0x00, 0x5b, 0x5d, 0x56, 0x1f,
+                    0x7f, 0x61,
+                ],
+            ),
+        ];
+
+        for (encoding, body) in EMPTY_LISTS {
+            let server = Server::run();
+            server.expect(
+                Expectation::matching(all_of![
+                    request::method_path("GET", "/hosts"),
+                    request::headers(contains((
+                        "accept-encoding",
+                        all_of![matches(r"\bgzip\b"), matches(r"\bzstd\b")]
+                    ))),
+                ])
+                .respond_with(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-encoding", *encoding)
+                        .body(body.to_vec())
+                        .unwrap(),
+                ),
+            );
+
+            let app_key = PrivateKey::from_seed(&rand::random());
+            let client = Client::new(server.url("/").to_string()).unwrap();
+            let hosts = client
+                .hosts(&app_key, HostQuery::default())
+                .await
+                .unwrap_or_else(|e| panic!("{encoding}: {e}"));
+            assert!(hosts.is_empty(), "{encoding}");
+        }
+    }
+
+    #[tokio::test]
     async fn test_hosts_with_additional_filters() {
         let server = Server::run();
         server.expect(
@@ -982,7 +1043,32 @@ mod tests {
 
         let app_key = PrivateKey::from_seed(&rand::random());
         let client = Client::new(server.url("/").to_string()).unwrap();
-        client.prune_slabs(&app_key).await.unwrap();
+        client.prune_slabs(&app_key, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_prune_slabs_before() {
+        let server = Server::run();
+
+        // The cutoff has to reach indexd as RFC3339, and the signature covers
+        // the path only, so adding it to the query does not disturb auth.
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/slabs/prune"),
+                request::query(url_decoded(contains((
+                    "before",
+                    "2025-09-09T23:10:46.898399+00:00"
+                )))),
+            ])
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let before = DateTime::parse_from_rfc3339("2025-09-09T16:10:46.898399-07:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        client.prune_slabs(&app_key, Some(before)).await.unwrap();
     }
 
     #[tokio::test]

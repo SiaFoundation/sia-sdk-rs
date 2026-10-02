@@ -292,6 +292,29 @@ impl From<&SealedObject> for PinObjectRequest {
     }
 }
 
+/// Requests pages until one comes back short, which ends the listing.
+async fn drain_pages<T, F, Fut>(page: F) -> Result<Vec<T>, Error>
+where
+    F: Fn(HostQuery) -> Fut,
+    Fut: Future<Output = Result<Vec<T>, Error>>,
+{
+    const PAGE_SIZE: u64 = 100;
+    let mut all = Vec::new();
+    loop {
+        let page = page(HostQuery {
+            offset: Some(all.len() as u64),
+            limit: Some(PAGE_SIZE),
+            ..Default::default()
+        })
+        .await?;
+        let done = (page.len() as u64) < PAGE_SIZE;
+        all.extend(page);
+        if done {
+            return Ok(all);
+        }
+    }
+}
+
 /// The indexer API client. The `mock` feature adds an in-memory backend
 /// alongside the HTTP one rather than replacing it, so a single build can
 /// drive both.
@@ -407,6 +430,11 @@ impl Client {
         }
     }
 
+    /// Every host the indexer has for this app.
+    pub(crate) async fn all_hosts(&self, app_key: &PrivateKey) -> Result<Vec<Host>, Error> {
+        drain_pages(|query| self.hosts(app_key, query)).await
+    }
+
     /// Retrieves an object from the indexer by its key.
     pub(crate) async fn object(
         &self,
@@ -489,11 +517,15 @@ impl Client {
     }
 
     /// Unpins slabs not used by any object on the account.
-    pub(crate) async fn prune_slabs(&self, app_key: &PrivateKey) -> Result<(), Error> {
+    pub(crate) async fn prune_slabs(
+        &self,
+        app_key: &PrivateKey,
+        before: Option<DateTime<Utc>>,
+    ) -> Result<(), Error> {
         match self {
-            Self::Http(c) => c.prune_slabs(app_key).await,
+            Self::Http(c) => c.prune_slabs(app_key, before).await,
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(c) => c.prune_slabs(app_key).await,
+            Self::Mock(c) => c.prune_slabs(app_key, before).await,
         }
     }
 
@@ -589,6 +621,14 @@ impl Client {
             #[cfg(any(test, feature = "mock"))]
             Self::Mock(c) => c.shared_hosts(sharing_key, query).await,
         }
+    }
+
+    /// Sharing key equivalent of [`Client::all_hosts`].
+    pub(crate) async fn all_shared_hosts(
+        &self,
+        sharing_key: &PrivateKey,
+    ) -> Result<Vec<SharedHost>, Error> {
+        drain_pages(|query| self.shared_hosts(sharing_key, query)).await
     }
 
     /// Creates a sharing key for the account.

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use log::{debug, warn};
+use log::warn;
 use reqwest::IntoUrl;
 use sia_core::signing::PrivateKey;
 use sia_core::types::Hash256;
@@ -69,41 +69,10 @@ pub struct Sdk {
     _refresh_task: Arc<AbortOnDropHandle<()>>,
 }
 
+/// Shortest time between host list refreshes, however they were triggered.
+const MIN_TIME_BETWEEN_REFRESH: Duration = Duration::from_secs(10);
+
 impl Sdk {
-    async fn refresh_hosts(
-        app_key: &AppKey,
-        api_client: &app_client::Client,
-        hosts: &Hosts,
-    ) -> Result<(), app_client::Error> {
-        const PAGE_SIZE: usize = 100;
-        let mut all_hosts = Vec::new();
-        for i in (0..).step_by(PAGE_SIZE) {
-            let page = api_client
-                .hosts(
-                    &app_key.0,
-                    HostQuery {
-                        offset: Some(i),
-                        limit: Some(PAGE_SIZE as u64),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            let done = page.len() < PAGE_SIZE;
-            all_hosts.extend(page);
-            if done {
-                break;
-            }
-        }
-
-        debug!(
-            "Refreshed hosts: total {}, good for upload {}",
-            all_hosts.len(),
-            all_hosts.iter().filter(|h| h.good_for_upload).count()
-        );
-        hosts.update(all_hosts, true);
-        Ok(())
-    }
-
     /// Creates a new SDK instance.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) async fn new(
@@ -119,14 +88,14 @@ impl Sdk {
         transport: Client,
         app_key: Arc<AppKey>,
     ) -> Result<Self, BuilderError> {
-        let hosts = Hosts::new(transport);
-        Self::refresh_hosts(&app_key, &api_client, &hosts).await?;
-        let refresh_task = Self::spawn_refresh_task(
+        let hosts = Hosts::with_refresher(
+            transport,
             app_key.clone(),
             api_client.clone(),
-            hosts.clone(),
-            Duration::from_secs(10 * 60),
+            MIN_TIME_BETWEEN_REFRESH,
         );
+        hosts.refresh().await?;
+        let refresh_task = Self::spawn_refresh_task(hosts.clone(), Duration::from_secs(10 * 60));
         Ok(Self {
             app_key,
             api_client,
@@ -136,16 +105,11 @@ impl Sdk {
     }
 
     /// Spawns a background task that refreshes the host list at the given interval.
-    fn spawn_refresh_task(
-        app_key: Arc<AppKey>,
-        api_client: app_client::Client,
-        hosts: Hosts,
-        interval: Duration,
-    ) -> AbortOnDropHandle<()> {
+    fn spawn_refresh_task(hosts: Hosts, interval: Duration) -> AbortOnDropHandle<()> {
         AbortOnDropHandle::new(maybe_spawn!(async move {
             loop {
                 crate::time::sleep(interval).await;
-                if let Err(err) = Self::refresh_hosts(&app_key, &api_client, &hosts).await {
+                if let Err(err) = hosts.refresh().await {
                     warn!("failed to refresh hosts: {err}");
                 }
             }
@@ -319,9 +283,14 @@ impl Sdk {
     /// Prunes unused slabs from the indexer. This helps to free up
     /// storage space by removing slabs that are no longer
     /// referenced by objects.
-    pub async fn prune_slabs(&self) -> Result<(), Error> {
+    ///
+    /// # Arguments
+    /// * `before` - prune only slabs pinned before this time. `None` leaves the
+    ///   cutoff to the indexer, which spares recently pinned slabs so an upload
+    ///   in progress is not pruned out from under itself.
+    pub async fn prune_slabs(&self, before: Option<DateTime<Utc>>) -> Result<(), Error> {
         self.api_client
-            .prune_slabs(&self.app_key.0)
+            .prune_slabs(&self.app_key.0, before)
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())
@@ -898,7 +867,7 @@ mod test {
 
         // Simulate an imported object whose slabs have not been pinned by this
         // account. pin_object should pin them and retry.
-        sdk.prune_slabs().await.expect("prune failed");
+        sdk.prune_slabs(None).await.expect("prune failed");
         assert_eq!(network.pinned_slabs(), 0);
         sdk.pin_object(&object).await.expect("pin failed");
         assert_eq!(network.pinned_slabs(), object.slabs().len());
@@ -924,7 +893,7 @@ mod test {
             .expect("delete failed");
         assert!(sdk.object(&object.id()).await.is_err());
 
-        sdk.prune_slabs().await.expect("prune failed");
+        sdk.prune_slabs(None).await.expect("prune failed");
         assert_eq!(network.pinned_slabs(), 0);
     }
 
@@ -972,7 +941,13 @@ mod test {
 
         let app_key = Arc::new(AppKey::import(random_seed()));
         let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();
-        let hosts = Hosts::new(crate::rhp4::Client::mock());
+        // no minimum between refreshes, so INTERVAL is the only pacing
+        let hosts = Hosts::with_refresher(
+            crate::rhp4::Client::mock(),
+            app_key.clone(),
+            client.clone(),
+            Duration::ZERO,
+        );
 
         // helper: seed one good-for-upload host so available_for_upload() == 1
         let add_upload_host = |hosts: &Hosts| {
@@ -992,7 +967,7 @@ mod test {
         // verify initial refresh replaces hosts
         add_upload_host(&hosts);
         assert_eq!(hosts.available_for_upload(), 1);
-        Sdk::refresh_hosts(&app_key, &client, &hosts).await.unwrap();
+        hosts.refresh().await.unwrap();
         assert_eq!(
             hosts.available_for_upload(),
             0,
@@ -1002,8 +977,7 @@ mod test {
         // spawn the periodic refresh task with a short interval
         add_upload_host(&hosts);
         assert_eq!(hosts.available_for_upload(), 1);
-        let handle =
-            Sdk::spawn_refresh_task(app_key.clone(), client.clone(), hosts.clone(), INTERVAL);
+        let handle = Sdk::spawn_refresh_task(hosts.clone(), INTERVAL);
 
         // wait for periodic refresh to run
         tokio::time::sleep(WAIT).await;
