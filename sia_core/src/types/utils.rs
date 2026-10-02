@@ -17,6 +17,75 @@ pub(crate) mod base64 {
     }
 }
 
+/// Helper module for timestamps that indexd may encode as null. indexd's CBOR
+/// encoder writes the zero `time.Time` as null instead of
+/// "0001-01-01T00:00:00Z", so null decodes as the zero time. Timestamps
+/// serialize as `Some` so that non-self-describing formats round trip.
+pub mod null_as_zero_time {
+    use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_some(v)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<DateTime<Utc>, D::Error> {
+        Ok(Option::deserialize(d)?.unwrap_or_else(|| {
+            NaiveDate::from_ymd_opt(1, 1, 1)
+                .unwrap()
+                .and_time(NaiveTime::MIN)
+                .and_utc()
+        }))
+    }
+}
+
+/// Deserializes a fixed-size byte array type that serializes as a string in
+/// human-readable formats and as a byte string otherwise. `parse` decodes the
+/// string form and `from_bytes` the byte form.
+pub fn deserialize_str_or_bytes<'de, D, T, F, E, const N: usize>(
+    deserializer: D,
+    parse: F,
+    from_bytes: fn([u8; N]) -> T,
+) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    F: FnOnce(&str) -> Result<T, E>,
+    E: core::fmt::Display,
+{
+    struct StrOrBytesVisitor<T, F, const N: usize>(F, fn([u8; N]) -> T);
+
+    impl<'de, T, F, E, const N: usize> serde::de::Visitor<'de> for StrOrBytesVisitor<T, F, N>
+    where
+        F: FnOnce(&str) -> Result<T, E>,
+        E: core::fmt::Display,
+    {
+        type Value = T;
+
+        fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+            write!(formatter, "a string or {N} bytes")
+        }
+
+        fn visit_str<DE: serde::de::Error>(self, value: &str) -> Result<Self::Value, DE> {
+            (self.0)(value).map_err(DE::custom)
+        }
+
+        fn visit_bytes<DE: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, DE> {
+            value
+                .try_into()
+                .map(self.1)
+                .map_err(|_| DE::invalid_length(value.len(), &self))
+        }
+    }
+
+    // Flattened structs do not preserve `is_human_readable`, so the
+    // human-readable path also accepts bytes.
+    if deserializer.is_human_readable() {
+        deserializer.deserialize_str(StrOrBytesVisitor(parse, from_bytes))
+    } else {
+        deserializer.deserialize_bytes(StrOrBytesVisitor(parse, from_bytes))
+    }
+}
+
 pub(crate) mod timestamp_array {
     use core::fmt;
 

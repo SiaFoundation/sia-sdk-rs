@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use chrono::Utc;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
+use serde_with::{DefaultOnNull, serde_as};
 use sia_core::rhp4::{AccountToken, HostPrices, SECTOR_SIZE};
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
@@ -21,6 +22,7 @@ mod metrics;
 
 /// Represents a host in the Sia network. The
 /// addresses can be used to connect to the host.
+#[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 /// A storage host on the Sia network.
@@ -28,6 +30,7 @@ pub struct Host {
     /// The host's public key.
     pub public_key: PublicKey,
     /// The host's network addresses.
+    #[serde_as(as = "DefaultOnNull")]
     pub addresses: Vec<NetAddress>,
     /// The host's ISO 3166-1 alpha-2 country code.
     pub country_code: String,
