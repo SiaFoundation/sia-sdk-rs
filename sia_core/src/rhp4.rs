@@ -101,7 +101,7 @@ pub struct HostSettings {
 pub struct AccountToken {
     pub host_key: PublicKey,
     pub account: PublicKey,
-    #[serde(with = "crate::types::utils::null_as_zero_time")]
+    #[serde(with = "crate::types::null_as_zero_time")]
     pub valid_until: DateTime<Utc>,
 
     pub signature: Signature,

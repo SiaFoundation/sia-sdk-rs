@@ -42,22 +42,19 @@ pub mod null_as_zero_time {
 /// Deserializes a fixed-size byte array type that serializes as a string in
 /// human-readable formats and as a byte string otherwise. `parse` decodes the
 /// string form and `from_bytes` the byte form.
-pub fn deserialize_str_or_bytes<'de, D, T, F, E, const N: usize>(
+pub fn deserialize_str_or_bytes<'de, D, T, E, const N: usize>(
     deserializer: D,
-    parse: F,
+    parse: fn(&str) -> Result<T, E>,
     from_bytes: fn([u8; N]) -> T,
 ) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
-    F: FnOnce(&str) -> Result<T, E>,
     E: core::fmt::Display,
 {
-    struct StrOrBytesVisitor<T, F, const N: usize>(F, fn([u8; N]) -> T);
+    struct StrOrBytesVisitor<T, E, const N: usize>(fn(&str) -> Result<T, E>, fn([u8; N]) -> T);
 
-    impl<'de, T, F, E, const N: usize> serde::de::Visitor<'de> for StrOrBytesVisitor<T, F, N>
-    where
-        F: FnOnce(&str) -> Result<T, E>,
-        E: core::fmt::Display,
+    impl<'de, T, E: core::fmt::Display, const N: usize> serde::de::Visitor<'de>
+        for StrOrBytesVisitor<T, E, N>
     {
         type Value = T;
 

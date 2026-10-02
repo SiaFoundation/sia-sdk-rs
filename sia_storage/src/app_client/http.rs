@@ -331,27 +331,25 @@ impl Client {
     /// Helper to either parse a successful response according to its content
     /// type, falling back to JSON, or return the error message from the API.
     async fn handle_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
-        if resp.status().is_success() {
-            let is_cbor = resp
-                .headers()
-                .get(CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.split(';').next())
-                .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/cbor"));
-            let body = resp.bytes().await?;
-            if is_cbor {
-                let mut rd = body.as_ref();
-                let v = ciborium::from_reader(&mut rd)?;
-                if !rd.is_empty() {
-                    return Err(ciborium::de::Error::Semantic(None, "trailing data".into()).into());
-                }
-                Ok(v)
-            } else {
-                Ok(serde_json::from_slice(&body)?)
-            }
-        } else {
-            Err(Error::Api(resp.status(), resp.text().await?))
+        if !resp.status().is_success() {
+            return Err(Error::Api(resp.status(), resp.text().await?));
         }
+        let is_cbor = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/cbor"));
+        let body = resp.bytes().await?;
+        if !is_cbor {
+            return Ok(serde_json::from_slice(&body)?);
+        }
+        let mut rd = body.as_ref();
+        let v = ciborium::from_reader(&mut rd)?;
+        if !rd.is_empty() {
+            return Err(ciborium::de::Error::Semantic(None, "trailing data".into()).into());
+        }
+        Ok(v)
     }
 
     /// Helper to send a signed POST request with a JSON body and parse the
@@ -735,85 +733,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_post_json_cbor_response() {
-        let server = Server::run();
-        server.expect(
-            Expectation::matching(all_of![
-                request::method_path("POST", "/"),
-                request::headers(contains(("accept", ACCEPT_CBOR))),
-                request::body("[1,2,3]"),
-            ])
-            .respond_with(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .header("content-type", "application/cbor")
-                    .body(hex::decode(ACCOUNT_CBOR).unwrap())
-                    .unwrap(),
-            ),
-        );
-
-        let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string()).unwrap();
-        let account: Account = client
-            .post_json("", &app_key, Some(&[1u8, 2, 3]))
-            .await
-            .unwrap();
-        assert!(account.ready);
-    }
-
-    #[tokio::test]
-    async fn test_check_request_status_cbor() {
-        let server = Server::run();
-        server.expect(
-            Expectation::matching(all_of![
-                request::method_path("GET", "/status"),
-                request::headers(contains(("accept", ACCEPT_CBOR))),
-            ])
-            .respond_with(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .header("content-type", "application/cbor")
-                    .body(hex::decode(STATUS_CBOR).unwrap())
-                    .unwrap(),
-            ),
-        );
-
-        let ephemeral_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string()).unwrap();
-        let approval = client
-            .check_request_status(
-                &ephemeral_key,
-                server.url("/status").to_string().parse().unwrap(),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            approval,
-            AuthApproval {
-                user_secret: hash_256!(
-                    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-                ),
-                reconnecting: true,
-            }
-        );
-    }
-
-    #[tokio::test]
     async fn test_handle_response_malformed_cbor() {
         // 0xff is a "break" with no indefinite-length item to end. 0xf6 is a
         // valid null, so the second body has trailing data.
         for body in [vec![0xff], vec![0xf6, 0xff]] {
             let server = Server::run();
             server.expect(
-                Expectation::matching(request::path("/slabs")).respond_with(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .header("content-type", "application/cbor")
-                        .body(body.clone())
-                        .unwrap(),
-                ),
+                Expectation::matching(request::path("/slabs"))
+                    .respond_with(ok_typed("application/cbor", body.clone())),
             );
 
             let app_key = PrivateKey::from_seed(&rand::random());
@@ -827,20 +754,15 @@ mod tests {
     #[tokio::test]
     async fn test_list_endpoints_null() {
         // `null` in each response encoding; 0xf6 is CBOR's null
-        const NULLS: &[(&str, &[u8])] =
-            &[("application/json", b"null"), ("application/cbor", &[0xf6])];
-
-        for (content_type, body) in NULLS {
+        for (content_type, body) in [
+            ("application/json", &b"null"[..]),
+            ("application/cbor", &[0xf6]),
+        ] {
             let server = Server::run();
             for (method, path) in [("GET", "/hosts"), ("POST", "/slabs")] {
                 server.expect(
-                    Expectation::matching(request::method_path(method, path)).respond_with(
-                        Response::builder()
-                            .status(StatusCode::OK)
-                            .header("content-type", *content_type)
-                            .body(body.to_vec())
-                            .unwrap(),
-                    ),
+                    Expectation::matching(request::method_path(method, path))
+                        .respond_with(ok_typed(content_type, body)),
                 );
             }
 
@@ -1369,6 +1291,16 @@ mod tests {
             ),
         );
         server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/cbor"),
+                request::headers(contains(("accept", ACCEPT_CBOR))),
+            ])
+            .respond_with(ok_typed(
+                "application/cbor",
+                hex::decode(STATUS_CBOR).unwrap(),
+            )),
+        );
+        server.expect(
             Expectation::matching(request::method_path("GET", "/rejected")).respond_with(
                 Response::builder()
                     .status(StatusCode::NOT_FOUND)
@@ -1415,6 +1347,22 @@ mod tests {
             AuthApproval {
                 user_secret: hash_256!(
                     "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
+                ),
+                reconnecting: true,
+            }
+        );
+
+        // approved request, CBOR-encoded
+        let status_url: Url = server.url("/cbor").to_string().parse().unwrap();
+        assert_eq!(
+            client
+                .check_request_status(&ephemeral_key, status_url)
+                .await
+                .unwrap()
+                .unwrap(),
+            AuthApproval {
+                user_secret: hash_256!(
+                    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
                 ),
                 reconnecting: true,
             }
@@ -2295,6 +2243,14 @@ mod tests {
     fn ok_body(body: impl Into<String>) -> Response<String> {
         Response::builder()
             .status(StatusCode::OK)
+            .body(body.into())
+            .unwrap()
+    }
+
+    fn ok_typed(content_type: &str, body: impl Into<Vec<u8>>) -> Response<Vec<u8>> {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", content_type)
             .body(body.into())
             .unwrap()
     }
