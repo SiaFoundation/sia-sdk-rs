@@ -625,11 +625,7 @@ impl PackedUpload {
     /// To minimize padding, prioritize objects that fit within the remaining
     /// size.
     pub fn remaining(&self) -> u64 {
-        let length = self.length.load(Ordering::Acquire);
-        if length == 0 {
-            return self.optimal_data_size;
-        }
-        (self.optimal_data_size - (length % self.optimal_data_size)) % self.optimal_data_size
+        remaining_in_slab(self.length.load(Ordering::Acquire), self.optimal_data_size)
     }
 
     /// Returns the number of bytes added so far.
@@ -1251,6 +1247,33 @@ mod tests {
         assert_eq!(
             encoded_size(1 << 20, 10, 20).unwrap(),
             sia_storage::encoded_size(1 << 20, 10, 20)
+        );
+    }
+}
+
+/// Bytes left in the current slab, derived from the cumulative length because
+/// reading the upload's own figure needs a lock an in-flight add holds. A slab
+/// rolls over only on an exact multiple, so a full one reads as a fresh one.
+fn remaining_in_slab(length: u64, optimal_data_size: u64) -> u64 {
+    optimal_data_size - (length % optimal_data_size)
+}
+
+#[cfg(test)]
+mod packed_remaining_tests {
+    use super::remaining_in_slab;
+
+    #[test]
+    fn a_full_slab_reports_a_whole_slab_free() {
+        let optimal = 40 << 20;
+        assert_eq!(remaining_in_slab(0, optimal), optimal, "nothing added yet");
+        assert_eq!(remaining_in_slab(optimal / 2, optimal), optimal / 2);
+        // The slab rolled over, so the next one is empty. Reporting 0 here
+        // would tell a caller every further add starts a new slab.
+        assert_eq!(remaining_in_slab(optimal, optimal), optimal);
+        assert_eq!(remaining_in_slab(2 * optimal, optimal), optimal);
+        assert_eq!(
+            remaining_in_slab(optimal + optimal / 4, optimal),
+            optimal * 3 / 4
         );
     }
 }
