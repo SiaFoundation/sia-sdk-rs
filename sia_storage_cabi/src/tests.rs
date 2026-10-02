@@ -2133,10 +2133,10 @@ fn object_truncate_shortens_and_copies() {
     }
 }
 
-/// A slab id taken from an object fetches that slab back from the indexer,
-/// and the sectors it reports are the ones the object references.
+/// `sia_sdk_slab` fetches a pinned slab back from the indexer, and the sectors
+/// it reports are the ones the object references.
 #[test]
-fn sdk_slab_fetches_by_id_from_an_object() {
+fn sdk_slab_fetches_a_pinned_slab_by_id() {
     unsafe {
         let mock = sia_mock_new(40);
         let mut sdk = std::ptr::null_mut();
@@ -2165,14 +2165,11 @@ fn sdk_slab_fetches_by_id_from_an_object() {
             take_err(err)
         );
 
-        let count = sia_object_slab_count(uploaded);
-        assert!(count > 0, "an uploaded object must reference slabs");
-
-        let mut id = [0u8; 32];
-        assert!(
-            sia_object_slab_id_at(uploaded, 0, id.as_mut_ptr()),
-            "the first slab id must be readable"
-        );
+        // The C ABI exposes no slab id, so the test derives one the way a Rust
+        // caller would.
+        let slabs = (*uploaded).slabs();
+        assert!(!slabs.is_empty(), "an uploaded object must reference slabs");
+        let id: [u8; 32] = slabs[0].digest().into();
         assert_ne!(id, [0u8; 32], "a slab id must not be all zeroes");
 
         let mut out = std::ptr::null_mut();
@@ -2200,20 +2197,6 @@ fn sdk_slab_fetches_by_id_from_an_object() {
         assert!(!sectors.is_empty(), "a pinned slab must have sectors");
         assert!(sectors[0]["root"].is_string(), "root: {slab}");
         assert!(sectors[0]["hostKey"].is_string(), "hostKey: {slab}");
-
-        // Out of range must report rather than write.
-        let mut untouched = [7u8; 32];
-        assert!(
-            !sia_object_slab_id_at(uploaded, count, untouched.as_mut_ptr()),
-            "an index past the end must return false"
-        );
-        assert_eq!(untouched, [7u8; 32], "a refused read must not write");
-        assert_eq!(sia_object_slab_count(std::ptr::null()), 0);
-        assert!(!sia_object_slab_id_at(
-            std::ptr::null(),
-            0,
-            untouched.as_mut_ptr()
-        ));
 
         // An id nothing was pinned under is an error, not an empty result.
         let mut out = std::ptr::null_mut();

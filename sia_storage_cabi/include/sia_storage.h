@@ -199,12 +199,6 @@ extern "C"
 	// above the current size copies it unchanged. o is untouched, so free both.
 	// Pin the result with sia_sdk_pin_object before the indexer knows about it.
 	sia_object_t *sia_object_truncate(const sia_object_t *o, uint64_t length);
-	// The ids of the slabs the object's data is spread across, which is what
-	// sia_sdk_slab takes. A slab id is derived from its contents rather than
-	// stored, so this is the only way to obtain one. sia_object_slab_id_at
-	// returns false when i is out of range, leaving out_id untouched.
-	size_t sia_object_slab_count(const sia_object_t *o);
-	bool sia_object_slab_id_at(const sia_object_t *o, size_t i, uint8_t out_id[32]);
 	void sia_object_id(const sia_object_t *o, uint8_t out[32]);
 	uint64_t sia_object_size(const sia_object_t *o);
 	uint64_t sia_object_encoded_size(const sia_object_t *o);
