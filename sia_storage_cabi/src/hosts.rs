@@ -33,7 +33,7 @@ pub(crate) unsafe fn make_host_query(c: &HostQueryC) -> Result<HostQuery, String
     let country = if c.country.is_null() {
         None
     } else {
-        match unsafe { cstr(c.country) } {
+        match unsafe { cstr(&c.country) } {
             Ok(s) => Some(s.to_string()),
             Err(e) => return Err(format!("invalid country: {e}")),
         }
@@ -52,7 +52,10 @@ pub(crate) unsafe fn make_host_query(c: &HostQueryC) -> Result<HostQuery, String
 
 /// Serializes a host listing the way the indexer and the other bindings emit
 /// it, so a consumer can decode straight into its own type.
-fn hosts_json(err: ErrOut, hosts: Vec<Host>, out_json: *mut *mut c_char) -> i32 {
+/// # Safety
+/// - `out_json` must be non null and writable. On success it receives an owned string that must
+///   be released with `sia_string_free`.
+unsafe fn hosts_json(err: ErrOut, hosts: Vec<Host>, out_json: *mut *mut c_char) -> i32 {
     let json = match serde_json::to_string(&hosts) {
         Ok(j) => j,
         Err(e) => return set_err(err, SIA_ERR, format!("failed to encode hosts: {e}")),
@@ -102,7 +105,7 @@ pub unsafe extern "C" fn sia_sdk_hosts(
         };
         match block_on(cancel, sdk.hosts(query)) {
             None => set_cancelled(err),
-            Some(Ok(hosts)) => hosts_json(err, hosts, out_json),
+            Some(Ok(hosts)) => unsafe { hosts_json(err, hosts, out_json) },
             Some(Err(e)) => set_typed_err(err, &e),
         }
     })
@@ -142,7 +145,7 @@ pub unsafe extern "C" fn sia_shared_sdk_hosts(
         };
         match block_on(cancel, sdk.hosts(query)) {
             None => set_cancelled(err),
-            Some(Ok(hosts)) => hosts_json(err, hosts, out_json),
+            Some(Ok(hosts)) => unsafe { hosts_json(err, hosts, out_json) },
             Some(Err(e)) => set_typed_err(err, &e),
         }
     })

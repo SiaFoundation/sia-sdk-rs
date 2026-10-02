@@ -360,7 +360,7 @@ pub unsafe extern "C" fn sia_sdk_object_from_share_url(
         let Some(sdk) = (unsafe { sdk.as_ref() }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        let url = match unsafe { cstr(share_url) } {
+        let url = match unsafe { cstr(&share_url) } {
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid share url: {e}")),
         };

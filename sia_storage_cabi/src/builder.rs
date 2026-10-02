@@ -81,11 +81,11 @@ pub unsafe extern "C" fn sia_builder_new(
 ) -> i32 {
     let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
-        let url = match unsafe { cstr(indexer_url) } {
+        let url = match unsafe { cstr(&indexer_url) } {
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid indexer url: {e}")),
         };
-        let meta_json = match unsafe { cstr(app_meta_json) } {
+        let meta_json = match unsafe { cstr(&app_meta_json) } {
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid app metadata: {e}")),
         };
@@ -281,7 +281,7 @@ pub unsafe extern "C" fn sia_builder_register(
         let Some(b) = (unsafe { b.as_ref() }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        let phrase = match unsafe { cstr(mnemonic) } {
+        let phrase = match unsafe { cstr(&mnemonic) } {
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid mnemonic: {e}")),
         };

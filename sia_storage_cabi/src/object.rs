@@ -279,7 +279,7 @@ pub unsafe extern "C" fn sia_object_from_sealed_json(
         let Some(sdk) = (unsafe { sdk.as_ref() }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        let s = match unsafe { cstr(json) } {
+        let s = match unsafe { cstr(&json) } {
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid sealed object json: {e}")),
         };

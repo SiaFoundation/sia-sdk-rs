@@ -275,12 +275,13 @@ pub(crate) unsafe fn app_key_from_ptr(ptr: *const u8) -> AppKey {
 }
 
 /// # Safety
-/// - `ptr` must be non null and point to a NUL terminated string. The result borrows that string
-///   rather than copying it, and `'a` is not tied to anything, so the caller has to choose a
-///   lifetime the C side actually keeps the memory alive for. Every caller here uses it before
-///   returning.
-pub(crate) unsafe fn cstr<'a>(ptr: *const c_char) -> Result<&'a str, std::str::Utf8Error> {
-    unsafe { CStr::from_ptr(ptr) }.to_str()
+/// - `ptr` must be non null and point to a NUL terminated string that outlives the borrow.
+///
+/// The result borrows that string rather than copying it. Taking `ptr` by reference ties the
+/// result to it, so the borrow cannot outlive the variable holding the pointer, which for every
+/// caller here is one entry point's body.
+pub(crate) unsafe fn cstr(ptr: &*const c_char) -> Result<&str, std::str::Utf8Error> {
+    unsafe { CStr::from_ptr(*ptr) }.to_str()
 }
 
 /// Wraps an FFI entry point body, converting panics into `SIA_ERR`.

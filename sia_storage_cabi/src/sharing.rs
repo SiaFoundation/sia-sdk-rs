@@ -125,7 +125,7 @@ pub unsafe extern "C" fn sia_sdk_create_sharing_key(
         let Some(sdk) = (unsafe { sdk.as_ref() }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        let description = match unsafe { cstr(description) } {
+        let description = match unsafe { cstr(&description) } {
             Ok(s) => s.to_string(),
             Err(e) => return set_err(err, SIA_ERR, format!("invalid description: {e}")),
         };

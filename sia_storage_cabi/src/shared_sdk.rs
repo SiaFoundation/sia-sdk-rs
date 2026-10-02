@@ -35,7 +35,7 @@ pub unsafe extern "C" fn sia_shared_sdk_connect(
     let err = unsafe { ErrOut::new(err) };
     let cancel = unsafe { cancel.as_ref() };
     guarded(err, || {
-        let url = match unsafe { cstr(indexer_url) } {
+        let url = match unsafe { cstr(&indexer_url) } {
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid indexer url: {e}")),
         };
