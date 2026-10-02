@@ -638,7 +638,8 @@ mod tests {
     use crate::sharing::Nonce;
 
     use crate::app_client::{
-        QUERY_PARAM_CREDENTIAL, QUERY_PARAM_SIGNATURE, QUERY_PARAM_VALID_UNTIL, request_hash,
+        QUERY_PARAM_CREDENTIAL, QUERY_PARAM_SIGNATURE, QUERY_PARAM_VALID_UNTIL, SectorPinParams,
+        request_hash,
     };
     use crate::slabs::SlabVersion::V0;
     use crate::{AppID, GeoLocation, Protocol, Sector, Slab};
@@ -1030,6 +1031,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_pin_slabs_upload_times() {
+        let params = SlabPinParams {
+            version: V0,
+            encryption_key: [1u8; 32].into(),
+            min_shards: 1,
+            sectors: vec![
+                SectorPinParams {
+                    sector: Sector {
+                        root: hash_256!(
+                            "826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6"
+                        ),
+                        host_key: public_key!(
+                            "ed25519:910b22c360a1c67cb6a9a7371fa600c48e87d626b328669d01f34048ac3132fe"
+                        ),
+                    },
+                    uploaded_at: Some(
+                        DateTime::<FixedOffset>::parse_from_rfc3339("2026-10-02T10:00:00Z")
+                            .unwrap()
+                            .to_utc(),
+                    ),
+                },
+                SectorPinParams {
+                    sector: Sector {
+                        root: hash_256!(
+                            "3017354ace367561d4c568263463c17d3c16030c637734e12e9418be1f2f8e65"
+                        ),
+                        host_key: public_key!(
+                            "ed25519:9f5fb0b962f29497b3993e12c7a7880fbaf0cf52bad3620af0280895fdea8ece"
+                        ),
+                    },
+                    uploaded_at: None,
+                },
+            ],
+        };
+
+        // A sector without an upload time, as when re-pinning an existing
+        // slab, omits the field rather than sending null.
+        const EXPECTED_JSON: &str = r#"
+        [
+          {
+            "version": 0,
+            "encryptionKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+            "minShards": 1,
+            "sectors": [
+              {
+                "root": "826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6",
+                "hostKey": "ed25519:910b22c360a1c67cb6a9a7371fa600c48e87d626b328669d01f34048ac3132fe",
+                "uploadedAt": "2026-10-02T10:00:00Z"
+              },
+              {
+                "root": "3017354ace367561d4c568263463c17d3c16030c637734e12e9418be1f2f8e65",
+                "hostKey": "ed25519:9f5fb0b962f29497b3993e12c7a7880fbaf0cf52bad3620af0280895fdea8ece"
+              }
+            ]
+          }
+        ]
+        "#;
+        let expected: serde_json::Value = serde_json::from_str(EXPECTED_JSON).unwrap();
+        let slab_id = hash_256!("43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28");
+
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/slabs"),
+                request::body(json_decoded(eq(expected))),
+            ])
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(format!(r#"["{slab_id}"]"#))
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        assert_eq!(
+            client.pin_slabs(&app_key, &[params]).await.unwrap(),
+            [slab_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pin_slabs_upload_too_old() {
+        let message = "invalid slab pin params: slab 0: sector 3 invalid: slab upload is too old (max 48h0m0s)";
+        let server = Server::run();
+
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/slabs")).respond_with(
+                Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(message)
+                    .unwrap(),
+            ),
+        );
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        let error = client.pin_slabs(&app_key, &[]).await.unwrap_err();
+        assert!(error.is_slab_upload_too_old());
+        assert!(!error.is_retryable());
+    }
+
+    #[tokio::test]
     async fn test_prune_slabs() {
         let server = Server::run();
 
@@ -1110,6 +1216,7 @@ mod tests {
         for (path, status) in [
             ("/missing", StatusCode::NOT_FOUND),
             ("/denied", StatusCode::UNAUTHORIZED),
+            ("/invalid", StatusCode::BAD_REQUEST),
             ("/broken", StatusCode::INTERNAL_SERVER_ERROR),
         ] {
             server.expect(
@@ -1126,15 +1233,18 @@ mod tests {
         assert!(matches!(not_found, Error::Api(StatusCode::NOT_FOUND, ref m) if m == "the body"));
         let denied = client.delete("denied", &app_key).await.unwrap_err();
         assert!(matches!(denied, Error::Api(StatusCode::UNAUTHORIZED, ref m) if m == "the body"));
+        let invalid = client.delete("invalid", &app_key).await.unwrap_err();
+        assert!(matches!(invalid, Error::Api(StatusCode::BAD_REQUEST, ref m) if m == "the body"));
         let other = client.delete("broken", &app_key).await.unwrap_err();
         assert!(
             matches!(other, Error::Api(StatusCode::INTERNAL_SERVER_ERROR, ref m) if m == "the body")
         );
 
-        // 404 and 401 cannot become a success on retry, so they stay out of
-        // the retryable set. Other statuses may.
+        // 404 and 401 cannot become a success on retry. Neither can a 400
+        // without changing the request. Transient failures may.
         assert!(!not_found.is_retryable());
         assert!(!denied.is_retryable());
+        assert!(!invalid.is_retryable());
         assert!(other.is_retryable());
     }
 

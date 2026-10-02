@@ -513,7 +513,7 @@ impl Hosts {
         account_key: &PrivateKey,
         sector: bytes::Bytes,
         write_timeout: Duration,
-    ) -> Result<(Hash256, u64), RPCError> {
+    ) -> Result<Hash256, RPCError> {
         let host = self.host_endpoint(host_key)?;
         timeout(write_timeout, async {
             let (prices, _) = Self::fetch_prices(
@@ -526,7 +526,6 @@ impl Hosts {
             )
             .await?;
             let bytes = sector.len() as u32;
-            let tip_height = prices.tip_height;
             let (root, elapsed) = self
                 .transport
                 .write_sector(&host, prices, account_key, sector)
@@ -534,7 +533,7 @@ impl Hosts {
                 .inspect_err(|_| self.hosts.add_failure(host_key))
                 .map_err(RPCError::Rhp)?;
             self.record_write_sample(host_key, bytes, elapsed);
-            Ok((root, tip_height))
+            Ok(root)
         })
         .await
         .inspect_err(|_| self.hosts.add_failure(host_key))?
