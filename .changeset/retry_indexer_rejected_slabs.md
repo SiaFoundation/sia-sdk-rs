@@ -1,8 +1,5 @@
 ---
 sia_storage: patch
-sia_storage_ffi: patch
-sia_storage_napi: patch
-sia_storage_wasm: patch
 ---
 
 # Reupload slabs rejected by the indexer as too old
