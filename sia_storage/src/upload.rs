@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::app_client::{self, SlabPinParams};
+use crate::app_client::{self, SectorPinParams, SlabPinParams};
 use crate::congestion::{InflightController, SamplePermit};
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
@@ -17,8 +17,9 @@ use crate::{
     ShardProgressCallback, Slab, UploadOptions,
 };
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use log::debug;
-use sia_core::rhp4::{SECTOR_SIZE, TEMP_SECTOR_DURATION};
+use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::PublicKey;
 use thiserror::Error;
 use tokio::io::AsyncRead;
@@ -66,8 +67,9 @@ struct SectorUploadResult {
     sector: Sector,
     shard_index: usize,
     elapsed: Duration,
-    /// Chain height the host reported when this sector was written.
-    tip_height: u64,
+    /// When the successful write attempt started, so never after the host
+    /// stored the sector.
+    uploaded_at: DateTime<Utc>,
 }
 
 /// Holds a host until the shard accepts its result. Dropping it returns
@@ -143,9 +145,6 @@ impl ShardAttempt {
 
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(90);
 const RACE_FACTOR: f64 = 1.5;
-
-/// Blocks reserved for host syncing delays and cached prices.
-const TEMP_SECTOR_PIN_MARGIN: u64 = 40;
 
 const INITIAL_INFLIGHT: usize = 8;
 const MIN_INFLIGHT: usize = 2;
@@ -326,6 +325,7 @@ impl ShardUpload {
             let host_key = host.host_key();
             let sample = limiter.sample();
             let start = Instant::now();
+            let uploaded_at = Utc::now();
             let result = client
                 .write_sector(host_key, &account_key.0, data, write_timeout)
                 .await;
@@ -344,7 +344,7 @@ impl ShardUpload {
                         "slab {slab_index} shard {shard_index} upload to host {host_key} failed after {elapsed:?} {e}",
                     );
                 })
-                .map(|(root, tip_height)| {
+                .map(|root| {
                     debug!(
                         "slab {slab_index} shard {shard_index} uploaded to {host_key} in {:?}",
                         elapsed
@@ -353,7 +353,7 @@ impl ShardUpload {
                         sector: Sector { root, host_key },
                         shard_index,
                         elapsed,
-                        tip_height,
+                        uploaded_at,
                     }
                 })
                 .map_err(UploadError::from);
@@ -487,7 +487,7 @@ pub enum UploadError {
     #[error("not enough shards: {0}/{1}")]
     NotEnoughShards(u8, u8),
 
-    /// Every upload of the slab outlived the hosts' temporary storage.
+    /// The indexer rejected every upload of the slab as too old to pin.
     #[error("slab stale after {0} upload attempts")]
     StaleSlab(usize),
 
@@ -536,15 +536,16 @@ const PIN_RETRY_DELAY: Duration = Duration::from_millis(250);
 async fn pin_uploaded_slab(
     api_client: &app_client::Client,
     app_key: &AppKey,
-    slab: &Slab,
+    params: SlabPinParams,
 ) -> Result<(), UploadError> {
-    let params = [SlabPinParams::from(slab)];
+    let slab_id = params.digest();
+    let params = [params];
 
     let mut attempt = 0;
     loop {
         match api_client.pin_slabs(&app_key.0, &params).await {
             Ok(ids) => {
-                if ids.len() != 1 || ids[0] != slab.digest() {
+                if ids.len() != 1 || ids[0] != slab_id {
                     return Err(UploadError::InvalidSlabId);
                 }
                 return Ok(());
@@ -686,7 +687,8 @@ impl Upload {
                 shards[shard_index] = shard;
             }
 
-            for attempt in 1..=MAX_SLAB_ATTEMPTS {
+            let mut attempt = 1;
+            loop {
                 // No pre-assignment of hosts: each shard picks its host
                 // just-in-time via the slab's `HostQueue`, which scores by
                 // `throughput / (inflight + 1)`. This disperses load across
@@ -727,11 +729,7 @@ impl Upload {
                     });
                 }
 
-                let mut sectors: Vec<Option<Sector>> = vec![None; total_shards];
-                // the slab dies with its first shard, so the oldest write
-                // bounds it; the newest is the latest view of the chain
-                let mut oldest_write = u64::MAX;
-                let mut newest_write = 0;
+                let mut sectors: Vec<Option<SectorPinParams>> = vec![None; total_shards];
                 while let Some(res) = shard_tasks.join_next().await {
                     let result: SectorUploadResult = res??;
                     if let Some(callback) = &progress_callback {
@@ -743,44 +741,39 @@ impl Upload {
                             elapsed: result.elapsed,
                         });
                     }
-                    oldest_write = oldest_write.min(result.tip_height);
-                    newest_write = newest_write.max(result.tip_height);
-                    sectors[result.shard_index] = Some(result.sector);
+                    sectors[result.shard_index] = Some(SectorPinParams {
+                        sector: result.sector,
+                        uploaded_at: Some(result.uploaded_at),
+                    });
                 }
 
-                // Temporary sectors last `TEMP_SECTOR_DURATION` blocks. Reserve
-                // 40 blocks for stale or skewed host heights and for the indexer
-                // to attach the sectors to contracts after registration. Retry
-                // the whole slab if the reported span leaves no more than that.
-                if newest_write
-                    .saturating_sub(oldest_write)
-                    .saturating_add(TEMP_SECTOR_PIN_MARGIN)
-                    >= TEMP_SECTOR_DURATION
-                {
-                    debug!(
-                        "slab {slab_index} upload attempt {attempt}/{MAX_SLAB_ATTEMPTS} stale: written from height {oldest_write} to {newest_write}"
-                    );
-                    if attempt == MAX_SLAB_ATTEMPTS {
-                        break;
-                    }
-                    waiting_guards = (0..total_shards)
-                        .map(|_| WaitingGuard::new(waiting.clone()))
-                        .collect();
-                    continue;
-                }
-
-                let uploaded = Slab {
+                let params = SlabPinParams {
                     version: SlabVersion::V1,
                     encryption_key: slab.encryption_key.clone(),
-                    offset: 0,
                     min_shards,
-                    length: slab.length as u32,
                     sectors: sectors.into_iter().map(|s| s.unwrap()).collect(),
                 };
-                pin_uploaded_slab(&api_client, &app_key, &uploaded).await?;
-                return Ok(uploaded);
+                let uploaded = Slab {
+                    length: slab.length as u32,
+                    ..Slab::from(&params)
+                };
+                match pin_uploaded_slab(&api_client, &app_key, params).await {
+                    Ok(()) => return Ok(uploaded),
+                    Err(UploadError::ApiError(e)) if e.is_slab_upload_too_old() => {
+                        debug!(
+                            "slab {slab_index} upload attempt {attempt}/{MAX_SLAB_ATTEMPTS} rejected: {e}"
+                        );
+                        if attempt == MAX_SLAB_ATTEMPTS {
+                            return Err(UploadError::StaleSlab(attempt));
+                        }
+                        attempt += 1;
+                        waiting_guards = (0..total_shards)
+                            .map(|_| WaitingGuard::new(waiting.clone()))
+                            .collect();
+                    }
+                    Err(e) => return Err(e),
+                }
             }
-            Err(UploadError::StaleSlab(MAX_SLAB_ATTEMPTS))
         }));
         self.slab_tasks.push_back(handle);
         Ok(())
@@ -1084,6 +1077,7 @@ mod tests {
     use crate::rhp4::{Client, mock};
     use bytes::BytesMut;
     use rand::Rng;
+    use reqwest::StatusCode;
     use sia_core::signing::PrivateKey;
     use sia_core::types::v2::{NetAddress, Protocol};
     use std::io::Cursor;
@@ -1688,13 +1682,14 @@ mod tests {
     }
 
     #[sia_core_derive::cross_target_test]
-    async fn test_pin_uploaded_slab_retries_api_errors() {
+    async fn test_pin_uploaded_slab_retries_transient_errors() {
         let api = app_client::mock::Client::new();
         api.set_pin_slabs_failures(MAX_PIN_RETRIES - 1);
         let client = app_client::Client::Mock(api.clone());
         let app_key = AppKey::import(rand::random());
 
-        pin_uploaded_slab(&client, &app_key, &test_slab())
+        let slab = test_slab();
+        pin_uploaded_slab(&client, &app_key, SlabPinParams::from(&slab))
             .await
             .unwrap();
 
@@ -1709,13 +1704,66 @@ mod tests {
         let client = app_client::Client::Mock(api.clone());
         let app_key = AppKey::import(rand::random());
 
-        let err = pin_uploaded_slab(&client, &app_key, &test_slab())
+        let slab = test_slab();
+        let err = pin_uploaded_slab(&client, &app_key, SlabPinParams::from(&slab))
             .await
             .expect_err("pin to fail");
 
         assert!(matches!(err, UploadError::ApiError(_)));
         assert_eq!(api.pin_slabs_calls(), MAX_PIN_RETRIES);
         assert_eq!(api.pinned_slabs(), 0);
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_upload_does_not_reupload_other_pin_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for (status, message) in [
+            (StatusCode::UNAUTHORIZED, "unauthorized"),
+            (StatusCode::BAD_REQUEST, "invalid slab pin params"),
+            (
+                StatusCode::BAD_REQUEST,
+                "slab upload time is in the future (max 5m0s ahead)",
+            ),
+        ] {
+            let options = opts(3, 9);
+            let total_shards = options.data_shards as usize + options.parity_shards as usize;
+            let hosts = Hosts::new(Client::Mock(mock::Client::new()));
+            hosts.update(
+                (0..total_shards * 2)
+                    .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
+                    .collect(),
+                true,
+            );
+            let api = app_client::mock::Client::new();
+            api.set_pin_slabs_errors([app_client::Error::Api(status, message.into())]);
+            let uploads = Arc::new(AtomicUsize::new(0));
+            let counter = uploads.clone();
+            let result = upload_object(
+                hosts,
+                app_client::Client::Mock(api.clone()),
+                Arc::new(AppKey::import(rand::random())),
+                Object::default(),
+                Cursor::new(vec![1; 4096]),
+                UploadOptions {
+                    shard_uploaded: Some(Arc::new(move |_| {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    })),
+                    ..options
+                },
+            )
+            .await;
+
+            assert!(
+                matches!(result, Err(UploadError::ApiError(app_client::Error::Api(s, m))) if s == status && m == message),
+                "expected the original pin error: {status}: {message}"
+            );
+            // One failed slab pin request; every shard uploaded once and
+            // no slab pinned.
+            assert_eq!(api.pin_slabs_calls(), 1);
+            assert_eq!(uploads.load(Ordering::SeqCst), total_shards);
+            assert_eq!(api.pinned_slabs(), 0);
+        }
     }
 
     #[sia_core_derive::cross_target_test]
@@ -1750,45 +1798,42 @@ mod tests {
         assert_eq!(api.pin_slabs_calls(), 3);
     }
 
-    /// A slab is reuploaded when the chain passes the hosts' safe temporary
-    /// sector window while the first attempt is still running.
+    /// Transient pin errors reuse the same request; the indexer rejecting the
+    /// slab as too old reuploads every shard with fresh upload times and
+    /// preserves the object's data.
     #[sia_core_derive::cross_target_test]
-    async fn test_upload_reuploads_when_chain_advances() {
+    async fn test_upload_reuploads_when_indexer_rejects_slab() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        const START_HEIGHT: u64 = 1000;
-
+        let options = opts(3, 9);
+        let total_shards = options.data_shards as usize + options.parity_shards as usize;
         let transport = mock::Client::new();
-        // each price fetch advances the chain a full expiry window, so the
-        // first shards written are expired before the last one lands
-        transport.set_tip_height(START_HEIGHT, TEMP_SECTOR_DURATION);
-        let hosts = Hosts::new(Client::Mock(transport.clone()));
-        // twice as many hosts as shards; the queue prefers unsampled hosts,
-        // so the retry lands on the untouched half
+        let hosts = Hosts::new(Client::Mock(transport));
+        // Two host sets let the reupload use previously unsampled hosts.
         hosts.update(
-            (0..60)
+            (0..total_shards * 2)
                 .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
                 .collect(),
             true,
         );
 
-        let options = UploadOptions::default();
-        let total_shards = options.data_shards as usize + options.parity_shards as usize;
         let uploads = Arc::new(AtomicUsize::new(0));
         let counter = uploads.clone();
-        let chain = transport.clone();
         let api = app_client::mock::Client::new();
+        api.set_pin_slabs_errors([
+            app_client::Error::Api(StatusCode::INTERNAL_SERVER_ERROR, "temporary".into()),
+            app_client::Error::Api(StatusCode::BAD_REQUEST, "slab upload is too old".into()),
+            app_client::Error::Api(StatusCode::INTERNAL_SERVER_ERROR, "temporary".into()),
+        ]);
+        let app_key = Arc::new(AppKey::import(rand::random()));
+        let before = Utc::now();
         let mut upload = Upload::new(
-            hosts,
+            hosts.clone(),
             app_client::Client::Mock(api.clone()),
-            Arc::new(AppKey::import(rand::random())),
+            app_key.clone(),
             UploadOptions {
                 shard_uploaded: Some(Arc::new(move |_| {
-                    // stop the chain after the first attempt so the retry
-                    // lands inside one expiry window
-                    if counter.fetch_add(1, Ordering::SeqCst) + 1 == total_shards {
-                        chain.set_tip_height(START_HEIGHT, 0);
-                    }
+                    counter.fetch_add(1, Ordering::SeqCst);
                 })),
                 ..options
             },
@@ -1797,44 +1842,88 @@ mod tests {
 
         let mut data = BytesMut::zeroed(4096);
         rand::rng().fill_bytes(&mut data);
+        let data = data.freeze();
+        let object = Object::default();
         upload
-            .read(
-                rand::random::<[u8; 32]>().into(),
-                Cursor::new(data.freeze()),
-            )
+            .read(object.data_key.clone(), Cursor::new(data.clone()))
             .await
             .unwrap();
         let slabs = upload.finish().await.unwrap();
 
         assert_eq!(slabs.len(), 1);
         assert_eq!(slabs[0].sectors.len(), total_shards);
-        // every shard uploaded twice; only the second attempt was pinned
+        let after = Utc::now();
+        // every shard uploaded twice; each upload's pin was retried once after
+        // a transient error, and only the second upload was pinned
         assert_eq!(uploads.load(Ordering::SeqCst), total_shards * 2);
-        assert_eq!(api.pin_slabs_calls(), 1);
+        assert_eq!(api.pin_slabs_calls(), 4);
         assert_eq!(api.pinned_slabs(), 1);
+
+        let requests = api.pin_slabs_requests();
+        assert_eq!(requests.len(), 4, "two pin requests per upload attempt");
+        assert_eq!(
+            requests[0], requests[1],
+            "first pin retry changed the request"
+        );
+        assert_eq!(
+            requests[2], requests[3],
+            "second pin retry changed the request"
+        );
+        for (shard_index, (first, second)) in requests[0][0]
+            .sectors
+            .iter()
+            .zip(&requests[2][0].sectors)
+            .enumerate()
+        {
+            assert_eq!(
+                first.sector.root, second.sector.root,
+                "shard {shard_index} changed its sector root on reupload"
+            );
+            // Upload times are UTC metadata, not a monotonic clock. Check
+            // that both attempts supply recent times without ordering them.
+            for (attempt, params) in [first, second].into_iter().enumerate() {
+                let uploaded_at = params.uploaded_at.expect("missing sector upload time");
+                assert!(
+                    before <= uploaded_at && uploaded_at <= after,
+                    "shard {shard_index} upload attempt {attempt}: {uploaded_at} outside {before}..={after}"
+                );
+            }
+        }
+
+        let object = Object { slabs, ..object };
+        let mut download =
+            Download::new(&object, hosts, app_key, DownloadOptions::default()).unwrap();
+        let mut downloaded = Vec::with_capacity(data.len());
+        tokio::io::copy(&mut download, &mut downloaded)
+            .await
+            .unwrap();
+        assert_eq!(downloaded, data, "reupload changed the object data");
     }
 
     /// An upload fails once [`MAX_SLAB_ATTEMPTS`] attempts have all gone
     /// stale.
     #[sia_core_derive::cross_target_test]
     async fn test_upload_fails_after_max_stale_attempts() {
+        let options = opts(3, 9);
+        let total_shards = options.data_shards as usize + options.parity_shards as usize;
         let transport = mock::Client::new();
-        // the chain never stops outrunning the upload, so no attempt survives
-        transport.set_tip_height(1000, TEMP_SECTOR_DURATION);
         let hosts = Hosts::new(Client::Mock(transport));
         hosts.update(
-            (0..60)
+            (0..total_shards * 2)
                 .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
                 .collect(),
             true,
         );
 
         let api = app_client::mock::Client::new();
+        api.set_pin_slabs_errors((0..MAX_SLAB_ATTEMPTS).map(|_| {
+            app_client::Error::Api(StatusCode::BAD_REQUEST, "slab upload is too old".into())
+        }));
         let mut upload = Upload::new(
             hosts,
             app_client::Client::Mock(api.clone()),
             Arc::new(AppKey::import(rand::random())),
-            UploadOptions::default(),
+            options,
         )
         .unwrap();
 
@@ -1849,8 +1938,8 @@ mod tests {
             .unwrap();
         let err = upload.finish().await.unwrap_err();
         assert!(matches!(err, UploadError::StaleSlab(attempts) if attempts == MAX_SLAB_ATTEMPTS));
-        // no stale attempt was pinned
-        assert_eq!(api.pin_slabs_calls(), 0);
+        // the indexer rejected every attempt, so none was pinned
+        assert_eq!(api.pin_slabs_calls(), MAX_SLAB_ATTEMPTS);
         assert_eq!(api.pinned_slabs(), 0);
     }
 }
