@@ -38,6 +38,24 @@ impl Builder {
         })
     }
 
+    /// Sets whether the SDK requests CBOR responses from the indexer (enabled
+    /// by default). Set to `false` to request JSON for easier inspection.
+    /// Only valid before connecting.
+    #[wasm_bindgen(js_name = "withCbor")]
+    pub fn with_cbor(&self, enable: bool) -> Result<(), JsError> {
+        let mut state = self.state.borrow_mut();
+        match state.take() {
+            Some(BuilderState::Disconnected(builder)) => {
+                *state = Some(BuilderState::Disconnected(builder.with_cbor(enable)));
+                Ok(())
+            }
+            other => {
+                *state = other;
+                Err(JsError::new("must be in disconnected state"))
+            }
+        }
+    }
+
     /// Attempts to connect using an existing AppKey.
     /// Returns a Sdk if the key is valid, or undefined if not registered.
     pub async fn connected(&self, app_key: &AppKey) -> Result<Option<Sdk>, JsError> {
