@@ -4381,3 +4381,213 @@ fn the_logger_bridge_reaches_c() {
         "the record is formatted, not raw"
     );
 }
+
+/// Maps a base type name from either side onto one spelling. `None` for
+/// anything unrecognised, which fails the caller rather than passing quietly,
+/// so a type new to the ABI has to be added here before the test goes green.
+fn canonical_base(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "i32" | "int32_t" => "int32_t",
+        "i64" | "int64_t" => "int64_t",
+        "u64" | "uint64_t" => "uint64_t",
+        "u8" | "uint8_t" => "uint8_t",
+        // usize is size_t, and uintptr_t where the ABI carries an opaque
+        // userdata word. The same width on every target this crate builds for.
+        "usize" | "size_t" | "uintptr_t" => "size_t",
+        "bool" => "bool",
+        "c_char" | "char" => "char",
+        "void" | "" => "void",
+        "Sdk" | "sia_sdk_t" => "sia_sdk_t",
+        "SharedSdk" | "sia_shared_sdk_t" => "sia_shared_sdk_t",
+        "Object" | "sia_object_t" => "sia_object_t",
+        "SharingKey" | "sia_sharing_key_t" => "sia_sharing_key_t",
+        "CancellationToken" | "sia_cancel_t" => "sia_cancel_t",
+        "FfiBuilder" | "sia_builder_t" => "sia_builder_t",
+        "FfiUpload" | "sia_upload_t" => "sia_upload_t",
+        "FfiPacked" | "sia_packed_upload_t" => "sia_packed_upload_t",
+        "FfiDownload" | "sia_download_t" => "sia_download_t",
+        "FfiEvents" | "sia_events_t" => "sia_events_t",
+        "FfiKeyRecords" | "sia_key_records_t" => "sia_key_records_t",
+        "FfiMock" | "sia_mock_t" => "sia_mock_t",
+        "KeyStatsC" | "sia_key_stats_t" => "sia_key_stats_t",
+        "HostQueryC" | "sia_host_query_t" => "sia_host_query_t",
+        "UploadOptionsC" | "sia_upload_options_t" => "sia_upload_options_t",
+        "DownloadOptionsC" | "sia_download_options_t" => "sia_download_options_t",
+        "Option<LogFn>" | "sia_log_cb_t" => "sia_log_cb_t",
+        _ => return None,
+    })
+}
+
+/// Canonicalises one C parameter or return type, dropping the parameter name.
+/// `const T *` becomes `*const T`, `T **` becomes `*mut *mut T`, and an array
+/// parameter is one more pointer level, which is what C passes.
+fn c_type(decl: &str) -> Option<String> {
+    let decl = decl.trim();
+    if decl.is_empty() || decl == "void" {
+        return Some("void".to_string());
+    }
+    let is_const = decl.starts_with("const ");
+    let body = decl.trim_start_matches("const ").trim();
+    let mut stars = body.matches('*').count();
+    if body.contains('[') {
+        stars += 1;
+    }
+    let base = body
+        .split(['*', '[', ' '])
+        .find(|s| !s.is_empty())?;
+    let mut t = canonical_base(base)?.to_string();
+    for level in 0..stars {
+        let qual = if level == 0 && is_const { "*const" } else { "*mut" };
+        t = format!("{qual} {t}");
+    }
+    Some(t)
+}
+
+/// Canonicalises one Rust type, written as it appears in a signature.
+fn rust_type(decl: &str) -> Option<String> {
+    let mut rest = decl.trim();
+    if rest.is_empty() {
+        return Some("void".to_string());
+    }
+    let mut quals = Vec::new();
+    loop {
+        if let Some(r) = rest.strip_prefix("*const ") {
+            quals.push("*const");
+            rest = r.trim();
+        } else if let Some(r) = rest.strip_prefix("*mut ") {
+            quals.push("*mut");
+            rest = r.trim();
+        } else {
+            break;
+        }
+    }
+    let mut t = canonical_base(rest)?.to_string();
+    for qual in quals.iter().rev() {
+        t = format!("{qual} {t}");
+    }
+    Some(t)
+}
+
+/// One function's types, as the two sides describe them.
+fn signature(ret: &str, params: &str, rust: bool) -> Result<String, String> {
+    let conv = if rust { rust_type } else { c_type };
+    let mut parts = Vec::new();
+    // C spells an empty parameter list `(void)`.
+    let params = if params.trim() == "void" { "" } else { params };
+    for raw in params.split(',') {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        // A Rust parameter is `name: type`; a C one carries the name last.
+        let t = if rust {
+            raw.split_once(':').map_or(raw, |(_, t)| t)
+        } else {
+            raw
+        };
+        parts.push(conv(t).ok_or_else(|| format!("unrecognised type {t:?}"))?);
+    }
+    let ret = conv(ret).ok_or_else(|| format!("unrecognised return type {ret:?}"))?;
+    Ok(format!("{ret} ({})", parts.join(", ")))
+}
+
+/// The two sides agreeing on names is not enough. A declaration whose
+/// parameters have drifted from the definition still links, and cgo compiles
+/// against the header, so the mismatch reaches a consumer as a corrupt call
+/// rather than a build failure here.
+#[test]
+fn header_signatures_match_the_rust_definitions() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let header = std::fs::read_to_string(root.join("include/sia_storage.h"))
+        .expect("the vendored header must be readable");
+    let mut declared = std::collections::BTreeMap::new();
+    for line in header.lines() {
+        let line = line.trim();
+        if line.starts_with("typedef") || line.starts_with("//") || !line.ends_with(");") {
+            continue;
+        }
+        let Some(open) = line.find('(') else { continue };
+        let head = &line[..open];
+        let name: String = head
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if !name.starts_with("sia_") {
+            continue;
+        }
+        let ret = head[..head.len() - name.len()].trim();
+        let params = &line[open + 1..line.len() - 2];
+        let sig = signature(ret, params, false)
+            .unwrap_or_else(|e| panic!("{name} in the header: {e}"));
+        declared.insert(name, sig);
+    }
+
+    let mut exported = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(root.join("src")).expect("src must be readable") {
+        let path = entry.expect("readable entry").path();
+        if path.extension().is_none_or(|e| e != "rs") || path.ends_with("tests.rs") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("source must be readable");
+        for (i, _) in src.match_indices("extern \"C\" fn ") {
+            let rest = &src[i + "extern \"C\" fn ".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !name.starts_with("sia_") {
+                continue;
+            }
+            let after = &rest[name.len()..];
+            let open = after.find('(').expect("a definition has a parameter list");
+            let mut depth = 0usize;
+            let mut close = open;
+            for (j, c) in after[open..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = open + j;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let params = &after[open + 1..close];
+            let tail = &after[close + 1..];
+            let body = tail.find('{').expect("a definition has a body");
+            let ret = tail[..body].trim().trim_start_matches("->").trim();
+            let sig = signature(ret, params, true)
+                .unwrap_or_else(|e| panic!("{name} in the Rust source: {e}"));
+            exported.insert(name, sig);
+        }
+    }
+
+    assert!(
+        !declared.is_empty() && !exported.is_empty(),
+        "both sides must parse, got {} declared and {} exported",
+        declared.len(),
+        exported.len()
+    );
+
+    let mut wrong = Vec::new();
+    for (name, rust) in &exported {
+        if let Some(c) = declared.get(name)
+            && c != rust
+        {
+            wrong.push(format!("  {name}\n    header: {c}\n    rust:   {rust}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the header declares a different signature than the crate defines:\n{}",
+        wrong.join("\n")
+    );
+}
