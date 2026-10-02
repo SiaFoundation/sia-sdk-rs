@@ -258,6 +258,9 @@ pub unsafe extern "C" fn sia_sdk_delete_object(
     })
 }
 
+/// Passing `has_before` prunes only slabs orphaned before `before_unix_us`. Without it the
+/// indexer applies its own cutoff.
+///
 /// # Safety
 /// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_builder_connect`, `sia_builder_register` or `sia_mock_sdk` that has not been freed.
@@ -268,6 +271,8 @@ pub unsafe extern "C" fn sia_sdk_delete_object(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_prune_slabs(
     sdk: *const Sdk,
+    has_before: bool,
+    before_unix_us: i64,
     cancel: *mut CancellationToken,
     err: *mut *mut c_char,
 ) -> i32 {
@@ -277,7 +282,15 @@ pub unsafe extern "C" fn sia_sdk_prune_slabs(
         let Some(sdk) = (unsafe { sdk.as_ref() }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        match block_on(cancel, sdk.prune_slabs()) {
+        let before = if has_before {
+            match sia_storage::DateTime::from_timestamp_micros(before_unix_us) {
+                Some(t) => Some(t),
+                None => return set_err(err, SIA_ERR, "invalid before timestamp"),
+            }
+        } else {
+            None
+        };
+        match block_on(cancel, sdk.prune_slabs(before)) {
             None => set_cancelled(err),
             Some(Ok(())) => SIA_OK,
             Some(Err(e)) => set_typed_err(err, &e),

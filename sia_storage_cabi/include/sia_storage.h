@@ -188,7 +188,7 @@ extern "C"
 	int32_t sia_sdk_pin_object(const sia_sdk_t *sdk, const sia_object_t *obj, sia_cancel_t *cancel, char **err);
 	int32_t sia_sdk_update_object_metadata(const sia_sdk_t *sdk, const sia_object_t *obj, sia_cancel_t *cancel, char **err);
 	int32_t sia_sdk_delete_object(const sia_sdk_t *sdk, const uint8_t id[32], sia_cancel_t *cancel, char **err);
-	int32_t sia_sdk_prune_slabs(const sia_sdk_t *sdk, sia_cancel_t *cancel, char **err);
+	int32_t sia_sdk_prune_slabs(const sia_sdk_t *sdk, bool has_before, int64_t before_unix_us, sia_cancel_t *cancel, char **err);
 	int32_t sia_sdk_object_share_url(const sia_sdk_t *sdk, const sia_object_t *obj, int64_t valid_until_unix_us, char **out_url, char **err);
 	int32_t sia_sdk_object_from_share_url(const sia_sdk_t *sdk, const char *share_url, sia_cancel_t *cancel, sia_object_t **out, char **err);
 

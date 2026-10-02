@@ -3976,7 +3976,7 @@ fn the_sdk_object_entry_points_round_trip() {
 
         let mut err = std::ptr::null_mut();
         assert_eq!(
-            sia_sdk_prune_slabs(sdk, std::ptr::null_mut(), &raw mut err),
+            sia_sdk_prune_slabs(sdk, false, 0, std::ptr::null_mut(), &raw mut err),
             SIA_OK,
             "sia_sdk_prune_slabs: {}",
             take_err(err)
