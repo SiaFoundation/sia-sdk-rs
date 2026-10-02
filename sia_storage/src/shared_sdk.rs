@@ -14,8 +14,8 @@ use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, sleep};
 use crate::tokens::AccountTokenSource;
 use crate::{
-    BuilderError, Download, DownloadError, DownloadOptions, Error, HostQuery, KeyStats, Object,
-    SharingKey, app_client,
+    Builder, BuilderError, Download, DownloadError, DownloadOptions, Error, HostQuery, KeyStats,
+    Object, SharingKey, app_client,
 };
 
 /// How often to replace the account tokens. Tokens are issued with a fixed
@@ -73,9 +73,11 @@ impl SharedSdk {
     ///
     /// `seed` is the credential the key's owner hands out; how it reaches the
     /// recipient is up to the caller.
+    ///
+    /// A shorthand for [Builder::init] followed by [Builder::for_sharing_key].
+    /// To share a host connection pool with other SDKs, call those directly instead.
     pub async fn connect<U: IntoUrl>(indexer_url: U, seed: [u8; 32]) -> Result<Self, BuilderError> {
-        let api_client = app_client::Client::new(indexer_url)?;
-        Self::with_backends(api_client, Client::new(), SharingKey::import(seed)).await
+        Builder::init().for_sharing_key(indexer_url, seed).await
     }
 
     /// Connects as the recipient of a sharing key, seeding the host list and

@@ -92,7 +92,8 @@ pub use sia_core::types::v2::Protocol;
 
 pub use app_client::{Error as AppApiError, KeyStats};
 pub use builder::{
-    ApprovedState, Builder, BuilderError, DisconnectedState, RequestingApprovalState,
+    ApprovedState, Builder, BuilderError, DisconnectedState, InitializedState,
+    RequestingApprovalState,
 };
 pub use download::{Download, DownloadError};
 pub use encryption::EncryptionKey;

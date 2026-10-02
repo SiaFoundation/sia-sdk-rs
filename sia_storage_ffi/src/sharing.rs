@@ -9,7 +9,7 @@ use crate::{
     Download, DownloadError, DownloadOptions, Error, Host, HostQuery, PinnedObject, Sdk, spawn,
 };
 
-fn seed_from_vec(seed: Vec<u8>) -> Result<[u8; 32], Error> {
+pub(crate) fn seed_from_vec(seed: Vec<u8>) -> Result<[u8; 32], Error> {
     seed.try_into()
         .map_err(|_| Error::Custom("seed must be 32 bytes".into()))
 }
@@ -71,7 +71,8 @@ impl SharingKey {
     }
 
     /// The 32-byte seed a recipient needs to read the key's objects. Pair it
-    /// with the indexer url in `SharedSdk::connect`.
+    /// with the indexer url in `SharedSdk::connect` or
+    /// `SharedBuilder::for_sharing_key`.
     pub fn seed(&self) -> Vec<u8> {
         self.inner.export().to_vec()
     }
@@ -227,7 +228,7 @@ impl Sdk {
 /// cannot upload, pin, or delete. Downloads are paid for by the key's owner.
 #[derive(uniffi::Object)]
 pub struct SharedSdk {
-    inner: sia_storage::SharedSdk,
+    pub(crate) inner: sia_storage::SharedSdk,
 }
 
 #[uniffi::export]

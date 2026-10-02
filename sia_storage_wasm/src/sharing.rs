@@ -14,7 +14,7 @@ use crate::run_local;
 use crate::types::{self, HostQuery, KeyStats, download_options_from_js};
 
 /// Decodes the hex seed a sharing key's owner handed out.
-fn seed_from_hex(seed: &str) -> Result<[u8; 32], JsError> {
+pub(crate) fn seed_from_hex(seed: &str) -> Result<[u8; 32], JsError> {
     let bytes = hex::decode(seed.trim()).map_err(to_js_err)?;
     bytes
         .try_into()
@@ -107,7 +107,7 @@ impl KeyRecord {
 /// cannot upload, pin, or delete. Downloads are paid for by the key's owner.
 #[wasm_bindgen]
 pub struct SharedSdk {
-    inner: StorageSharedSdk,
+    pub(crate) inner: StorageSharedSdk,
 }
 
 #[wasm_bindgen]
