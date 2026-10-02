@@ -29,6 +29,11 @@ const _: () = {
     moves_between_threads::<download::FfiDownload>();
     moves_between_threads::<builder::FfiBuilder>();
     moves_between_threads::<upload::FfiPacked>();
+    moves_between_threads::<sharing::FfiKeyRecords>();
+    moves_between_threads::<object::FfiEvents>();
+    moves_between_threads::<tokio_util::sync::CancellationToken>();
+    #[cfg(feature = "mock")]
+    moves_between_threads::<mock::FfiMock>();
 
     shared_across_threads::<sia_storage::Sdk>();
     shared_across_threads::<sia_storage::SharedSdk>();
@@ -36,6 +41,10 @@ const _: () = {
     shared_across_threads::<sia_storage::SharingKey>();
     shared_across_threads::<upload::FfiPacked>();
     shared_across_threads::<tokio_util::sync::CancellationToken>();
+    shared_across_threads::<sharing::FfiKeyRecords>();
+    shared_across_threads::<object::FfiEvents>();
+    #[cfg(feature = "mock")]
+    shared_across_threads::<mock::FfiMock>();
 };
 
 mod abi;
