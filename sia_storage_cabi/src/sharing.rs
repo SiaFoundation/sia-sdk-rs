@@ -1,7 +1,7 @@
 use crate::abi::*;
 use crate::object::write_object_array;
 use sia_storage::{KeyRecord, KeyStats, Object, Sdk, SharingError, SharingKey, SharingKeyOptions};
-use std::ffi::{CString, c_char};
+use std::ffi::c_char;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) struct FfiKeyRecords(pub(crate) Vec<KeyRecord>);
@@ -185,7 +185,7 @@ pub unsafe extern "C" fn sia_sdk_sharing_key(
         match block_on(cancel, sdk.sharing_key(key)) {
             None => set_cancelled(err),
             Some(Ok(record)) => {
-                let desc = CString::new(record.description).unwrap_or_default();
+                let desc = lossy_cstring(record.description);
                 unsafe {
                     *out_description = desc.into_raw();
                     *out_stats = key_stats_c(&record.stats);
@@ -274,7 +274,7 @@ pub unsafe extern "C" fn sia_key_records_at(
     let Some(record) = recs.0.get(i) else {
         return false;
     };
-    let desc = CString::new(record.description.clone()).unwrap_or_default();
+    let desc = lossy_cstring(record.description.clone());
     unsafe {
         *out_key = Box::into_raw(Box::new(record.key.clone()));
         *out_description = desc.into_raw();

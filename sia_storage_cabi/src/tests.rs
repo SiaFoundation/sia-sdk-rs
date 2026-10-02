@@ -3378,6 +3378,24 @@ fn abort_reports_a_panicked_add() {
     }
 }
 
+/// An error message carrying an interior NUL still reaches the caller. It is
+/// built from host and indexer text, so it is the least controlled string the
+/// ABI returns, and an empty message alongside a failure code tells nobody
+/// anything.
+#[test]
+fn an_error_message_survives_an_interior_nul() {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    unsafe {
+        set_err(ErrOut::new(&raw mut err), SIA_ERR, "host said hi\0 then quit");
+        assert_eq!(
+            CStr::from_ptr(err).to_bytes(),
+            b"host said hi? then quit",
+            "the text around the NUL must survive"
+        );
+        sia_string_free(err);
+    }
+}
+
 /// A log record carrying a NUL used to arrive at the callback as an empty
 /// string, taking the rest of the message with it.
 #[test]

@@ -1,6 +1,6 @@
 use crate::abi::*;
 use sia_storage::{Object, Sdk, SealedObject};
-use std::ffi::{CString, c_char};
+use std::ffi::c_char;
 
 pub(crate) struct FfiEvent {
     pub(crate) id: [u8; 32],
@@ -247,7 +247,7 @@ pub unsafe extern "C" fn sia_object_seal_json(
         let sealed = obj.seal(sdk.app_key());
         match serde_json::to_string(&sealed) {
             Ok(s) => {
-                unsafe { *out_json = CString::new(s).unwrap_or_default().into_raw() }
+                unsafe { *out_json = lossy_cstring(s).into_raw() }
                 SIA_OK
             }
             Err(e) => set_err(err, SIA_ERR, format!("failed to encode sealed object: {e}")),

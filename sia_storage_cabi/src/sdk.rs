@@ -1,7 +1,7 @@
 use crate::abi::*;
 use crate::object::{FfiEvent, FfiEvents};
 use sia_storage::{Object, ObjectsCursor, Sdk};
-use std::ffi::{CString, c_char};
+use std::ffi::c_char;
 use tokio_util::sync::CancellationToken;
 
 /// # Safety
@@ -53,7 +53,7 @@ pub unsafe extern "C" fn sia_sdk_account(
             None => set_cancelled(err),
             Some(Ok(account)) => match serde_json::to_string(&account) {
                 Ok(js) => {
-                    unsafe { *out_json = CString::new(js).unwrap_or_default().into_raw() }
+                    unsafe { *out_json = lossy_cstring(js).into_raw() }
                     SIA_OK
                 }
                 Err(e) => set_typed_err(err, &e),
@@ -327,7 +327,7 @@ pub unsafe extern "C" fn sia_sdk_object_share_url(
         match sdk.object_share_url(obj, valid_until) {
             Ok(url) => {
                 unsafe {
-                    *out_url = CString::new(url.as_str()).unwrap_or_default().into_raw();
+                    *out_url = lossy_cstring(url.as_str()).into_raw();
                 }
                 SIA_OK
             }

@@ -158,7 +158,7 @@ impl<'a> ErrOut<'a> {
     /// freeing it, which matches what the header promises.
     pub(crate) fn set(self, msg: impl AsRef<str>) {
         if let Some(slot) = self.0 {
-            let s = CString::new(msg.as_ref()).unwrap_or_default();
+            let s = lossy_cstring(msg.as_ref());
             slot.set(s.into_raw());
         }
     }
@@ -328,9 +328,7 @@ pub unsafe extern "C" fn sia_set_logger(cb: Option<LogFn>, userdata: usize, max_
 /// - This function is only callable across the C ABI and takes no pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_generate_recovery_phrase() -> *mut c_char {
-    CString::new(sia_storage::generate_recovery_phrase())
-        .unwrap_or_default()
-        .into_raw()
+    lossy_cstring(sia_storage::generate_recovery_phrase()).into_raw()
 }
 
 /// # Safety

@@ -3,7 +3,7 @@ use sia_storage::{
     AppApiError, AppMetadata, ApprovedState, Builder, BuilderError, DisconnectedState, Hash256,
     RequestingApprovalState, Sdk,
 };
-use std::ffi::{CString, c_char};
+use std::ffi::c_char;
 use std::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -202,7 +202,7 @@ pub unsafe extern "C" fn sia_builder_request_connection(
         match block_on(cancel, builder.request_connection()) {
             None => set_cancelled(err),
             Some(Ok(requesting)) => {
-                let url = CString::new(requesting.response_url()).unwrap_or_default();
+                let url = lossy_cstring(requesting.response_url());
                 *state = BuilderState::Requesting(requesting);
                 unsafe { *response_url = url.into_raw() }
                 SIA_OK

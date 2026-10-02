@@ -1,6 +1,6 @@
 use crate::abi::*;
 use sia_storage::{GeoLocation, Host, HostQuery, Protocol, Sdk, SharedSdk};
-use std::ffi::{CString, c_char};
+use std::ffi::c_char;
 use tokio_util::sync::CancellationToken;
 
 /// Filters for a host listing. A zeroed struct with a null `country` applies
@@ -57,13 +57,8 @@ fn hosts_json(err: ErrOut, hosts: Vec<Host>, out_json: *mut *mut c_char) -> i32 
         Ok(j) => j,
         Err(e) => return set_err(err, SIA_ERR, format!("failed to encode hosts: {e}")),
     };
-    match CString::new(json) {
-        Ok(s) => {
-            unsafe { *out_json = s.into_raw() }
-            SIA_OK
-        }
-        Err(e) => set_err(err, SIA_ERR, format!("failed to encode hosts: {e}")),
-    }
+    unsafe { *out_json = lossy_cstring(json).into_raw() }
+    SIA_OK
 }
 
 /// Lists the usable hosts the indexer knows, as a JSON array.
