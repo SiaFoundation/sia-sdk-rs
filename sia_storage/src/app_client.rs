@@ -997,6 +997,7 @@ mod cross_target_test {
                 sectors: vec![Sector {
                     root: Hash256::new([1u8; 32]),
                     host_key: PublicKey::new([2u8; 32]),
+                    uploaded_at: None,
                 }],
                 offset: 10,
                 length: 100,

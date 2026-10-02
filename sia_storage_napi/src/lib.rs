@@ -299,6 +299,9 @@ impl TryInto<sia_storage::Slab> for Slab {
                             .map_err(|e: HexParseError| Error::from_reason(e.to_string()))?,
                         root: Hash256::from_str(sec.root.as_str())
                             .map_err(|e: HexParseError| Error::from_reason(e.to_string()))?,
+                        // This process did not write these sectors, so the
+                        // indexer's upload age check does not apply.
+                        uploaded_at: None,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?,

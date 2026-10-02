@@ -1,3 +1,4 @@
+use chrono::Utc;
 use std::collections::VecDeque;
 use std::io;
 #[cfg(feature = "fs")]
@@ -350,7 +351,13 @@ impl ShardUpload {
                         elapsed
                     );
                     SectorUploadResult {
-                        sector: Sector { root, host_key },
+                        sector: Sector {
+                            root,
+                            host_key,
+                            // Stamped here, where the write actually happened, so
+                            // the indexer can apply its upload age check.
+                            uploaded_at: Some(Utc::now()),
+                        },
                         shard_index,
                         elapsed,
                         tip_height,

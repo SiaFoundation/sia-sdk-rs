@@ -561,6 +561,9 @@ impl TryInto<sia_storage::Sector> for PinnedSector {
         Ok(sia_storage::Sector {
             host_key: PublicKey::from_str(self.host_key.as_str())?,
             root: Hash256::from_str(self.root.as_str())?,
+            // This process did not write these sectors, so the indexer's
+            // upload age check does not apply.
+            uploaded_at: None,
         })
     }
 }

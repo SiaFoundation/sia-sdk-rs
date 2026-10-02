@@ -757,6 +757,7 @@ mod tests {
             sectors: vec![Sector {
                 root: Hash256::new([2u8; 32]),
                 host_key: PublicKey::new([3u8; 32]),
+                uploaded_at: None,
             }],
             offset: 0,
             length: 256,
@@ -992,6 +993,7 @@ mod tests {
                 host_key: public_key!(
                     "ed25519:910b22c360a1c67cb6a9a7371fa600c48e87d626b328669d01f34048ac3132fe"
                 ),
+                uploaded_at: None,
             }],
         };
 
@@ -1336,6 +1338,7 @@ mod tests {
                             host_key: public_key!(
                                 "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
                             ),
+                            uploaded_at: None,
                         },
                         Sector {
                             root: hash_256!(
@@ -1344,6 +1347,7 @@ mod tests {
                             host_key: public_key!(
                                 "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
                             ),
+                            uploaded_at: None,
                         },
                     ],
                     offset: 6,
@@ -1361,6 +1365,7 @@ mod tests {
                             host_key: public_key!(
                                 "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
                             ),
+                            uploaded_at: None,
                         },
                         Sector {
                             root: hash_256!(
@@ -1369,6 +1374,7 @@ mod tests {
                             host_key: public_key!(
                                 "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
                             ),
+                            uploaded_at: None,
                         },
                     ],
                     offset: 6,
@@ -1472,6 +1478,7 @@ mod tests {
                             host_key: public_key!(
                                 "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
                             ),
+                            uploaded_at: None,
                         },
                         Sector {
                             root: hash_256!(
@@ -1480,6 +1487,7 @@ mod tests {
                             host_key: public_key!(
                                 "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
                             ),
+                            uploaded_at: None,
                         },
                     ],
                     offset: 0,
@@ -1497,6 +1505,7 @@ mod tests {
                             host_key: public_key!(
                                 "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
                             ),
+                            uploaded_at: None,
                         },
                         Sector {
                             root: hash_256!(
@@ -1505,6 +1514,7 @@ mod tests {
                             host_key: public_key!(
                                 "ed25519:0505050505050505050505050505050505050505050505050505050505050505"
                             ),
+                            uploaded_at: None,
                         },
                     ],
                     offset: 256,
@@ -2156,6 +2166,7 @@ mod tests {
                 sectors: vec![Sector {
                     root: Hash256::new([2u8; 32]),
                     host_key: PublicKey::new([3u8; 32]),
+                    uploaded_at: None,
                 }],
                 offset: 0,
                 length: 256,
@@ -2302,6 +2313,7 @@ mod tests {
                 sectors: vec![Sector {
                     root: Hash256::new([2u8; 32]),
                     host_key: PublicKey::new([3u8; 32]),
+                    uploaded_at: None,
                 }],
                 offset: 0,
                 length: 256,
