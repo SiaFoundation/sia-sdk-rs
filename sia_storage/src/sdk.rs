@@ -14,7 +14,7 @@ use url::Url;
 use crate::app_client::PinObjectError::UnpinnedSlab;
 use crate::app_client::{self, KeyResponse, SLAB_PIN_BATCH_SIZE, SlabPinParams};
 use crate::hosts::Hosts;
-use crate::rhp4::Client;
+use crate::rhp4::{Client, default_client};
 use crate::sharing::{self, KeyRecord, KeyRequest, Nonce, SharingError, SharingKey};
 use crate::task::AbortOnDropHandle;
 use crate::time::Duration;
@@ -78,7 +78,7 @@ impl Sdk {
         api_client: app_client::Client,
         app_key: Arc<AppKey>,
     ) -> Result<Self, BuilderError> {
-        Self::with_backends(api_client, Client::new(), app_key).await
+        Self::with_backends(api_client, default_client(), app_key).await
     }
 
     /// Creates a new SDK instance with the provided backends
@@ -460,14 +460,11 @@ impl Sdk {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::KeyStats;
-    use sia_core::signing::PrivateKey;
 
-    fn random_seed() -> [u8; 32] {
+    pub(super) fn random_seed() -> [u8; 32] {
         let mut seed = [0u8; 32];
         getrandom::fill(&mut seed).unwrap();
         seed
@@ -476,7 +473,7 @@ mod test {
     /// The whole sharing flow against the in-memory network: an owner creates a
     /// key and attaches an object, and a recipient holding only the seed lists,
     /// decrypts, and downloads it.
-    #[tokio::test]
+    #[sia_core_derive::cross_target_test]
     async fn test_mock_network_sharing_roundtrip() {
         use std::io::Cursor;
         use tokio::io::AsyncReadExt;
@@ -564,7 +561,7 @@ mod test {
     /// keys. indexd scopes every owner-side query by `account_id`, so a mock
     /// that ignores the app key would let a test pass against behaviour the
     /// real indexer rejects.
-    #[tokio::test]
+    #[sia_core_derive::cross_target_test]
     async fn test_sharing_keys_are_scoped_to_their_owner() {
         use std::io::Cursor;
 
@@ -663,7 +660,7 @@ mod test {
     /// indexd deletes the object row and `shared_objects.object_id` cascades,
     /// so a mock that only tombstones the object would leave recipients able
     /// to list and fetch something the indexer has dropped.
-    #[tokio::test]
+    #[sia_core_derive::cross_target_test]
     async fn test_deleting_an_object_detaches_it_from_sharing_keys() {
         use std::io::Cursor;
 
@@ -748,7 +745,7 @@ mod test {
     /// attachments, but must still be revocable so an owner can clean up.
     /// indexd filters on `expires_at` in its reads and in its attach, and
     /// deliberately does not filter it in delete.
-    #[tokio::test]
+    #[sia_core_derive::cross_target_test]
     async fn test_expired_sharing_keys_are_filtered_out() {
         use std::io::Cursor;
 
@@ -828,7 +825,7 @@ mod test {
             .expect("an expired key must still be revocable");
     }
 
-    #[tokio::test]
+    #[sia_core_derive::cross_target_test]
     async fn test_mock_network_object_roundtrip() {
         use std::io::Cursor;
         use tokio::io::AsyncReadExt;
@@ -887,6 +884,40 @@ mod test {
         sdk.prune_slabs(None).await.expect("prune failed");
         assert_eq!(network.pinned_slabs(), 0);
     }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_unshare_object_not_attached() {
+        use crate::mock::MockNetwork;
+
+        let network = MockNetwork::new();
+        let sdk = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("sdk creation failed");
+
+        let key = sdk
+            .create_sharing_key(SharingKeyOptions {
+                description: "photos".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create failed");
+
+        let err = sdk
+            .unshare_object(&key, &sia_core::types::Hash256::new([2u8; 32]))
+            .await
+            .expect_err("detaching an unattached object should fail");
+        assert!(matches!(err, SharingError::ObjectNotAttached), "{err}");
+    }
+}
+
+/// Integration tests requiring httptest, a TCP mock server. Native only.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_tests {
+    use super::test::random_seed;
+    use super::*;
+    use crate::KeyStats;
+    use sia_core::signing::PrivateKey;
 
     #[tokio::test]
     async fn test_refresh_task_periodic_and_abort() {
@@ -1187,31 +1218,6 @@ mod test {
         sdk.unshare_object(&sharing_key, &object_id)
             .await
             .expect("detaching an attached object should succeed");
-    }
-
-    #[tokio::test]
-    async fn test_unshare_object_not_attached() {
-        use crate::mock::MockNetwork;
-
-        let network = MockNetwork::new();
-        let sdk = network
-            .sdk(AppKey::import(random_seed()))
-            .await
-            .expect("sdk creation failed");
-
-        let key = sdk
-            .create_sharing_key(SharingKeyOptions {
-                description: "photos".to_string(),
-                ..Default::default()
-            })
-            .await
-            .expect("create failed");
-
-        let err = sdk
-            .unshare_object(&key, &sia_core::types::Hash256::new([2u8; 32]))
-            .await
-            .expect_err("detaching an unattached object should fail");
-        assert!(matches!(err, SharingError::ObjectNotAttached), "{err}");
     }
 
     #[tokio::test]

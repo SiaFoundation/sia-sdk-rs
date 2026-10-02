@@ -206,7 +206,7 @@ mod tests {
     // Golden vectors generated from indexd's Go `sharing` package (HKDF +
     // KeyRequest.SigHash) for app key seed [1;32], nonce [2;32],
     // description "photos", expiry unix 1893456000.
-    #[test]
+    #[sia_core_derive::cross_target_test]
     fn test_derive_and_sig_hash_golden() {
         let app_key = PrivateKey::from_seed(&[1u8; 32]);
         let nonce = Nonce([2u8; 32]);
@@ -240,7 +240,7 @@ mod tests {
         assert!(req.public_key.verify(sig_hash.as_ref(), &req.signature));
     }
 
-    #[test]
+    #[sia_core_derive::cross_target_test]
     fn test_nonce_hex_roundtrip() {
         let nonce = Nonce([2u8; 32]);
         let json = serde_json::to_string(&nonce).unwrap();

@@ -659,9 +659,86 @@ async fn delete(client: &reqwest::Client, url: Url, app_key: &PrivateKey) -> Res
     .map(|_| ())
 }
 
-/// Integration tests requiring httptest (native TCP mock server) — native only.
+#[cfg(test)]
+mod test {
+    use sia_core::rhp4::AccountToken;
+
+    use super::*;
+
+    #[sia_core_derive::cross_target_test]
+    fn test_pagination_query() {
+        assert!(Client::pagination_query(None, None).is_empty());
+        assert_eq!(
+            Client::pagination_query(Some(5), None),
+            vec![("offset", "5".to_string())]
+        );
+        assert_eq!(
+            Client::pagination_query(None, Some(10)),
+            vec![("limit", "10".to_string())]
+        );
+        assert_eq!(
+            Client::pagination_query(Some(5), Some(10)),
+            vec![("offset", "5".to_string()), ("limit", "10".to_string())]
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_key_stats_deserializes_go_wire_format() {
+        // A literal body pins the wire format (Go's camelCase JSON tags) rather
+        // than round-tripping our own struct.
+        const KEY_STATS_JSON: &str = r#"{
+            "objectCount": 3,
+            "objectSize": 1024,
+            "pinnedData": 2048,
+            "pinnedSize": 6144,
+            "expiresAt": "2027-01-02T03:04:05Z",
+            "createdAt": "2026-01-02T03:04:05Z",
+            "updatedAt": "2026-02-02T03:04:05Z"
+        }"#;
+
+        assert_eq!(
+            serde_json::from_str::<KeyStats>(KEY_STATS_JSON).unwrap(),
+            KeyStats {
+                object_count: 3,
+                object_size: 1024,
+                pinned_data: 2048,
+                pinned_size: 6144,
+                expires_at: Some("2027-01-02T03:04:05Z".parse().unwrap()),
+                created_at: "2026-01-02T03:04:05Z".parse().unwrap(),
+                updated_at: "2026-02-02T03:04:05Z".parse().unwrap(),
+            }
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_shared_host_flattens_host_fields() {
+        let shared_host = SharedHost {
+            host: Host {
+                public_key: PublicKey::new([4u8; 32]),
+                addresses: vec![],
+                country_code: "US".to_string(),
+                latitude: 1.5,
+                longitude: 2.5,
+                good_for_upload: true,
+            },
+            token: AccountToken::new(
+                &PrivateKey::from_seed(&[5u8; 32]),
+                PublicKey::new([4u8; 32]),
+            ),
+        };
+
+        // The host fields must flatten to the top level, matching Go's embedded
+        // HostInfo, not nest under a "host" key.
+        let json = serde_json::to_value(&shared_host).unwrap();
+        assert!(json.get("publicKey").is_some(), "host fields not flattened");
+        assert!(json.get("host").is_none(), "host fields wrongly nested");
+        assert!(json.get("token").is_some());
+    }
+}
+
+/// Integration tests requiring httptest, a native TCP mock server. Native only.
 #[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
+mod native_tests {
     use base64::engine::general_purpose::URL_SAFE;
     use chrono::FixedOffset;
     use sia_core::rhp4::AccountToken;
@@ -768,23 +845,6 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{content_type}: {e}"));
             assert!(slab_ids.is_empty(), "{content_type}");
         }
-    }
-
-    #[test]
-    fn test_pagination_query() {
-        assert!(Client::pagination_query(None, None).is_empty());
-        assert_eq!(
-            Client::pagination_query(Some(5), None),
-            vec![("offset", "5".to_string())]
-        );
-        assert_eq!(
-            Client::pagination_query(None, Some(10)),
-            vec![("limit", "10".to_string())]
-        );
-        assert_eq!(
-            Client::pagination_query(Some(5), Some(10)),
-            vec![("offset", "5".to_string()), ("limit", "10".to_string())]
-        );
     }
 
     /// Validates a signed HTTP request by reconstructing the URL from the
@@ -2296,59 +2356,6 @@ mod tests {
             .header("content-type", content_type)
             .body(body.into())
             .unwrap()
-    }
-
-    #[test]
-    fn test_key_stats_deserializes_go_wire_format() {
-        // A literal body pins the wire format (Go's camelCase JSON tags) rather
-        // than round-tripping our own struct.
-        const KEY_STATS_JSON: &str = r#"{
-            "objectCount": 3,
-            "objectSize": 1024,
-            "pinnedData": 2048,
-            "pinnedSize": 6144,
-            "expiresAt": "2027-01-02T03:04:05Z",
-            "createdAt": "2026-01-02T03:04:05Z",
-            "updatedAt": "2026-02-02T03:04:05Z"
-        }"#;
-
-        assert_eq!(
-            serde_json::from_str::<KeyStats>(KEY_STATS_JSON).unwrap(),
-            KeyStats {
-                object_count: 3,
-                object_size: 1024,
-                pinned_data: 2048,
-                pinned_size: 6144,
-                expires_at: Some("2027-01-02T03:04:05Z".parse().unwrap()),
-                created_at: "2026-01-02T03:04:05Z".parse().unwrap(),
-                updated_at: "2026-02-02T03:04:05Z".parse().unwrap(),
-            }
-        );
-    }
-
-    #[test]
-    fn test_shared_host_flattens_host_fields() {
-        let shared_host = SharedHost {
-            host: Host {
-                public_key: PublicKey::new([4u8; 32]),
-                addresses: vec![],
-                country_code: "US".to_string(),
-                latitude: 1.5,
-                longitude: 2.5,
-                good_for_upload: true,
-            },
-            token: AccountToken::new(
-                &PrivateKey::from_seed(&[5u8; 32]),
-                PublicKey::new([4u8; 32]),
-            ),
-        };
-
-        // The host fields must flatten to the top level, matching Go's embedded
-        // HostInfo, not nest under a "host" key.
-        let json = serde_json::to_value(&shared_host).unwrap();
-        assert!(json.get("publicKey").is_some(), "host fields not flattened");
-        assert!(json.get("host").is_none(), "host fields wrongly nested");
-        assert!(json.get("token").is_some());
     }
 
     #[tokio::test]
