@@ -321,12 +321,6 @@ extern "C"
 	// typed collection because a host's address list is variable length.
 	int32_t sia_sdk_hosts(const sia_sdk_t *sdk, const sia_host_query_t *query, sia_cancel_t *cancel, char **out_json, char **err);
 
-	// *out_json receives one pinned slab as a JSON object, with version, id,
-	// encryptionKey, minShards and sectors (each with root and hostKey). Free it
-	// with sia_string_free. encryptionKey is the slab's data key, so treat the
-	// result as secret.
-	int32_t sia_sdk_slab(const sia_sdk_t *sdk, const uint8_t id[32], sia_cancel_t *cancel, char **out_json, char **err);
-
 	int32_t sia_sdk_create_sharing_key(const sia_sdk_t *sdk, const char *description, bool has_expiry, int64_t expires_at_unix_us, sia_cancel_t *cancel, sia_sharing_key_t **out, char **err);
 	// *out_description receives an owned string. Free it with sia_string_free.
 	int32_t sia_sdk_sharing_key(const sia_sdk_t *sdk, const sia_sharing_key_t *key, sia_cancel_t *cancel, char **out_description, sia_key_stats_t *out_stats, char **err);
