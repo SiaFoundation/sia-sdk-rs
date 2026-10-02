@@ -3,10 +3,19 @@ use uint::construct_uint;
 
 use crate::encoding::{self, SiaDecodable, SiaEncodable, V1SiaDecodable, V1SiaEncodable};
 
-construct_uint! {
-    /// Work is a 256-bit unsigned integer.
-    pub struct Work(4);
+/// Remove the wrapper and the allow once `uint` stops calling `max_value` and
+/// `min_value`.
+#[allow(deprecated)]
+mod generated {
+    use super::construct_uint;
+
+    construct_uint! {
+        /// Work is a 256-bit unsigned integer.
+        pub struct Work(4);
+    }
 }
+
+pub use generated::Work;
 
 impl From<&[u8; 32]> for Work {
     fn from(bytes: &[u8; 32]) -> Self {
