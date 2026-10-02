@@ -253,7 +253,7 @@ impl Sdk {
     pub fn download(
         &self,
         object: &PinnedObject,
-        options: Option<JsValue>,
+        #[wasm_bindgen(unchecked_optional_param_type = "DownloadOptions")] options: Option<JsValue>,
     ) -> Result<web_sys::ReadableStream, JsError> {
         const CHUNK_SIZE: usize = 1 << 18; // matches sia_storage chunk size for optimal performance
         let obj = object.0.clone();
@@ -276,7 +276,7 @@ impl Sdk {
         &self,
         object: PinnedObject,
         source: web_sys::ReadableStream,
-        options: Option<JsValue>,
+        #[wasm_bindgen(unchecked_optional_param_type = "UploadOptions")] options: Option<JsValue>,
     ) -> Result<PinnedObject, JsError> {
         let sdk = self.inner.clone();
         let opts = match options {
@@ -296,7 +296,12 @@ impl Sdk {
     /// to avoid wasting storage. Call `add(data)` for each object, then
     /// `finalize()` to get the resulting `PinnedObject` handles.
     #[wasm_bindgen(js_name = "uploadPacked")]
-    pub fn upload_packed(&self, options: Option<JsValue>) -> Result<PackedUpload, JsError> {
+    pub fn upload_packed(
+        &self,
+        #[wasm_bindgen(unchecked_optional_param_type = "PackedUploadOptions")] options: Option<
+            JsValue,
+        >,
+    ) -> Result<PackedUpload, JsError> {
         let opts = options
             .map(packed_upload_options_from_js)
             .unwrap_or_default();
@@ -350,12 +355,3 @@ impl Sdk {
             .map_err(to_js_err)
     }
 }
-
-#[wasm_bindgen(typescript_custom_section)]
-const _: &str = r#"
-interface Sdk {
-    download(object: PinnedObject, options?: DownloadOptions): ReadableStream;
-    upload(object: PinnedObject, source: ReadableStream, options?: UploadOptions): Promise<PinnedObject>;
-    uploadPacked(options?: PackedUploadOptions): PackedUpload;
-}
-"#;
