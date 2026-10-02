@@ -115,8 +115,20 @@ impl SharedSdk {
     /// Connects to `indexerUrl` as the recipient of the sharing key derived
     /// from `seed`, which is the hex string the key's owner handed out.
     pub async fn connect(indexer_url: String, seed: String) -> Result<SharedSdk, JsError> {
+        Self::connect_with_cbor(indexer_url, seed, true).await
+    }
+
+    /// Like `connect`, but sets whether the SDK requests CBOR responses from
+    /// the indexer. Set `cbor` to `false` to request JSON for easier
+    /// inspection.
+    #[wasm_bindgen(js_name = "connectWithCbor")]
+    pub async fn connect_with_cbor(
+        indexer_url: String,
+        seed: String,
+        cbor: bool,
+    ) -> Result<SharedSdk, JsError> {
         let seed = seed_from_hex(&seed)?;
-        let inner = StorageSharedSdk::connect(indexer_url, seed)
+        let inner = StorageSharedSdk::connect_with_cbor(indexer_url, seed, cbor)
             .await
             .map_err(to_js_err)?;
         Ok(Self { inner })
