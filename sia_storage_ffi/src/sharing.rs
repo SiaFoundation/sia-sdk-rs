@@ -236,9 +236,21 @@ impl SharedSdk {
     /// from `seed`, the 32-byte seed the key's owner handed out.
     #[uniffi::constructor]
     pub async fn connect(indexer_url: String, seed: Vec<u8>) -> Result<SharedSdk, Error> {
+        Self::connect_with_cbor(indexer_url, seed, true).await
+    }
+
+    /// Like [SharedSdk::connect], but sets whether the SDK requests CBOR
+    /// responses from the indexer. Set `cbor` to `false` to request JSON for
+    /// easier inspection.
+    #[uniffi::constructor]
+    pub async fn connect_with_cbor(
+        indexer_url: String,
+        seed: Vec<u8>,
+        cbor: bool,
+    ) -> Result<SharedSdk, Error> {
         let seed = seed_from_vec(seed)?;
         let inner = spawn(async move {
-            sia_storage::SharedSdk::connect(indexer_url, seed)
+            sia_storage::SharedSdk::connect_with_cbor(indexer_url, seed, cbor)
                 .await
                 .map_err(|e| Error::Custom(e.to_string()))
         })

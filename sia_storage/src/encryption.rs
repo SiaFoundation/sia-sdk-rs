@@ -4,6 +4,7 @@ use chacha20::XChaCha20;
 use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use serde::{Deserialize, Serialize};
 use sia_core::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
+use sia_core::types::deserialize_str_or_bytes;
 use zeroize::ZeroizeOnDrop;
 
 /// A 256-bit symmetric encryption key used to encrypt and decrypt slab data.
@@ -40,8 +41,12 @@ impl Serialize for EncryptionKey {
     where
         S: serde::Serializer,
     {
-        let s = BASE64_STANDARD.encode(self.0);
-        serializer.serialize_str(&s)
+        if serializer.is_human_readable() {
+            let s = BASE64_STANDARD.encode(self.0);
+            serializer.serialize_str(&s)
+        } else {
+            serializer.serialize_bytes(&self.0)
+        }
     }
 }
 
@@ -50,11 +55,14 @@ impl<'de> Deserialize<'de> for EncryptionKey {
     where
         D: serde::Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        let bytes = BASE64_STANDARD
-            .decode(s.as_bytes())
-            .map_err(serde::de::Error::custom)?;
-        EncryptionKey::try_from(bytes.as_slice()).map_err(serde::de::Error::custom)
+        deserialize_str_or_bytes(
+            deserializer,
+            |s| {
+                let bytes = BASE64_STANDARD.decode(s).map_err(|e| e.to_string())?;
+                EncryptionKey::try_from(bytes.as_slice()).map_err(|e| e.to_string())
+            },
+            EncryptionKey,
+        )
     }
 }
 
