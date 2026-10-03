@@ -19,9 +19,7 @@ use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
 use crate::sharing::{KeyRequest, SharedObjectRequest};
 use crate::time::Duration;
-use crate::{
-    Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, PinnedSlab, SealedObject,
-};
+use crate::{Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject};
 
 const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -244,16 +242,6 @@ impl Client {
         key: &Hash256,
     ) -> Result<(), Error> {
         self.delete(&format!("objects/{key}"), app_key).await
-    }
-
-    /// Retrieves a slab from the indexer by its ID.
-    pub(crate) async fn slab(
-        &self,
-        app_key: &PrivateKey,
-        slab_id: &Hash256,
-    ) -> Result<PinnedSlab, Error> {
-        self.get_json::<_, ()>(&format!("slabs/{slab_id}"), app_key, None)
-            .await
     }
 
     /// Pins slabs to the indexer.
@@ -972,61 +960,6 @@ mod tests {
             .await
             .unwrap();
         assert!(hosts.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_slab() {
-        let slab = PinnedSlab {
-            version: V0,
-            id: "43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28"
-                .parse()
-                .unwrap(),
-            encryption_key: [
-                186, 153, 179, 170, 159, 95, 101, 177, 15, 130, 58, 19, 138, 144, 9, 91, 181, 119,
-                38, 225, 209, 47, 149, 22, 157, 210, 16, 232, 10, 151, 186, 160,
-            ]
-            .into(),
-            min_shards: 1,
-            sectors: vec![Sector {
-                root: hash_256!("826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6"),
-                host_key: public_key!(
-                    "ed25519:910b22c360a1c67cb6a9a7371fa600c48e87d626b328669d01f34048ac3132fe"
-                ),
-            }],
-        };
-
-        const TEST_SLAB_JSON: &str = r#"
-        {
-          "id": "43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28",
-          "encryptionKey": "upmzqp9fZbEPgjoTipAJW7V3JuHRL5UWndIQ6AqXuqA=",
-          "minShards": 1,
-          "sectors": [
-            {
-              "root": "826af7ab6471d01f4a912903a9dc23d59cff3b151059fa25615322bbf41634d6",
-              "hostKey": "ed25519:910b22c360a1c67cb6a9a7371fa600c48e87d626b328669d01f34048ac3132fe"
-            }
-          ]
-        }
-        "#;
-
-        let server = Server::run();
-
-        server.expect(
-            Expectation::matching(request::method_path(
-                "GET",
-                "/slabs/43e424e1fc0e8b4fab0b49721d3ccb73fe1d09eef38227d9915beee623785f28",
-            ))
-            .respond_with(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .body(TEST_SLAB_JSON)
-                    .unwrap(),
-            ),
-        );
-
-        let app_key = PrivateKey::from_seed(&rand::random());
-        let client = Client::new(server.url("/").to_string()).unwrap();
-        assert_eq!(client.slab(&app_key, &slab.id).await.unwrap(), slab);
     }
 
     #[tokio::test]

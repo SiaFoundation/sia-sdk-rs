@@ -152,23 +152,6 @@ impl SiaDecodable for Slab {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-/// A slab that has been pinned to the indexer.
-pub struct PinnedSlab {
-    /// The encoding version of this slab.
-    #[serde(default)]
-    pub version: SlabVersion,
-    /// The unique identifier of the slab.
-    pub id: Hash256,
-    /// The encryption key used to encrypt and decrypt this slab's data.
-    pub encryption_key: EncryptionKey,
-    /// The minimum number of sectors required to recover the slab's data.
-    pub min_shards: u8,
-    /// The sectors that make up this slab.
-    pub sectors: Vec<Sector>,
-}
-
 /// Errors that can occur when opening or verifying a sealed object.
 #[derive(Debug, Error)]
 pub enum SealedObjectError {

@@ -220,35 +220,6 @@ pub struct PinnedSector {
     pub host_key: String,
 }
 
-/// A pinned slab from the indexer.
-#[napi(object)]
-pub struct PinnedSlab {
-    pub version: u8,
-    pub id: String,
-    pub encryption_key: Buffer,
-    pub min_shards: u8,
-    pub sectors: Vec<PinnedSector>,
-}
-
-impl From<sia_storage::PinnedSlab> for PinnedSlab {
-    fn from(s: sia_storage::PinnedSlab) -> Self {
-        Self {
-            version: s.version as u8,
-            id: s.id.to_string(),
-            encryption_key: Buffer::from(s.encryption_key.as_ref().to_vec()),
-            min_shards: s.min_shards,
-            sectors: s
-                .sectors
-                .into_iter()
-                .map(|sec| PinnedSector {
-                    root: sec.root.to_string(),
-                    host_key: sec.host_key.to_string(),
-                })
-                .collect(),
-        }
-    }
-}
-
 /// A slab representing a contiguous erasure-coded segment of a file.
 #[napi(object)]
 pub struct Slab {
@@ -1006,19 +977,6 @@ impl Sdk {
         Ok(PinnedObject {
             inner: Mutex::new(obj),
         })
-    }
-
-    /// Returns metadata about a slab.
-    #[napi]
-    pub async fn slab(&self, slab_id: String) -> Result<PinnedSlab> {
-        let slab_id = Hash256::from_str(slab_id.as_str())
-            .map_err(|e: HexParseError| Error::from_reason(e.to_string()))?;
-        let slab = self
-            .inner
-            .slab(&slab_id)
-            .await
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-        Ok(slab.into())
     }
 
     /// Unpins slabs not used by any object on the account.

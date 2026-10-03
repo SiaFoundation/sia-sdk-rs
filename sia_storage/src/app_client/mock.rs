@@ -18,9 +18,7 @@ use crate::hosts::Host;
 use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
 use crate::slabs::Slab;
 use crate::time::Duration;
-use crate::{
-    Account, App, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, PinnedSlab, SealedObject,
-};
+use crate::{Account, App, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject};
 
 const MOCK_AUTHORITY: &str = "mock.indexd";
 
@@ -44,11 +42,19 @@ struct StoredSharingKey {
     attached: HashMap<Hash256, SealedObject>,
 }
 
+/// What the mock keeps per pinned slab. Only the shard counts are read back,
+/// for the account figures.
+#[derive(Debug)]
+struct StoredSlab {
+    min_shards: u8,
+    sectors: usize,
+}
+
 #[derive(Debug, Default)]
 struct State {
     hosts: Vec<Host>,
     objects: HashMap<Hash256, StoredObject>,
-    slabs: HashMap<Hash256, PinnedSlab>,
+    slabs: HashMap<Hash256, StoredSlab>,
     user_secret: Hash256,
     pin_slabs_calls: usize,
     pin_slabs_failures: usize,
@@ -248,26 +254,6 @@ impl Client {
         Ok(())
     }
 
-    pub(crate) async fn slab(
-        &self,
-        _: &PrivateKey,
-        slab_id: &Hash256,
-    ) -> Result<PinnedSlab, Error> {
-        self.state
-            .read()
-            .unwrap()
-            .slabs
-            .get(slab_id)
-            .map(|s| PinnedSlab {
-                version: s.version,
-                id: s.id,
-                encryption_key: s.encryption_key.clone(),
-                min_shards: s.min_shards,
-                sectors: s.sectors.clone(),
-            })
-            .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("slab {slab_id} not found")))
-    }
-
     pub(crate) async fn pin_slabs(
         &self,
         _: &PrivateKey,
@@ -288,12 +274,9 @@ impl Client {
                 let id = slab_id(params);
                 state.slabs.insert(
                     id,
-                    PinnedSlab {
-                        version: params.version,
-                        id,
-                        encryption_key: params.encryption_key.clone(),
+                    StoredSlab {
                         min_shards: params.min_shards,
-                        sectors: params.sectors.clone(),
+                        sectors: params.sectors.len(),
                     },
                 );
                 id
@@ -324,7 +307,7 @@ impl Client {
         let pinned_size: u64 = state
             .slabs
             .values()
-            .map(|s| (s.sectors.len() * SECTOR_SIZE) as u64)
+            .map(|s| (s.sectors * SECTOR_SIZE) as u64)
             .sum();
         let pinned_data: u64 = state
             .slabs
