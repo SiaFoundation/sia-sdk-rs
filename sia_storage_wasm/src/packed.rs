@@ -46,12 +46,7 @@ impl PackedUpload {
     /// Bytes remaining until the current slab is full. Adding objects that
     /// fit within this size avoids starting a new slab and minimizes padding.
     pub fn remaining(&self) -> f64 {
-        let length = self.length.get();
-        if length == 0.0 {
-            self.optimal_data_size
-        } else {
-            (self.optimal_data_size - (length % self.optimal_data_size)) % self.optimal_data_size
-        }
+        remaining_in_slab(self.length.get(), self.optimal_data_size)
     }
 
     /// Total bytes added so far across all objects.
@@ -148,5 +143,32 @@ impl PackedUpload {
         if let Ok(mut guard) = self.inner.try_lock() {
             guard.take();
         }
+    }
+}
+
+/// Bytes left in the current slab, derived from the cumulative length because
+/// reading the upload's own figure needs a lock an in-flight add holds. A slab
+/// rolls over only on an exact multiple, so a full one reads as a fresh one.
+fn remaining_in_slab(length: f64, optimal_data_size: f64) -> f64 {
+    optimal_data_size - (length % optimal_data_size)
+}
+
+#[cfg(test)]
+mod packed_remaining_tests {
+    use super::remaining_in_slab;
+
+    #[test]
+    fn a_full_slab_reports_a_whole_slab_free() {
+        let optimal = (40 << 20) as f64;
+        assert_eq!(
+            remaining_in_slab(0.0, optimal),
+            optimal,
+            "nothing added yet"
+        );
+        assert_eq!(remaining_in_slab(optimal / 2.0, optimal), optimal / 2.0);
+        // The slab rolled over, so the next one is empty. Reporting 0 here
+        // would tell a caller every further add starts a new slab.
+        assert_eq!(remaining_in_slab(optimal, optimal), optimal);
+        assert_eq!(remaining_in_slab(2.0 * optimal, optimal), optimal);
     }
 }
