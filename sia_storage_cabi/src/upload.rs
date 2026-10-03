@@ -45,16 +45,15 @@ pub(crate) struct FfiPacked {
     pub(crate) length: AtomicU64,
 }
 
-/// Reads one figure without waiting on an add. While an add holds the lock,
-/// the snapshot from before it began is the honest answer.
-fn packed_stat(up: &FfiPacked, snapshot: &AtomicU64, read: impl Fn(&PackedUpload) -> u64) -> u64 {
-    match up.inner.try_lock() {
-        Ok(guard) => {
-            let value = guard.as_ref().map(read).unwrap_or(0);
-            snapshot.store(value, Ordering::Relaxed);
-            value
-        }
-        Err(_) => snapshot.load(Ordering::Relaxed),
+/// Takes both figures while the lock is free, leaving them for a getter called
+/// during an add to read. An add holds the lock from add_begin until the EOF
+/// only the caller can send, so waiting on it would deadlock that caller.
+fn refresh_packed_stats(up: &FfiPacked) {
+    if let Ok(guard) = up.inner.try_lock()
+        && let Some(packed) = guard.as_ref()
+    {
+        up.length.store(packed.length(), Ordering::Relaxed);
+        up.remaining.store(packed.remaining(), Ordering::Relaxed);
     }
 }
 
@@ -416,7 +415,8 @@ pub unsafe extern "C" fn sia_packed_upload_remaining(up: *const FfiPacked) -> u6
     let Some(up) = (unsafe { up.as_ref() }) else {
         return 0;
     };
-    packed_stat(up, &up.remaining, |p| p.remaining())
+    refresh_packed_stats(up);
+    up.remaining.load(Ordering::Relaxed)
 }
 
 /// # Safety
@@ -427,7 +427,8 @@ pub unsafe extern "C" fn sia_packed_upload_length(up: *const FfiPacked) -> u64 {
     let Some(up) = (unsafe { up.as_ref() }) else {
         return 0;
     };
-    packed_stat(up, &up.length, |p| p.length())
+    refresh_packed_stats(up);
+    up.length.load(Ordering::Relaxed)
 }
 
 /// # Safety
@@ -585,6 +586,9 @@ pub unsafe extern "C" fn sia_packed_upload_add_finish(
 
         match joined {
             Ok(Ok(n)) => {
+                // The add released the lock, so take the new figures now. A
+                // getter is not guaranteed to run while it is free again.
+                refresh_packed_stats(up);
                 unsafe { *written = n }
                 SIA_OK
             }

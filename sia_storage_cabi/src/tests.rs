@@ -3770,6 +3770,107 @@ fn a_cancelled_add_write_recovers_through_abort() {
 }
 
 /// Adds one object to a packed upload and waits for it to land.
+/// The figures a getter reports during an add come from a snapshot, and
+/// nothing refreshes that snapshot but a getter that found the lock free. An
+/// upload whose getters are only consulted mid add would otherwise report the
+/// values it started with rather than the totals from before the add began.
+#[test]
+fn packed_figures_survive_an_add_with_no_earlier_getter_call() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [8u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let mut packed = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
+            SIA_OK,
+            "sia_packed_upload_start: {}",
+            take_err(err)
+        );
+
+        // One whole add, with no getter called anywhere near it.
+        let first = vec![1u8; 4096];
+        add_one_object(packed, &first);
+
+        // Open a second add and wait until its task holds the lock, so the
+        // getters below have to fall back to the snapshot.
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_begin(packed, &raw mut err),
+            SIA_OK,
+            "add_begin: {}",
+            take_err(err)
+        );
+        let second = vec![2u8; 8192];
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_write(
+                packed,
+                second.as_ptr(),
+                second.len(),
+                std::ptr::null_mut(),
+                &raw mut err
+            ),
+            SIA_OK,
+            "add_write: {}",
+            take_err(err)
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while packed
+            .as_ref()
+            .expect("live handle")
+            .inner
+            .try_lock()
+            .is_ok()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the add task never took the lock"
+            );
+            std::thread::yield_now();
+        }
+
+        assert_eq!(
+            sia_packed_upload_length(packed),
+            first.len() as u64,
+            "length during an add is the total from before it began"
+        );
+        assert_eq!(
+            sia_packed_upload_remaining(packed),
+            sia_packed_upload_optimal_data_size(packed) - first.len() as u64,
+            "remaining during an add matches that same moment"
+        );
+
+        let mut n = 0u64;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_finish(packed, std::ptr::null_mut(), &raw mut n, &raw mut err),
+            SIA_OK,
+            "add_finish: {}",
+            take_err(err)
+        );
+
+        sia_packed_upload_free(packed);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
 unsafe fn add_one_object(packed: *mut FfiPacked, data: &[u8]) {
     unsafe {
         let mut err = std::ptr::null_mut();
