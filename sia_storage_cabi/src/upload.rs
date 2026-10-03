@@ -517,7 +517,12 @@ pub unsafe extern "C" fn sia_packed_upload_add_write(
         }
         let buf = unsafe { std::slice::from_raw_parts(data, len) };
         match block_on(cancel, writer.write_all(buf)) {
-            None => set_cancelled(err),
+            None => {
+                // Part of the buffer may be in the stream, so the add cannot
+                // carry on. The task stays for add_abort or add_finish.
+                drop(up.writer.take());
+                set_cancelled(err)
+            }
             Some(Ok(())) => SIA_OK,
             Some(Err(_)) => {
                 up.writer = None;

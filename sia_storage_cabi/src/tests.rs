@@ -3710,6 +3710,22 @@ fn a_cancelled_add_write_recovers_through_abort() {
         let _ = take_err(err);
         sia_cancel_free(cancel);
 
+        // The add is over, so writing again has to be refused rather than
+        // appending to a buffer that was only partly written.
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_write(
+                packed,
+                abandoned.as_ptr(),
+                abandoned.len(),
+                std::ptr::null_mut(),
+                &raw mut err
+            ),
+            SIA_ERR_INVALID_STATE,
+            "a write after a cancelled write"
+        );
+        let _ = take_err(err);
+
         let mut err = std::ptr::null_mut();
         assert_eq!(
             sia_packed_upload_add_abort(packed, std::ptr::null_mut(), &raw mut err),
