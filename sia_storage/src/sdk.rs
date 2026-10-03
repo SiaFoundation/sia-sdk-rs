@@ -21,8 +21,8 @@ use crate::time::Duration;
 use crate::upload::{PackedUpload, upload_object};
 use crate::{
     Account, AppKey, BuilderError, Download, DownloadError, DownloadOptions, Host, HostQuery,
-    Object, ObjectEvent, ObjectsCursor, PackedUploadOptions, PinnedSlab, SealedObjectError,
-    SharingKeyOptions, UploadError, UploadOptions,
+    Object, ObjectEvent, ObjectsCursor, PackedUploadOptions, SealedObjectError, SharingKeyOptions,
+    UploadError, UploadOptions,
 };
 
 /// The `Sdk` sharing methods live here so they can reach this module's private
@@ -381,14 +381,6 @@ impl Sdk {
             .await
             .map_err(|e| Error::App(format!("{e:?}")))?;
         Ok(())
-    }
-
-    /// Retrieves a pinned slab from the indexer by its id.
-    pub async fn slab(&self, id: &Hash256) -> Result<PinnedSlab, Error> {
-        self.api_client
-            .slab(&self.app_key.0, id)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))
     }
 
     /// Creates a sharing key granting read-only access to the objects the
