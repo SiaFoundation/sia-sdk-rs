@@ -196,17 +196,6 @@ impl Sdk {
         Ok(events.into_iter().map(ObjectEvent::from).collect())
     }
 
-    /// Retrieves a pinned slab from the indexer by its hex ID.
-    #[wasm_bindgen(unchecked_return_type = "PinnedSlab")]
-    pub async fn slab(&self, slab_id: &str) -> Result<JsValue, JsError> {
-        let sdk = self.inner.clone();
-        let id = Hash256::from_str(slab_id).map_err(to_js_err)?;
-        let slab = run_local(async move { sdk.slab(&id).await })
-            .await
-            .map_err(to_js_err)?;
-        types::to_js(&slab)
-    }
-
     /// Deletes an object from the indexer by its hex ID.
     #[wasm_bindgen(js_name = "deleteObject")]
     pub async fn delete_object(&self, key_hex: &str) -> Result<(), JsError> {
