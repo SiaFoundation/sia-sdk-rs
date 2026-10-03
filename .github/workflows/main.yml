@@ -116,8 +116,12 @@ jobs:
         # Installed by name rather than run through `npx tsc`: the binary is
         # `tsc` but the package is `typescript`, and `tsc` is a different
         # package on npm.
+        #
+        # Both are exact, so a release of either cannot turn this check red
+        # without a commit saying so. Keep @types/node on the same major as
+        # node-version above.
         run: |
-          npm install --no-save typescript@5 @types/node
+          npm install --no-save typescript@5.9.3 @types/node@24.19.1
           npx tsc -p sia_storage_wasm/typecheck/tsconfig.json
           npx tsc -p sia_storage_napi/typecheck/tsconfig.json
 
