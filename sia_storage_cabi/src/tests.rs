@@ -3386,7 +3386,11 @@ fn abort_reports_a_panicked_add() {
 fn an_error_message_survives_an_interior_nul() {
     let mut err: *mut c_char = std::ptr::null_mut();
     unsafe {
-        set_err(ErrOut::new(&raw mut err), SIA_ERR, "host said hi\0 then quit");
+        set_err(
+            ErrOut::new(&raw mut err),
+            SIA_ERR,
+            "host said hi\0 then quit",
+        );
         assert_eq!(
             CStr::from_ptr(err).to_bytes(),
             b"host said hi? then quit",
@@ -4432,12 +4436,14 @@ fn c_type(decl: &str) -> Option<String> {
     if body.contains('[') {
         stars += 1;
     }
-    let base = body
-        .split(['*', '[', ' '])
-        .find(|s| !s.is_empty())?;
+    let base = body.split(['*', '[', ' ']).find(|s| !s.is_empty())?;
     let mut t = canonical_base(base)?.to_string();
     for level in 0..stars {
-        let qual = if level == 0 && is_const { "*const" } else { "*mut" };
+        let qual = if level == 0 && is_const {
+            "*const"
+        } else {
+            "*mut"
+        };
         t = format!("{qual} {t}");
     }
     Some(t)
@@ -4522,8 +4528,8 @@ fn header_signatures_match_the_rust_definitions() {
         }
         let ret = head[..head.len() - name.len()].trim();
         let params = &line[open + 1..line.len() - 2];
-        let sig = signature(ret, params, false)
-            .unwrap_or_else(|e| panic!("{name} in the header: {e}"));
+        let sig =
+            signature(ret, params, false).unwrap_or_else(|e| panic!("{name} in the header: {e}"));
         declared.insert(name, sig);
     }
 
