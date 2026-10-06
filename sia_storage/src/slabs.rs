@@ -6,7 +6,7 @@ use crate::AppKey;
 use crate::encryption::EncryptionKey;
 use blake2b_simd::Params;
 use serde_with::base64::Base64;
-use serde_with::{DefaultOnNull, serde_as};
+use serde_with::{Bytes, DefaultOnNull, IfIsHumanReadable, serde_as};
 use sia_core::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;
@@ -77,6 +77,7 @@ impl TryFrom<u8> for SlabVersion {
 
 /// A Slab is an erasure-coded collection of sectors. The sectors can be downloaded and
 /// used to recover the original data.
+#[serde_as]
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Slab {
@@ -88,6 +89,7 @@ pub struct Slab {
     /// The minimum number of sectors required to recover the slab's data.
     pub min_shards: u8,
     /// The sectors that make up this slab, spread across different hosts.
+    #[serde_as(as = "DefaultOnNull")]
     pub sectors: Vec<Sector>,
     /// The byte offset of this slab's data within the parent object.
     pub offset: u32,
@@ -169,6 +171,10 @@ pub enum SealedObjectError {
     InvalidSignature,
 }
 
+/// (De)serializes bytes as a base64 string in human-readable formats and as a
+/// byte string otherwise.
+pub(crate) type Base64OrBytes = IfIsHumanReadable<Base64, Bytes>;
+
 #[serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -177,27 +183,30 @@ pub enum SealedObjectError {
 /// A sealed object can be opened with [SealedObject::open] using the same [AppKey] that sealed it.
 pub struct SealedObject {
     /// The encrypted data encryption key.
-    #[serde_as(as = "Base64")]
+    #[serde_as(as = "Base64OrBytes")]
     pub encrypted_data_key: Vec<u8>,
     /// The erasure-coded slabs that make up the object's data.
+    #[serde_as(as = "DefaultOnNull")]
     pub slabs: Vec<Slab>,
     /// A signature over the data key and slabs.
     pub data_signature: Signature,
 
     /// The encrypted metadata encryption key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[serde_as(as = "DefaultOnNull<Base64>")]
+    #[serde_as(as = "DefaultOnNull<Base64OrBytes>")]
     pub encrypted_metadata_key: Vec<u8>,
     /// The encrypted metadata.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[serde_as(as = "DefaultOnNull<Base64>")]
+    #[serde_as(as = "DefaultOnNull<Base64OrBytes>")]
     pub encrypted_metadata: Vec<u8>,
     /// A signature over the metadata key and metadata.
     pub metadata_signature: Signature,
 
     /// The time the object was created.
+    #[serde(with = "sia_core::types::null_as_zero_time")]
     pub created_at: DateTime<Utc>,
     /// The time the object was last updated.
+    #[serde(with = "sia_core::types::null_as_zero_time")]
     pub updated_at: DateTime<Utc>,
 }
 

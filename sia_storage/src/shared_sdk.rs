@@ -74,7 +74,22 @@ impl SharedSdk {
     /// `seed` is the credential the key's owner hands out; how it reaches the
     /// recipient is up to the caller.
     pub async fn connect<U: IntoUrl>(indexer_url: U, seed: [u8; 32]) -> Result<Self, BuilderError> {
-        let api_client = app_client::Client::new(indexer_url)?;
+        Self::connect_with_cbor(indexer_url, seed, true).await
+    }
+
+    /// Like [SharedSdk::connect], but sets whether the SDK requests CBOR
+    /// responses from the indexer. Responses are always decoded according to
+    /// their content type; request bodies remain JSON.
+    ///
+    /// # Arguments
+    /// * `cbor` - Whether to request CBOR. Set to `false` to request JSON for easier inspection.
+    pub async fn connect_with_cbor<U: IntoUrl>(
+        indexer_url: U,
+        seed: [u8; 32],
+        cbor: bool,
+    ) -> Result<Self, BuilderError> {
+        let mut api_client = app_client::Client::new(indexer_url)?;
+        api_client.set_cbor(cbor);
         Self::with_backends(api_client, Client::new(), SharingKey::import(seed)).await
     }
 
@@ -422,5 +437,27 @@ mod tests {
             matches!(err, Error::App(ref msg) if msg.contains("was requested")),
             "expected an id-mismatch error, got: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_connect_without_cbor() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/shared/hosts"),
+                request::headers(contains(("accept", "application/json"))),
+            ])
+            .times(1..)
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body("[]")
+                    .unwrap(),
+            ),
+        );
+
+        SharedSdk::connect_with_cbor(format!("http://{}", server.addr()), [7u8; 32], false)
+            .await
+            .expect("failed to build shared sdk");
     }
 }

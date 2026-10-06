@@ -1,6 +1,7 @@
 use base64::engine::general_purpose::URL_SAFE;
 use base64::prelude::*;
 use chrono::{DateTime, Utc};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -22,6 +23,8 @@ use crate::time::Duration;
 use crate::{Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject};
 
 const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(45);
+const ACCEPT_CBOR: &str = "application/cbor, application/json;q=0.9";
+const ACCEPT_JSON: &str = "application/json";
 
 #[derive(Clone)]
 pub(crate) struct Client {
@@ -45,9 +48,13 @@ impl<'de> serde::Deserialize<'de> for EmptyResponse {
 impl Client {
     pub(crate) fn new<U: IntoUrl>(base_url: U) -> Result<Self, Error> {
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: http_client(true),
             url: base_url.into_url()?,
         })
+    }
+
+    pub(crate) fn set_cbor(&mut self, enable: bool) {
+        self.client = http_client(enable);
     }
 
     /// Checks if the application is authenticated with the indexer. It returns
@@ -132,9 +139,7 @@ impl Client {
         let http_status = resp.status();
         match http_status {
             StatusCode::OK => {
-                let Ok(status) = resp.json::<AuthConnectStatusResponse>().await else {
-                    return Err(Error::Format("invalid response format".to_string()));
-                };
+                let status = Self::handle_response::<AuthConnectStatusResponse>(resp).await?;
                 if !status.approved {
                     return Ok(None);
                 }
@@ -183,7 +188,7 @@ impl Client {
         app_key: &PrivateKey,
         query: HostQuery,
     ) -> Result<Vec<Host>, Error> {
-        self.get_json("hosts", app_key, Some(&query)).await
+        self.get_list("hosts", app_key, Some(&query)).await
     }
 
     /// Retrieves an object from the indexer by its key.
@@ -212,8 +217,7 @@ impl Client {
             query_params.push(("after", after.to_rfc3339())); // indexd expects RFC3339
             query_params.push(("key", id.to_string()));
         }
-        self.get_json::<_, _>("objects", app_key, Some(&query_params))
-            .await
+        self.get_list("objects", app_key, Some(&query_params)).await
     }
 
     /// Pins an object to the indexer. If an object with the same ID already
@@ -250,7 +254,10 @@ impl Client {
         app_key: &PrivateKey,
         slabs: &[SlabPinParams],
     ) -> Result<Vec<Hash256>, Error> {
-        self.post_json("slabs", app_key, Some(&slabs)).await
+        // indexd encodes an empty list as null
+        self.post_json("slabs", app_key, Some(&slabs))
+            .await
+            .map(Option::unwrap_or_default)
     }
 
     /// Unpins slabs not used by any object on the account.
@@ -283,7 +290,7 @@ impl Client {
         delete(&self.client, url, app_key).await
     }
 
-    /// Helper to send a signed GET request and parse the JSON
+    /// Helper to send a signed GET request and parse the JSON or CBOR
     /// response.
     async fn get_json<D: DeserializeOwned, Q: Serialize + ?Sized>(
         &self,
@@ -295,18 +302,46 @@ impl Client {
         get_json(&self.client, url, signing_key, query_params).await
     }
 
-    /// Helper to either parse a successfully JSON response or return the error
-    /// message from the API.
-    async fn handle_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
-        if resp.status().is_success() {
-            Ok(resp.json::<T>().await?)
-        } else {
-            Err(Error::Api(resp.status(), resp.text().await?))
-        }
+    /// Helper to send a signed GET request to a list endpoint. indexd encodes
+    /// empty lists as null in both JSON and CBOR, so null decodes as an empty
+    /// list.
+    async fn get_list<T: DeserializeOwned, Q: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        signing_key: &PrivateKey,
+        query_params: Option<&Q>,
+    ) -> Result<Vec<T>, Error> {
+        self.get_json(path, signing_key, query_params)
+            .await
+            .map(Option::unwrap_or_default)
     }
 
-    // Helper to send a signed POST request and parse the JSON
-    // response.
+    /// Helper to either parse a successful response according to its content
+    /// type, falling back to JSON, or return the error message from the API.
+    async fn handle_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
+        if !resp.status().is_success() {
+            return Err(Error::Api(resp.status(), resp.text().await?));
+        }
+        let is_cbor = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/cbor"));
+        let body = resp.bytes().await?;
+        if !is_cbor {
+            return Ok(serde_json::from_slice(&body)?);
+        }
+        let mut rd = body.as_ref();
+        let v = ciborium::from_reader(&mut rd)?;
+        if !rd.is_empty() {
+            return Err(ciborium::de::Error::Semantic(None, "trailing data".into()).into());
+        }
+        Ok(v)
+    }
+
+    /// Helper to send a signed POST request with a JSON body and parse the
+    /// JSON or CBOR response.
     async fn post_json<S: Serialize, D: DeserializeOwned>(
         &self,
         path: &str,
@@ -435,7 +470,7 @@ impl Client {
         limit: Option<u64>,
     ) -> Result<Vec<SealedObject>, Error> {
         let query = Self::pagination_query(offset, limit);
-        self.get_json::<_, _>("shared/objects", sharing_key, Some(&query))
+        self.get_list("shared/objects", sharing_key, Some(&query))
             .await
     }
 
@@ -456,7 +491,7 @@ impl Client {
         sharing_key: &PrivateKey,
         query: HostQuery,
     ) -> Result<Vec<SharedHost>, Error> {
-        self.get_json("shared/hosts", sharing_key, Some(&query))
+        self.get_list("shared/hosts", sharing_key, Some(&query))
             .await
     }
 
@@ -477,8 +512,7 @@ impl Client {
         limit: Option<u64>,
     ) -> Result<Vec<KeyResponse>, Error> {
         let query = Self::pagination_query(offset, limit);
-        self.get_json::<_, _>("sharing", app_key, Some(&query))
-            .await
+        self.get_list("sharing", app_key, Some(&query)).await
     }
 
     /// Retrieves one of the account's sharing keys by its public key.
@@ -525,7 +559,7 @@ impl Client {
         limit: Option<u64>,
     ) -> Result<Vec<SealedObject>, Error> {
         let query = Self::pagination_query(offset, limit);
-        self.get_json::<_, _>(
+        self.get_list(
             &format!("sharing/{sharing_key}/objects"),
             app_key,
             Some(&query),
@@ -546,6 +580,18 @@ impl Client {
         )
         .await
     }
+}
+
+fn http_client(cbor: bool) -> reqwest::Client {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static(if cbor { ACCEPT_CBOR } else { ACCEPT_JSON }),
+    );
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .expect("http client configuration is valid")
 }
 
 async fn get_json<D: DeserializeOwned, Q: Serialize + ?Sized>(
@@ -625,6 +671,7 @@ mod tests {
     use crate::AppKey;
     use crate::sharing::Nonce;
 
+    use crate::app_client::cross_target_test::{ACCOUNT_CBOR, STATUS_CBOR};
     use crate::app_client::{
         QUERY_PARAM_CREDENTIAL, QUERY_PARAM_SIGNATURE, QUERY_PARAM_VALID_UNTIL, SectorPinParams,
         request_hash,
@@ -636,6 +683,92 @@ mod tests {
     use httptest::http::Response;
     use httptest::matchers::*;
     use httptest::{Expectation, Server};
+
+    #[tokio::test]
+    async fn test_handle_response_content_type() {
+        let cbor = hex::decode(ACCOUNT_CBOR).unwrap();
+        let expected: Account = ciborium::from_reader(cbor.as_slice()).unwrap();
+        let json = serde_json::to_vec(&expected).unwrap();
+
+        for (cbor_enabled, accept) in [(true, ACCEPT_CBOR), (false, ACCEPT_JSON)] {
+            for (content_type, body) in [
+                (None, json.clone()),
+                (Some("application/json"), json.clone()),
+                (Some("application/cbor; charset=binary"), cbor.clone()),
+            ] {
+                let server = Server::run();
+                let mut response = Response::builder().status(StatusCode::OK);
+                if let Some(content_type) = content_type {
+                    response = response.header("content-type", content_type);
+                }
+                server.expect(
+                    Expectation::matching(all_of![
+                        request::method_path("GET", "/account"),
+                        request::headers(contains(("accept", accept))),
+                    ])
+                    .respond_with(response.body(body).unwrap()),
+                );
+
+                let app_key = PrivateKey::from_seed(&rand::random());
+                let mut client = Client::new(server.url("/").to_string()).unwrap();
+                client.set_cbor(cbor_enabled);
+                let account = client
+                    .account(&app_key)
+                    .await
+                    .unwrap_or_else(|e| panic!("{accept} {content_type:?}: {e}"));
+                assert_eq!(account, expected, "{accept} {content_type:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_response_malformed_cbor() {
+        // 0xff is a "break" with no indefinite-length item to end. 0xf6 is a
+        // valid null, so the second body has trailing data.
+        for body in [vec![0xff], vec![0xf6, 0xff]] {
+            let server = Server::run();
+            server.expect(
+                Expectation::matching(request::path("/slabs"))
+                    .respond_with(ok_typed("application/cbor", body.clone())),
+            );
+
+            let app_key = PrivateKey::from_seed(&rand::random());
+            let client = Client::new(server.url("/").to_string()).unwrap();
+            let err = client.pin_slabs(&app_key, &[]).await.unwrap_err();
+            assert!(matches!(err, Error::Cbor(_)), "{body:x?}: {err}");
+            assert!(err.is_retryable());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_endpoints_null() {
+        // `null` in each response encoding; 0xf6 is CBOR's null
+        for (content_type, body) in [
+            ("application/json", &b"null"[..]),
+            ("application/cbor", &[0xf6]),
+        ] {
+            let server = Server::run();
+            for (method, path) in [("GET", "/hosts"), ("POST", "/slabs")] {
+                server.expect(
+                    Expectation::matching(request::method_path(method, path))
+                        .respond_with(ok_typed(content_type, body)),
+                );
+            }
+
+            let app_key = PrivateKey::from_seed(&rand::random());
+            let client = Client::new(server.url("/").to_string()).unwrap();
+            let hosts = client
+                .hosts(&app_key, HostQuery::default())
+                .await
+                .unwrap_or_else(|e| panic!("{content_type}: {e}"));
+            assert!(hosts.is_empty(), "{content_type}");
+            let slab_ids = client
+                .pin_slabs(&app_key, &[])
+                .await
+                .unwrap_or_else(|e| panic!("{content_type}: {e}"));
+            assert!(slab_ids.is_empty(), "{content_type}");
+        }
+    }
 
     #[test]
     fn test_pagination_query() {
@@ -1201,6 +1334,16 @@ mod tests {
             ),
         );
         server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/cbor"),
+                request::headers(contains(("accept", ACCEPT_CBOR))),
+            ])
+            .respond_with(ok_typed(
+                "application/cbor",
+                hex::decode(STATUS_CBOR).unwrap(),
+            )),
+        );
+        server.expect(
             Expectation::matching(request::method_path("GET", "/rejected")).respond_with(
                 Response::builder()
                     .status(StatusCode::NOT_FOUND)
@@ -1247,6 +1390,22 @@ mod tests {
             AuthApproval {
                 user_secret: hash_256!(
                     "3ceeb79f58b0c4f67775e0a06aa7241c461e6844b4700a94e0a31e4d22dd02c2"
+                ),
+                reconnecting: true,
+            }
+        );
+
+        // approved request, CBOR-encoded
+        let status_url: Url = server.url("/cbor").to_string().parse().unwrap();
+        assert_eq!(
+            client
+                .check_request_status(&ephemeral_key, status_url)
+                .await
+                .unwrap()
+                .unwrap(),
+            AuthApproval {
+                user_secret: hash_256!(
+                    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
                 ),
                 reconnecting: true,
             }
@@ -2127,6 +2286,14 @@ mod tests {
     fn ok_body(body: impl Into<String>) -> Response<String> {
         Response::builder()
             .status(StatusCode::OK)
+            .body(body.into())
+            .unwrap()
+    }
+
+    fn ok_typed(content_type: &str, body: impl Into<Vec<u8>>) -> Response<Vec<u8>> {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", content_type)
             .body(body.into())
             .unwrap()
     }

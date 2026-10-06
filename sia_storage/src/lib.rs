@@ -288,6 +288,7 @@ pub struct Account {
     /// The application registered to this account.
     pub app: App,
     /// The last time the account was used.
+    #[serde(with = "sia_core::types::null_as_zero_time")]
     pub last_used: DateTime<Utc>,
 }
 
