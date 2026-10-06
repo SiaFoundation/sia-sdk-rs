@@ -8,9 +8,9 @@ use std::task::{Poll, ready};
 use crate::congestion::{InflightController, SamplePermit};
 use crate::encryption::{Chacha20Cipher, EncryptionKey, encrypt_recovered_shards};
 use crate::erasure_coding::{self, ErasureCoder};
-use crate::hosts::{Hosts, InflightGuard, RPCError};
+use crate::hosts::{Hosts, InflightGuard, RPC_IDLE_TIMEOUT, RPCError};
 use crate::slabs::SlabVersion::{V0, V1};
-use crate::time::{Duration, Elapsed, Instant, sleep};
+use crate::time::{Duration, Instant, sleep};
 use crate::tokens::AccountTokenSource;
 use crate::{DownloadOptions, Object, Sector, ShardProgress, ShardProgressCallback, Slab};
 use bytes::{Buf, Bytes};
@@ -40,10 +40,6 @@ pub enum DownloadError {
     /// The requested range is out of bounds.
     #[error("invalid range: {0}-{1}")]
     OutOfRange(usize, usize),
-
-    /// A host RPC timed out.
-    #[error("timeout error: {0}")]
-    Timeout(#[from] Elapsed),
 
     /// An internal task join error.
     #[error("join error: {0}")]
@@ -264,12 +260,11 @@ impl SlabRecovery<AwaitingRecovery> {
                     task.sector.root,
                     sector_offset,
                     sector_length,
-                    // long to handle slow hosts, racing will ensure we don't waste time unnecessarily
-                    Duration::from_secs(60),
+                    RPC_IDLE_TIMEOUT,
                 )
                 .await;
             let elapsed = start.elapsed();
-            if matches!(result, Err(RPCError::Elapsed(_))) {
+            if matches!(&result, Err(RPCError::Rhp(e)) if e.is_timeout()) {
                 controller.record_timeout(permit, task.sector.host_key);
             }
             DownloadResult {

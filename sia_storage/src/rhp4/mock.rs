@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
@@ -58,6 +59,29 @@ impl Client {
         self.slow_hosts.write().unwrap().clear();
         *self.slow_delay.write().unwrap() = Duration::ZERO;
     }
+
+    /// Sleeps out the host's configured slow delay. A delay longer than
+    /// `idle_timeout` is a stall, which the real transports report once
+    /// the idle limit passes.
+    async fn stall(&self, host: &PublicKey, idle_timeout: Duration) -> Result<(), RHP4Error> {
+        let delay = {
+            let slow_hosts = self.slow_hosts.read().unwrap();
+            if slow_hosts.contains(host) {
+                Some(*self.slow_delay.read().unwrap())
+            } else {
+                None
+            }
+        };
+        let Some(delay) = delay else {
+            return Ok(());
+        };
+        if delay > idle_timeout {
+            sleep(idle_timeout).await;
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "stream idle").into());
+        }
+        sleep(delay).await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -79,7 +103,11 @@ impl Client {
 }
 
 impl Transport for Client {
-    async fn host_prices(&self, _: &HostEndpoint) -> Result<(HostPrices, Duration), RHP4Error> {
+    async fn host_prices(
+        &self,
+        _: &HostEndpoint,
+        _: Duration,
+    ) -> Result<(HostPrices, Duration), RHP4Error> {
         let start = Instant::now();
         let prices = HostPrices {
             contract_price: Currency::zero(),
@@ -101,23 +129,13 @@ impl Transport for Client {
         _: HostPrices,
         _: &PrivateKey,
         sector: Bytes,
+        idle_timeout: Duration,
     ) -> Result<(Hash256, Duration), RHP4Error> {
         if host.addresses.is_empty() {
             return Err(RHP4Error::Transport("host has no addresses".to_string()));
         }
         let start = Instant::now();
-        // Check if this host is configured as slow
-        let slow_delay = {
-            let slow_hosts = self.slow_hosts.read().unwrap();
-            if slow_hosts.contains(&host.public_key) {
-                Some(*self.slow_delay.read().unwrap())
-            } else {
-                None
-            }
-        };
-        if let Some(delay) = slow_delay {
-            sleep(delay).await;
-        }
+        self.stall(&host.public_key, idle_timeout).await?;
 
         sleep(Duration::from_millis(3)).await; // simulate network latency ~ 10Gbps
         let sector_root = sia_core::rhp4::sector_root(&sector);
@@ -136,25 +154,14 @@ impl Transport for Client {
         _: HostPrices,
         _: AccountToken,
         root: Hash256,
-        offset: usize,
-        length: usize,
+        range: Range<usize>,
+        idle_timeout: Duration,
     ) -> Result<(Bytes, Duration), RHP4Error> {
         if host.addresses.is_empty() {
             return Err(RHP4Error::Transport("host has no addresses".to_string()));
         }
         let start = Instant::now();
-        // Check if this host is configured as slow
-        let slow_delay = {
-            let slow_hosts = self.slow_hosts.read().unwrap();
-            if slow_hosts.contains(&host.public_key) {
-                Some(*self.slow_delay.read().unwrap())
-            } else {
-                None
-            }
-        };
-        if let Some(delay) = slow_delay {
-            sleep(delay).await;
-        }
+        self.stall(&host.public_key, idle_timeout).await?;
 
         let fail = {
             let mut failures = self.read_failures.write().unwrap();
@@ -189,7 +196,7 @@ impl Transport for Client {
             let sector = host_sectors
                 .get(&root)
                 .ok_or_else(|| RHP4Error::Transport("sector not found".to_string()))?;
-            Bytes::copy_from_slice(&sector[offset..offset + length])
+            Bytes::copy_from_slice(&sector[range])
         };
         sleep(Duration::from_nanos(sector.len() as u64 * 8 / 10)).await; // simulate network latency ~ 10Gbps
         Ok((sector, start.elapsed()))
