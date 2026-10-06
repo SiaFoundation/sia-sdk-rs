@@ -367,7 +367,8 @@ impl Stream {
     /// remain independent and can expire sooner.
     pub fn set_idle_timeout(&mut self, timeout: Option<time::Duration>) {
         self.idle_timeout = timeout;
-        self.stream_state.lock().unwrap().last_progress = time::Instant::now();
+        let mut state = self.stream_state.lock().unwrap();
+        state.last_progress = time::Instant::now();
     }
 
     fn check_deadline(
@@ -880,7 +881,8 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                 if written.min(end) > previous.max(payload_start)
                     && let Some(state) = s.streams.get(&header.id)
                 {
-                    state.lock().unwrap().last_progress = now;
+                    let mut state = state.lock().unwrap();
+                    state.last_progress = state.last_progress.max(now);
                 }
                 if written < end {
                     break;

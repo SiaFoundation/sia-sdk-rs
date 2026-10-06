@@ -1,5 +1,5 @@
 ---
-sia_mux: patch
+sia_mux: minor
 ---
 
 # Detect idle streams in SiaMux
