@@ -16,9 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::object_encryption::DecryptError;
 use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
 use crate::slabs::{Sector, SlabVersion};
-use crate::{
-    Account, AppMetadata, HostQuery, Object, ObjectsCursor, PinnedSlab, SealedObject, Slab,
-};
+use crate::{Account, AppMetadata, HostQuery, Object, ObjectsCursor, SealedObject, Slab};
 use sia_core::rhp4::AccountToken;
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;
@@ -539,19 +537,6 @@ impl Client {
             Self::Http(c) => c.delete_object(app_key, key).await,
             #[cfg(any(test, feature = "mock"))]
             Self::Mock(c) => c.delete_object(app_key, key).await,
-        }
-    }
-
-    /// Retrieves a slab from the indexer by its ID.
-    pub(crate) async fn slab(
-        &self,
-        app_key: &PrivateKey,
-        slab_id: &Hash256,
-    ) -> Result<PinnedSlab, Error> {
-        match self {
-            Self::Http(c) => c.slab(app_key, slab_id).await,
-            #[cfg(any(test, feature = "mock"))]
-            Self::Mock(c) => c.slab(app_key, slab_id).await,
         }
     }
 
