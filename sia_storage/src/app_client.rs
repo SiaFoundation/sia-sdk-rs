@@ -35,6 +35,7 @@ const QUERY_PARAM_SIGNATURE: &str = "ss";
 const SHARE_URL_SCHEME: &str = "sia";
 
 const ERROR_OBJECT_UNPINNED_SLAB: &str = "object contains unpinned slab";
+const ERROR_SLAB_UPLOAD_TOO_OLD: &str = "slab upload is too old";
 
 #[cfg(not(test))]
 const SHARE_URL_FETCH_SCHEME: &str = "https";
@@ -91,10 +92,19 @@ pub enum PinObjectError {
 }
 
 impl Error {
+    /// Returns whether the indexer rejected the slab as too old to pin, so it
+    /// must be uploaded again.
+    pub(crate) fn is_slab_upload_too_old(&self) -> bool {
+        matches!(self, Self::Api(StatusCode::BAD_REQUEST, message) if message.contains(ERROR_SLAB_UPLOAD_TOO_OLD))
+    }
+
     /// Returns whether repeating the request may succeed.
     pub(crate) fn is_retryable(&self) -> bool {
         match self {
-            Self::Api(StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED, _) => false,
+            Self::Api(
+                StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED,
+                _,
+            ) => false,
             Self::Api(..) | Self::Reqwest(_) => true,
             _ => false,
         }
@@ -134,11 +144,45 @@ pub(crate) struct SlabPinParams {
     pub version: SlabVersion,
     pub encryption_key: EncryptionKey,
     pub min_shards: u8,
-    pub sectors: Vec<Sector>,
+    pub sectors: Vec<SectorPinParams>,
+}
+
+/// Parameters for pinning a sector as part of a slab pin request.
+/// Fresh uploads include the write attempt's start time; re-pinning an existing
+/// slab omits it. The upload time is not part of the pinned slab or its ID.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SectorPinParams {
+    #[serde(flatten)]
+    pub sector: Sector,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uploaded_at: Option<DateTime<Utc>>,
 }
 
 /// Maximum number of slabs to send in a single [`Client::pin_slabs`] request.
 pub(crate) const SLAB_PIN_BATCH_SIZE: usize = 50;
+
+impl SlabPinParams {
+    /// Returns the slab ID, excluding sector upload times.
+    pub(crate) fn digest(&self) -> Hash256 {
+        Slab::from(self).digest()
+    }
+}
+
+/// Converts pin parameters to a slab with zero offset and length, since pin
+/// requests do not include the slab's position within an object.
+impl From<&SlabPinParams> for Slab {
+    fn from(params: &SlabPinParams) -> Self {
+        Self {
+            version: params.version,
+            encryption_key: params.encryption_key.clone(),
+            min_shards: params.min_shards,
+            sectors: params.sectors.iter().map(|s| s.sector.clone()).collect(),
+            offset: 0,
+            length: 0,
+        }
+    }
+}
 
 impl From<&Slab> for SlabPinParams {
     fn from(slab: &Slab) -> Self {
@@ -146,7 +190,15 @@ impl From<&Slab> for SlabPinParams {
             version: slab.version,
             encryption_key: slab.encryption_key.clone(),
             min_shards: slab.min_shards,
-            sectors: slab.sectors.clone(),
+            sectors: slab
+                .sectors
+                .iter()
+                .cloned()
+                .map(|sector| SectorPinParams {
+                    sector,
+                    uploaded_at: None,
+                })
+                .collect(),
         }
     }
 }
@@ -993,5 +1045,60 @@ mod cross_target_test {
             object_id(&obj.slabs).to_string(),
             "1b13d5dd22605af0573cae7fe9242c1ee83727c29798308b2b170864677b46d0"
         );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_slab_pin_params_digest() {
+        for version in [SlabVersion::V0, SlabVersion::V1] {
+            let slab = Slab {
+                version,
+                encryption_key: [1u8; 32].into(),
+                min_shards: 1,
+                sectors: vec![Sector {
+                    root: Hash256::new([2u8; 32]),
+                    host_key: PublicKey::new([3u8; 32]),
+                }],
+                offset: 123,
+                length: 456,
+            };
+            let mut params = SlabPinParams::from(&slab);
+            assert_eq!(params.digest(), slab.digest());
+            params.sectors[0].uploaded_at = Some(Utc::now());
+            assert_eq!(
+                params.digest(),
+                slab.digest(),
+                "upload time changed the slab ID"
+            );
+            assert_eq!(
+                Slab::from(&params),
+                Slab {
+                    offset: 0,
+                    length: 0,
+                    ..slab
+                },
+                "pin parameters changed the slab contents"
+            );
+        }
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_is_slab_upload_too_old() {
+        let message = "invalid slab pin params: slab 0: sector 3 invalid: slab upload is too old (max 48h0m0s)";
+        let stale = Error::Api(StatusCode::BAD_REQUEST, message.into());
+        assert!(stale.is_slab_upload_too_old());
+        assert!(!stale.is_retryable());
+
+        for error in [
+            Error::Api(StatusCode::INTERNAL_SERVER_ERROR, message.into()),
+            Error::Api(StatusCode::UNAUTHORIZED, message.into()),
+            Error::Custom(message.into()),
+            Error::Api(
+                StatusCode::BAD_REQUEST,
+                "slab upload time is in the future (max 5m0s ahead)".into(),
+            ),
+            Error::Api(StatusCode::BAD_REQUEST, "invalid slab pin params".into()),
+        ] {
+            assert!(!error.is_slab_upload_too_old(), "{error}");
+        }
     }
 }
