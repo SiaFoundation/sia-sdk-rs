@@ -131,7 +131,13 @@ impl<W: AsyncWrite + Unpin, C: PacketCipher> PacketWriter<W, C> {
     /// Encrypts plaintext from `buf` into a separate output buffer and writes
     /// the resulting packets to the underlying writer. The caller must ensure
     /// `buf.len()` is a multiple of `max_frame_size` (`packet_size - AEAD_TAG_SIZE`).
-    pub async fn write_encrypted(&mut self, buf: &[u8]) -> Result<(), io::Error> {
+    /// Calls `progress` after each nonempty socket write with the cumulative
+    /// plaintext offset, excluding authentication tags.
+    pub async fn write_encrypted(
+        &mut self,
+        buf: &[u8],
+        mut progress: impl FnMut(usize),
+    ) -> Result<(), io::Error> {
         let max_frame_size = self.packet_size - AEAD_TAG_SIZE;
         let num_packets = buf.len() / max_frame_size;
         let total_size = num_packets * self.packet_size;
@@ -150,7 +156,21 @@ impl<W: AsyncWrite + Unpin, C: PacketCipher> PacketWriter<W, C> {
                 .encrypt_in_place(&mut self.enc_buf[dst_start..dst_start + self.packet_size]);
         }
 
-        self.writer.write_all(&self.enc_buf[..total_size]).await
+        let mut written = 0;
+        while written < total_size {
+            let n = self
+                .writer
+                .write(&self.enc_buf[written..total_size])
+                .await?;
+            if n == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            written += n;
+            let plaintext = (written / self.packet_size) * max_frame_size
+                + (written % self.packet_size).min(max_frame_size);
+            progress(plaintext);
+        }
+        Ok(())
     }
 }
 
@@ -375,6 +395,27 @@ mod tests {
         assert_eq!(&buf[FRAME_HEADER_SIZE..], b"hello");
     }
 
+    #[tokio::test]
+    async fn partial_write_progress_excludes_authentication_tags() {
+        const PACKET_SIZE: usize = 64;
+        const MAX_FRAME: usize = PACKET_SIZE - AEAD_TAG_SIZE;
+        let (w, mut r) = tokio::io::duplex(1);
+        let mut writer = PacketWriter::new(w, TestCipher { key: 0xAA }, PACKET_SIZE);
+        let plaintext = [0; MAX_FRAME * 2];
+        let mut offsets = Vec::new();
+        let write = writer.write_encrypted(&plaintext, |offset| offsets.push(offset));
+        let mut received = [0; PACKET_SIZE * 2];
+        let (write_result, read_result) = tokio::join!(write, r.read_exact(&mut received));
+        write_result.unwrap();
+        read_result.unwrap();
+        let expected: Vec<_> = (0..2)
+            .flat_map(|packet| {
+                (1..=PACKET_SIZE).map(move |n| packet * MAX_FRAME + n.min(MAX_FRAME))
+            })
+            .collect();
+        assert_eq!(offsets, expected);
+    }
+
     // Verifies that a single packet encrypted by PacketWriter can be decrypted by PacketReader.
     #[tokio::test]
     async fn packet_writer_reader_single_packet() {
@@ -388,7 +429,7 @@ mod tests {
         let mut plaintext = vec![0u8; MAX_FRAME];
         plaintext[..13].copy_from_slice(b"hello, world!");
 
-        writer.write_encrypted(&plaintext).await.unwrap();
+        writer.write_encrypted(&plaintext, |_| {}).await.unwrap();
         drop(writer);
 
         let mut buf = vec![0u8; MAX_FRAME];
@@ -415,7 +456,7 @@ mod tests {
         }
         let expected = plaintext.clone();
 
-        writer.write_encrypted(&plaintext).await.unwrap();
+        writer.write_encrypted(&plaintext, |_| {}).await.unwrap();
         drop(writer);
 
         let mut result = vec![0u8; expected.len()];
@@ -450,7 +491,7 @@ mod tests {
         plaintext[..FRAME_HEADER_SIZE].copy_from_slice(&header_bytes);
         plaintext[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + 5].copy_from_slice(b"hello");
 
-        writer.write_encrypted(&plaintext).await.unwrap();
+        writer.write_encrypted(&plaintext, |_| {}).await.unwrap();
         drop(writer);
 
         let (h, payload) = reader.next_frame().await.unwrap();
@@ -493,7 +534,7 @@ mod tests {
         plaintext[MAX_FRAME + FRAME_HEADER_SIZE..MAX_FRAME + FRAME_HEADER_SIZE + 6]
             .copy_from_slice(b"barbaz");
 
-        writer.write_encrypted(&plaintext).await.unwrap();
+        writer.write_encrypted(&plaintext, |_| {}).await.unwrap();
         drop(writer);
 
         let (rh1, rp1) = reader.next_frame().await.unwrap();
