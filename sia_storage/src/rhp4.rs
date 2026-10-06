@@ -155,13 +155,17 @@ pub enum Error {
 
 impl Error {
     /// Whether the RPC's stream went idle. Both transports report a stalled
-    /// stream as an I/O error of kind [`std::io::ErrorKind::TimedOut`].
+    /// stream as an I/O error of kind [`std::io::ErrorKind::TimedOut`]. It
+    /// arrives bare from a request write, or wrapped by the protocol decoder
+    /// when the stall happens while waiting for or reading the response.
     pub(crate) fn is_timeout(&self) -> bool {
-        matches!(
-            self,
-            Error::Io(e) | Error::Rpc(RHP4Error::Io(e))
-                if e.kind() == std::io::ErrorKind::TimedOut
-        )
+        let io = match self {
+            Error::Io(e)
+            | Error::Rpc(RHP4Error::Io(e))
+            | Error::Rpc(RHP4Error::Encoding(encoding::Error::Io(e))) => e,
+            _ => return false,
+        };
+        io.kind() == std::io::ErrorKind::TimedOut
     }
 }
 

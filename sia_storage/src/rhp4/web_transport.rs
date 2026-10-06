@@ -529,6 +529,7 @@ impl Transport for Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::time::Instant;
     use js_sys::Uint8Array;
     use tokio::io::AsyncReadExt;
     use wasm_bindgen_futures::spawn_local;
@@ -680,18 +681,23 @@ mod tests {
         assert_eq!(stream.last_progress, progress);
     }
 
+    /// A transfer that outlasts the idle limit must still succeed as long as
+    /// every chunk lands within it. The reader paces the writer: with a zero
+    /// high-water mark, each chunk's write only resolves once it is pulled.
     #[wasm_bindgen_test]
-    async fn test_each_write_chunk_records_progress() {
-        let (mut stream, _feeder, out_reader) = test_stream(IDLE_TIMEOUT);
-        let data = vec![42; WRITE_CHUNK_SIZE * 2];
-        let old = stream.last_progress;
-        sleep(Duration::from_millis(5)).await;
+    async fn test_slow_but_progressing_write_outlasts_idle_limit() {
+        const LIMIT: Duration = Duration::from_millis(200);
+        const GAP: Duration = Duration::from_millis(100);
+        const CHUNKS: usize = 4;
+        let (mut stream, _feeder, out_reader) = test_stream(LIMIT);
+        let data = vec![42; WRITE_CHUNK_SIZE * CHUNKS];
         let (tx, rx) = tokio::sync::oneshot::channel();
         spawn_local(async move {
-            stream.write_chunks(&data).await.unwrap();
-            tx.send(stream.last_progress).unwrap();
+            tx.send(stream.write_chunks(&data).await).unwrap();
         });
-        for _ in 0..2 {
+        let start = Instant::now();
+        for _ in 0..CHUNKS {
+            sleep(GAP).await;
             let result = JsFuture::from(out_reader.read()).await.unwrap();
             let chunk: ReadableStreamReadResult = result.unchecked_into();
             assert_eq!(
@@ -699,7 +705,11 @@ mod tests {
                 WRITE_CHUNK_SIZE
             );
         }
-        assert!(rx.await.unwrap() > old);
+        assert!(
+            start.elapsed() > LIMIT,
+            "the transfer must outlast the idle limit"
+        );
+        rx.await.unwrap().unwrap();
     }
 
     #[wasm_bindgen_test]

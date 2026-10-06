@@ -4,6 +4,8 @@ use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use chrono::Utc;
+use sia_core::encoding;
+use sia_core::rhp4::protocol::Error as ProtocolError;
 use sia_core::rhp4::{AccountToken, HostPrices};
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::{Currency, Hash256};
@@ -62,7 +64,8 @@ impl Client {
 
     /// Sleeps out the host's configured slow delay. A delay longer than
     /// `idle_timeout` is a stall, which the real transports report once
-    /// the idle limit passes.
+    /// the idle limit passes. The error takes the shape a stalled response
+    /// has after passing through the protocol decoder.
     async fn stall(&self, host: &PublicKey, idle_timeout: Duration) -> Result<(), RHP4Error> {
         let delay = {
             let slow_hosts = self.slow_hosts.read().unwrap();
@@ -77,7 +80,8 @@ impl Client {
         };
         if delay > idle_timeout {
             sleep(idle_timeout).await;
-            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "stream idle").into());
+            let io = std::io::Error::new(std::io::ErrorKind::TimedOut, "stream idle");
+            return Err(ProtocolError::from(encoding::Error::from(io)).into());
         }
         sleep(delay).await;
         Ok(())
