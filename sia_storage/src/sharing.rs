@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::hex::Hex;
-use serde_with::{DefaultOnNull, serde_as};
+use serde_with::{Bytes, DefaultOnNull, IfIsHumanReadable, serde_as};
 use sia_core::encoding::SiaEncodable;
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;
@@ -18,10 +18,13 @@ use crate::slabs::{Object, SealedObjectError};
 pub const NONCE_SIZE: usize = 32;
 
 /// The per-key salt used to derive a sharing key from the owner's app key. It
-/// (de)serializes as a hex string, matching indexd.
+/// (de)serializes as a hex string in human-readable formats and as a byte
+/// string otherwise, matching indexd.
 #[serde_as]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Nonce(#[serde_as(as = "Hex")] pub(crate) [u8; NONCE_SIZE]);
+pub(crate) struct Nonce(
+    #[serde_as(as = "IfIsHumanReadable<Hex, Bytes>")] pub(crate) [u8; NONCE_SIZE],
+);
 
 /// Deterministically derives the sharing key's seed from the owner's app key
 /// and a nonce, matching indexd's `DeriveSharingKey`. The seed is the

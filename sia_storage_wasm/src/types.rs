@@ -341,14 +341,6 @@ export interface Slab {
     sectors: Sector[];
 }
 
-export interface PinnedSlab {
-    version: number;
-    id: string;
-    encryptionKey: string;
-    minShards: number;
-    sectors: Sector[];
-}
-
 export interface Host {
     publicKey: string;
     addresses: { protocol: string; address: string }[];

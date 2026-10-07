@@ -22,7 +22,7 @@ macro_rules! impl_hash_id {
                 if serializer.is_human_readable() {
                     String::serialize(&self.to_string(), serializer)
                 } else {
-                    <[u8; 32]>::serialize(&self.0, serializer)
+                    serializer.serialize_bytes(&self.0)
                 }
             }
         }
@@ -32,9 +32,7 @@ macro_rules! impl_hash_id {
             where
                 D: serde::Deserializer<'de>,
             {
-                let s = String::deserialize(deserializer)?;
-                s.parse()
-                    .map_err(|e| serde::de::Error::custom(format!("{:?}", e)))
+                $crate::types::deserialize_str_or_bytes(deserializer, str::parse, $name)
             }
         }
 

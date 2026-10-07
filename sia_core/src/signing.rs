@@ -2,9 +2,8 @@ use core::fmt;
 
 use crate::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use crate::encoding_async::AsyncSiaDecode;
-use crate::types::{Hash256, HexParseError};
+use crate::types::{Hash256, HexParseError, deserialize_str_or_bytes};
 use ed25519_dalek::{Signature as ED25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use serde::de::Error;
 use serde::{Deserialize, Serialize};
 use zeroize::ZeroizeOnDrop;
 
@@ -18,7 +17,11 @@ impl PublicKey {
 
 impl Serialize for PublicKey {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        String::serialize(&self.to_string(), serializer)
+        if serializer.is_human_readable() {
+            String::serialize(&self.to_string(), serializer)
+        } else {
+            serializer.serialize_bytes(&self.0)
+        }
     }
 }
 
@@ -27,9 +30,7 @@ impl<'de> Deserialize<'de> for PublicKey {
     where
         D: serde::Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        let result = s.parse().map_err(|e| Error::custom(format!("{e:?}")))?;
-        Ok(result)
+        deserialize_str_or_bytes(deserializer, str::parse, PublicKey)
     }
 }
 
@@ -122,7 +123,11 @@ pub struct Signature([u8; 64]);
 
 impl Serialize for Signature {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        String::serialize(&hex::encode(self.0), serializer)
+        if serializer.is_human_readable() {
+            String::serialize(&hex::encode(self.0), serializer)
+        } else {
+            serializer.serialize_bytes(&self.0)
+        }
     }
 }
 
@@ -131,12 +136,7 @@ impl<'de> Deserialize<'de> for Signature {
     where
         D: serde::Deserializer<'de>,
     {
-        let buf = hex::decode(String::deserialize(deserializer)?)
-            .map_err(|e| D::Error::custom(format!("{e:?}")))?;
-        if buf.len() != 64 {
-            return Err(D::Error::custom("Invalid signature length"));
-        }
-        Ok(Signature(buf.try_into().unwrap()))
+        deserialize_str_or_bytes(deserializer, str::parse, Signature)
     }
 }
 

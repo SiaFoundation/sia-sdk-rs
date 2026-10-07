@@ -3,7 +3,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Waker, ready};
 
 use bytes::BytesMut;
 use thiserror::Error;
@@ -54,10 +54,25 @@ pub enum MuxError {
     TooManyStreams,
     #[error("peer sent invalid frame ID: {0}")]
     InvalidFrameId(u32),
+    #[error("read deadline exceeded")]
+    ReadDeadlineExceeded,
+    #[error("write deadline exceeded")]
+    WriteDeadlineExceeded,
+    #[error("stream idle")]
+    IdleTimeout,
     #[error("{0}")]
     Io(String),
     #[error("peer error: {0}")]
     PeerError(String),
+}
+
+impl MuxError {
+    fn is_timeout(&self) -> bool {
+        matches!(
+            self,
+            Self::IdleTimeout | Self::ReadDeadlineExceeded | Self::WriteDeadlineExceeded
+        )
+    }
 }
 
 /// Required because [`AsyncRead`] and [`AsyncWrite`] trait methods return `io::Result`.
@@ -66,6 +81,7 @@ impl From<MuxError> for io::Error {
         let kind = match &e {
             MuxError::ClosedConn | MuxError::ClosedStream => io::ErrorKind::ConnectionAborted,
             MuxError::PeerClosedStream | MuxError::PeerClosedConn => io::ErrorKind::ConnectionReset,
+            err if err.is_timeout() => io::ErrorKind::TimedOut,
             _ => io::ErrorKind::Other,
         };
         io::Error::new(kind, e)
@@ -94,7 +110,7 @@ fn packet_reader_error_is_conn_close(err: &PacketReaderError) -> bool {
     }
 }
 
-/// Per-stream read state, protected by its own mutex (separate from the mux lock).
+/// Per-stream read/write state, protected by its own mutex (separate from the mux lock).
 struct StreamState {
     /// Buffered read data delivered by the read loop.
     read_buf: BytesMut,
@@ -102,6 +118,8 @@ struct StreamState {
     err: Option<MuxError>,
     /// Waker for the reader waiting for data.
     waker: Option<Waker>,
+    /// Time of the last payload received or written to the underlying connection.
+    last_progress: time::Instant,
 }
 
 /// Tracks a recently-closed stream to absorb in-flight frames from the peer.
@@ -117,10 +135,9 @@ struct MuxState {
     /// Shared write buffer. Streams append frames directly here; the write loop
     /// swaps it out, encrypts, and writes to the connection.
     write_buf: Vec<u8>,
-    /// Wakers for streams blocked due to write buffer backpressure.
-    /// Wake-one: write_loop wakes the front; each successful writer
-    /// chain-wakes the next.
-    buffer_wakers: VecDeque<Waker>,
+    /// One waker per stream blocked by write buffer backpressure.
+    /// Buffer swaps wake all waiters.
+    buffer_wakers: HashMap<u32, Waker>,
 
     /// Active streams indexed by stream ID.
     streams: HashMap<u32, Arc<StdMutex<StreamState>>>,
@@ -208,6 +225,7 @@ impl Mux {
             read_buf: BytesMut::new(),
             err: None,
             waker: None,
+            last_progress: time::Instant::now(),
         }));
         s.streams.insert(id, ss.clone());
 
@@ -221,7 +239,9 @@ impl Mux {
             closed: false,
             read_deadline: None,
             write_deadline: None,
-            deadline_sleep: None,
+            idle_timeout: None,
+            read_deadline_sleep: None,
+            write_deadline_sleep: None,
         })
     }
 
@@ -300,27 +320,111 @@ pub struct Stream {
     closed: bool,
     read_deadline: Option<time::Instant>,
     write_deadline: Option<time::Instant>,
+    idle_timeout: Option<time::Duration>,
     /// Pinned timer reused across polls to avoid spawning a new task per
     /// Pending return. Reset to the active deadline; polled alongside the
     /// data/write channel so the waker fires when the deadline expires.
-    deadline_sleep: Option<Pin<Box<time::Sleep>>>,
+    read_deadline_sleep: Option<Pin<Box<time::Sleep>>>,
+    write_deadline_sleep: Option<Pin<Box<time::Sleep>>>,
 }
 
 impl Stream {
     /// Set both read and write deadlines.
+    ///
+    /// Once expiry is observed, all subsequent reads and writes return the
+    /// stored timeout error, even if deadlines are cleared or extended.
     pub fn set_deadline(&mut self, t: Option<time::Instant>) {
         self.read_deadline = t;
         self.write_deadline = t;
     }
 
     /// Set the read deadline.
+    ///
+    /// Once expiry is observed, all subsequent reads and writes return the
+    /// stored timeout error, even if deadlines are cleared or extended.
     pub fn set_read_deadline(&mut self, t: Option<time::Instant>) {
         self.read_deadline = t;
     }
 
     /// Set the write deadline.
+    ///
+    /// Once expiry is observed, all subsequent reads and writes return the
+    /// stored timeout error, even if deadlines are cleared or extended.
     pub fn set_write_deadline(&mut self, t: Option<time::Instant>) {
         self.write_deadline = t;
+    }
+
+    /// Limit how long a pending read or write may wait without stream progress.
+    ///
+    /// Payload received for this stream or passed to the underlying connection
+    /// resets the clock. Enqueuing a write, consuming buffered reads, keepalives,
+    /// and traffic on other streams do not. Socket writes indicate acceptance by
+    /// the underlying connection, not acknowledgment by the peer.
+    ///
+    /// `None` disables the limit (the default). Setting a limit starts a fresh
+    /// clock. Expiry returns a sticky [`MuxError::IdleTimeout`] wrapped in an
+    /// [`io::Error`] with kind [`io::ErrorKind::TimedOut`]. Absolute deadlines
+    /// remain independent and can expire sooner.
+    pub fn set_idle_timeout(&mut self, timeout: Option<time::Duration>) {
+        self.idle_timeout = timeout;
+        let mut state = self.stream_state.lock().unwrap();
+        state.last_progress = time::Instant::now();
+    }
+
+    fn check_deadline(
+        &self,
+        deadline: Option<time::Instant>,
+        error: MuxError,
+    ) -> Result<(), MuxError> {
+        let mut state = self.stream_state.lock().unwrap();
+        if let Some(err) = state.err.as_ref().filter(|err| err.is_timeout()) {
+            return Err(err.clone());
+        }
+        if !deadline.is_some_and(|deadline| time::Instant::now() >= deadline) {
+            return Ok(());
+        }
+        state.err = Some(error.clone());
+        let reader = state.waker.take();
+        drop(state);
+        // Either half can observe expiry; wake the other half to report it too.
+        let writer = self
+            .mux_state
+            .lock()
+            .unwrap()
+            .buffer_wakers
+            .remove(&self.id);
+        if let Some(waker) = reader {
+            waker.wake();
+        }
+        if let Some(waker) = writer {
+            waker.wake();
+        }
+        Err(error)
+    }
+
+    fn poll_pending(
+        cx: &mut Context<'_>,
+        deadline: Option<time::Instant>,
+        idle_timeout: Option<time::Duration>,
+        state: &StdMutex<StreamState>,
+        timer: &mut Option<Pin<Box<time::Sleep>>>,
+    ) -> Poll<io::Result<()>> {
+        let mut state = state.lock().unwrap();
+        let idle_deadline = idle_timeout.and_then(|limit| state.last_progress.checked_add(limit));
+        if let Some(deadline) = idle_deadline
+            && time::Instant::now() >= deadline
+        {
+            state.err = Some(MuxError::IdleTimeout);
+            return Poll::Ready(Err(MuxError::IdleTimeout.into()));
+        }
+        drop(state);
+        if let Some(deadline) = deadline.into_iter().chain(idle_deadline).min() {
+            let sleep = timer.get_or_insert_with(|| Box::pin(time::sleep_until(deadline)));
+            sleep.as_mut().reset(deadline);
+            ready!(sleep.as_mut().poll(cx));
+            cx.waker().wake_by_ref();
+        }
+        Poll::Pending
     }
 
     /// Gracefully close this stream. Sends FLAG_LAST to the peer.
@@ -348,6 +452,7 @@ impl Stream {
         let mut s = self.mux_state.lock().unwrap();
         let err = s.err.clone();
         s.streams.remove(&self.id);
+        s.buffer_wakers.remove(&self.id);
 
         if !self.established {
             return err;
@@ -390,21 +495,13 @@ impl AsyncRead for Stream {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
 
+        this.check_deadline(this.read_deadline, MuxError::ReadDeadlineExceeded)?;
+
         // Peer doesn't know this stream exists until we write the first frame.
         if !this.established {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "read called before write on newly-dialed stream",
-            )));
-        }
-
-        // Check deadline
-        if let Some(deadline) = this.read_deadline
-            && time::Instant::now() >= deadline
-        {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "read deadline exceeded",
             )));
         }
 
@@ -431,15 +528,13 @@ impl AsyncRead for Stream {
         ss.waker = Some(cx.waker().clone());
         drop(ss);
 
-        if let Some(deadline) = this.read_deadline {
-            let sleep = this
-                .deadline_sleep
-                .get_or_insert_with(|| Box::pin(time::sleep_until(deadline)));
-            sleep.as_mut().reset(deadline);
-            let _ = sleep.as_mut().poll(cx);
-        }
-
-        Poll::Pending
+        Self::poll_pending(
+            cx,
+            this.read_deadline,
+            this.idle_timeout,
+            &this.stream_state,
+            &mut this.read_deadline_sleep,
+        )
     }
 }
 
@@ -451,20 +546,12 @@ impl AsyncWrite for Stream {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
 
+        this.check_deadline(this.write_deadline, MuxError::WriteDeadlineExceeded)?;
+
         if this.closed {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 MuxError::ClosedStream,
-            )));
-        }
-
-        // Check deadline
-        if let Some(deadline) = this.write_deadline
-            && time::Instant::now() >= deadline
-        {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "write deadline exceeded",
             )));
         }
 
@@ -474,7 +561,6 @@ impl AsyncWrite for Stream {
 
         let mut s = this.mux_state.lock().unwrap();
 
-        // Check fatal error
         if let Some(ref err) = s.err {
             return Poll::Ready(Err(err.clone().into()));
         }
@@ -482,17 +568,21 @@ impl AsyncWrite for Stream {
         // Backpressure check
         let max_buf_size = max_payload * MAX_WRITE_BUF_FACTOR;
         if s.write_buf.len() + frame_size > max_buf_size {
-            s.buffer_wakers.push_back(cx.waker().clone());
+            s.buffer_wakers
+                .entry(this.id)
+                .and_modify(|waker| waker.clone_from(cx.waker()))
+                .or_insert_with(|| cx.waker().clone());
             drop(s);
-            if let Some(deadline) = this.write_deadline {
-                let sleep = this
-                    .deadline_sleep
-                    .get_or_insert_with(|| Box::pin(time::sleep_until(deadline)));
-                sleep.as_mut().reset(deadline);
-                let _ = sleep.as_mut().poll(cx);
-            }
-            return Poll::Pending;
+            return Self::poll_pending(
+                cx,
+                this.write_deadline,
+                this.idle_timeout,
+                &this.stream_state,
+                &mut this.write_deadline_sleep,
+            )
+            .map_ok(|()| 0);
         }
+        s.buffer_wakers.remove(&this.id);
 
         // Build header
         let mut flags = 0u16;
@@ -509,15 +599,6 @@ impl AsyncWrite for Stream {
 
         // Single copy: directly into shared write buffer
         append_frame(&mut s.write_buf, header, &buf[..n]);
-
-        // Chain-wake: if there's still buffer space, wake the next
-        // backpressured writer so it can append without waiting for
-        // the write loop to drain.
-        if s.write_buf.len() + frame_size <= max_buf_size
-            && let Some(w) = s.buffer_wakers.pop_front()
-        {
-            w.wake();
-        }
 
         drop(s);
 
@@ -610,6 +691,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         read_buf: BytesMut::new(),
                         err: None,
                         waker: None,
+                        last_progress: time::Instant::now(),
                     }));
                     s.streams.insert(h.id, ss.clone());
 
@@ -623,7 +705,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         closed: false,
                         read_deadline: None,
                         write_deadline: None,
-                        deadline_sleep: None,
+                        idle_timeout: None,
+                        read_deadline_sleep: None,
+                        write_deadline_sleep: None,
                     };
 
                     s.accept_queue.push_back(stream);
@@ -659,6 +743,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 let mut state = ss.lock().unwrap();
                 if state.err.is_none() {
                     state.read_buf.extend_from_slice(&payload);
+                    if !payload.is_empty() {
+                        state.last_progress = time::Instant::now();
+                    }
                     if let Some(w) = state.waker.take() {
                         w.wake();
                     }
@@ -666,7 +753,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
             }
             Action::Close(ss, err) => {
                 let mut state = ss.lock().unwrap();
-                state.err = Some(err);
+                if state.err.is_none() {
+                    state.err = Some(err);
+                }
                 if let Some(w) = state.waker.take() {
                     w.wake();
                 }
@@ -753,14 +842,16 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                 last_cleanup = now;
             }
 
-            // Wake one backpressure-blocked writer. That writer will
-            // chain-wake the next after it successfully appends its frame.
-            if let Some(w) = s.buffer_wakers.pop_front() {
-                w.wake();
+            // Wake every blocked writer so progress does not depend on another
+            // writer being polled or successfully appending a frame.
+            for (_, waker) in s.buffer_wakers.drain() {
+                waker.wake();
             }
 
             s.shutdown
         };
+
+        let data_len = local_buf.len();
 
         // Pad to packet boundary
         if !local_buf.is_empty() {
@@ -771,9 +862,39 @@ async fn write_loop<W: AsyncWrite + Unpin>(
             }
         }
 
+        // Attribute partial socket writes to the payloads they cover. The
+        // packet writer removes authentication-tag offsets before reporting
+        // progress; padding and control frames don't reset stream clocks.
+        let mut frame_offset = 0;
+        let mut previous = 0;
+        let progress = |written: usize| {
+            if written == previous {
+                return;
+            }
+            let s = mux_state.lock().unwrap();
+            let now = time::Instant::now();
+            while frame_offset < data_len && frame_offset < written {
+                let header = FrameHeader::try_from(&local_buf[frame_offset..])
+                    .expect("locally encoded frame header");
+                let payload_start = frame_offset + FRAME_HEADER_SIZE;
+                let end = payload_start + header.length as usize;
+                if written.min(end) > previous.max(payload_start)
+                    && let Some(state) = s.streams.get(&header.id)
+                {
+                    let mut state = state.lock().unwrap();
+                    state.last_progress = state.last_progress.max(now);
+                }
+                if written < end {
+                    break;
+                }
+                frame_offset = end;
+            }
+            previous = written;
+        };
+
         // Encrypt + I/O (no lock held)
         if !local_buf.is_empty()
-            && let Err(e) = writer.write_encrypted(&local_buf).await
+            && let Err(e) = writer.write_encrypted(&local_buf, progress).await
         {
             let err = if is_conn_close_error(&e) {
                 MuxError::PeerClosedConn
@@ -810,14 +931,16 @@ fn set_fatal_error(mux_state: &Arc<StdMutex<MuxState>>, err: MuxError) {
     // Lock ordering: mux lock first, then stream lock (never reverse).
     for (_, ss) in s.streams.drain() {
         let mut state = ss.lock().unwrap();
-        state.err = Some(err.clone());
+        if state.err.is_none() {
+            state.err = Some(err.clone());
+        }
         if let Some(w) = state.waker.take() {
             w.wake();
         }
     }
     // Wake blocked writers
-    for w in s.buffer_wakers.drain(..) {
-        w.wake();
+    for (_, waker) in s.buffer_wakers.drain() {
+        waker.wake();
     }
     // Wake any task blocked in accept_stream
     s.accept_notify.notify_one();
@@ -847,7 +970,7 @@ pub(crate) fn new_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     let max_frame_size = settings.max_frame_size();
     let mux_state = Arc::new(StdMutex::new(MuxState {
         write_buf: Vec::with_capacity(max_frame_size * 10),
-        buffer_wakers: VecDeque::new(),
+        buffer_wakers: HashMap::new(),
         streams: HashMap::new(),
         closing: HashMap::new(),
         accept_queue: VecDeque::new(),
@@ -910,6 +1033,581 @@ mod tests {
         let accept_mux = accept_fut.await.unwrap();
 
         (dial_mux, accept_mux)
+    }
+
+    async fn memory_pair() -> (super::Mux, super::Mux) {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (client, server) = tokio::join!(
+            crate::dial_anonymous(client),
+            crate::accept_anonymous(server),
+        );
+        (client.unwrap(), server.unwrap())
+    }
+
+    fn assert_idle(err: &std::io::Error) {
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            matches!(
+                err.get_ref().and_then(|err| err.downcast_ref::<MuxError>()),
+                Some(MuxError::IdleTimeout)
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_requests_poll_for_elapsed_timer() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Wake, Waker};
+
+        struct WakeFlag(AtomicBool);
+
+        impl Wake for WakeFlag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let (client, _server) = memory_pair().await;
+        let stream = client.dial_stream().unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        assert!(tokio::time::Instant::now() < deadline);
+        // Simulate expiry between the caller's check and polling the timer.
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        let wakes = Arc::new(WakeFlag(AtomicBool::new(false)));
+        let waker = Waker::from(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut timer = None;
+        assert!(
+            super::Stream::poll_pending(
+                &mut cx,
+                Some(deadline),
+                None,
+                &stream.stream_state,
+                &mut timer,
+            )
+            .is_pending()
+        );
+        assert!(wakes.0.load(Ordering::SeqCst));
+    }
+
+    async fn backpressured_writer() -> (super::Mux, tokio::io::DuplexStream, super::Stream) {
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+        use tokio::io::AsyncWrite;
+
+        let (conn, peer) = tokio::io::duplex(128);
+        let mux = super::new_mux(
+            conn,
+            crate::handshake::HandshakeResult {
+                key: [0; 32],
+                our_nonce: [0; 12],
+                their_nonce: [0; 12],
+            },
+            crate::ConnSettings::default(),
+            0,
+        );
+        let mut stream = mux.dial_stream().unwrap();
+        let payload = vec![42; mux.settings.max_payload_size()];
+        let capacity = payload.len() * super::MAX_WRITE_BUF_FACTOR;
+        let mut cx = Context::from_waker(Waker::noop());
+
+        // Block the socket with one batch, then fill the shared buffer exactly.
+        for _ in 0..2 {
+            loop {
+                let available = capacity - mux.state.lock().unwrap().write_buf.len();
+                if available == 0 {
+                    break;
+                }
+                let n = payload.len().min(available - super::FRAME_HEADER_SIZE);
+                assert!(matches!(
+                    Pin::new(&mut stream).poll_write(&mut cx, &payload[..n]),
+                    Poll::Ready(Ok(written)) if written == n
+                ));
+            }
+            tokio::task::yield_now().await;
+        }
+        (mux, peer, stream)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_writer_repolls_do_not_block_healthy_writer() {
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+        use tokio::io::AsyncWrite;
+
+        let (mux, mut peer, mut healthy) = backpressured_writer().await;
+        let mut idle = mux.dial_stream().unwrap();
+        let mut cx = Context::from_waker(Waker::noop());
+        let limit = Duration::from_secs(4);
+        idle.set_idle_timeout(Some(limit));
+        for _ in 0..8 {
+            assert!(
+                Pin::new(&mut idle)
+                    .poll_write(&mut cx, b"idle")
+                    .is_pending()
+            );
+        }
+        assert_eq!(mux.state.lock().unwrap().buffer_wakers.len(), 1);
+        let write = tokio::spawn(async move {
+            healthy.write_all(b"healthy").await.unwrap();
+            healthy
+        });
+        tokio::task::yield_now().await;
+        assert!(!write.is_finished());
+        assert_eq!(mux.state.lock().unwrap().buffer_wakers.len(), 2);
+        tokio::time::advance(limit).await;
+        match Pin::new(&mut idle).poll_write(&mut cx, b"idle") {
+            Poll::Ready(Err(err)) => assert_idle(&err),
+            result => panic!("expected idle timeout, got {result:?}"),
+        }
+
+        let drain = tokio::spawn(async move { copy(&mut peer, &mut sink()).await });
+        let healthy = timeout(Duration::from_secs(1), write)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(mux.state.lock().unwrap().buffer_wakers.is_empty());
+        drop(healthy);
+        drop(idle);
+        mux.close().await.unwrap();
+        drain.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_writes_do_not_reserve_buffer_capacity() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        let (mux, mut peer, mut healthy) = backpressured_writer().await;
+        let payload = vec![42; mux.settings.max_payload_size()];
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut cancelled = Vec::new();
+        for _ in 0..super::MAX_WRITE_BUF_FACTOR * 2 {
+            let mut stream = mux.dial_stream().unwrap();
+            let mut write = Box::pin(stream.write(&payload));
+            assert!(write.as_mut().poll(&mut cx).is_pending());
+            drop(write);
+            cancelled.push(stream);
+        }
+        let write = tokio::spawn(async move {
+            healthy
+                .write_all(&payload.repeat(super::MAX_WRITE_BUF_FACTOR * 2))
+                .await
+                .unwrap();
+            healthy
+        });
+        tokio::task::yield_now().await;
+        assert!(!write.is_finished());
+        let drain = tokio::spawn(async move { copy(&mut peer, &mut sink()).await });
+        let healthy = timeout(Duration::from_secs(1), write)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(mux.state.lock().unwrap().buffer_wakers.is_empty());
+        // Keep cancelled streams alive and unpolled until the healthy write completes.
+        drop(cancelled);
+        drop(healthy);
+        mux.close().await.unwrap();
+        drain.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn blocked_writer_updates_waker_and_unregisters_on_close() {
+        use std::pin::Pin;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Wake, Waker};
+        use tokio::io::AsyncWrite;
+
+        struct WakeFlag(AtomicBool);
+        impl Wake for WakeFlag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let (mux, _peer, mut stream) = backpressured_writer().await;
+        let first = Arc::new(WakeFlag(AtomicBool::new(false)));
+        let second = Arc::new(WakeFlag(AtomicBool::new(false)));
+        for flag in [&first, &second] {
+            let waker = Waker::from(flag.clone());
+            let mut cx = Context::from_waker(&waker);
+            assert!(
+                Pin::new(&mut stream)
+                    .poll_write(&mut cx, b"pending")
+                    .is_pending()
+            );
+        }
+        {
+            let state = mux.state.lock().unwrap();
+            assert_eq!(state.buffer_wakers.len(), 1);
+            state.buffer_wakers[&stream.id].wake_by_ref();
+        }
+        assert!(!first.0.load(Ordering::SeqCst));
+        assert!(second.0.load(Ordering::SeqCst));
+        stream.close().unwrap();
+        assert!(mux.state.lock().unwrap().buffer_wakers.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fatal_error_wakes_backpressured_writer() {
+        let (mux, _peer, mut stream) = backpressured_writer().await;
+        let write = tokio::spawn(async move { stream.write_all(b"blocked").await });
+        tokio::task::yield_now().await;
+        assert!(!write.is_finished());
+        super::set_fatal_error(&mux.state, MuxError::PeerClosedConn);
+        let err = timeout(Duration::from_secs(1), write)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_stream_is_not_kept_alive_by_other_streams() {
+        let (client, server) = memory_pair().await;
+        let mut idle = client.dial_stream().unwrap();
+        idle.write_all(b"request").await.unwrap();
+        let _idle_peer = server.accept_stream().await.unwrap();
+        let mut busy = client.dial_stream().unwrap();
+        busy.write_all(b"request").await.unwrap();
+        let mut busy_peer = server.accept_stream().await.unwrap();
+        let limit = Duration::from_secs(4);
+        idle.set_idle_timeout(Some(limit));
+        busy.set_idle_timeout(Some(limit));
+        let start = tokio::time::Instant::now();
+
+        let sender = async {
+            for _ in 0..8 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                busy_peer.write_all(b"x").await.unwrap();
+            }
+        };
+        let receiver = async {
+            for _ in 0..8 {
+                assert_eq!(busy.read_u8().await.unwrap(), b'x');
+                busy.write_all(b"reply").await.unwrap();
+            }
+        };
+        let stalled = async {
+            let err = idle.read_u8().await.unwrap_err();
+            assert_idle(&err);
+            assert_eq!(start.elapsed(), limit);
+            assert_idle(&idle.read_u8().await.unwrap_err());
+            assert_idle(&idle.write(b"retry").await.unwrap_err());
+        };
+        tokio::join!(sender, receiver, stalled);
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    /// A socket accepts only 128 bytes per second. A single packet takes longer
+    /// than the idle limit, and application writes either finish immediately
+    /// into the mux buffer or block behind a whole batch. Both must stay alive
+    /// while their payload is moving, then fail when the socket stops draining.
+    #[tokio::test(start_paused = true)]
+    async fn idle_tracks_partial_socket_writes() {
+        let limit = Duration::from_secs(4);
+        for size in [20 * 1024, 1024 * 1024] {
+            let (conn, mut peer) = tokio::io::duplex(128);
+            let mux = super::new_mux(
+                conn,
+                crate::handshake::HandshakeResult {
+                    key: [0; 32],
+                    our_nonce: [0; 12],
+                    their_nonce: [0; 12],
+                },
+                crate::ConnSettings::default(),
+                0,
+            );
+            let mut stream = mux.dial_stream().unwrap();
+            stream.set_idle_timeout(Some(limit));
+            let start = tokio::time::Instant::now();
+            let transfer = async {
+                let result = stream.write_all(&vec![42; size]).await;
+                let err = if size == 20 * 1024 {
+                    result.unwrap();
+                    stream.read_u8().await.unwrap_err()
+                } else {
+                    result.unwrap_err()
+                };
+                assert_idle(&err);
+                assert_eq!(start.elapsed(), Duration::from_secs(16));
+            };
+            let drain = async {
+                for _ in 0..12 {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    peer.read_exact(&mut [0; 128]).await.unwrap();
+                }
+                // Keep the peer open while the idle timer expires.
+                tokio::time::sleep(limit * 2).await;
+            };
+            tokio::join!(transfer, drain);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_can_be_disabled_and_absolute_deadlines_still_apply() {
+        let (client, server) = memory_pair().await;
+        for idle_timeout in [Some(Duration::from_secs(10)), None] {
+            let mut stream = client.dial_stream().unwrap();
+            stream.write_all(b"request").await.unwrap();
+            let _peer = server.accept_stream().await.unwrap();
+            stream.set_idle_timeout(Some(Duration::from_secs(1)));
+            stream.set_idle_timeout(idle_timeout);
+            let start = tokio::time::Instant::now();
+            let deadline = Duration::from_secs(3);
+            stream.set_read_deadline(Some(start + deadline));
+            let err = stream.read_u8().await.unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+            assert_eq!(err.to_string(), "read deadline exceeded");
+            assert_eq!(start.elapsed(), deadline);
+        }
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn absolute_deadline_expiry_is_sticky_for_both_directions() {
+        for writing in [false, true] {
+            let (client, server) = memory_pair().await;
+            let mut stream = client.dial_stream().unwrap();
+            stream.write_all(b"request").await.unwrap();
+            let mut peer = server.accept_stream().await.unwrap();
+            stream
+                .stream_state
+                .lock()
+                .unwrap()
+                .read_buf
+                .extend_from_slice(b"buffered");
+            let now = tokio::time::Instant::now();
+            let expected = if writing {
+                stream.set_write_deadline(Some(now));
+                "write deadline exceeded"
+            } else {
+                stream.set_read_deadline(Some(now));
+                "read deadline exceeded"
+            };
+            let err = if writing {
+                stream.write(b"expired").await.unwrap_err()
+            } else {
+                stream.read_u8().await.unwrap_err()
+            };
+            assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+            assert_eq!(err.to_string(), expected);
+
+            for deadline in [None, Some(now + Duration::from_secs(60))] {
+                stream.set_deadline(deadline);
+                stream.set_read_deadline(deadline);
+                stream.set_write_deadline(deadline);
+                stream.set_idle_timeout(None);
+                for err in [
+                    stream.read_u8().await.unwrap_err(),
+                    stream.write(b"retry").await.unwrap_err(),
+                ] {
+                    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+                    assert_eq!(err.to_string(), expected);
+                }
+            }
+            assert_eq!(
+                &stream.stream_state.lock().unwrap().read_buf[..],
+                b"buffered"
+            );
+
+            peer.close().unwrap();
+            let mut barrier = server.dial_stream().unwrap();
+            barrier.write_all(b"barrier").await.unwrap();
+            let _barrier_peer = client.accept_stream().await.unwrap();
+            assert_eq!(stream.read_u8().await.unwrap_err().to_string(), expected);
+            assert_eq!(
+                stream.write(b"retry").await.unwrap_err().to_string(),
+                expected
+            );
+            client.close().await.unwrap();
+            assert_eq!(stream.read_u8().await.unwrap_err().to_string(), expected);
+            assert_eq!(
+                stream.write(b"retry").await.unwrap_err().to_string(),
+                expected
+            );
+            server.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn absolute_deadline_expiry_wakes_both_split_halves() {
+        for writing in [false, true] {
+            let (_mux, _peer, mut stream) = backpressured_writer().await;
+            let start = tokio::time::Instant::now();
+            let limit = Duration::from_secs(1);
+            let expected = if writing {
+                stream.set_write_deadline(Some(start + limit));
+                "write deadline exceeded"
+            } else {
+                stream.set_read_deadline(Some(start + limit));
+                "read deadline exceeded"
+            };
+            let (mut reader, mut writer) = tokio::io::split(stream);
+            let read = tokio::spawn(async move { reader.read_u8().await });
+            let write = tokio::spawn(async move { writer.write_all(b"blocked").await });
+            let (read, write) = timeout(limit * 2, async { tokio::join!(read, write) })
+                .await
+                .unwrap();
+            for err in [read.unwrap().unwrap_err(), write.unwrap().unwrap_err()] {
+                assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+                assert_eq!(err.to_string(), expected);
+            }
+            assert_eq!(start.elapsed(), limit);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oversized_idle_timeout_preserves_absolute_deadlines() {
+        use std::pin::Pin;
+        use std::task::{Context, Waker};
+        use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+        for writing in [false, true] {
+            let (mux, _peer, mut stream) = backpressured_writer().await;
+            stream.set_idle_timeout(Some(Duration::MAX));
+            let mut cx = Context::from_waker(Waker::noop());
+            let mut bytes = [0];
+            let mut buf = ReadBuf::new(&mut bytes);
+            if writing {
+                assert!(
+                    Pin::new(&mut stream)
+                        .poll_write(&mut cx, b"pending")
+                        .is_pending()
+                );
+            } else {
+                assert!(
+                    Pin::new(&mut stream)
+                        .poll_read(&mut cx, &mut buf)
+                        .is_pending()
+                );
+            }
+            assert!(stream.stream_state.lock().unwrap().err.is_none());
+            let start = tokio::time::Instant::now();
+            let limit = Duration::from_secs(3);
+            stream.set_deadline(Some(start + limit));
+            let err = if writing {
+                stream.write(b"pending").await.unwrap_err()
+            } else {
+                stream.read_u8().await.unwrap_err()
+            };
+            assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+            assert_eq!(
+                err.to_string(),
+                if writing {
+                    "write deadline exceeded"
+                } else {
+                    "read deadline exceeded"
+                }
+            );
+            assert_eq!(start.elapsed(), limit);
+            assert!(stream.stream_state.lock().unwrap().err.is_some());
+            drop(stream);
+            drop(mux);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn write_idle_timeout_takes_precedence_over_buffered_reads() {
+        let (_mux, _peer, mut stream) = backpressured_writer().await;
+        stream
+            .stream_state
+            .lock()
+            .unwrap()
+            .read_buf
+            .extend_from_slice(b"buffered");
+        let limit = Duration::from_secs(4);
+        stream.set_idle_timeout(Some(limit));
+        assert_idle(&stream.write(b"pending").await.unwrap_err());
+        assert_idle(&stream.read_u8().await.unwrap_err());
+        assert_eq!(
+            &stream.stream_state.lock().unwrap().read_buf[..],
+            b"buffered"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_wakes_both_split_halves() {
+        let (conn, _peer) = tokio::io::duplex(128);
+        let mux = super::new_mux(
+            conn,
+            crate::handshake::HandshakeResult {
+                key: [0; 32],
+                our_nonce: [0; 12],
+                their_nonce: [0; 12],
+            },
+            crate::ConnSettings::default(),
+            0,
+        );
+        let mut stream = mux.dial_stream().unwrap();
+        let limit = Duration::from_secs(4);
+        stream.set_idle_timeout(Some(limit));
+        stream.write_all(b"request").await.unwrap();
+        let (mut reader, mut writer) = tokio::io::split(stream);
+        let data = vec![42; 1024 * 1024];
+        let start = tokio::time::Instant::now();
+        let (read, write) = tokio::join!(reader.read_u8(), writer.write_all(&data));
+        assert_idle(&read.unwrap_err());
+        assert_idle(&write.unwrap_err());
+        assert_eq!(start.elapsed(), limit);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_survives_peer_stream_close() {
+        let (client, server) = memory_pair().await;
+        let mut stream = client.dial_stream().unwrap();
+        stream.write_all(b"request").await.unwrap();
+        let mut peer = server.accept_stream().await.unwrap();
+        let limit = Duration::from_secs(4);
+        stream.set_idle_timeout(Some(limit));
+        assert_idle(&stream.read_u8().await.unwrap_err());
+
+        peer.close().unwrap();
+        let mut barrier = server.dial_stream().unwrap();
+        barrier.write_all(b"barrier").await.unwrap();
+        let _barrier_peer = client.accept_stream().await.unwrap();
+        for _ in 0..2 {
+            assert_idle(&stream.read_u8().await.unwrap_err());
+            assert_idle(&stream.write(b"retry").await.unwrap_err());
+        }
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_survives_connection_close() {
+        for close_peer in [false, true] {
+            let (client, server) = memory_pair().await;
+            let mut stream = client.dial_stream().unwrap();
+            stream.write_all(b"request").await.unwrap();
+            let _peer = server.accept_stream().await.unwrap();
+            let limit = Duration::from_secs(4);
+            stream.set_idle_timeout(Some(limit));
+            assert_idle(&stream.read_u8().await.unwrap_err());
+
+            let remaining = if close_peer {
+                server.close().await.unwrap();
+                assert!(matches!(
+                    client.accept_stream().await,
+                    Err(MuxError::PeerClosedConn)
+                ));
+                client
+            } else {
+                client.close().await.unwrap();
+                server
+            };
+            for _ in 0..2 {
+                assert_idle(&stream.read_u8().await.unwrap_err());
+                assert_idle(&stream.write(b"retry").await.unwrap_err());
+            }
+            remaining.close().await.unwrap();
+        }
     }
 
     #[tokio::test]

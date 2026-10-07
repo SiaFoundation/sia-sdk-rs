@@ -474,35 +474,6 @@ pub struct PinnedSector {
     pub host_key: String,
 }
 
-/// A PinnedSlab represents a slab that has been pinned to the indexer.
-#[derive(uniffi::Record)]
-pub struct PinnedSlab {
-    pub version: u8,
-    pub id: String,
-    pub encryption_key: Vec<u8>,
-    pub min_shards: u8,
-    pub sectors: Vec<PinnedSector>,
-}
-
-impl From<sia_storage::PinnedSlab> for PinnedSlab {
-    fn from(s: sia_storage::PinnedSlab) -> Self {
-        Self {
-            version: s.version as u8,
-            id: s.id.to_string(),
-            encryption_key: s.encryption_key.as_ref().to_vec(),
-            min_shards: s.min_shards,
-            sectors: s
-                .sectors
-                .into_iter()
-                .map(|sec| PinnedSector {
-                    root: sec.root.to_string(),
-                    host_key: sec.host_key.to_string(),
-                })
-                .collect(),
-        }
-    }
-}
-
 /// A Slab represents a contiguous erasure-coded segment of a file stored on the Sia network.
 #[derive(uniffi::Record)]
 pub struct Slab {
@@ -1190,17 +1161,6 @@ impl Sdk {
             Ok(PinnedObject {
                 inner: Arc::new(Mutex::new(obj)),
             })
-        })
-        .await?
-    }
-
-    /// Returns metadata about a slab stored in the indexer.
-    pub async fn slab(&self, slab_id: String) -> Result<PinnedSlab, Error> {
-        let slab_id = Hash256::from_str(slab_id.as_str())?;
-        let sdk = self.inner.clone();
-        spawn(async move {
-            let slab = sdk.slab(&slab_id).await?;
-            Ok(slab.into())
         })
         .await?
     }

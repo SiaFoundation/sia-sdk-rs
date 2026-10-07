@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 
 use base64::engine::general_purpose::URL_SAFE;
@@ -18,9 +18,7 @@ use crate::hosts::Host;
 use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
 use crate::slabs::Slab;
 use crate::time::Duration;
-use crate::{
-    Account, App, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, PinnedSlab, SealedObject,
-};
+use crate::{Account, App, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject};
 
 /// The moment, truncated to microseconds.
 ///
@@ -60,14 +58,24 @@ struct StoredSharingKey {
     attached: HashMap<Hash256, SealedObject>,
 }
 
+/// What the mock keeps per pinned slab. Only the shard counts are read back,
+/// for the account figures.
+#[derive(Debug)]
+struct StoredSlab {
+    min_shards: u8,
+    sectors: usize,
+}
+
 #[derive(Debug, Default)]
 struct State {
     hosts: Vec<Host>,
     objects: HashMap<Hash256, StoredObject>,
-    slabs: HashMap<Hash256, PinnedSlab>,
+    slabs: HashMap<Hash256, StoredSlab>,
     user_secret: Hash256,
     pin_slabs_calls: usize,
-    pin_slabs_failures: usize,
+    #[cfg(test)]
+    pin_slabs_requests: Vec<Vec<SlabPinParams>>,
+    pin_slabs_errors: VecDeque<Error>,
     sharing_keys: HashMap<PublicKey, StoredSharingKey>,
 }
 
@@ -80,6 +88,15 @@ struct State {
 #[derive(Clone, Default)]
 pub(crate) struct Client {
     state: Arc<RwLock<State>>,
+}
+
+#[cfg(test)]
+impl Client {
+    /// Returns the slab pin parameters sent in each call to [`Client::pin_slabs`],
+    /// including the calls made to fail.
+    pub(crate) fn pin_slabs_requests(&self) -> Vec<Vec<SlabPinParams>> {
+        self.state.read().unwrap().pin_slabs_requests.clone()
+    }
 }
 
 impl Client {
@@ -100,7 +117,17 @@ impl Client {
     /// Makes the next `failures` calls to [`Client::pin_slabs`] fail with an
     /// [`Error::Api`] before they resume succeeding.
     pub(crate) fn set_pin_slabs_failures(&self, failures: usize) {
-        self.state.write().unwrap().pin_slabs_failures = failures;
+        self.set_pin_slabs_errors((0..failures).map(|_| {
+            Error::Api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "temporary pin failure".to_string(),
+            )
+        }));
+    }
+
+    /// Returns the given errors on successive pin requests, then succeeds.
+    pub(crate) fn set_pin_slabs_errors(&self, errors: impl IntoIterator<Item = Error>) {
+        self.state.write().unwrap().pin_slabs_errors = errors.into_iter().collect();
     }
 
     /// Returns the number of times [`Client::pin_slabs`] has been called,
@@ -264,26 +291,6 @@ impl Client {
         Ok(())
     }
 
-    pub(crate) async fn slab(
-        &self,
-        _: &PrivateKey,
-        slab_id: &Hash256,
-    ) -> Result<PinnedSlab, Error> {
-        self.state
-            .read()
-            .unwrap()
-            .slabs
-            .get(slab_id)
-            .map(|s| PinnedSlab {
-                version: s.version,
-                id: s.id,
-                encryption_key: s.encryption_key.clone(),
-                min_shards: s.min_shards,
-                sectors: s.sectors.clone(),
-            })
-            .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("slab {slab_id} not found")))
-    }
-
     pub(crate) async fn pin_slabs(
         &self,
         _: &PrivateKey,
@@ -291,25 +298,21 @@ impl Client {
     ) -> Result<Vec<Hash256>, Error> {
         let mut state = self.state.write().unwrap();
         state.pin_slabs_calls += 1;
-        if state.pin_slabs_failures > 0 {
-            state.pin_slabs_failures -= 1;
-            return Err(Error::Api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "temporary pin failure".to_string(),
-            ));
+        #[cfg(test)]
+        state.pin_slabs_requests.push(slabs.to_vec());
+        if let Some(error) = state.pin_slabs_errors.pop_front() {
+            return Err(error);
         }
         Ok(slabs
             .iter()
             .map(|params| {
-                let id = slab_id(params);
+                let slab = Slab::from(params);
+                let id = slab.digest();
                 state.slabs.insert(
                     id,
-                    PinnedSlab {
-                        version: params.version,
-                        id,
-                        encryption_key: params.encryption_key.clone(),
-                        min_shards: params.min_shards,
-                        sectors: params.sectors.clone(),
+                    StoredSlab {
+                        min_shards: slab.min_shards,
+                        sectors: slab.sectors.len(),
                     },
                 );
                 id
@@ -340,7 +343,7 @@ impl Client {
         let pinned_size: u64 = state
             .slabs
             .values()
-            .map(|s| (s.sectors.len() * SECTOR_SIZE) as u64)
+            .map(|s| (s.sectors * SECTOR_SIZE) as u64)
             .sum();
         let pinned_data: u64 = state
             .slabs
@@ -729,20 +732,6 @@ fn key_not_found(public_key: &PublicKey) -> Error {
         StatusCode::NOT_FOUND,
         format!("sharing key {public_key} not found"),
     )
-}
-
-/// Derives a slab's id the same way the indexer does, from the fields covered
-/// by [`Slab::digest`]. `offset` and `length` are outside the digest.
-fn slab_id(params: &SlabPinParams) -> Hash256 {
-    Slab {
-        version: params.version,
-        encryption_key: params.encryption_key.clone(),
-        min_shards: params.min_shards,
-        sectors: params.sectors.clone(),
-        offset: 0,
-        length: 0,
-    }
-    .digest()
 }
 
 impl StoredSharingKey {
