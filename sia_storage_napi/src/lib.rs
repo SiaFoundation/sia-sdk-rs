@@ -637,10 +637,8 @@ impl PackedUpload {
     /// packed size. Adding objects larger than this will start a new slab.
     #[napi]
     pub fn remaining(&self) -> BigInt {
-        BigInt::from(remaining_in_slab(
-            self.length.load(Ordering::Acquire),
-            self.optimal_data_size,
-        ))
+        let length = self.length.load(Ordering::Acquire);
+        BigInt::from(self.optimal_data_size - (length % self.optimal_data_size))
     }
 
     /// Returns the number of bytes added so far.
@@ -1051,29 +1049,32 @@ pub fn encoded_size(size: BigInt, data_shards: u8, parity_shards: u8) -> Result<
     Ok(sia_storage::encoded_size(size, data_shards, parity_shards).into())
 }
 
-/// Bytes left in the current slab, derived from the cumulative length because
-/// reading the upload's own figure needs a lock an in-flight add holds. A slab
-/// rolls over only on an exact multiple, so a full one reads as a fresh one.
-fn remaining_in_slab(length: u64, optimal_data_size: u64) -> u64 {
-    optimal_data_size - (length % optimal_data_size)
-}
-
 #[cfg(test)]
 mod packed_remaining_tests {
-    use super::remaining_in_slab;
+    use super::*;
+
+    fn upload(length: u64, optimal_data_size: u64) -> PackedUpload {
+        PackedUpload {
+            inner: Arc::new(tokio::sync::Mutex::new(None)),
+            cancel: CancellationToken::new(),
+            optimal_data_size,
+            length: Arc::new(AtomicU64::new(length)),
+        }
+    }
+
+    fn remaining(length: u64, optimal_data_size: u64) -> u64 {
+        upload(length, optimal_data_size).remaining().get_u64().1
+    }
 
     #[test]
     fn a_full_slab_reports_a_whole_slab_free() {
         let optimal = 40 << 20;
-        assert_eq!(remaining_in_slab(0, optimal), optimal, "nothing added yet");
-        assert_eq!(remaining_in_slab(optimal / 2, optimal), optimal / 2);
+        assert_eq!(remaining(0, optimal), optimal, "nothing added yet");
+        assert_eq!(remaining(optimal / 2, optimal), optimal / 2);
         // The slab rolled over, so the next one is empty. Reporting 0 here
         // would tell a caller every further add starts a new slab.
-        assert_eq!(remaining_in_slab(optimal, optimal), optimal);
-        assert_eq!(remaining_in_slab(2 * optimal, optimal), optimal);
-        assert_eq!(
-            remaining_in_slab(optimal + optimal / 4, optimal),
-            optimal * 3 / 4
-        );
+        assert_eq!(remaining(optimal, optimal), optimal);
+        assert_eq!(remaining(2 * optimal, optimal), optimal);
+        assert_eq!(remaining(optimal + optimal / 4, optimal), optimal * 3 / 4);
     }
 }
