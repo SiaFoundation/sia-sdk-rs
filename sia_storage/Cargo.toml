@@ -17,6 +17,7 @@ bench = false
 [dependencies]
 serde = "1.0.229"
 serde_json = "1.0.151"
+ciborium = "0.2.2"
 thiserror = "2.0.19"
 sia_core = { path = "../sia_core", version = "0.5.0" }
 rand = "0.10.2"

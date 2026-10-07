@@ -15,10 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::DecryptError;
 use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
-use crate::slabs::{Sector, SlabVersion};
-use crate::{
-    Account, AppMetadata, HostQuery, Object, ObjectsCursor, PinnedSlab, SealedObject, Slab,
-};
+use crate::slabs::{Base64OrBytes, Sector, SlabVersion};
+use crate::{Account, AppMetadata, HostQuery, Object, ObjectsCursor, SealedObject, Slab};
 use sia_core::rhp4::AccountToken;
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;
@@ -37,6 +35,7 @@ const QUERY_PARAM_SIGNATURE: &str = "ss";
 const SHARE_URL_SCHEME: &str = "sia";
 
 const ERROR_OBJECT_UNPINNED_SLAB: &str = "object contains unpinned slab";
+const ERROR_SLAB_UPLOAD_TOO_OLD: &str = "slab upload is too old";
 
 #[cfg(not(test))]
 const SHARE_URL_FETCH_SCHEME: &str = "https";
@@ -61,6 +60,10 @@ pub enum Error {
     /// A JSON serialization or deserialization error.
     #[error("serde error: {0}")]
     Serde(#[from] serde_json::Error),
+
+    /// A CBOR deserialization error.
+    #[error("cbor error: {0}")]
+    Cbor(#[from] ciborium::de::Error<std::io::Error>),
 
     /// A URL could not be parsed.
     #[error("url parse error: {0}")]
@@ -93,11 +96,20 @@ pub enum PinObjectError {
 }
 
 impl Error {
+    /// Returns whether the indexer rejected the slab as too old to pin, so it
+    /// must be uploaded again.
+    pub(crate) fn is_slab_upload_too_old(&self) -> bool {
+        matches!(self, Self::Api(StatusCode::BAD_REQUEST, message) if message.contains(ERROR_SLAB_UPLOAD_TOO_OLD))
+    }
+
     /// Returns whether repeating the request may succeed.
     pub(crate) fn is_retryable(&self) -> bool {
         match self {
-            Self::Api(StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED, _) => false,
-            Self::Api(..) | Self::Reqwest(_) => true,
+            Self::Api(
+                StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED,
+                _,
+            ) => false,
+            Self::Api(..) | Self::Reqwest(_) | Self::Serde(_) | Self::Cbor(_) => true,
             _ => false,
         }
     }
@@ -127,6 +139,7 @@ pub(crate) struct RegisterAppResponse {
     pub status_url: String,
     #[serde(rename = "registerURL")]
     pub register_url: String,
+    #[serde(with = "sia_core::types::null_as_zero_time")]
     pub expiration: DateTime<Utc>,
 }
 
@@ -136,11 +149,45 @@ pub(crate) struct SlabPinParams {
     pub version: SlabVersion,
     pub encryption_key: EncryptionKey,
     pub min_shards: u8,
-    pub sectors: Vec<Sector>,
+    pub sectors: Vec<SectorPinParams>,
+}
+
+/// Parameters for pinning a sector as part of a slab pin request.
+/// Fresh uploads include the write attempt's start time; re-pinning an existing
+/// slab omits it. The upload time is not part of the pinned slab or its ID.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SectorPinParams {
+    #[serde(flatten)]
+    pub sector: Sector,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uploaded_at: Option<DateTime<Utc>>,
 }
 
 /// Maximum number of slabs to send in a single [`Client::pin_slabs`] request.
 pub(crate) const SLAB_PIN_BATCH_SIZE: usize = 50;
+
+impl SlabPinParams {
+    /// Returns the slab ID, excluding sector upload times.
+    pub(crate) fn digest(&self) -> Hash256 {
+        Slab::from(self).digest()
+    }
+}
+
+/// Converts pin parameters to a slab with zero offset and length, since pin
+/// requests do not include the slab's position within an object.
+impl From<&SlabPinParams> for Slab {
+    fn from(params: &SlabPinParams) -> Self {
+        Self {
+            version: params.version,
+            encryption_key: params.encryption_key.clone(),
+            min_shards: params.min_shards,
+            sectors: params.sectors.iter().map(|s| s.sector.clone()).collect(),
+            offset: 0,
+            length: 0,
+        }
+    }
+}
 
 impl From<&Slab> for SlabPinParams {
     fn from(slab: &Slab) -> Self {
@@ -148,7 +195,15 @@ impl From<&Slab> for SlabPinParams {
             version: slab.version,
             encryption_key: slab.encryption_key.clone(),
             min_shards: slab.min_shards,
-            sectors: slab.sectors.clone(),
+            sectors: slab
+                .sectors
+                .iter()
+                .cloned()
+                .map(|sector| SectorPinParams {
+                    sector,
+                    uploaded_at: None,
+                })
+                .collect(),
         }
     }
 }
@@ -161,6 +216,7 @@ pub(crate) struct SealedObjectEvent {
     #[serde(rename = "key")]
     pub id: Hash256,
     pub deleted: bool,
+    #[serde(with = "sia_core::types::null_as_zero_time")]
     pub updated_at: DateTime<Utc>,
     pub object: Option<SealedObject>,
 }
@@ -169,8 +225,9 @@ pub(crate) struct SealedObjectEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SharedObjectResponse {
+    #[serde_as(as = "DefaultOnNull")]
     pub slabs: Vec<Slab>,
-    #[serde_as(as = "Option<Base64>")]
+    #[serde_as(as = "Option<Base64OrBytes>")]
     pub encrypted_metadata: Option<Vec<u8>>,
 }
 
@@ -202,8 +259,10 @@ pub struct KeyStats {
     /// When the sharing key expires, if it expires at all.
     pub expires_at: Option<DateTime<Utc>>,
     /// When the sharing key was created.
+    #[serde(with = "sia_core::types::null_as_zero_time")]
     pub created_at: DateTime<Utc>,
     /// When the sharing key was last updated.
+    #[serde(with = "sia_core::types::null_as_zero_time")]
     pub updated_at: DateTime<Utc>,
 }
 
@@ -329,6 +388,16 @@ impl Client {
     /// Creates a client that talks to a real indexer over HTTP.
     pub(crate) fn new<U: IntoUrl>(base_url: U) -> Result<Self, Error> {
         Ok(Self::Http(http::Client::new(base_url)?))
+    }
+
+    /// Sets whether the client requests CBOR responses. The mock backend
+    /// ignores it.
+    pub(crate) fn set_cbor(&mut self, enable: bool) {
+        match self {
+            Self::Http(c) => c.set_cbor(enable),
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(_) => {}
+        }
     }
 
     /// Creates a client backed by the in-memory mock indexer. Use
@@ -487,19 +556,6 @@ impl Client {
             Self::Http(c) => c.delete_object(app_key, key).await,
             #[cfg(any(test, feature = "mock"))]
             Self::Mock(c) => c.delete_object(app_key, key).await,
-        }
-    }
-
-    /// Retrieves a slab from the indexer by its ID.
-    pub(crate) async fn slab(
-        &self,
-        app_key: &PrivateKey,
-        slab_id: &Hash256,
-    ) -> Result<PinnedSlab, Error> {
-        match self {
-            Self::Http(c) => c.slab(app_key, slab_id).await,
-            #[cfg(any(test, feature = "mock"))]
-            Self::Mock(c) => c.slab(app_key, slab_id).await,
         }
     }
 
@@ -835,6 +891,200 @@ mod cross_target_test {
 
     use super::*;
 
+    /// Golden CBOR `Account` response, shared with the HTTP tests.
+    pub(super) const ACCOUNT_CBOR: &str = "a86a6163636f756e744b65795820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f6d6d617850696e6e6564446174611b00000100000000007072656d61696e696e6753746f726167651a40000000657265616479f56a70696e6e656444617461006a70696e6e656453697a650063617070a56269645820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f646e616d656874657374206170706b6465736372697074696f6e60676c6f676f55524c606a7365727669636555524c60686c61737455736564781e323032362d31302d30325431323a33343a35362e3132333435363738395a";
+    /// Golden CBOR `AuthConnectStatusResponse` for an approved, reconnecting
+    /// request, shared with the HTTP tests.
+    pub(super) const STATUS_CBOR: &str = "a368617070726f766564f56c7265636f6e6e656374696e67f56a757365725365637265745820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    #[sia_core_derive::cross_target_test]
+    fn test_cbor_wire_format_golden() {
+        // Generated from indexd's response types with fxamacker/cbor v2.9.3
+        // against go.sia.tech/core v0.21.7. hash = 0..32, public key = 32..64,
+        // nonce = 64..96, encryption key = 96..128, signature = 128..192.
+        fn check<T: serde::de::DeserializeOwned + PartialEq + std::fmt::Debug>(
+            name: &str,
+            cbor: &str,
+            expected: T,
+        ) {
+            let decoded: T = ciborium::from_reader(hex::decode(cbor).unwrap().as_slice())
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(decoded, expected, "{name}");
+        }
+
+        let hash = Hash256::new(std::array::from_fn(|i| i as u8));
+        let key = PublicKey::new(std::array::from_fn(|i| i as u8 + 32));
+        let nonce = Nonce(std::array::from_fn(|i| i as u8 + 64));
+        let encryption_key =
+            EncryptionKey::from(std::array::from_fn::<u8, 32, _>(|i| i as u8 + 96));
+        let sig = Signature::from(std::array::from_fn::<u8, 64, _>(|i| i as u8 + 128));
+        let now: DateTime<Utc> = "2026-10-02T12:34:56.123456789Z".parse().unwrap();
+        let sectors = vec![Sector {
+            root: hash,
+            host_key: key,
+        }];
+        let slabs = vec![Slab {
+            version: SlabVersion::V1,
+            encryption_key: encryption_key.clone(),
+            min_shards: 1,
+            sectors: sectors.clone(),
+            offset: 10,
+            length: 100,
+        }];
+        let object = SealedObject {
+            encrypted_data_key: vec![1, 2, 3],
+            slabs: slabs.clone(),
+            data_signature: sig.clone(),
+            encrypted_metadata_key: vec![4, 5, 6],
+            encrypted_metadata: vec![7, 8, 9],
+            metadata_signature: sig.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        let stats = KeyStats {
+            object_count: 3,
+            object_size: 100,
+            pinned_data: 200,
+            pinned_size: 300,
+            expires_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        check(
+            "object",
+            "a870656e63727970746564446174614b65794301020365736c61627381a66776657273696f6e016d656e6372797074696f6e4b65795820606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f696d696e5368617264730167736563746f727381a264726f6f745820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f67686f73744b65795820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f666f66667365740a666c656e67746818646d646174615369676e61747572655840808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf74656e637279707465644d657461646174614b65794304050671656e637279707465644d6574616461746143070809716d657461646174615369676e61747572655840808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf69637265617465644174781e323032362d31302d30325431323a33343a35362e3132333435363738395a69757064617465644174781e323032362d31302d30325431323a33343a35362e3132333435363738395a",
+            object.clone(),
+        );
+        check(
+            "key",
+            "ab676163636f756e745820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f697075626c69634b65795820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f656e6f6e63655820404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f6b6465736372697074696f6e6874657374206b65796b6f626a656374436f756e74036a6f626a65637453697a6518646a70696e6e65644461746118c86a70696e6e656453697a6519012c69657870697265734174781e323032362d31302d30325431323a33343a35362e3132333435363738395a69637265617465644174781e323032362d31302d30325431323a33343a35362e3132333435363738395a69757064617465644174781e323032362d31302d30325431323a33343a35362e3132333435363738395a",
+            KeyResponse {
+                public_key: key,
+                nonce,
+                account: key,
+                description: "test key".to_string(),
+                stats: KeyStats {
+                    expires_at: Some(now),
+                    ..stats.clone()
+                },
+            },
+        );
+        check(
+            "host",
+            "a7697075626c69634b65795820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f6961646472657373657381a26870726f746f636f6c667369616d7578676164647265737375686f73742e6578616d706c652e636f6d3a393938346b636f756e747279436f6465625553686c61746974756465fb0000000000000000696c6f6e676974756465fb00000000000000006d676f6f64466f7255706c6f6164f565746f6b656ea467686f73744b65795820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f676163636f756e745820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f6a76616c6964556e74696c781e323032362d31302d30325431323a33343a35362e3132333435363738395a697369676e61747572655840808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+            SharedHost {
+                host: Host {
+                    public_key: key,
+                    addresses: vec![sia_core::types::v2::NetAddress {
+                        protocol: sia_core::types::v2::Protocol::SiaMux,
+                        address: "host.example.com:9984".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                },
+                token: AccountToken {
+                    host_key: key,
+                    account: key,
+                    valid_until: now,
+                    signature: sig.clone(),
+                },
+            },
+        );
+        check(
+            "account",
+            ACCOUNT_CBOR,
+            Account {
+                account_key: key,
+                max_pinned_data: 1 << 40,
+                remaining_storage: 1 << 30,
+                pinned_data: 0,
+                pinned_size: 0,
+                ready: true,
+                app: crate::App {
+                    id: hash,
+                    name: "test app".to_string(),
+                    description: String::new(),
+                    logo_url: Some(String::new()),
+                    service_url: Some(String::new()),
+                },
+                last_used: now,
+            },
+        );
+        check(
+            "status",
+            STATUS_CBOR,
+            AuthConnectStatusResponse {
+                approved: true,
+                reconnecting: true,
+                user_secret: Some(hash),
+            },
+        );
+        check(
+            "events",
+            "82a4636b65795820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f6764656c65746564f469757064617465644174781e323032362d31302d30325431323a33343a35362e3132333435363738395a666f626a656374a870656e63727970746564446174614b65794301020365736c61627381a66776657273696f6e016d656e6372797074696f6e4b65795820606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f696d696e5368617264730167736563746f727381a264726f6f745820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f67686f73744b65795820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f666f66667365740a666c656e67746818646d646174615369676e61747572655840808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf74656e637279707465644d657461646174614b65794304050671656e637279707465644d6574616461746143070809716d657461646174615369676e61747572655840808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf69637265617465644174781e323032362d31302d30325431323a33343a35362e3132333435363738395a69757064617465644174781e323032362d31302d30325431323a33343a35362e3132333435363738395aa3636b65795820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f6764656c65746564f569757064617465644174781e323032362d31302d30325431323a33343a35362e3132333435363738395a",
+            vec![
+                SealedObjectEvent {
+                    id: hash,
+                    deleted: false,
+                    updated_at: now,
+                    object: Some(object),
+                },
+                SealedObjectEvent {
+                    id: hash,
+                    deleted: true,
+                    updated_at: now,
+                    object: None,
+                },
+            ],
+        );
+        check(
+            "register",
+            "a46b726573706f6e736555524c782a68747470733a2f2f696e64657865722e6578616d706c652e636f6d2f617574682f636f6e6e6563742f316973746174757355524c783168747470733a2f2f696e64657865722e6578616d706c652e636f6d2f617574682f636f6e6e6563742f312f7374617475736b726567697374657255524c783368747470733a2f2f696e64657865722e6578616d706c652e636f6d2f617574682f636f6e6e6563742f312f72656769737465726a65787069726174696f6e781e323032362d31302d30325431323a33343a35362e3132333435363738395a",
+            RegisterAppResponse {
+                response_url: "https://indexer.example.com/auth/connect/1".to_string(),
+                status_url: "https://indexer.example.com/auth/connect/1/status".to_string(),
+                register_url: "https://indexer.example.com/auth/connect/1/register".to_string(),
+                expiration: now,
+            },
+        );
+        check(
+            "slab ids",
+            "815820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            vec![hash],
+        );
+        check(
+            "stats",
+            "a66b6f626a656374436f756e74036a6f626a65637453697a6518646a70696e6e65644461746118c86a70696e6e656453697a6519012c69637265617465644174781e323032362d31302d30325431323a33343a35362e3132333435363738395a69757064617465644174781e323032362d31302d30325431323a33343a35362e3132333435363738395a",
+            stats,
+        );
+        check(
+            "shared",
+            "a165736c61627381a66776657273696f6e016d656e6372797074696f6e4b65795820606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f696d696e5368617264730167736563746f727381a264726f6f745820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f67686f73744b65795820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f666f66667365740a666c656e6774681864",
+            SharedObjectResponse {
+                slabs,
+                encrypted_metadata: None,
+            },
+        );
+        // Go's zero time and nil slices encode as null.
+        check(
+            "zero",
+            "a670656e63727970746564446174614b65794301020365736c616273f66d646174615369676e6174757265584000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000716d657461646174615369676e617475726558400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000069637265617465644174f669757064617465644174f6",
+            SealedObject {
+                encrypted_data_key: vec![1, 2, 3],
+                slabs: vec![],
+                data_signature: Signature::default(),
+                encrypted_metadata_key: vec![],
+                encrypted_metadata: vec![],
+                metadata_signature: Signature::default(),
+                created_at: "0001-01-01T00:00:00Z".parse().unwrap(),
+                updated_at: "0001-01-01T00:00:00Z".parse().unwrap(),
+            },
+        );
+    }
+
     #[sia_core_derive::cross_target_test]
     fn test_register_app_sig_hash_golden() {
         const REQUEST_ID: &str = "ebddc9385dace70f9a97cebce34134ac";
@@ -1008,5 +1258,60 @@ mod cross_target_test {
             object_id(&obj.slabs).to_string(),
             "1b13d5dd22605af0573cae7fe9242c1ee83727c29798308b2b170864677b46d0"
         );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_slab_pin_params_digest() {
+        for version in [SlabVersion::V0, SlabVersion::V1] {
+            let slab = Slab {
+                version,
+                encryption_key: [1u8; 32].into(),
+                min_shards: 1,
+                sectors: vec![Sector {
+                    root: Hash256::new([2u8; 32]),
+                    host_key: PublicKey::new([3u8; 32]),
+                }],
+                offset: 123,
+                length: 456,
+            };
+            let mut params = SlabPinParams::from(&slab);
+            assert_eq!(params.digest(), slab.digest());
+            params.sectors[0].uploaded_at = Some(Utc::now());
+            assert_eq!(
+                params.digest(),
+                slab.digest(),
+                "upload time changed the slab ID"
+            );
+            assert_eq!(
+                Slab::from(&params),
+                Slab {
+                    offset: 0,
+                    length: 0,
+                    ..slab
+                },
+                "pin parameters changed the slab contents"
+            );
+        }
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_is_slab_upload_too_old() {
+        let message = "invalid slab pin params: slab 0: sector 3 invalid: slab upload is too old (max 48h0m0s)";
+        let stale = Error::Api(StatusCode::BAD_REQUEST, message.into());
+        assert!(stale.is_slab_upload_too_old());
+        assert!(!stale.is_retryable());
+
+        for error in [
+            Error::Api(StatusCode::INTERNAL_SERVER_ERROR, message.into()),
+            Error::Api(StatusCode::UNAUTHORIZED, message.into()),
+            Error::Custom(message.into()),
+            Error::Api(
+                StatusCode::BAD_REQUEST,
+                "slab upload time is in the future (max 5m0s ahead)".into(),
+            ),
+            Error::Api(StatusCode::BAD_REQUEST, "invalid slab pin params".into()),
+        ] {
+            assert!(!error.is_slab_upload_too_old(), "{error}");
+        }
     }
 }

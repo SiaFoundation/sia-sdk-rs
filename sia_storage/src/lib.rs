@@ -97,9 +97,7 @@ pub use builder::{
 pub use download::{Download, DownloadError};
 pub use encryption::EncryptionKey;
 pub use hosts::{QueueError, RPCError};
-pub use slabs::{
-    Object, ObjectEvent, PinnedSlab, SealedObject, SealedObjectError, Sector, Slab, SlabVersion,
-};
+pub use slabs::{Object, ObjectEvent, SealedObject, SealedObjectError, Sector, Slab, SlabVersion};
 pub use upload::{PackedUpload, UploadError};
 
 /// A unique identifier for an indexer application. It should be constant for an application.
@@ -290,6 +288,7 @@ pub struct Account {
     /// The application registered to this account.
     pub app: App,
     /// The last time the account was used.
+    #[serde(with = "sia_core::types::null_as_zero_time")]
     pub last_used: DateTime<Utc>,
 }
 
