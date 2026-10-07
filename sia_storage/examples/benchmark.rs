@@ -79,6 +79,10 @@ enum Command {
         /// Print a per-host breakdown of shards and throughput after the run.
         #[arg(long)]
         host_summary: bool,
+
+        /// Number of times to run the benchmark. Prints min/max/avg when > 1.
+        #[arg(short = 'n', long, default_value_t = 1)]
+        runs: usize,
     },
     /// List configured profiles.
     Profiles,
@@ -457,13 +461,64 @@ async fn warmup(
     Ok(())
 }
 
+struct RunResult {
+    size: u64,
+    encoded_size: u64,
+    upload: Duration,
+    download: Duration,
+    ttfb: Duration,
+    max_latency: Duration,
+}
+
+impl RunResult {
+    fn upload_rate(&self) -> f64 {
+        self.size as f64 * 8.0 / self.upload.as_secs_f64()
+    }
+
+    fn upload_encoded_rate(&self) -> f64 {
+        self.encoded_size as f64 * 8.0 / self.upload.as_secs_f64()
+    }
+
+    fn download_rate(&self) -> f64 {
+        self.size as f64 * 8.0 / self.download.as_secs_f64()
+    }
+}
+
+fn print_summary(results: &[RunResult]) {
+    let stat = |label: &str, f: &dyn Fn(&RunResult) -> f64, fmt: &dyn Fn(f64) -> String| {
+        let values: Vec<f64> = results.iter().map(f).collect();
+        let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let avg = values.iter().sum::<f64>() / values.len() as f64;
+        println!(
+            "  {label:<15}min {:>12}  max {:>12}  avg {:>12}",
+            fmt(min),
+            fmt(max),
+            fmt(avg)
+        );
+    };
+    let secs = |v: f64| format!("{:?}", Duration::from_secs_f64(v));
+    let rate = |v: f64| format_bitrate(v as u64 / 8, Duration::from_secs(1));
+
+    println!("\nSummary ({} runs)", results.len());
+    println!("Upload");
+    stat("Elapsed:", &|r| r.upload.as_secs_f64(), &secs);
+    stat("Rate:", &|r| r.upload_rate(), &rate);
+    stat("Encoded Rate:", &|r| r.upload_encoded_rate(), &rate);
+    println!("Download");
+    stat("Elapsed:", &|r| r.download.as_secs_f64(), &secs);
+    stat("TTFB:", &|r| r.ttfb.as_secs_f64(), &secs);
+    stat("Rate:", &|r| r.download_rate(), &rate);
+    stat("Max latency:", &|r| r.max_latency.as_secs_f64(), &secs);
+}
+
 async fn run_benchmark(
-    sdk: Sdk,
+    sdk: &Sdk,
     size: usize,
     mut upload_options: UploadOptions,
     mut download_options: DownloadOptions,
     host_summary: bool,
-) {
+) -> RunResult {
     let seed: u64 = rand::random();
     let reader = SeededReader::new(seed, size);
 
@@ -554,6 +609,15 @@ async fn run_benchmark(
         print_host_summary("Upload", &upload_hosts);
         print_host_summary("Download", &download_hosts);
     }
+
+    RunResult {
+        size: obj.size(),
+        encoded_size: obj.encoded_size(),
+        upload: upload_duration,
+        download: download_duration,
+        ttfb: verifier.ttfb().unwrap_or_default(),
+        max_latency: verifier.gap_max().unwrap_or_default(),
+    }
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -578,6 +642,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             upload_max_buffered_slabs,
             download_max_buffered_chunks,
             host_summary,
+            runs,
         } => {
             let sdk = connect(&cli.profile).await?;
 
@@ -605,7 +670,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .await?;
             }
 
-            run_benchmark(sdk, size, upload_options, download_options, host_summary).await;
+            let mut results = Vec::with_capacity(runs);
+            for i in 1..=runs {
+                if runs > 1 {
+                    println!("\n=== run {i}/{runs} ===");
+                }
+                results.push(
+                    run_benchmark(
+                        &sdk,
+                        size,
+                        upload_options.clone(),
+                        download_options.clone(),
+                        host_summary,
+                    )
+                    .await,
+                );
+            }
+            if runs > 1 {
+                print_summary(&results);
+            }
             Ok(())
         }
         Command::Profiles => list_profiles().await,
