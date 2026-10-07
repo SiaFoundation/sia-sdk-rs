@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
@@ -23,6 +24,9 @@ pub struct Client {
     read_delays: Arc<RwLock<HashMap<Hash256, Duration>>>,
     initial_read_delay: Arc<RwLock<Option<Duration>>>,
     read_failures: Arc<RwLock<HashMap<PublicKey, usize>>>,
+    price_delay: Arc<RwLock<Duration>>,
+    price_requests: Arc<AtomicUsize>,
+    price_failures: Arc<AtomicUsize>,
 }
 
 impl Default for Client {
@@ -40,6 +44,9 @@ impl Client {
             read_delays: Arc::new(RwLock::new(HashMap::new())),
             initial_read_delay: Arc::new(RwLock::new(None)),
             read_failures: Arc::new(RwLock::new(HashMap::new())),
+            price_delay: Arc::new(RwLock::new(Duration::ZERO)),
+            price_requests: Arc::new(AtomicUsize::new(0)),
+            price_failures: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -104,6 +111,22 @@ impl Client {
     pub fn set_initial_read_delay(&self, delay: Duration) {
         *self.initial_read_delay.write().unwrap() = Some(delay);
     }
+
+    /// Delays every `host_prices` call by `delay`.
+    pub fn set_price_delay(&self, delay: Duration) {
+        *self.price_delay.write().unwrap() = delay;
+    }
+
+    /// Number of `host_prices` calls served so far.
+    pub fn price_requests(&self) -> usize {
+        self.price_requests.load(Ordering::Relaxed)
+    }
+
+    /// Fails the next `count` `host_prices` calls, after which prices are
+    /// served normally.
+    pub fn set_price_failures(&self, count: usize) {
+        self.price_failures.store(count, Ordering::Relaxed);
+    }
 }
 
 impl Transport for Client {
@@ -113,6 +136,18 @@ impl Transport for Client {
         _: Duration,
     ) -> Result<(HostPrices, Duration), RHP4Error> {
         let start = Instant::now();
+        self.price_requests.fetch_add(1, Ordering::Relaxed);
+        let delay = *self.price_delay.read().unwrap();
+        if !delay.is_zero() {
+            sleep(delay).await;
+        }
+        if self
+            .price_failures
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(RHP4Error::Transport("price fetch failed".to_string()));
+        }
         let prices = HostPrices {
             contract_price: Currency::zero(),
             collateral: Currency::zero(),
