@@ -17,6 +17,17 @@ pub enum Error {
     Custom(String),
 }
 
+impl Clone for Error {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Io(e) => Self::Io(io::Error::new(e.kind(), e.to_string())),
+            Self::InvalidLength(n) => Self::InvalidLength(*n),
+            Self::InvalidValue(s) => Self::InvalidValue(s.clone()),
+            Self::Custom(s) => Self::Custom(s.clone()),
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub use sia_core_derive::{SiaDecode, SiaEncode};

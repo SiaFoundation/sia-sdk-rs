@@ -153,6 +153,19 @@ pub enum Error {
     Transport(String),
 }
 
+impl Clone for Error {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Io(e) => Self::Io(std::io::Error::new(e.kind(), e.to_string())),
+            Self::Encoding(e) => Self::Encoding(e.clone()),
+            Self::Rpc(e) => Self::Rpc(e.clone()),
+            Self::InvalidPrices => Self::InvalidPrices,
+            Self::InvalidSignature => Self::InvalidSignature,
+            Self::Transport(s) => Self::Transport(s.clone()),
+        }
+    }
+}
+
 impl Error {
     /// Whether the RPC's stream went idle. Both transports report a stalled
     /// stream as an I/O error of kind [`std::io::ErrorKind::TimedOut`]. It

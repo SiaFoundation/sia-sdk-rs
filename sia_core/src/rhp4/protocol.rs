@@ -448,7 +448,7 @@ struct RPCFundAccountsResponse {
 }
 
 /// RPCError is the error type returned by the RPC server.
-#[derive(Debug, PartialEq, SiaEncode, SiaDecode, AsyncSiaDecode)]
+#[derive(Debug, Clone, PartialEq, SiaEncode, SiaDecode, AsyncSiaDecode)]
 pub struct RPCError {
     pub code: u8,
     pub description: String,
@@ -492,6 +492,23 @@ pub enum Error {
 
     #[error("root of uploaded data doesn't match root returned by host")]
     SectorRootMismatch,
+}
+
+impl Clone for Error {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Io(e) => Self::Io(std::io::Error::new(e.kind(), e.to_string())),
+            Self::Encoding(e) => Self::Encoding(e.clone()),
+            Self::RPC(e) => Self::RPC(e.clone()),
+            Self::NotEnoughHostFunds => Self::NotEnoughHostFunds,
+            Self::InvalidResponse(s) => Self::InvalidResponse(s.clone()),
+            Self::InvalidSignature => Self::InvalidSignature,
+            Self::ExpectedContractTransaction => Self::ExpectedContractTransaction,
+            Self::ExpectedTransactionSet => Self::ExpectedTransactionSet,
+            Self::ProofValidation(e) => Self::ProofValidation(e.clone()),
+            Self::SectorRootMismatch => Self::SectorRootMismatch,
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Clone, Copy, Serialize, Deserialize)]
