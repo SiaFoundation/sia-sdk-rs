@@ -1216,7 +1216,7 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(result.sector.host_key, slow);
-        let mut ranked = [slow, control];
+        let mut ranked = vec![slow, control];
         hosts_manager.prioritize(&mut ranked, |key| key);
         assert_eq!(
             ranked[0], slow,
