@@ -267,14 +267,16 @@ extern "C"
 	// Any status other than SIA_OK ends the add, SIA_ERR_CANCELLED included.
 	// Part of the buffer may already be in the stream and there is no count to
 	// resume from, unlike sia_upload_write. Call add_abort to discard the
-	// object and add it again from the start.
+	// object and add it again from the start. The partial object is never
+	// registered, and add_finish refuses with SIA_ERR_INVALID_STATE rather
+	// than reporting a short object as a whole one.
 	int32_t sia_packed_upload_add_write(sia_packed_upload_t *up, const uint8_t *data, size_t len, sia_cancel_t *cancel, char **err);
 	int32_t sia_packed_upload_add_finish(sia_packed_upload_t *up, sia_cancel_t *cancel, uint64_t *written, char **err);
-	// Abandons the add in progress and discards the object it would have
-	// produced, for a caller whose source failed part way. The bytes already
-	// written stay in the packed stream and are never referenced, so the slab
-	// still pays for them, but every other object's offsets are unaffected.
-	// Returns SIA_ERR_INVALID_STATE when no add is in progress.
+	// Abandons the add in progress, for a caller whose source failed part
+	// way, so it produces no object. The bytes already written stay in the
+	// packed stream and are never referenced, so the slab still pays for
+	// them, but every other object's offsets are unaffected. Returns
+	// SIA_ERR_INVALID_STATE when no add is in progress.
 	int32_t sia_packed_upload_add_abort(sia_packed_upload_t *up, sia_cancel_t *cancel, char **err);
 	// *out_objs receives a heap array of owned object handles. Free the array
 	// (not the objects) with sia_object_array_free.

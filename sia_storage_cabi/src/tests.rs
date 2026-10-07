@@ -3350,6 +3350,7 @@ fn abort_reports_a_panicked_add() {
         add_task: Some(task),
         remaining: AtomicU64::new(0),
         length: AtomicU64::new(0),
+        torn: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }));
 
     unsafe {
@@ -3758,6 +3759,131 @@ fn a_cancelled_add_write_recovers_through_abort() {
         let listed = std::slice::from_raw_parts(objs, len);
         assert_eq!(sia_object_size(listed[0]), kept.len() as u64);
         assert_eq!(sia_object_size(listed[1]), after.len() as u64);
+
+        for o in listed {
+            sia_object_free(*o);
+        }
+        sia_object_array_free(objs, len);
+        sia_packed_upload_free(packed);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// A cancelled add_write leaves an object holding only the bytes that reached
+/// the add task. add_finish used to accept that state and record the short
+/// object as a whole one, so a caller whose write was cancelled part way
+/// through a 12 KiB source finished with a 4 KiB object and SIA_OK.
+#[test]
+fn a_cancelled_add_write_cannot_be_finished() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [113u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let mut packed = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
+            SIA_OK,
+            "sia_packed_upload_start: {}",
+            take_err(err)
+        );
+
+        // One object of 12 KiB, written in three parts, the last cancelled.
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_begin(packed, &raw mut err),
+            SIA_OK,
+            "add_begin: {}",
+            take_err(err)
+        );
+        let part = vec![7u8; 4096];
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_write(
+                packed,
+                part.as_ptr(),
+                part.len(),
+                std::ptr::null_mut(),
+                &raw mut err
+            ),
+            SIA_OK,
+            "add_write: {}",
+            take_err(err)
+        );
+
+        let cancel = sia_cancel_new();
+        sia_cancel_cancel(cancel);
+        let rest = vec![7u8; 8192];
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_write(packed, rest.as_ptr(), rest.len(), cancel, &raw mut err),
+            SIA_ERR_CANCELLED,
+            "setup: the write must report cancellation"
+        );
+        let _ = take_err(err);
+        sia_cancel_free(cancel);
+
+        // Finishing here would record the 4 KiB that arrived as the whole
+        // object, and report success for it.
+        let mut n = u64::MAX;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_finish(packed, std::ptr::null_mut(), &raw mut n, &raw mut err),
+            SIA_ERR_INVALID_STATE,
+            "finishing a torn add must be refused"
+        );
+        let message = take_err(err);
+        assert!(
+            message.contains("sia_packed_upload_add_abort"),
+            "the refusal must name the way out, got {message:?}"
+        );
+        assert_eq!(n, u64::MAX, "a refused finish must not report a count");
+
+        // Abort is the way out, and it clears the torn state.
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_abort(packed, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "add_abort: {}",
+            take_err(err)
+        );
+
+        let after = vec![8u8; 2048];
+        add_one_object(packed, &after);
+
+        let mut objs = std::ptr::null_mut();
+        let mut len = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_finalize(
+                packed,
+                std::ptr::null_mut(),
+                &raw mut objs,
+                &raw mut len,
+                &raw mut err
+            ),
+            SIA_OK,
+            "finalize: {}",
+            take_err(err)
+        );
+        assert_eq!(len, 1, "only the object added after the abort is on record");
+        let listed = std::slice::from_raw_parts(objs, len);
+        assert_eq!(sia_object_size(listed[0]), after.len() as u64);
 
         for o in listed {
             sia_object_free(*o);

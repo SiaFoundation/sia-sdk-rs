@@ -3,13 +3,41 @@ use crate::object::{sia_object_free, write_object_array};
 use sia_storage::{Object, PackedUpload, PackedUploadOptions, Sdk, UploadOptions};
 use std::ffi::c_char;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncWriteExt, DuplexStream};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWriteExt, DuplexStream, ReadBuf};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) const UPLOAD_PIPE_CAPACITY: usize = 1 << 24; // 16 MiB
+
+/// The read half an add task consumes, with a way to fail it.
+///
+/// Dropping the writer is an EOF, indistinguishable from a finished object.
+/// Setting `torn` fails the next read instead, and `add` registers nothing
+/// for a reader that failed.
+struct AddReader {
+    inner: DuplexStream,
+    torn: Arc<AtomicBool>,
+}
+
+impl AsyncRead for AddReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.torn.load(Ordering::Acquire) {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the add ended before the object was complete",
+            )));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
 
 #[repr(C)]
 pub(crate) struct UploadOptionsC {
@@ -43,6 +71,9 @@ pub(crate) struct FfiPacked {
     /// the lock would deadlock the thread driving the add.
     pub(crate) remaining: AtomicU64,
     pub(crate) length: AtomicU64,
+    /// Fails the add task's reader, for an add ended part way through the
+    /// object. Shared with the reader the task holds, and reset by add_begin.
+    pub(crate) torn: Arc<AtomicBool>,
 }
 
 /// Takes both figures while the lock is free, leaving them for a getter called
@@ -161,6 +192,7 @@ pub(crate) unsafe fn start_packed(packed: PackedUpload, out: *mut *mut FfiPacked
             add_task: None,
             remaining: AtomicU64::new(optimal_data_size),
             length: AtomicU64::new(0),
+            torn: Arc::new(AtomicBool::new(false)),
         }));
     }
     SIA_OK
@@ -464,6 +496,11 @@ pub unsafe extern "C" fn sia_packed_upload_add_begin(
             return set_err(err, SIA_ERR_INVALID_STATE, "upload already finalized");
         }
         let (writer, reader) = tokio::io::duplex(UPLOAD_PIPE_CAPACITY);
+        up.torn.store(false, Ordering::Release);
+        let reader = AddReader {
+            inner: reader,
+            torn: up.torn.clone(),
+        };
         let inner = up.inner.clone();
         let task = runtime().spawn(async move {
             let mut guard = inner.lock().await;
@@ -495,7 +532,9 @@ pub unsafe extern "C" fn sia_packed_upload_add_begin(
 ///
 /// Any status other than `SIA_OK` ends the add. Part of the buffer may already
 /// be in the stream and no count is reported, so the object has to be discarded
-/// with `sia_packed_upload_add_abort` and added again.
+/// with `sia_packed_upload_add_abort` and added again. The partial object is
+/// never registered, and `sia_packed_upload_add_finish` refuses rather than
+/// reporting it as a whole one.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_packed_upload_add_write(
     up: *mut FfiPacked,
@@ -520,7 +559,10 @@ pub unsafe extern "C" fn sia_packed_upload_add_write(
         match block_on(cancel, writer.write_all(buf)) {
             None => {
                 // Part of the buffer may be in the stream, so the add cannot
-                // carry on. The task stays for add_abort or add_finish.
+                // carry on. Failing the reader before the writer goes makes
+                // the task see an error rather than the EOF a finished object
+                // ends with, so it registers nothing.
+                up.torn.store(true, Ordering::Release);
                 drop(up.writer.take());
                 set_cancelled(err)
             }
@@ -568,6 +610,14 @@ pub unsafe extern "C" fn sia_packed_upload_add_finish(
         let Some(up) = (unsafe { up.as_mut() }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
+        if up.torn.load(Ordering::Acquire) {
+            return set_err(
+                err,
+                SIA_ERR_INVALID_STATE,
+                "the add ended part way; discard it with \
+                 sia_packed_upload_add_abort",
+            );
+        }
         drop(up.writer.take()); // signal EOF for this object
         if up.add_task.is_none() {
             return set_err(err, SIA_ERR_INVALID_STATE, "no add in progress");
@@ -601,11 +651,11 @@ pub unsafe extern "C" fn sia_packed_upload_add_finish(
 
 /// Abandons the add in progress, discarding the object it would have produced.
 ///
-/// The writer is dropped first, which the add task sees as a clean end of
-/// input, so it commits a short but otherwise valid object. That object is
-/// then removed. The bytes it contributed stay in the packed stream and are
-/// never referenced, which costs that much slab space but keeps every other
-/// object's offsets intact.
+/// The add task's reader is failed before the writer is dropped, so the task
+/// returns an error and registers no object rather than committing a short
+/// one. The bytes already written stay in the packed stream and are never
+/// referenced, which costs that much slab space but keeps every other object's
+/// offsets intact.
 ///
 /// # Safety
 /// - `up` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
@@ -626,40 +676,33 @@ pub unsafe extern "C" fn sia_packed_upload_add_abort(
         let Some(up) = (unsafe { up.as_mut() }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        drop(up.writer.take()); // signal EOF so the add task can finish
+        up.torn.store(true, Ordering::Release);
+        drop(up.writer.take()); // unblock the reader so it can observe the tear
         if up.add_task.is_none() {
             return set_err(err, SIA_ERR_INVALID_STATE, "no add in progress");
         }
 
         // Awaited by reference, so a cancelled abort leaves the task owned
-        // rather than detaching it. The writer is already gone, so the add is
-        // finishing either way; keeping the handle lets a second abort observe
-        // it and still drop the object. Aborting the task instead would leave
-        // whether the object landed unknowable.
+        // rather than detaching it. The reader is already failed, so the add
+        // is ending either way; keeping the handle lets a second abort observe
+        // it. Aborting the task instead would leave whether it had already
+        // registered the object unknowable.
         let task = up.add_task.as_mut().expect("checked above");
         let Some(joined) = block_on(cancel, task) else {
             return set_cancelled(err);
         };
         up.add_task.take();
+        up.torn.store(false, Ordering::Release);
 
-        // Only a task that succeeded pushed an object, so only then is there
-        // one to remove. A failed or cancelled add left the list untouched,
-        // which is the abort's own goal, so both are a success. A panicked one
-        // is a bug and gets a message, as add_finish gives it.
+        // The failed reader is what the task reports, and a task that failed
+        // registered no object, which is the abort's own goal. Only a panic is
+        // a bug, and it gets a message as add_finish gives it.
         match joined {
-            Ok(Ok(_)) => {}
             Err(join_err) if !join_err.is_cancelled() => {
-                return set_err(err, SIA_ERR, join_err.to_string());
+                set_err(err, SIA_ERR, join_err.to_string())
             }
-            _ => return SIA_OK,
+            _ => SIA_OK,
         }
-        let inner = up.inner.clone();
-        runtime().block_on(async move {
-            if let Some(packed) = inner.lock().await.as_mut() {
-                packed.discard_last();
-            }
-        });
-        SIA_OK
     })
 }
 
