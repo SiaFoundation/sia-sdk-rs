@@ -84,3 +84,42 @@ impl PinnedObject {
         Ok(PinnedObject(obj))
     }
 }
+
+/// An object listed without its slabs, as `SharedSdk.objectSummaries` returns
+/// it. It describes the object but cannot be downloaded. Fetch the full
+/// object with `SharedSdk.object(id)` to download it.
+#[wasm_bindgen]
+pub struct ObjectSummary(pub(crate) sia_storage::ObjectSummary);
+
+#[wasm_bindgen]
+impl ObjectSummary {
+    /// The object's ID as a hex string.
+    #[wasm_bindgen(getter)]
+    pub fn id(&self) -> String {
+        self.0.id.to_string()
+    }
+
+    /// The object's size in bytes.
+    #[wasm_bindgen(getter)]
+    pub fn size(&self) -> f64 {
+        self.0.size as f64
+    }
+
+    /// The object's decrypted metadata.
+    #[wasm_bindgen(getter)]
+    pub fn metadata(&self) -> Vec<u8> {
+        self.0.metadata.clone()
+    }
+
+    /// The creation time.
+    #[wasm_bindgen(getter, js_name = "createdAt")]
+    pub fn created_at(&self) -> js_sys::Date {
+        js_sys::Date::new(&JsValue::from(self.0.created_at.timestamp_millis() as f64))
+    }
+
+    /// The last updated time.
+    #[wasm_bindgen(getter, js_name = "updatedAt")]
+    pub fn updated_at(&self) -> js_sys::Date {
+        js_sys::Date::new(&JsValue::from(self.0.updated_at.timestamp_millis() as f64))
+    }
+}

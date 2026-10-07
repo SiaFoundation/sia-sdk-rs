@@ -16,11 +16,12 @@
 // assignability failures appear, and they point at the consumer rather than at
 // the declaration that is wrong.
 import { SharedSdk } from '../pkg/sia_storage_wasm'
-import type { AppKey, Builder, PinnedObject, Sdk } from '../pkg/sia_storage_wasm'
+import type { AppKey, Builder, ObjectSummary, PinnedObject, Sdk } from '../pkg/sia_storage_wasm'
 
 declare function useSdk(sdk: Sdk): void
 declare function useShared(sdk: SharedSdk): void
 declare function useObject(object: PinnedObject): void
+declare function useSummary(summary: ObjectSummary): void
 
 export async function check(
   builder: Builder,
@@ -41,6 +42,15 @@ export async function check(
   const objects = await shared.objects(0, 1)
   if (objects[0]) {
     useObject(objects[0])
+  }
+  const summaries = await shared.objectSummaries(0, 1)
+  if (summaries[0]) {
+    useSummary(summaries[0])
+    const size: number = summaries[0].size
+    const metadata: Uint8Array = summaries[0].metadata
+    const id: string = summaries[0].id
+    const times: Date[] = [summaries[0].createdAt, summaries[0].updatedAt]
+    void [size, metadata, id, times]
   }
   shared.free()
 }

@@ -15,7 +15,7 @@ use crate::time::{Duration, sleep};
 use crate::tokens::AccountTokenSource;
 use crate::{
     BuilderError, Download, DownloadError, DownloadOptions, Error, HostQuery, KeyStats, Object,
-    SharingKey, app_client,
+    ObjectSummary, SharingKey, app_client,
 };
 
 /// How often to replace the account tokens. Tokens are issued with a fixed
@@ -200,6 +200,26 @@ impl SharedSdk {
         let sealed = self
             .api_client
             .shared_objects(&self.sharing_key.0, offset, limit)
+            .await?;
+        sealed
+            .into_iter()
+            .map(|s| s.open_with(&self.sharing_key.0).map_err(Error::from))
+            .collect()
+    }
+
+    /// Lists a page of the objects the sharing key grants access to without
+    /// their slabs, which makes the response a small fraction of the size
+    /// of [SharedSdk::objects]. Each summary's metadata is verified and
+    /// decrypted. Omit `offset` or `limit` to use the indexer's default
+    /// paging.
+    pub async fn object_summaries(
+        &self,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<ObjectSummary>, Error> {
+        let sealed = self
+            .api_client
+            .shared_object_summaries(&self.sharing_key.0, offset, limit)
             .await?;
         sealed
             .into_iter()

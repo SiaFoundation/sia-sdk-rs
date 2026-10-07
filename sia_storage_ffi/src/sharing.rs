@@ -41,6 +41,31 @@ impl From<sia_storage::KeyStats> for KeyStats {
     }
 }
 
+/// An object listed without its slabs, as `SharedSdk::object_summaries`
+/// returns it. It cannot be downloaded. Fetch the full object with
+/// `SharedSdk::object` to download it.
+#[derive(uniffi::Record)]
+pub struct ObjectSummary {
+    pub id: String,
+    /// The object's size in bytes.
+    pub size: u64,
+    pub metadata: Vec<u8>,
+    pub created_at: SystemTime,
+    pub updated_at: SystemTime,
+}
+
+impl From<sia_storage::ObjectSummary> for ObjectSummary {
+    fn from(s: sia_storage::ObjectSummary) -> Self {
+        Self {
+            id: s.id.to_string(),
+            size: s.size,
+            metadata: s.metadata,
+            created_at: s.created_at.into(),
+            updated_at: s.updated_at.into(),
+        }
+    }
+}
+
 /// A sharing key, granting read-only access to the objects attached to it.
 ///
 /// It is just the credential; the operations that use it live on `Sdk`.
@@ -277,6 +302,23 @@ impl SharedSdk {
             Ok(PinnedObject {
                 inner: Arc::new(Mutex::new(object)),
             })
+        })
+        .await?
+    }
+
+    /// Lists a page of the objects the key grants access to without their
+    /// slabs, which is much smaller and faster than `objects`.
+    pub async fn object_summaries(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<ObjectSummary>, Error> {
+        let shared = self.inner.clone();
+        spawn(async move {
+            let summaries = shared
+                .object_summaries(Some(offset as u64), Some(limit as u64))
+                .await?;
+            Ok(summaries.into_iter().map(ObjectSummary::from).collect())
         })
         .await?
     }

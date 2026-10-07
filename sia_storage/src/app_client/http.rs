@@ -19,6 +19,7 @@ use crate::app_client::{ERROR_OBJECT_UNPINNED_SLAB, PinObjectError};
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
 use crate::sharing::{KeyRequest, SharedObjectRequest};
+use crate::slabs::SealedObjectSummary;
 use crate::time::Duration;
 use crate::{Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject};
 
@@ -470,6 +471,20 @@ impl Client {
         limit: Option<u64>,
     ) -> Result<Vec<SealedObject>, Error> {
         let query = Self::pagination_query(offset, limit);
+        self.get_list("shared/objects", sharing_key, Some(&query))
+            .await
+    }
+
+    /// Lists the objects the sharing key grants access to without their
+    /// slabs.
+    pub(crate) async fn shared_object_summaries(
+        &self,
+        sharing_key: &PrivateKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<SealedObjectSummary>, Error> {
+        let mut query = Self::pagination_query(offset, limit);
+        query.push(("includeslabs", "false".to_string()));
         self.get_list("shared/objects", sharing_key, Some(&query))
             .await
     }
@@ -2356,6 +2371,138 @@ mod native_tests {
             .header("content-type", content_type)
             .body(body.into())
             .unwrap()
+    }
+
+    /// A sealed summary as indexd lists it with `includeslabs=false`, in the
+    /// given response encoding.
+    /// Built field by field from Go's JSON tags rather than from our own
+    /// struct, so the test checks the wire format.
+    fn summary_body(cbor: bool, sealed: &SealedObject, id: Hash256, size: u64) -> Vec<u8> {
+        use ciborium::value::Value;
+
+        let time = |t: DateTime<Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let bytes = |b: &[u8]| -> (Value, serde_json::Value) {
+            (Value::Bytes(b.to_vec()), BASE64_STANDARD.encode(b).into())
+        };
+        let fields: Vec<(&str, Value, serde_json::Value)> = vec![
+            (
+                "objectID",
+                Value::Bytes(AsRef::<[u8]>::as_ref(&id).to_vec()),
+                serde_json::to_value(id).unwrap(),
+            ),
+            {
+                let (c, j) = bytes(&sealed.encrypted_data_key);
+                ("encryptedDataKey", c, j)
+            },
+            (
+                "dataSignature",
+                Value::Bytes(sealed.data_signature.as_ref().to_vec()),
+                serde_json::to_value(&sealed.data_signature).unwrap(),
+            ),
+            {
+                let (c, j) = bytes(&sealed.encrypted_metadata_key);
+                ("encryptedMetadataKey", c, j)
+            },
+            {
+                let (c, j) = bytes(&sealed.encrypted_metadata);
+                ("encryptedMetadata", c, j)
+            },
+            (
+                "metadataSignature",
+                Value::Bytes(sealed.metadata_signature.as_ref().to_vec()),
+                serde_json::to_value(&sealed.metadata_signature).unwrap(),
+            ),
+            (
+                "createdAt",
+                Value::Text(time(sealed.created_at)),
+                time(sealed.created_at).into(),
+            ),
+            (
+                "updatedAt",
+                Value::Text(time(sealed.updated_at)),
+                time(sealed.updated_at).into(),
+            ),
+            ("size", Value::Integer(size.into()), size.into()),
+        ];
+        if cbor {
+            let map = fields
+                .into_iter()
+                .map(|(k, c, _)| (Value::Text(k.to_string()), c))
+                .collect();
+            let mut buf = Vec::new();
+            ciborium::into_writer(&Value::Array(vec![Value::Map(map)]), &mut buf).unwrap();
+            buf
+        } else {
+            let map: serde_json::Map<_, _> = fields
+                .into_iter()
+                .map(|(k, _, j)| (k.to_string(), j))
+                .collect();
+            serde_json::to_vec(&vec![map]).unwrap()
+        }
+    }
+
+    /// Summaries decode from both response encodings and are requested with
+    /// `includeslabs=false` so the indexer leaves the slabs out.
+    #[tokio::test]
+    async fn test_shared_object_summaries_wire_format() {
+        let sharing_key = PrivateKey::from_seed(&rand::random());
+        let object = Object {
+            data_key: [9u8; 32].into(),
+            slabs: vec![Slab {
+                version: V0,
+                encryption_key: [1u8; 32].into(),
+                min_shards: 1,
+                sectors: vec![Sector {
+                    root: Hash256::new([2u8; 32]),
+                    host_key: PublicKey::new([3u8; 32]),
+                }],
+                offset: 0,
+                length: 256,
+            }],
+            metadata: b"a movie".to_vec(),
+            created_at: "2026-01-02T03:04:05.123456789Z".parse().unwrap(),
+            updated_at: "2026-02-02T03:04:05Z".parse().unwrap(),
+        };
+        let sealed = object.seal_with(&sharing_key);
+        let id = object.id();
+
+        let size = 256;
+        for cbor in [false, true] {
+            let server = Server::run();
+            let content_type = if cbor {
+                "application/cbor"
+            } else {
+                "application/json"
+            };
+            server.expect(
+                Expectation::matching(all_of![
+                    signed_get("/shared/objects", sharing_key.public_key()),
+                    request::query(url_decoded(contains(("includeslabs", "false")))),
+                    request::query(url_decoded(contains(("limit", "10")))),
+                ])
+                .respond_with(ok_typed(
+                    content_type,
+                    summary_body(cbor, &sealed, id, size),
+                )),
+            );
+            let client = Client::new(server.url("/").to_string()).unwrap();
+            let summaries = client
+                .shared_object_summaries(&sharing_key, Some(0), Some(10))
+                .await
+                .unwrap_or_else(|e| panic!("decode failed (cbor {cbor}): {e}"));
+            assert_eq!(summaries.len(), 1);
+            let summary = &summaries[0];
+            assert_eq!(summary.object_id, id);
+            assert_eq!(summary.size, size, "cbor {cbor}");
+            assert_eq!(summary.encrypted_metadata, sealed.encrypted_metadata);
+            assert_eq!(
+                summary.encrypted_metadata_key,
+                sealed.encrypted_metadata_key
+            );
+            assert_eq!(summary.metadata_signature, sealed.metadata_signature);
+            assert_eq!(summary.created_at, object.created_at);
+            assert_eq!(summary.updated_at, object.updated_at);
+        }
     }
 
     #[tokio::test]

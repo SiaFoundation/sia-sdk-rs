@@ -11,13 +11,21 @@
 // `skipLibCheck` is false in the tsconfig on purpose, so the declarations
 // themselves are checked rather than only the code below.
 import { Builder, SharedSdk } from '../examples/index.js'
-import type { AppKey, PinnedObject, Sdk, SharingKey, Slab } from '../examples/index.js'
+import type {
+  AppKey,
+  ObjectSummary,
+  PinnedObject,
+  Sdk,
+  SharingKey,
+  Slab,
+} from '../examples/index.js'
 
 declare function useSdk(sdk: Sdk): void
 declare function useShared(sdk: SharedSdk): void
 declare function useObject(object: PinnedObject): void
 declare function useKey(key: SharingKey): void
 declare function useSlab(slab: Slab): void
+declare function useSummary(summary: ObjectSummary): void
 
 export async function check(
   builder: Builder,
@@ -41,5 +49,14 @@ export async function check(
     for (const slab of objects[0].slabs()) {
       useSlab(slab)
     }
+  }
+  const summaries = await shared.objectSummaries(0, 1)
+  if (summaries[0]) {
+    useSummary(summaries[0])
+    const size: bigint = summaries[0].size
+    const metadata: Buffer = summaries[0].metadata
+    const id: string = summaries[0].id
+    const times: Date[] = [summaries[0].createdAt, summaries[0].updatedAt]
+    void [size, metadata, id, times]
   }
 }
