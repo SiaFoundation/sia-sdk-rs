@@ -19,19 +19,22 @@ mod imp {
 
     pub(crate) fn default_client() -> Client {
         let id = tokio::runtime::Handle::current().id();
-        RHP_CLIENTS
-            .lock()
-            .unwrap()
-            .entry(id)
-            .or_insert_with(|| {
-                let detach = Detach(id);
-                tokio::spawn(async move {
-                    let _detach = detach;
-                    pending::<()>().await;
-                });
-                Client::new()
-            })
-            .clone()
+        let mut clients = RHP_CLIENTS.lock().unwrap();
+        if let Some(client) = clients.get(&id) {
+            return client.clone();
+        }
+        let client = Client::new();
+        clients.insert(id, client.clone());
+        drop(clients);
+
+        // Spawn outside the lock: on a runtime that is shutting down, tokio
+        // drops the task immediately, running Detach::drop on this thread.
+        let detach = Detach(id);
+        tokio::spawn(async move {
+            let _detach = detach;
+            pending::<()>().await;
+        });
+        client
     }
 
     #[cfg(test)]
@@ -183,6 +186,25 @@ mod imp {
         fn test_multi_thread_runtime_detaches_on_shutdown() {
             let build = || Builder::new_multi_thread().enable_all().build().unwrap();
             assert_detaches_on_shutdown(build(), build());
+        }
+
+        /// A handle that outlives its runtime can still enter it, but tokio
+        /// drops anything spawned there immediately.
+        #[test]
+        fn test_default_client_after_shutdown_does_not_deadlock() {
+            let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+            let handle = runtime.handle().clone();
+            let id = handle.id();
+            drop(runtime);
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                handle.block_on(async { default_client() });
+                tx.send(()).unwrap();
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .expect("default_client deadlocked");
+            assert!(!registered(id));
         }
     }
 }
