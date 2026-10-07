@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use bytes::Bytes;
 use sia_core::encoding;
 use sia_core::rhp4::protocol::Error as RHP4Error;
@@ -7,7 +9,7 @@ use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
 use thiserror::Error;
 
-use crate::time::{Duration, Elapsed};
+use crate::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod siamux;
@@ -59,14 +61,18 @@ impl Client {
 }
 
 impl Transport for Client {
-    async fn host_prices(&self, host: &HostEndpoint) -> Result<(HostPrices, Duration), Error> {
+    async fn host_prices(
+        &self,
+        host: &HostEndpoint,
+        idle_timeout: Duration,
+    ) -> Result<(HostPrices, Duration), Error> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
-            Self::SiaMux(c) => c.host_prices(host).await,
+            Self::SiaMux(c) => c.host_prices(host, idle_timeout).await,
             #[cfg(target_arch = "wasm32")]
-            Self::WebTransport(c) => c.host_prices(host).await,
+            Self::WebTransport(c) => c.host_prices(host, idle_timeout).await,
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(c) => c.host_prices(host).await,
+            Self::Mock(c) => c.host_prices(host, idle_timeout).await,
         }
     }
 
@@ -76,14 +82,24 @@ impl Transport for Client {
         prices: HostPrices,
         account_key: &PrivateKey,
         sector: Bytes,
+        idle_timeout: Duration,
     ) -> Result<(Hash256, Duration), Error> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
-            Self::SiaMux(c) => c.write_sector(host, prices, account_key, sector).await,
+            Self::SiaMux(c) => {
+                c.write_sector(host, prices, account_key, sector, idle_timeout)
+                    .await
+            }
             #[cfg(target_arch = "wasm32")]
-            Self::WebTransport(c) => c.write_sector(host, prices, account_key, sector).await,
+            Self::WebTransport(c) => {
+                c.write_sector(host, prices, account_key, sector, idle_timeout)
+                    .await
+            }
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(c) => c.write_sector(host, prices, account_key, sector).await,
+            Self::Mock(c) => {
+                c.write_sector(host, prices, account_key, sector, idle_timeout)
+                    .await
+            }
         }
     }
 
@@ -93,23 +109,23 @@ impl Transport for Client {
         prices: HostPrices,
         token: AccountToken,
         root: Hash256,
-        offset: usize,
-        length: usize,
+        range: Range<usize>,
+        idle_timeout: Duration,
     ) -> Result<(Bytes, Duration), Error> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
             Self::SiaMux(c) => {
-                c.read_sector(host, prices, token, root, offset, length)
+                c.read_sector(host, prices, token, root, range, idle_timeout)
                     .await
             }
             #[cfg(target_arch = "wasm32")]
             Self::WebTransport(c) => {
-                c.read_sector(host, prices, token, root, offset, length)
+                c.read_sector(host, prices, token, root, range, idle_timeout)
                     .await
             }
             #[cfg(any(test, feature = "mock"))]
             Self::Mock(c) => {
-                c.read_sector(host, prices, token, root, offset, length)
+                c.read_sector(host, prices, token, root, range, idle_timeout)
                     .await
             }
         }
@@ -133,11 +149,24 @@ pub enum Error {
     #[error("invalid signature")]
     InvalidSignature,
 
-    #[error("timeout error: {0}")]
-    Timeout(#[from] Elapsed),
-
     #[error("transport error: {0}")]
     Transport(String),
+}
+
+impl Error {
+    /// Whether the RPC's stream went idle. Both transports report a stalled
+    /// stream as an I/O error of kind [`std::io::ErrorKind::TimedOut`]. It
+    /// arrives bare from a request write, or wrapped by the protocol decoder
+    /// when the stall happens while waiting for or reading the response.
+    pub(crate) fn is_timeout(&self) -> bool {
+        let io = match self {
+            Error::Io(e)
+            | Error::Rpc(RHP4Error::Io(e))
+            | Error::Rpc(RHP4Error::Encoding(encoding::Error::Io(e))) => e,
+            _ => return false,
+        };
+        io.kind() == std::io::ErrorKind::TimedOut
+    }
 }
 
 /// A host endpoint contains the information needed to connect to a host.
@@ -153,10 +182,17 @@ pub(crate) struct HostEndpoint {
 /// duration measures only the time spent exchanging request/response bytes —
 /// it excludes connection setup and stream opening. Callers can feed it into
 /// host performance tracking without contamination from pool-miss costs.
+///
+/// Each RPC takes an `idle_timeout`: the longest its stream may go without
+/// making progress in either direction before the RPC fails with an I/O
+/// error of kind [`std::io::ErrorKind::TimedOut`] (see [`Error::is_timeout`]).
+/// There is no bound on the total RPC duration, so a slow transfer that keeps
+/// moving bytes is allowed to finish.
 pub(crate) trait Transport: Clone + Unpin + MaybeSendSync + 'static {
     fn host_prices(
         &self,
         host: &HostEndpoint,
+        idle_timeout: Duration,
     ) -> impl Future<Output = Result<(HostPrices, Duration), Error>> + MaybeSendSync;
     fn write_sector(
         &self,
@@ -164,6 +200,7 @@ pub(crate) trait Transport: Clone + Unpin + MaybeSendSync + 'static {
         prices: HostPrices,
         account_key: &PrivateKey,
         sector: Bytes,
+        idle_timeout: Duration,
     ) -> impl Future<Output = Result<(Hash256, Duration), Error>> + MaybeSendSync;
     fn read_sector(
         &self,
@@ -171,8 +208,8 @@ pub(crate) trait Transport: Clone + Unpin + MaybeSendSync + 'static {
         prices: HostPrices,
         token: AccountToken,
         root: Hash256,
-        offset: usize,
-        length: usize,
+        range: Range<usize>,
+        idle_timeout: Duration,
     ) -> impl Future<Output = Result<(Bytes, Duration), Error>> + MaybeSendSync;
 }
 #[cfg(not(target_arch = "wasm32"))]

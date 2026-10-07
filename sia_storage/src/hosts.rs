@@ -15,10 +15,14 @@ use thiserror::Error;
 
 use crate::hosts::metrics::{HostMetric, HostScore, RPCAverage, Transfer};
 use crate::rhp4::{Client, HostEndpoint, Transport};
-use crate::time::{Duration, Elapsed, Instant, timeout};
+use crate::time::{Duration, Instant};
 use crate::{AppKey, app_client};
 
 mod metrics;
+
+/// How long a sector RPC may go without stream progress before the
+/// transport gives up on the host.
+pub(crate) const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Represents a host in the Sia network. The
 /// addresses can be used to connect to the host.
@@ -280,10 +284,6 @@ pub enum RPCError {
     /// An error in the RHP4 protocol.
     #[error("RHP error: {0}")]
     Rhp(#[from] crate::rhp4::Error),
-
-    /// The RPC timed out.
-    #[error("RPC time out after {0:?}")]
-    Elapsed(#[from] Elapsed),
 }
 
 /// Manages a list of known hosts and their performance metrics.
@@ -495,7 +495,7 @@ impl Hosts {
         cache: &HostCache<HostPrices>,
         hosts: &HostList,
         host_endpoint: &HostEndpoint,
-        fetch_timeout: Duration,
+        idle_timeout: Duration,
         refresh: bool,
     ) -> Result<(HostPrices, bool), RPCError> {
         if !refresh
@@ -504,9 +504,9 @@ impl Hosts {
         {
             Ok((prices, false))
         } else {
-            let (prices, _) = timeout(fetch_timeout, transport.host_prices(host_endpoint))
+            let (prices, _) = transport
+                .host_prices(host_endpoint, idle_timeout)
                 .await
-                .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))?
                 .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))?;
             cache.set(host_endpoint.public_key, prices.clone());
             Ok((prices, true))
@@ -521,31 +521,26 @@ impl Hosts {
         host_key: PublicKey,
         account_key: &PrivateKey,
         sector: bytes::Bytes,
-        write_timeout: Duration,
+        idle_timeout: Duration,
     ) -> Result<Hash256, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        timeout(write_timeout, async {
-            let (prices, _) = Self::fetch_prices(
-                self.transport.clone(),
-                &self.price_cache,
-                &self.hosts,
-                &host,
-                write_timeout,
-                false,
-            )
-            .await?;
-            let bytes = sector.len() as u32;
-            let (root, elapsed) = self
-                .transport
-                .write_sector(&host, prices, account_key, sector)
-                .await
-                .inspect_err(|_| self.hosts.add_failure(host_key))
-                .map_err(RPCError::Rhp)?;
-            self.record_write_sample(host_key, bytes, elapsed);
-            Ok(root)
-        })
-        .await
-        .inspect_err(|_| self.hosts.add_failure(host_key))?
+        let (prices, _) = Self::fetch_prices(
+            self.transport.clone(),
+            &self.price_cache,
+            &self.hosts,
+            &host,
+            idle_timeout,
+            false,
+        )
+        .await?;
+        let bytes = sector.len() as u32;
+        let (root, elapsed) = self
+            .transport
+            .write_sector(&host, prices, account_key, sector, idle_timeout)
+            .await
+            .inspect_err(|_| self.hosts.add_failure(host_key))?;
+        self.record_write_sample(host_key, bytes, elapsed);
+        Ok(root)
     }
 
     /// Performs a download RPC from the given host. The caller is
@@ -559,31 +554,33 @@ impl Hosts {
         root: Hash256,
         offset: usize,
         length: usize,
-        read_timeout: Duration,
+        idle_timeout: Duration,
     ) -> Result<bytes::Bytes, RPCError> {
         let host = self.host_endpoint(host_key)?;
         let bytes = length as u32;
-        timeout(read_timeout, async {
-            let (prices, _) = Self::fetch_prices(
-                self.transport.clone(),
-                &self.price_cache,
-                &self.hosts,
+        let (prices, _) = Self::fetch_prices(
+            self.transport.clone(),
+            &self.price_cache,
+            &self.hosts,
+            &host,
+            idle_timeout,
+            false,
+        )
+        .await?;
+        let (data, elapsed) = self
+            .transport
+            .read_sector(
                 &host,
-                read_timeout,
-                false,
+                prices,
+                token,
+                root,
+                offset..offset + length,
+                idle_timeout,
             )
-            .await?;
-            let (data, elapsed) = self
-                .transport
-                .read_sector(&host, prices, token, root, offset, length)
-                .await
-                .inspect_err(|_| self.hosts.add_failure(host_key))
-                .map_err(RPCError::Rhp)?;
-            self.record_read_sample(host_key, bytes, elapsed);
-            Ok(data)
-        })
-        .await
-        .inspect_err(|_| self.hosts.add_failure(host_key))?
+            .await
+            .inspect_err(|_| self.hosts.add_failure(host_key))?;
+        self.record_read_sample(host_key, bytes, elapsed);
+        Ok(data)
     }
 }
 
@@ -787,8 +784,8 @@ mod test {
         let write_host = random_pubkey();
         let read_host = random_pubkey();
         let transport = crate::rhp4::mock::Client::new();
-        // Far longer than the timeout the RPCs get, so Elapsed always wins
-        // rather than the test depending on scheduling.
+        // Far longer than the idle limit the RPCs get, so the idle timeout
+        // always fires rather than the test depending on scheduling.
         transport.set_slow_hosts([write_host, read_host], Duration::from_secs(30));
 
         let entry = |public_key| Host {
@@ -829,8 +826,8 @@ mod test {
             .await
             .expect_err("a 30 second host cannot answer in 50ms");
         assert!(
-            matches!(err, RPCError::Elapsed(_)),
-            "expected the timeout, got {err:?}"
+            matches!(&err, RPCError::Rhp(e) if e.is_timeout()),
+            "expected the idle timeout, got {err:?}"
         );
         assert!(
             rate(write_host) > 0,
@@ -849,8 +846,8 @@ mod test {
             .await
             .expect_err("a 30 second host cannot answer in 50ms");
         assert!(
-            matches!(err, RPCError::Elapsed(_)),
-            "expected the timeout, got {err:?}"
+            matches!(&err, RPCError::Rhp(e) if e.is_timeout()),
+            "expected the idle timeout, got {err:?}"
         );
         assert!(
             rate(read_host) > 0,

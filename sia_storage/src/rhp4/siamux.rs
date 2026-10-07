@@ -6,6 +6,7 @@ use ed25519_dalek::{SignatureError, VerifyingKey};
 use log::debug;
 use std::collections::HashMap;
 use std::num::ParseIntError;
+use std::ops::Range;
 use std::sync::{Arc, RwLock};
 use thiserror::{self, Error};
 use tokio::net::{TcpStream, lookup_host};
@@ -145,11 +146,13 @@ impl Transport for Client {
     async fn host_prices(
         &self,
         host: &HostEndpoint,
+        idle_timeout: Duration,
     ) -> Result<(HostPrices, Duration), TransportError> {
         let mut stream = self
             .host_stream(host)
             .await
             .map_err(|e| TransportError::Transport(e.to_string()))?;
+        stream.set_idle_timeout(Some(idle_timeout));
         let start = Instant::now();
         let resp = RPCSettings::send_request(&mut stream)
             .await?
@@ -164,12 +167,14 @@ impl Transport for Client {
         prices: HostPrices,
         account_key: &PrivateKey,
         data: Bytes,
+        idle_timeout: Duration,
     ) -> Result<(Hash256, Duration), TransportError> {
         let token = AccountToken::new(account_key, host.public_key);
         let mut stream = self
             .host_stream(host)
             .await
             .map_err(|e| TransportError::Transport(e.to_string()))?;
+        stream.set_idle_timeout(Some(idle_timeout));
         let start = Instant::now();
         let resp = RPCWriteSector::send_request(&mut stream, prices, token, data)
             .await?
@@ -184,18 +189,20 @@ impl Transport for Client {
         prices: HostPrices,
         token: AccountToken,
         root: Hash256,
-        offset: usize,
-        length: usize,
+        range: Range<usize>,
+        idle_timeout: Duration,
     ) -> Result<(Bytes, Duration), TransportError> {
         let mut stream = self
             .host_stream(host)
             .await
             .map_err(|e| TransportError::Transport(e.to_string()))?;
+        stream.set_idle_timeout(Some(idle_timeout));
         let start = Instant::now();
-        let resp = RPCReadSector::send_request(&mut stream, prices, token, root, offset, length)
-            .await?
-            .complete(&mut stream)
-            .await?;
+        let resp =
+            RPCReadSector::send_request(&mut stream, prices, token, root, range.start, range.len())
+                .await?
+                .complete(&mut stream)
+                .await?;
         Ok((resp.data, start.elapsed()))
     }
 }
