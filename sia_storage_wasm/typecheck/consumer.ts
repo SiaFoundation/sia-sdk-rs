@@ -2,12 +2,12 @@
 // uses it: import a type, take a value from an SDK method, pass it somewhere
 // that expects that type.
 //
-// This exists because the generated .d.ts is assembled from several
-// `typescript_custom_section` blocks plus wasm-bindgen's own output, and
-// nothing in the Rust build sees the result. A custom section that declares a
-// bare `interface Sdk` alongside the exported `class Sdk` cannot merge with it,
-// so every method returning an `Sdk` starts handing back a type with three
-// members. The Rust still compiles and clippy is happy; only a consumer
+// This exists because the generated .d.ts is assembled from the
+// `typescript_custom_section` blocks in types.rs plus wasm-bindgen's own
+// output, and nothing in the Rust build sees the result. A section that
+// declares a bare `interface Foo` next to an exported `class Foo` cannot merge
+// with it, and every method returning one then hands back a type missing most
+// of its members. The Rust still compiles and clippy is happy; only a consumer
 // notices.
 //
 // `skipLibCheck` is false in the tsconfig on purpose. It is what surfaces the
@@ -32,7 +32,7 @@ export async function check(
   const sdk = await builder.connected(appKey)
   if (sdk) {
     useSdk(sdk)
-    // A member of the class, not of the custom-section interface.
+    // A member that only the generated class declares.
     sdk.appKey()
   }
 
