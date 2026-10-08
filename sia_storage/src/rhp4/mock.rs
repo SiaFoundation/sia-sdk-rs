@@ -1,8 +1,12 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use chrono::Utc;
+use sia_core::encoding;
+use sia_core::rhp4::protocol::Error as ProtocolError;
 use sia_core::rhp4::{AccountToken, HostPrices};
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::{Currency, Hash256};
@@ -20,6 +24,10 @@ pub struct Client {
     read_delays: Arc<RwLock<HashMap<Hash256, Duration>>>,
     initial_read_delay: Arc<RwLock<Option<Duration>>>,
     read_failures: Arc<RwLock<HashMap<PublicKey, usize>>>,
+    price_delay: Arc<RwLock<Duration>>,
+    price_requests: Arc<AtomicUsize>,
+    price_failures: Arc<AtomicUsize>,
+    read_requests: Arc<AtomicUsize>,
 }
 
 impl Default for Client {
@@ -37,6 +45,10 @@ impl Client {
             read_delays: Arc::new(RwLock::new(HashMap::new())),
             initial_read_delay: Arc::new(RwLock::new(None)),
             read_failures: Arc::new(RwLock::new(HashMap::new())),
+            price_delay: Arc::new(RwLock::new(Duration::ZERO)),
+            price_requests: Arc::new(AtomicUsize::new(0)),
+            price_failures: Arc::new(AtomicUsize::new(0)),
+            read_requests: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -58,6 +70,31 @@ impl Client {
         self.slow_hosts.write().unwrap().clear();
         *self.slow_delay.write().unwrap() = Duration::ZERO;
     }
+
+    /// Sleeps out the host's configured slow delay. A delay longer than
+    /// `idle_timeout` is a stall, which the real transports report once
+    /// the idle limit passes. The error takes the shape a stalled response
+    /// has after passing through the protocol decoder.
+    async fn stall(&self, host: &PublicKey, idle_timeout: Duration) -> Result<(), RHP4Error> {
+        let delay = {
+            let slow_hosts = self.slow_hosts.read().unwrap();
+            if slow_hosts.contains(host) {
+                Some(*self.slow_delay.read().unwrap())
+            } else {
+                None
+            }
+        };
+        let Some(delay) = delay else {
+            return Ok(());
+        };
+        if delay > idle_timeout {
+            sleep(idle_timeout).await;
+            let io = std::io::Error::new(std::io::ErrorKind::TimedOut, "stream idle");
+            return Err(ProtocolError::from(encoding::Error::from(io)).into());
+        }
+        sleep(delay).await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -76,11 +113,48 @@ impl Client {
     pub fn set_initial_read_delay(&self, delay: Duration) {
         *self.initial_read_delay.write().unwrap() = Some(delay);
     }
+
+    /// Delays every `host_prices` call by `delay`.
+    pub fn set_price_delay(&self, delay: Duration) {
+        *self.price_delay.write().unwrap() = delay;
+    }
+
+    /// Number of `host_prices` calls served so far.
+    pub fn price_requests(&self) -> usize {
+        self.price_requests.load(Ordering::Relaxed)
+    }
+
+    /// Fails the next `count` `host_prices` calls, after which prices are
+    /// served normally.
+    pub fn set_price_failures(&self, count: usize) {
+        self.price_failures.store(count, Ordering::Relaxed);
+    }
+
+    /// Number of `read_sector` calls started so far.
+    pub fn read_requests(&self) -> usize {
+        self.read_requests.load(Ordering::Relaxed)
+    }
 }
 
 impl Transport for Client {
-    async fn host_prices(&self, _: &HostEndpoint) -> Result<(HostPrices, Duration), RHP4Error> {
+    async fn host_prices(
+        &self,
+        _: &HostEndpoint,
+        _: Duration,
+    ) -> Result<(HostPrices, Duration), RHP4Error> {
         let start = Instant::now();
+        self.price_requests.fetch_add(1, Ordering::Relaxed);
+        let delay = *self.price_delay.read().unwrap();
+        if !delay.is_zero() {
+            sleep(delay).await;
+        }
+        if self
+            .price_failures
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(RHP4Error::Transport("price fetch failed".to_string()));
+        }
         let prices = HostPrices {
             contract_price: Currency::zero(),
             collateral: Currency::zero(),
@@ -101,23 +175,13 @@ impl Transport for Client {
         _: HostPrices,
         _: &PrivateKey,
         sector: Bytes,
+        idle_timeout: Duration,
     ) -> Result<(Hash256, Duration), RHP4Error> {
         if host.addresses.is_empty() {
             return Err(RHP4Error::Transport("host has no addresses".to_string()));
         }
         let start = Instant::now();
-        // Check if this host is configured as slow
-        let slow_delay = {
-            let slow_hosts = self.slow_hosts.read().unwrap();
-            if slow_hosts.contains(&host.public_key) {
-                Some(*self.slow_delay.read().unwrap())
-            } else {
-                None
-            }
-        };
-        if let Some(delay) = slow_delay {
-            sleep(delay).await;
-        }
+        self.stall(&host.public_key, idle_timeout).await?;
 
         sleep(Duration::from_millis(3)).await; // simulate network latency ~ 10Gbps
         let sector_root = sia_core::rhp4::sector_root(&sector);
@@ -136,25 +200,15 @@ impl Transport for Client {
         _: HostPrices,
         _: AccountToken,
         root: Hash256,
-        offset: usize,
-        length: usize,
+        range: Range<usize>,
+        idle_timeout: Duration,
     ) -> Result<(Bytes, Duration), RHP4Error> {
+        self.read_requests.fetch_add(1, Ordering::Relaxed);
         if host.addresses.is_empty() {
             return Err(RHP4Error::Transport("host has no addresses".to_string()));
         }
         let start = Instant::now();
-        // Check if this host is configured as slow
-        let slow_delay = {
-            let slow_hosts = self.slow_hosts.read().unwrap();
-            if slow_hosts.contains(&host.public_key) {
-                Some(*self.slow_delay.read().unwrap())
-            } else {
-                None
-            }
-        };
-        if let Some(delay) = slow_delay {
-            sleep(delay).await;
-        }
+        self.stall(&host.public_key, idle_timeout).await?;
 
         let fail = {
             let mut failures = self.read_failures.write().unwrap();
@@ -189,7 +243,7 @@ impl Transport for Client {
             let sector = host_sectors
                 .get(&root)
                 .ok_or_else(|| RHP4Error::Transport("sector not found".to_string()))?;
-            Bytes::copy_from_slice(&sector[offset..offset + length])
+            Bytes::copy_from_slice(&sector[range])
         };
         sleep(Duration::from_nanos(sector.len() as u64 * 8 / 10)).await; // simulate network latency ~ 10Gbps
         Ok((sector, start.elapsed()))

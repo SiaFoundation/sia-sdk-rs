@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use chrono::Utc;
 use log::{debug, warn};
@@ -12,13 +12,19 @@ use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
 use thiserror::Error;
+use tokio::sync::watch;
 
 use crate::hosts::metrics::{HostMetric, HostScore, RPCAverage, Transfer};
 use crate::rhp4::{Client, HostEndpoint, Transport};
-use crate::time::{Duration, Elapsed, Instant, timeout};
+use crate::task::AbortOnDropHandle;
+use crate::time::{Duration, Instant};
 use crate::{AppKey, app_client};
 
 mod metrics;
+
+/// How long a sector RPC may go without stream progress before the
+/// transport gives up on the host.
+pub(crate) const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Represents a host in the Sia network. The
 /// addresses can be used to connect to the host.
@@ -82,12 +88,18 @@ impl HostList {
     /// wins first, and unsampled hosts get discovery priority. Used by the
     /// download path so concurrent slab downloads spread initial picks
     /// across less-busy hosts.
-    fn prioritize<H, F>(&self, items: &mut [H], f: F)
+    ///
+    /// Hosts this SDK has no address for are dropped rather than sorted to
+    /// the back. Reading from one could only ever fail with
+    /// [`RPCError::UnknownHost`], so leaving it in hides a shortage that is
+    /// already certain behind a run of doomed attempts.
+    fn prioritize<H, F>(&self, items: &mut Vec<H>, f: F)
     where
         F: Fn(&H) -> &PublicKey,
     {
         let metrics = self.metrics.read().unwrap();
         let host_info = self.hosts.read().unwrap();
+        items.retain(|item| host_info.contains_key(f(item)));
         let score_for = |k: &PublicKey| -> Option<HostScore> {
             let metric = metrics.get(k)?;
             let inflight = host_info
@@ -226,29 +238,112 @@ impl Drop for InflightGuard {
     }
 }
 
-#[derive(Debug)]
-struct HostCache<T> {
-    items: RwLock<HashMap<PublicKey, T>>,
+type PriceOutcome = Result<HostPrices, crate::rhp4::Error>;
+
+/// A price RPC running on its own task. Waiters hold the `Arc`; dropping
+/// the last one aborts the task.
+struct PriceFetch {
+    outcome: watch::Receiver<Option<PriceOutcome>>,
+    _task: AbortOnDropHandle<()>,
 }
 
-impl<T> HostCache<T> {
-    fn new() -> Self {
+enum PriceEntry {
+    Cached(HostPrices),
+    Fetching(Weak<PriceFetch>),
+}
+
+/// Caches each host's price table and serializes concurrent fetches for
+/// the same host behind a single RPC.
+#[derive(Clone)]
+struct PriceCache {
+    transport: Client,
+    hosts: Arc<HostList>,
+    entries: Arc<Mutex<HashMap<PublicKey, PriceEntry>>>,
+}
+
+impl PriceCache {
+    fn new(transport: Client, hosts: Arc<HostList>) -> Self {
         Self {
-            items: RwLock::new(HashMap::new()),
+            transport,
+            hosts,
+            entries: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    fn get(&self, host_key: &PublicKey) -> Option<T>
-    where
-        T: Clone,
-    {
-        let cache = self.items.read().unwrap();
-        cache.get(host_key).cloned()
+    fn start(&self, host: &HostEndpoint, idle_timeout: Duration) -> Arc<PriceFetch> {
+        let host = HostEndpoint {
+            public_key: host.public_key,
+            addresses: host.addresses.clone(),
+        };
+        let transport = self.transport.clone();
+        let hosts = self.hosts.clone();
+        let entries = self.entries.clone();
+        let (tx, outcome) = watch::channel(None);
+        let task = maybe_spawn!(async move {
+            let outcome = transport
+                .host_prices(&host, idle_timeout)
+                .await
+                .map(|(prices, _)| prices);
+            match &outcome {
+                Ok(prices) => {
+                    entries
+                        .lock()
+                        .unwrap()
+                        .insert(host.public_key, PriceEntry::Cached(prices.clone()));
+                }
+                Err(_) => hosts.add_failure(host.public_key),
+            }
+            let _ = tx.send(Some(outcome));
+        });
+        Arc::new(PriceFetch {
+            outcome,
+            _task: AbortOnDropHandle::new(task),
+        })
     }
 
-    fn set(&self, host_key: PublicKey, item: T) {
-        let mut cache = self.items.write().unwrap();
-        cache.insert(host_key, item);
+    /// Returns the host's prices, fetching them when none are cached, the
+    /// cached ones have expired, or `refresh` is set. Concurrent calls for
+    /// the same host wait on the in-flight fetch and share its outcome,
+    /// success or failure.
+    async fn fetch(
+        &self,
+        host: &HostEndpoint,
+        idle_timeout: Duration,
+        refresh: bool,
+    ) -> Result<HostPrices, RPCError> {
+        let fetch = {
+            let mut entries = self.entries.lock().unwrap();
+            match entries.get(&host.public_key) {
+                Some(PriceEntry::Cached(prices)) if !refresh && prices.valid_until > Utc::now() => {
+                    return Ok(prices.clone());
+                }
+                // a finished fetch still held by its waiters has failed; start over
+                Some(PriceEntry::Fetching(fetch))
+                    if let Some(fetch) = fetch.upgrade()
+                        && fetch.outcome.borrow().is_none() =>
+                {
+                    fetch
+                }
+                _ => {
+                    let fetch = self.start(host, idle_timeout);
+                    entries.insert(
+                        host.public_key,
+                        PriceEntry::Fetching(Arc::downgrade(&fetch)),
+                    );
+                    fetch
+                }
+            }
+        };
+        let mut outcome = fetch.outcome.clone();
+        let outcome = outcome
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| crate::rhp4::Error::Transport("price fetch exited".to_string()))?;
+        outcome
+            .as_ref()
+            .expect("waited for an outcome")
+            .clone()
+            .map_err(RPCError::Rhp)
     }
 }
 
@@ -274,10 +369,6 @@ pub enum RPCError {
     /// An error in the RHP4 protocol.
     #[error("RHP error: {0}")]
     Rhp(#[from] crate::rhp4::Error),
-
-    /// The RPC timed out.
-    #[error("RPC time out after {0:?}")]
-    Elapsed(#[from] Elapsed),
 }
 
 /// Manages a list of known hosts and their performance metrics.
@@ -291,7 +382,7 @@ pub enum RPCError {
 #[derive(Clone)]
 pub(crate) struct Hosts {
     transport: Client,
-    price_cache: Arc<HostCache<HostPrices>>,
+    prices: PriceCache,
     hosts: Arc<HostList>,
     refresher: Option<Arc<HostRefresher>>,
 
@@ -301,10 +392,11 @@ pub(crate) struct Hosts {
 
 impl Hosts {
     pub fn new(transport: Client) -> Self {
+        let hosts = Arc::new(HostList::new());
         Self {
+            prices: PriceCache::new(transport.clone(), hosts.clone()),
             transport,
-            hosts: Arc::new(HostList::new()),
-            price_cache: Arc::new(HostCache::new()),
+            hosts,
             refresher: None,
 
             global_write_avg: Arc::new(RwLock::new(RPCAverage::default())),
@@ -389,7 +481,7 @@ impl Hosts {
     /// Sorts a list of hosts according to their priority in the client's
     /// preferred hosts queue. The function `f` is used to extract the
     /// public key from each item.
-    pub fn prioritize<H, F>(&self, hosts: &mut [H], f: F)
+    pub fn prioritize<H, F>(&self, hosts: &mut Vec<H>, f: F)
     where
         F: Fn(&H) -> &PublicKey,
     {
@@ -484,29 +576,6 @@ impl Hosts {
             .unwrap_or_else(|| DEFAULT.estimate_duration(bytes))
     }
 
-    async fn fetch_prices(
-        transport: Client,
-        cache: &HostCache<HostPrices>,
-        hosts: &HostList,
-        host_endpoint: &HostEndpoint,
-        fetch_timeout: Duration,
-        refresh: bool,
-    ) -> Result<(HostPrices, bool), RPCError> {
-        if !refresh
-            && let Some(prices) = cache.get(&host_endpoint.public_key)
-            && prices.valid_until > Utc::now()
-        {
-            Ok((prices, false))
-        } else {
-            let (prices, _) = timeout(fetch_timeout, transport.host_prices(host_endpoint))
-                .await
-                .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))?
-                .inspect_err(|_| hosts.add_failure(host_endpoint.public_key))?;
-            cache.set(host_endpoint.public_key, prices.clone());
-            Ok((prices, true))
-        }
-    }
-
     /// Performs an upload RPC to the given host. The caller is responsible
     /// for holding the [`InflightGuard`] returned by [`HostQueue::pick`]
     /// for the duration of this call so the host scorer reflects the load.
@@ -515,31 +584,18 @@ impl Hosts {
         host_key: PublicKey,
         account_key: &PrivateKey,
         sector: bytes::Bytes,
-        write_timeout: Duration,
+        idle_timeout: Duration,
     ) -> Result<Hash256, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        timeout(write_timeout, async {
-            let (prices, _) = Self::fetch_prices(
-                self.transport.clone(),
-                &self.price_cache,
-                &self.hosts,
-                &host,
-                write_timeout,
-                false,
-            )
-            .await?;
-            let bytes = sector.len() as u32;
-            let (root, elapsed) = self
-                .transport
-                .write_sector(&host, prices, account_key, sector)
-                .await
-                .inspect_err(|_| self.hosts.add_failure(host_key))
-                .map_err(RPCError::Rhp)?;
-            self.record_write_sample(host_key, bytes, elapsed);
-            Ok(root)
-        })
-        .await
-        .inspect_err(|_| self.hosts.add_failure(host_key))?
+        let prices = self.prices.fetch(&host, idle_timeout, false).await?;
+        let bytes = sector.len() as u32;
+        let (root, elapsed) = self
+            .transport
+            .write_sector(&host, prices, account_key, sector, idle_timeout)
+            .await
+            .inspect_err(|_| self.hosts.add_failure(host_key))?;
+        self.record_write_sample(host_key, bytes, elapsed);
+        Ok(root)
     }
 
     /// Performs a download RPC from the given host. The caller is
@@ -553,31 +609,25 @@ impl Hosts {
         root: Hash256,
         offset: usize,
         length: usize,
-        read_timeout: Duration,
+        idle_timeout: Duration,
     ) -> Result<bytes::Bytes, RPCError> {
         let host = self.host_endpoint(host_key)?;
         let bytes = length as u32;
-        timeout(read_timeout, async {
-            let (prices, _) = Self::fetch_prices(
-                self.transport.clone(),
-                &self.price_cache,
-                &self.hosts,
+        let prices = self.prices.fetch(&host, idle_timeout, false).await?;
+        let (data, elapsed) = self
+            .transport
+            .read_sector(
                 &host,
-                read_timeout,
-                false,
+                prices,
+                token,
+                root,
+                offset..offset + length,
+                idle_timeout,
             )
-            .await?;
-            let (data, elapsed) = self
-                .transport
-                .read_sector(&host, prices, token, root, offset, length)
-                .await
-                .inspect_err(|_| self.hosts.add_failure(host_key))
-                .map_err(RPCError::Rhp)?;
-            self.record_read_sample(host_key, bytes, elapsed);
-            Ok(data)
-        })
-        .await
-        .inspect_err(|_| self.hosts.add_failure(host_key))?
+            .await
+            .inspect_err(|_| self.hosts.add_failure(host_key))?;
+        self.record_read_sample(host_key, bytes, elapsed);
+        Ok(data)
     }
 }
 
@@ -710,6 +760,7 @@ impl HostQueue {
 #[cfg(test)]
 mod test {
     use crate::rhp4::Client;
+    use crate::time::sleep;
     use sia_core::signing::PrivateKey;
 
     use super::*;
@@ -781,8 +832,8 @@ mod test {
         let write_host = random_pubkey();
         let read_host = random_pubkey();
         let transport = crate::rhp4::mock::Client::new();
-        // Far longer than the timeout the RPCs get, so Elapsed always wins
-        // rather than the test depending on scheduling.
+        // Far longer than the idle limit the RPCs get, so the idle timeout
+        // always fires rather than the test depending on scheduling.
         transport.set_slow_hosts([write_host, read_host], Duration::from_secs(30));
 
         let entry = |public_key| Host {
@@ -823,8 +874,8 @@ mod test {
             .await
             .expect_err("a 30 second host cannot answer in 50ms");
         assert!(
-            matches!(err, RPCError::Elapsed(_)),
-            "expected the timeout, got {err:?}"
+            matches!(&err, RPCError::Rhp(e) if e.is_timeout()),
+            "expected the idle timeout, got {err:?}"
         );
         assert!(
             rate(write_host) > 0,
@@ -843,12 +894,172 @@ mod test {
             .await
             .expect_err("a 30 second host cannot answer in 50ms");
         assert!(
-            matches!(err, RPCError::Elapsed(_)),
-            "expected the timeout, got {err:?}"
+            matches!(&err, RPCError::Rhp(e) if e.is_timeout()),
+            "expected the idle timeout, got {err:?}"
         );
         assert!(
             rate(read_host) > 0,
             "the read timeout left the host unsampled, so it stays top ranked"
+        );
+    }
+
+    /// Concurrent price lookups for one host share a single RPC, success or
+    /// failure, and a `refresh` issued while that RPC is in flight is
+    /// satisfied by it. A shared failure is sampled once, not per caller.
+    #[sia_core_derive::cross_target_test]
+    async fn test_price_fetches_serialize_behind_one_rpc() {
+        let host_key = random_pubkey();
+        let transport = crate::rhp4::mock::Client::new();
+        transport.set_price_delay(Duration::from_millis(100));
+        let entry = || Host {
+            public_key: host_key,
+            addresses: vec![],
+            country_code: String::new(),
+            latitude: 0.0,
+            longitude: 0.0,
+            good_for_upload: true,
+        };
+        let hosts = Arc::new(HostList::new());
+        hosts.update(vec![entry()], true);
+        let cache = PriceCache::new(Client::Mock(transport.clone()), hosts.clone());
+        let host = || HostEndpoint {
+            public_key: host_key,
+            addresses: vec![],
+        };
+        let rate = |hosts: &HostList| {
+            hosts
+                .metrics
+                .read()
+                .unwrap()
+                .get(&host_key)
+                .expect("host has metrics")
+                .failure_rate()
+        };
+
+        let mut set = tokio::task::JoinSet::new();
+        for i in 0..8 {
+            let cache = cache.clone();
+            let host = host();
+            join_set_spawn!(set, async move {
+                cache.fetch(&host, Duration::from_secs(5), i % 2 == 0).await
+            });
+        }
+        while let Some(result) = set.join_next().await {
+            result.unwrap().expect("price fetch failed");
+        }
+        assert_eq!(transport.price_requests(), 1);
+
+        cache
+            .fetch(&host(), Duration::from_secs(5), false)
+            .await
+            .expect("price fetch failed");
+        assert_eq!(transport.price_requests(), 1, "a valid table is reused");
+
+        cache
+            .fetch(&host(), Duration::from_secs(5), true)
+            .await
+            .expect("price fetch failed");
+        assert_eq!(
+            transport.price_requests(),
+            2,
+            "a refresh after the fetch completed must hit the host"
+        );
+
+        // A failed in-flight fetch is shared with everyone queued behind it
+        // rather than each waiter retrying in turn. Seed a success first so
+        // the failure rate can tell one failure sample from eight.
+        let sample = Transfer::new(1 << 20, Duration::from_secs(1));
+        hosts.add_write_sample(host_key, sample);
+        transport.set_price_failures(1);
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let cache = cache.clone();
+            let host = host();
+            join_set_spawn!(set, async move {
+                cache.fetch(&host, Duration::from_secs(5), true).await
+            });
+        }
+        while let Some(result) = set.join_next().await {
+            result
+                .unwrap()
+                .expect_err("the failure must reach every waiter");
+        }
+        assert_eq!(transport.price_requests(), 3);
+
+        // Eight callers, one RPC, one failure sample: the rate must match a
+        // host that was told about exactly one failure.
+        let reference = HostList::new();
+        reference.update(vec![entry()], true);
+        reference.add_write_sample(host_key, sample);
+        reference.add_failure(host_key);
+        assert_eq!(rate(&hosts), rate(&reference));
+        assert!(rate(&hosts) > 0, "the failed RPC must be sampled");
+
+        cache
+            .fetch(&host(), Duration::from_secs(5), false)
+            .await
+            .expect("a call after the failure must retry");
+        assert_eq!(transport.price_requests(), 4);
+    }
+
+    /// A price fetch outlives the caller that started it while another
+    /// caller waits on it, and stops once nobody does.
+    #[sia_core_derive::cross_target_test]
+    async fn test_price_fetch_runs_until_done_or_unwanted() {
+        let host_key = random_pubkey();
+        let transport = crate::rhp4::mock::Client::new();
+        transport.set_price_delay(Duration::from_millis(200));
+        let hosts = Arc::new(HostList::new());
+        hosts.update(
+            vec![Host {
+                public_key: host_key,
+                addresses: vec![],
+                country_code: String::new(),
+                latitude: 0.0,
+                longitude: 0.0,
+                good_for_upload: true,
+            }],
+            true,
+        );
+        let cache = PriceCache::new(Client::Mock(transport.clone()), hosts);
+        let host = || HostEndpoint {
+            public_key: host_key,
+            addresses: vec![],
+        };
+        let spawn_fetch = |refresh: bool| {
+            let cache = cache.clone();
+            let host = host();
+            AbortOnDropHandle::new(maybe_spawn!(async move {
+                cache.fetch(&host, Duration::from_secs(5), refresh).await
+            }))
+        };
+
+        // the starter is cancelled; the waiter still gets the result of the
+        // same RPC
+        let starter = spawn_fetch(false);
+        let waiter = spawn_fetch(false);
+        sleep(Duration::from_millis(20)).await;
+        drop(starter);
+        waiter
+            .await
+            .unwrap()
+            .expect("the fetch must survive its starter being cancelled");
+        assert_eq!(transport.price_requests(), 1);
+
+        // with every waiter gone the RPC is abandoned, so nothing is cached
+        // from it and the next call fetches again
+        let abandoned = spawn_fetch(true);
+        sleep(Duration::from_millis(20)).await;
+        drop(abandoned);
+        sleep(Duration::from_millis(300)).await;
+        cache
+            .fetch(&host(), Duration::from_secs(5), false)
+            .await
+            .expect("price fetch failed");
+        assert_eq!(
+            transport.price_requests(),
+            3,
+            "an abandoned fetch must not complete and populate the cache"
         );
     }
 

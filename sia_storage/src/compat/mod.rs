@@ -15,7 +15,7 @@ pub mod time {
     pub use tokio::time::{error::Elapsed, sleep, timeout};
 
     #[cfg(target_arch = "wasm32")]
-    pub use super::wasm_time::{Elapsed, sleep, timeout};
+    pub use super::wasm_time::{sleep, timeout};
 }
 
 /// Unified task utilities for native and WASM targets.

@@ -5,12 +5,14 @@
 //! Connections are pooled per host — one WebTransport session per host,
 //! with multiple bidirectional streams for concurrent RPCs.
 //!
-//! Writes use direct `JsFuture` calls (`write_all_async`) to avoid tokio
+//! Writes use bounded chunks and direct `JsFuture` calls to avoid tokio
 //! poll overhead. Reads use `AsyncRead` — the JS `reader.read()` already
 //! returns large chunks which are buffered internally.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::future::{Future, poll_fn};
+use std::ops::Range;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll};
@@ -28,7 +30,7 @@ use tokio::sync::{Semaphore, watch};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::time::{Duration, Instant, timeout};
+use crate::time::{Duration, Instant, sleep, timeout};
 
 use super::{Error, HostEndpoint, Transport};
 
@@ -53,9 +55,11 @@ const MAX_PENDING_CONNS: usize = 4;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Timeout for opening a bidirectional stream on an established connection.
-/// Independent of the per-RPC timeout so a hung `create_bidirectional_stream`
-/// can't consume the caller's full RPC budget.
+/// The RPC's idle clock only starts once the stream is open, so a hung
+/// `create_bidirectional_stream` needs its own bound.
 const OPEN_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
+
+const WRITE_CHUNK_SIZE: usize = 64 * 1024;
 
 fn js_err_message(e: &JsValue) -> String {
     if let Some(err) = e.dyn_ref::<js_sys::Error>() {
@@ -153,7 +157,7 @@ async fn connect(addr: &str) -> Result<Connection, Error> {
 // --- Stream ---
 
 /// One bidirectional stream carrying a single RPC. Reads go through
-/// [`AsyncRead`]; writes bypass poll entirely via [`Stream::write_all_async`].
+/// [`AsyncRead`]; writes await bounded browser writes via [`Stream::write_chunks`].
 struct Stream {
     reader: web_sys::ReadableStreamDefaultReader,
     pending_read: Option<JsFuture>,
@@ -161,6 +165,10 @@ struct Stream {
     /// chunk rather than a copy.
     leftover: Option<Uint8Array>,
     writer: web_sys::WritableStreamDefaultWriter,
+    last_progress: Instant,
+    idle_timeout: Option<Duration>,
+    idle_timer: Option<Pin<Box<dyn Future<Output = ()>>>>,
+    timed_out: bool,
 }
 
 impl Stream {
@@ -173,18 +181,69 @@ impl Stream {
             pending_read: None,
             leftover: None,
             writer,
+            last_progress: Instant::now(),
+            idle_timeout: None,
+            idle_timer: None,
+            timed_out: false,
         }
     }
 
-    /// Write all bytes in one JS call. This bypasses tokio's poll-based
-    /// AsyncWrite which would yield to the JS event loop on every poll.
-    /// RPC requests are encoded into a Vec<u8> first, then sent here.
-    async fn write_all_async(&self, data: &[u8]) -> Result<(), std::io::Error> {
-        let array = Uint8Array::new_with_length(data.len() as u32);
-        array.copy_from(data);
-        JsFuture::from(self.writer.write_with_chunk(&array))
-            .await
-            .map_err(|e| std::io::Error::other(js_err_message(&e)))?;
+    /// Set the stream's idle limit, or disable it with `None`.
+    /// Changing the limit does not clear an observed timeout.
+    fn set_idle_timeout(&mut self, timeout: Option<Duration>) {
+        self.idle_timeout = timeout;
+        self.last_progress = Instant::now();
+        self.idle_timer = None;
+    }
+
+    fn idle_error() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "WebTransport stream idle")
+    }
+
+    fn poll_idle(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if self.timed_out {
+            return Poll::Ready(Err(Self::idle_error()));
+        }
+        let Some(limit) = self.idle_timeout else {
+            return Poll::Pending;
+        };
+        loop {
+            let elapsed = self.last_progress.elapsed();
+            if elapsed >= limit {
+                self.timed_out = true;
+                return Poll::Ready(Err(Self::idle_error()));
+            }
+            let timer = self
+                .idle_timer
+                .get_or_insert_with(|| Box::pin(sleep(limit - elapsed)));
+            std::task::ready!(timer.as_mut().poll(cx));
+            // Progress may have moved the deadline since this timer was armed.
+            self.idle_timer = None;
+        }
+    }
+
+    /// Await each bounded write so browser backpressure exposes incremental
+    /// progress. Completion indicates browser acceptance rather than transport
+    /// ack, but it's the best we can do.
+    async fn write_chunks(&mut self, data: &[u8]) -> Result<(), std::io::Error> {
+        if self.timed_out {
+            return Err(Self::idle_error());
+        }
+        for chunk in data.chunks(WRITE_CHUNK_SIZE) {
+            let array = Uint8Array::new_with_length(chunk.len() as u32);
+            array.copy_from(chunk);
+            let mut write = JsFuture::from(self.writer.write_with_chunk(&array));
+            poll_fn(|cx| match Pin::new(&mut write).poll(cx) {
+                Poll::Ready(result) => Poll::Ready(
+                    result
+                        .map(|_| ())
+                        .map_err(|e| std::io::Error::other(js_err_message(&e))),
+                ),
+                Poll::Pending => self.poll_idle(cx),
+            })
+            .await?;
+            self.last_progress = Instant::now();
+        }
         Ok(())
     }
 }
@@ -196,9 +255,15 @@ impl Drop for Stream {
     fn drop(&mut self) {
         let reader = self.reader.clone();
         let writer = self.writer.clone();
+        let timed_out = self.timed_out;
         wasm_bindgen_futures::spawn_local(async move {
-            let _ = JsFuture::from(writer.close()).await;
-            let _ = JsFuture::from(reader.cancel()).await;
+            let write = JsFuture::from(if timed_out {
+                writer.abort()
+            } else {
+                writer.close()
+            });
+            let read = JsFuture::from(reader.cancel());
+            let _ = tokio::join!(write, read);
         });
     }
 }
@@ -225,6 +290,12 @@ impl AsyncRead for Stream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
+        if this.timed_out {
+            return Poll::Ready(Err(Self::idle_error()));
+        }
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
 
         if let Some(chunk) = this.leftover.take() {
             this.leftover = fill_from_chunk(chunk, buf);
@@ -236,8 +307,10 @@ impl AsyncRead for Stream {
         }
 
         let future = this.pending_read.as_mut().unwrap();
-        let result = std::task::ready!(Pin::new(future).poll(cx))
-            .map_err(|e| std::io::Error::other(js_err_message(&e)))?;
+        let result = match Pin::new(future).poll(cx) {
+            Poll::Ready(result) => result.map_err(|e| std::io::Error::other(js_err_message(&e)))?,
+            Poll::Pending => return this.poll_idle(cx),
+        };
         this.pending_read = None;
 
         let chunk: ReadableStreamReadResult = result.unchecked_into();
@@ -245,7 +318,13 @@ impl AsyncRead for Stream {
             return Poll::Ready(Ok(()));
         }
 
-        this.leftover = fill_from_chunk(Uint8Array::new(&chunk.value()), buf);
+        let chunk = Uint8Array::new(&chunk.value());
+        if chunk.length() == 0 {
+            cx.waker().wake_by_ref();
+            return this.poll_idle(cx);
+        }
+        this.last_progress = Instant::now();
+        this.leftover = fill_from_chunk(chunk, buf);
         Poll::Ready(Ok(()))
     }
 }
@@ -381,20 +460,25 @@ impl Client {
 }
 
 // RPC writes: encode request into a Vec<u8> (instant — Vec impls AsyncWrite),
-// then send the whole buffer with write_all_async in one JS Promise.
+// then send bounded chunks, awaiting each JS Promise for backpressure.
 //
 // RPC reads: use AsyncRead on Stream directly. The JS reader.read() already
 // returns large chunks from the network buffer, which Stream keeps a view of
 // in self.leftover and serves to subsequent poll_read calls without further
 // JS calls.
 impl Transport for Client {
-    async fn host_prices(&self, host: &HostEndpoint) -> Result<(HostPrices, Duration), Error> {
+    async fn host_prices(
+        &self,
+        host: &HostEndpoint,
+        idle_timeout: Duration,
+    ) -> Result<(HostPrices, Duration), Error> {
         let conn = self.connection(host).await?;
         let mut stream = conn.open_stream().await?;
+        stream.set_idle_timeout(Some(idle_timeout));
         let mut buf = Vec::new();
         let req = RPCSettings::send_request(&mut buf).await?;
         let start = Instant::now();
-        stream.write_all_async(&buf).await?;
+        stream.write_chunks(&buf).await?;
         let resp = req.complete(&mut stream).await?;
         Ok((resp.settings.prices, start.elapsed()))
     }
@@ -405,14 +489,16 @@ impl Transport for Client {
         prices: HostPrices,
         account_key: &PrivateKey,
         data: Bytes,
+        idle_timeout: Duration,
     ) -> Result<(Hash256, Duration), Error> {
         let token = AccountToken::new(account_key, host.public_key);
         let conn = self.connection(host).await?;
         let mut stream = conn.open_stream().await?;
+        stream.set_idle_timeout(Some(idle_timeout));
         let mut buf = Vec::new();
         let req = RPCWriteSector::send_request(&mut buf, prices, token, data.clone()).await?;
         let start = Instant::now();
-        stream.write_all_async(&buf).await?;
+        stream.write_chunks(&buf).await?;
         let resp = req.complete(&mut stream).await?;
         Ok((resp.root, start.elapsed()))
     }
@@ -423,16 +509,18 @@ impl Transport for Client {
         prices: HostPrices,
         token: AccountToken,
         root: Hash256,
-        offset: usize,
-        length: usize,
+        range: Range<usize>,
+        idle_timeout: Duration,
     ) -> Result<(Bytes, Duration), Error> {
         let conn = self.connection(host).await?;
         let mut stream = conn.open_stream().await?;
+        stream.set_idle_timeout(Some(idle_timeout));
         let mut buf = Vec::new();
         let req =
-            RPCReadSector::send_request(&mut buf, prices, token, root, offset, length).await?;
+            RPCReadSector::send_request(&mut buf, prices, token, root, range.start, range.len())
+                .await?;
         let start = Instant::now();
-        stream.write_all_async(&buf).await?;
+        stream.write_chunks(&buf).await?;
         let resp = req.complete(&mut stream).await?;
         Ok((resp.data, start.elapsed()))
     }
@@ -441,14 +529,20 @@ impl Transport for Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::time::Instant;
     use js_sys::Uint8Array;
     use tokio::io::AsyncReadExt;
     use wasm_bindgen_futures::spawn_local;
     use wasm_bindgen_test::*;
 
+    /// Idle limit for tests that must not time out.
+    const IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+
     /// Creates a Stream backed by separate read/write TransformStreams.
     /// Returns (stream, feeder_for_reads, reader_for_writes).
-    fn test_stream() -> (
+    fn test_stream(
+        idle_timeout: Duration,
+    ) -> (
         Stream,
         web_sys::WritableStreamDefaultWriter,
         web_sys::ReadableStreamDefaultReader,
@@ -469,11 +563,9 @@ mod tests {
             .get_reader()
             .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
 
-        (
-            Stream::new(stream_reader, stream_writer),
-            feeder,
-            out_reader,
-        )
+        let mut stream = Stream::new(stream_reader, stream_writer);
+        stream.set_idle_timeout(Some(idle_timeout));
+        (stream, feeder, out_reader)
     }
 
     /// Feed data into a WritableStreamDefaultWriter from a spawned microtask.
@@ -491,7 +583,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_stream_write_basic() {
-        let (stream, _, out_reader) = test_stream();
+        let (mut stream, _, out_reader) = test_stream(IDLE_TIMEOUT);
 
         // Write from a spawned task — even with separate TransformStreams,
         // the write-side transform won't pull unless the readable side is
@@ -499,7 +591,7 @@ mod tests {
         let data = b"hello from rust";
         let data_clone = data.to_vec();
         spawn_local(async move {
-            stream.write_all_async(&data_clone).await.unwrap();
+            stream.write_chunks(&data_clone).await.unwrap();
         });
 
         let result = JsFuture::from(out_reader.read()).await.unwrap();
@@ -511,12 +603,12 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_stream_write_large() {
-        let (stream, _, out_reader) = test_stream();
+        let (mut stream, _, out_reader) = test_stream(IDLE_TIMEOUT);
 
-        let data = vec![0xABu8; 4096];
+        let data = vec![0xABu8; WRITE_CHUNK_SIZE * 2 + 17];
         let data_clone = data.clone();
         spawn_local(async move {
-            stream.write_all_async(&data_clone).await.unwrap();
+            stream.write_chunks(&data_clone).await.unwrap();
         });
 
         let mut received = Vec::new();
@@ -524,14 +616,105 @@ mod tests {
             let result = JsFuture::from(out_reader.read()).await.unwrap();
             let chunk: ReadableStreamReadResult = result.unchecked_into();
             assert!(!chunk.is_done());
-            received.extend_from_slice(&Uint8Array::new(&chunk.value()).to_vec());
+            let chunk = Uint8Array::new(&chunk.value());
+            assert!(chunk.length() as usize <= WRITE_CHUNK_SIZE);
+            received.extend_from_slice(&chunk.to_vec());
         }
         assert_eq!(received, data);
     }
 
     #[wasm_bindgen_test]
+    async fn test_stalled_read_times_out_and_stays_failed() {
+        let (mut stream, _feeder, _out_reader) = test_stream(Duration::from_millis(25));
+        let err = timeout(Duration::from_secs(1), stream.read_u8())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        stream.leftover = Some(Uint8Array::from(&b"buffered"[..]));
+        assert_eq!(
+            stream.read_u8().await.unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            stream.write_chunks(b"retry").await.unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_stalled_write_times_out_and_stays_failed() {
+        let (mut stream, _feeder, out_reader) = test_stream(Duration::from_millis(25));
+        let err = timeout(Duration::from_secs(1), stream.write_chunks(b"blocked"))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(
+            stream.read_u8().await.unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            stream.write_chunks(b"retry").await.unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        drop(stream);
+        // Cleanup must abort the pending write instead of queuing close behind it.
+        assert!(
+            timeout(Duration::from_secs(1), JsFuture::from(out_reader.read()))
+                .await
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_read_progress_resets_idle_but_buffered_reads_do_not() {
+        let (mut stream, feeder, _out_reader) = test_stream(IDLE_TIMEOUT);
+        let old = stream.last_progress;
+        sleep(Duration::from_millis(5)).await;
+        feed_async(feeder, b"ab".to_vec());
+        assert_eq!(stream.read_u8().await.unwrap(), b'a');
+        let progress = stream.last_progress;
+        assert!(progress > old);
+        assert_eq!(stream.read_u8().await.unwrap(), b'b');
+        assert_eq!(stream.last_progress, progress);
+    }
+
+    /// A transfer that outlasts the idle limit must still succeed as long as
+    /// every chunk lands within it. The reader paces the writer: with a zero
+    /// high-water mark, each chunk's write only resolves once it is pulled.
+    #[wasm_bindgen_test]
+    async fn test_slow_but_progressing_write_outlasts_idle_limit() {
+        const LIMIT: Duration = Duration::from_millis(200);
+        const GAP: Duration = Duration::from_millis(100);
+        const CHUNKS: usize = 4;
+        let (mut stream, _feeder, out_reader) = test_stream(LIMIT);
+        let data = vec![42; WRITE_CHUNK_SIZE * CHUNKS];
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        spawn_local(async move {
+            tx.send(stream.write_chunks(&data).await).unwrap();
+        });
+        let start = Instant::now();
+        for _ in 0..CHUNKS {
+            sleep(GAP).await;
+            let result = JsFuture::from(out_reader.read()).await.unwrap();
+            let chunk: ReadableStreamReadResult = result.unchecked_into();
+            assert_eq!(
+                Uint8Array::new(&chunk.value()).length() as usize,
+                WRITE_CHUNK_SIZE
+            );
+        }
+        assert!(
+            start.elapsed() > LIMIT,
+            "the transfer must outlast the idle limit"
+        );
+        rx.await.unwrap().unwrap();
+    }
+
+    #[wasm_bindgen_test]
     async fn test_stream_read_exact() {
-        let (mut stream, feeder, _) = test_stream();
+        let (mut stream, feeder, _) = test_stream(IDLE_TIMEOUT);
         feed_async(feeder, b"hello, world!".to_vec());
 
         let mut buf = vec![0u8; 5];
@@ -545,7 +728,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_stream_read_buffering() {
-        let (mut stream, feeder, _) = test_stream();
+        let (mut stream, feeder, _) = test_stream(IDLE_TIMEOUT);
         feed_async(feeder, vec![42u8; 1024]);
 
         let mut total = Vec::new();
@@ -562,7 +745,7 @@ mod tests {
         // Use two separate TransformStreams: one for write, one for read.
         // Write side: our Stream writes → write_ts → out_reader verifies
         // Read side: feeder feeds → read_ts → our Stream reads
-        let (mut stream, feeder, out_reader) = test_stream();
+        let (mut stream, feeder, out_reader) = test_stream(IDLE_TIMEOUT);
 
         let data = b"roundtrip test data!";
 
@@ -575,7 +758,7 @@ mod tests {
         // 2. Write data through our Stream and verify it on the write side
         let data_vec = data.to_vec();
         spawn_local(async move {
-            stream.write_all_async(&data_vec).await.unwrap();
+            stream.write_chunks(&data_vec).await.unwrap();
         });
         let result = JsFuture::from(out_reader.read()).await.unwrap();
         let chunk: ReadableStreamReadResult = result.unchecked_into();
@@ -586,7 +769,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_stream_read_multiple_feeds() {
-        let (mut stream, feeder, _) = test_stream();
+        let (mut stream, feeder, _) = test_stream(IDLE_TIMEOUT);
 
         spawn_local(async move {
             let array = Uint8Array::new_with_length(5);

@@ -626,10 +626,7 @@ impl PackedUpload {
     /// size.
     pub fn remaining(&self) -> u64 {
         let length = self.length.load(Ordering::Acquire);
-        if length == 0 {
-            return self.optimal_data_size;
-        }
-        (self.optimal_data_size - (length % self.optimal_data_size)) % self.optimal_data_size
+        self.optimal_data_size - (length % self.optimal_data_size)
     }
 
     /// Returns the number of bytes added so far.
@@ -1251,6 +1248,35 @@ mod tests {
         assert_eq!(
             encoded_size(1 << 20, 10, 20).unwrap(),
             sia_storage::encoded_size(1 << 20, 10, 20)
+        );
+    }
+}
+
+#[cfg(test)]
+mod packed_remaining_tests {
+    use super::*;
+
+    fn upload(length: u64, optimal_data_size: u64) -> PackedUpload {
+        PackedUpload {
+            inner: Arc::new(tokio::sync::Mutex::new(None)),
+            cancel: CancellationToken::new(),
+            optimal_data_size,
+            length: Arc::new(AtomicU64::new(length)),
+        }
+    }
+
+    #[test]
+    fn a_full_slab_reports_a_whole_slab_free() {
+        let optimal = 40 << 20;
+        assert_eq!(upload(0, optimal).remaining(), optimal, "nothing added yet");
+        assert_eq!(upload(optimal / 2, optimal).remaining(), optimal / 2);
+        // The slab rolled over, so the next one is empty. Reporting 0 here
+        // would tell a caller every further add starts a new slab.
+        assert_eq!(upload(optimal, optimal).remaining(), optimal);
+        assert_eq!(upload(2 * optimal, optimal).remaining(), optimal);
+        assert_eq!(
+            upload(optimal + optimal / 4, optimal).remaining(),
+            optimal * 3 / 4
         );
     }
 }

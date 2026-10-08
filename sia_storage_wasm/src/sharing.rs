@@ -171,10 +171,11 @@ impl SharedSdk {
     }
 
     /// Streams a shared object's data.
+    #[wasm_bindgen(unchecked_return_type = "ReadableStream")]
     pub fn download(
         &self,
         object: &PinnedObject,
-        options: Option<JsValue>,
+        #[wasm_bindgen(unchecked_optional_param_type = "DownloadOptions")] options: Option<JsValue>,
     ) -> Result<web_sys::ReadableStream, JsError> {
         const CHUNK_SIZE: usize = 1 << 18;
         let opts = options.map(download_options_from_js).unwrap_or_default();
@@ -182,11 +183,3 @@ impl SharedSdk {
         Ok(wasm_streams::ReadableStream::from_async_read(download.compat(), CHUNK_SIZE).into_raw())
     }
 }
-
-// Types the download options, which wasm_bindgen otherwise emits as any.
-#[wasm_bindgen(typescript_custom_section)]
-const _: &str = r#"
-interface SharedSdk {
-    download(object: PinnedObject, options?: DownloadOptions): ReadableStream;
-}
-"#;

@@ -39,6 +39,17 @@ pub enum ProofValidationError {
     NotSegmentAligned,
 }
 
+impl Clone for ProofValidationError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::InvalidProofLength => Self::InvalidProofLength,
+            Self::InvalidProofRoot => Self::InvalidProofRoot,
+            Self::Io(e) => Self::Io(io::Error::new(e.kind(), e.to_string())),
+            Self::NotSegmentAligned => Self::NotSegmentAligned,
+        }
+    }
+}
+
 #[derive(Debug, SiaEncode, SiaDecode, AsyncSiaDecode, PartialEq)]
 pub struct RangeProof(Vec<Hash256>, Bytes);
 
