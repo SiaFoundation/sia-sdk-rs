@@ -9,7 +9,7 @@ use sia_core::types::Hash256;
 
 use crate::app_client::IntoUrl;
 use crate::hosts::{Host, Hosts};
-use crate::rhp4::Client;
+use crate::rhp4::{Client, default_client};
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, sleep};
 use crate::tokens::AccountTokenSource;
@@ -90,7 +90,7 @@ impl SharedSdk {
     ) -> Result<Self, BuilderError> {
         let mut api_client = app_client::Client::new(indexer_url)?;
         api_client.set_cbor(cbor);
-        Self::with_backends(api_client, Client::new(), SharingKey::import(seed)).await
+        Self::with_backends(api_client, default_client(), SharingKey::import(seed)).await
     }
 
     /// Connects as the recipient of a sharing key, seeding the host list and
@@ -241,8 +241,9 @@ impl SharedSdk {
     }
 }
 
+/// Integration tests requiring httptest, a TCP mock server. Native only.
 #[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
+mod native_tests {
     use super::*;
     use crate::app_client::SharedHost;
     use crate::hosts::Host;

@@ -1483,7 +1483,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[sia_core_derive::cross_target_test]
     fn test_validate_ec_params() {
         let cases: &[(u8, u8, bool)] = &[
             (0, 6, false),   // zero data shards
