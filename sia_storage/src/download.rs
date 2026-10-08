@@ -100,6 +100,9 @@ struct AwaitingRecovery {
     /// This chunk's position in download order. Compared against `popped`
     /// to decide whether the chunk is close enough to the read head to race.
     seq: usize,
+    /// The reader was already waiting on this chunk when it was admitted, so
+    /// every sector is read at once rather than racing slow hosts in.
+    head: bool,
     /// Counts the chunks handed to the reader so far. `recover_shards`
     /// subscribes to it; holding a sender keeps the channel open so the
     /// `changed` arm cannot fail.
@@ -193,11 +196,14 @@ impl SlabRecovery<AwaitingRecovery> {
         // snapshot and pile onto the same fastest hosts. The guards travel
         // into the spawned read tasks via `recover_shards` and drop with
         // them; failure/timeout retries reserve on demand from `remaining`.
+        // The head chunk reads every sector, so it reserves them all.
+        let head = seq <= *popped.borrow();
+        let reserved = if head { sectors.len() } else { min_shards };
         let sectors = sectors
             .into_iter()
             .enumerate()
             .map(|(i, task)| {
-                if i < min_shards {
+                if i < reserved {
                     let guard = client.reserve_inflight_download(&task.sector.host_key);
                     (task, guard)
                 } else {
@@ -219,6 +225,7 @@ impl SlabRecovery<AwaitingRecovery> {
             state: AwaitingRecovery {
                 sectors,
                 seq,
+                head,
                 popped,
             },
         })
@@ -297,8 +304,13 @@ impl SlabRecovery<AwaitingRecovery> {
             .read_estimate(shard_length as u32)
             .mul_f64(RACE_FACTOR);
 
-        // overprovision the recovery to reduce tail latency from slow hosts
-        let spawn_shards = (min_shards * 3 / 2).min(sectors.len());
+        // overprovision the recovery to reduce tail latency from slow hosts;
+        // the chunk the reader is waiting on tries every host at once
+        let spawn_shards = if self.state.head {
+            sectors.len()
+        } else {
+            (min_shards * 3 / 2).min(sectors.len())
+        };
         for (task, inflight) in sectors.drain(..spawn_shards) {
             join_set_spawn!(
                 &mut shard_tasks,
@@ -308,6 +320,7 @@ impl SlabRecovery<AwaitingRecovery> {
         let mut recovered_shards: usize = 0;
         let mut slowest_winner: Option<Duration> = None;
         let mut eligible = seq < popped_rx.borrow_and_update().saturating_add(RACE_WINDOW);
+        let mut head = self.state.head;
         let mut last_event = Instant::now();
 
         loop {
@@ -379,8 +392,18 @@ impl SlabRecovery<AwaitingRecovery> {
                     debug!("chunk {seq} racing slow host with {} after {:?}", task.sector.host_key, elapsed);
                     join_set_spawn!(&mut shard_tasks, self.recover_shard(task, inflight, shard_offset, shard_length));
                 },
-                _ = popped_rx.wait_for(|popped| seq < popped.saturating_add(RACE_WINDOW)), if !eligible => {
+                // Fires when the reader brings this chunk into the race window, and again when it
+                // reaches the chunk itself: a chunk the reader is waiting on races every remaining host at once
+                Ok(popped) = popped_rx.wait_for(|popped| seq <= *popped || (!eligible && seq < popped.saturating_add(RACE_WINDOW))), if !head && (!eligible || !sectors.is_empty()) => {
                     eligible = true;
+                    if seq <= *popped {
+                        head = true;
+                        debug!("chunk {seq} reached the read head, racing {} remaining hosts", sectors.len());
+                        for (task, _) in sectors.drain(..) {
+                            let inflight = self.client.reserve_inflight_download(&task.sector.host_key);
+                            join_set_spawn!(&mut shard_tasks, self.recover_shard(task, inflight, shard_offset, shard_length));
+                        }
+                    }
                 },
             }
         }
@@ -719,7 +742,6 @@ impl Download {
         let Some(chunk_handle) = self.queue.pop_front() else {
             return Ok(Vec::new()); // EOF
         };
-        self.popped.send_modify(|p| *p += 1);
         let result = match chunk_handle.await {
             Ok(Ok(data)) => data,
             Ok(Err(e)) => {
@@ -731,6 +753,9 @@ impl Download {
                 return Err(e.into());
             }
         };
+        // Counted once the chunk is in hand, as in `poll_read`, so the next
+        // chunk is not promoted to the read head while this one is in flight.
+        self.popped.send_modify(|p| *p += 1);
         self.refill();
         Ok(result)
     }
@@ -1295,7 +1320,8 @@ mod test {
     /// surfaces per sector, after a run of doomed reads.
     #[sia_core_derive::cross_target_test]
     async fn test_recovery_fails_immediately_when_hosts_are_unreachable() {
-        let (hosts, app_key, slab) = racing_setup(Duration::from_millis(0)).await;
+        let (hosts, app_key, slab, _) =
+            racing_setup(Duration::from_millis(0), Duration::from_micros(1)).await;
         let min_shards = slab.min_shards as usize;
 
         // Every host the slab was written to is now gone from the SDK, so none
@@ -1428,12 +1454,15 @@ mod test {
         }
     }
 
-    /// Uploads one slab to 60 hosts, then seeds fast read samples for the
-    /// first 15 sector hosts so they deterministically win `prioritize`
-    /// (the rest only have write samples from the upload) and the read median
-    /// sits at its floor, and finally makes those 15 hosts slow. Racers
-    /// (when allowed) come from the remaining fast hosts.
-    async fn racing_setup(slow_delay: Duration) -> (Hosts, Arc<AppKey>, Slab) {
+    /// Uploads one slab to 60 hosts and makes its first 15 sector hosts
+    /// answer after `slow_delay`. Every other host gets a failure sample so
+    /// `prioritize` picks the slow hosts first and racers come from the fast
+    /// ones. The slow hosts get a read sample of 256 KiB in `sample`, which
+    /// sets the read estimate the race timeout derives from.
+    async fn racing_setup(
+        slow_delay: Duration,
+        sample: Duration,
+    ) -> (Hosts, Arc<AppKey>, Slab, mock::Client) {
         let upload_options = UploadOptions::default();
         let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
@@ -1473,11 +1502,14 @@ mod test {
         let slab = obj.slabs()[0].clone();
 
         let slow_set: Vec<_> = slab.sectors.iter().take(15).map(|s| s.host_key).collect();
+        for sector in slab.sectors.iter().skip(15) {
+            hosts.add_failure(sector.host_key);
+        }
         for host_key in &slow_set {
-            hosts.record_read_sample(*host_key, 1 << 18, Duration::from_micros(1));
+            hosts.record_read_sample(*host_key, 1 << 18, sample);
         }
         transport.set_slow_hosts(slow_set, slow_delay);
-        (hosts, app_key, slab)
+        (hosts, app_key, slab, transport)
     }
 
     fn racing_chunk(slab: &Slab) -> ChunkSlab {
@@ -1493,7 +1525,8 @@ mod test {
 
     #[sia_core_derive::cross_target_test]
     async fn test_download_race_gated_outside_window() {
-        let (hosts, app_key, slab) = racing_setup(Duration::from_millis(1500)).await;
+        let (hosts, app_key, slab, transport) =
+            racing_setup(Duration::from_millis(1500), Duration::from_micros(1)).await;
         let start = Instant::now();
         let controller = Arc::new(InflightController::new(
             INITIAL_INFLIGHT,
@@ -1520,11 +1553,51 @@ mod test {
             "chunk outside the window must not race: {:?}",
             start.elapsed()
         );
+        assert_eq!(
+            transport.read_requests(),
+            slab.min_shards as usize * 3 / 2,
+            "a chunk outside the window reads only the overprovisioned set"
+        );
     }
 
     #[sia_core_derive::cross_target_test]
     async fn test_download_race_within_window() {
-        let (hosts, app_key, slab) = racing_setup(Duration::from_millis(1500)).await;
+        let (hosts, app_key, slab, _) =
+            racing_setup(Duration::from_millis(1500), Duration::from_micros(1)).await;
+        let start = Instant::now();
+        let controller = Arc::new(InflightController::new(
+            INITIAL_INFLIGHT,
+            MIN_INFLIGHT,
+            100,
+            10,
+        ));
+        let permit = controller.sample();
+        SlabRecovery::new(
+            hosts.clone(),
+            controller,
+            app_key.clone(),
+            permit,
+            racing_chunk(&slab),
+            1, // one chunk ahead of the reader: in the window, not the head
+            watch::channel(0).0,
+        )
+        .unwrap()
+        .recover_shards(None)
+        .await
+        .unwrap();
+        assert!(
+            start.elapsed() < Duration::from_millis(1200),
+            "chunk within the window should race slow hosts: {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// The chunk the reader is waiting on reads every sector up front instead
+    /// of racing slow hosts in one at a time.
+    #[sia_core_derive::cross_target_test]
+    async fn test_download_head_chunk_reads_every_host() {
+        let (hosts, app_key, slab, transport) =
+            racing_setup(Duration::from_millis(1500), Duration::from_micros(1)).await;
         let start = Instant::now();
         let controller = Arc::new(InflightController::new(
             INITIAL_INFLIGHT,
@@ -1548,14 +1621,20 @@ mod test {
         .unwrap();
         assert!(
             start.elapsed() < Duration::from_millis(1200),
-            "chunk at the read head should race slow hosts: {:?}",
+            "the head chunk must not wait on slow hosts: {:?}",
             start.elapsed()
+        );
+        assert_eq!(
+            transport.read_requests(),
+            slab.sectors.len(),
+            "the head chunk reads every sector at once"
         );
     }
 
     #[sia_core_derive::cross_target_test]
     async fn test_download_race_triggered_by_window() {
-        let (hosts, app_key, slab) = racing_setup(Duration::from_millis(1500)).await;
+        let (hosts, app_key, slab, _) =
+            racing_setup(Duration::from_millis(1500), Duration::from_micros(1)).await;
         let popped_tx = watch::channel(0).0;
         // the reader pops a chunk 200ms in, bringing this chunk into the
         // window; racing should begin immediately rather than waiting
@@ -1590,6 +1669,125 @@ mod test {
         assert!(
             elapsed >= Duration::from_millis(190) && elapsed < Duration::from_millis(1200),
             "racing should begin once the chunk enters the window: {elapsed:?}"
+        );
+    }
+
+    /// `read_chunk` must not count a chunk as popped until it has completed;
+    /// otherwise the chunk behind it is promoted to the read head and reads
+    /// every sector while the reader is still blocked on this one.
+    #[sia_core_derive::cross_target_test]
+    async fn test_read_chunk_pops_after_the_chunk_completes() {
+        let upload_options = UploadOptions::default();
+        let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
+
+        let transport = mock::Client::new();
+        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        let host_keys: Vec<_> = (0..60)
+            .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
+            .collect();
+        hosts.update(
+            host_keys
+                .iter()
+                .map(|public_key| Host {
+                    public_key: *public_key,
+                    addresses: vec![NetAddress {
+                        protocol: sia_core::types::v2::Protocol::QUIC,
+                        address: "localhost:1234".to_string(),
+                    }],
+                    country_code: "US".to_string(),
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    good_for_upload: true,
+                })
+                .collect(),
+            true,
+        );
+        let mut data = BytesMut::zeroed(optimal_data_size);
+        rand::rng().fill_bytes(&mut data);
+        let app_key = Arc::new(AppKey::import(rand::random()));
+        let obj = upload_object(
+            hosts.clone(),
+            crate::app_client::Client::mock(),
+            app_key.clone(),
+            Object::default(),
+            Cursor::new(data.freeze()),
+            upload_options,
+        )
+        .await
+        .unwrap();
+        // every host answers late, so the first chunk stays in flight
+        transport.set_slow_hosts(host_keys, Duration::from_millis(500));
+
+        let mut download = Download::new(
+            &obj,
+            hosts.clone(),
+            app_key.clone(),
+            DownloadOptions::default(),
+        )
+        .unwrap();
+        let popped = download.popped.subscribe();
+        let read = download.read_chunk();
+        tokio::pin!(read);
+        tokio::select! {
+            biased;
+            _ = sleep(Duration::from_millis(100)) => {},
+            _ = &mut read => panic!("the chunk completed before its hosts could answer"),
+        }
+        assert_eq!(
+            *popped.borrow(),
+            0,
+            "a chunk still in flight must not count as popped"
+        );
+        let chunk = read.await.unwrap();
+        assert!(!chunk.is_empty());
+        assert_eq!(*popped.borrow(), 1);
+    }
+
+    /// A chunk the reader catches up to races every remaining host at once
+    /// rather than waiting out the race timeout for each.
+    #[sia_core_derive::cross_target_test]
+    async fn test_download_head_transition_races_every_host() {
+        // 256 KiB in a second puts the race timeout at 1.5s, past the slow
+        // hosts, so only the head transition can finish this chunk early
+        let (hosts, app_key, slab, transport) =
+            racing_setup(Duration::from_millis(1500), Duration::from_secs(1)).await;
+        let popped_tx = watch::channel(0).0;
+        // the reader reaches this chunk 200ms in
+        let tx = popped_tx.clone();
+        maybe_spawn!(async move {
+            sleep(Duration::from_millis(200)).await;
+            tx.send_modify(|p| *p = RACE_WINDOW);
+        });
+        let start = Instant::now();
+        let controller = Arc::new(InflightController::new(
+            INITIAL_INFLIGHT,
+            MIN_INFLIGHT,
+            100,
+            10,
+        ));
+        let permit = controller.sample();
+        SlabRecovery::new(
+            hosts.clone(),
+            controller,
+            app_key.clone(),
+            permit,
+            racing_chunk(&slab),
+            RACE_WINDOW,
+            popped_tx,
+        )
+        .unwrap()
+        .recover_shards(None)
+        .await
+        .unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(190) && elapsed < Duration::from_millis(1200),
+            "reaching the head must race the remaining hosts immediately: {elapsed:?}"
+        );
+        assert_eq!(
+            transport.read_requests(),
+            slab.sectors.len(),
+            "the head transition reads every remaining sector"
         );
     }
 }

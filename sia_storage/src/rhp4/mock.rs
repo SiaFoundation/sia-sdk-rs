@@ -27,6 +27,7 @@ pub struct Client {
     price_delay: Arc<RwLock<Duration>>,
     price_requests: Arc<AtomicUsize>,
     price_failures: Arc<AtomicUsize>,
+    read_requests: Arc<AtomicUsize>,
 }
 
 impl Default for Client {
@@ -47,6 +48,7 @@ impl Client {
             price_delay: Arc::new(RwLock::new(Duration::ZERO)),
             price_requests: Arc::new(AtomicUsize::new(0)),
             price_failures: Arc::new(AtomicUsize::new(0)),
+            read_requests: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -127,6 +129,11 @@ impl Client {
     pub fn set_price_failures(&self, count: usize) {
         self.price_failures.store(count, Ordering::Relaxed);
     }
+
+    /// Number of `read_sector` calls started so far.
+    pub fn read_requests(&self) -> usize {
+        self.read_requests.load(Ordering::Relaxed)
+    }
 }
 
 impl Transport for Client {
@@ -196,6 +203,7 @@ impl Transport for Client {
         range: Range<usize>,
         idle_timeout: Duration,
     ) -> Result<(Bytes, Duration), RHP4Error> {
+        self.read_requests.fetch_add(1, Ordering::Relaxed);
         if host.addresses.is_empty() {
             return Err(RHP4Error::Transport("host has no addresses".to_string()));
         }
