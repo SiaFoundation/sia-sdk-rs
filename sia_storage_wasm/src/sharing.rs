@@ -9,7 +9,7 @@ use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::*;
 
 use crate::helpers::to_js_err;
-use crate::object::PinnedObject;
+use crate::object::{ObjectSummary, PinnedObject};
 use crate::run_local;
 use crate::types::{self, HostQuery, KeyStats, download_options_from_js};
 
@@ -155,6 +155,23 @@ impl SharedSdk {
             .await
             .map_err(to_js_err)?;
         Ok(objects.into_iter().map(PinnedObject).collect())
+    }
+
+    /// Lists a page of the objects the key grants access to without their
+    /// slabs, which is much smaller and faster than `objects`. Each summary
+    /// has the object's id, size, decrypted metadata and timestamps.
+    #[wasm_bindgen(js_name = "objectSummaries")]
+    pub async fn object_summaries(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<ObjectSummary>, JsError> {
+        let summaries = self
+            .inner
+            .object_summaries(Some(offset as u64), Some(limit as u64))
+            .await
+            .map_err(to_js_err)?;
+        Ok(summaries.into_iter().map(ObjectSummary).collect())
     }
 
     /// Returns the hosts serving this key's objects, optionally filtered by a

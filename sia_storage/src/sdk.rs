@@ -534,6 +534,15 @@ mod test {
             .expect("list failed");
         assert_eq!(listed.len(), 1);
 
+        let summaries = shared
+            .object_summaries(Some(0), Some(10))
+            .await
+            .expect("summary list failed");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, object.id());
+        assert_eq!(summaries[0].metadata, b"metadata".to_vec());
+        assert_eq!(summaries[0].size, data.len() as u64);
+
         // re-sealing under the sharing key must round-trip, or a recipient can
         // decrypt nothing at all
         let fetched = shared.object(&object.id()).await.expect("fetch failed");

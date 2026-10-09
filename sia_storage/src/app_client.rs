@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::object_encryption::DecryptError;
 use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
-use crate::slabs::{Base64OrBytes, Sector, SlabVersion};
+use crate::slabs::{Base64OrBytes, SealedObjectSummary, Sector, SlabVersion};
 use crate::{Account, AppMetadata, HostQuery, Object, ObjectsCursor, SealedObject, Slab};
 use sia_core::rhp4::AccountToken;
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
@@ -649,6 +649,21 @@ impl Client {
             Self::Http(c) => c.shared_objects(sharing_key, offset, limit).await,
             #[cfg(any(test, feature = "mock"))]
             Self::Mock(c) => c.shared_objects(sharing_key, offset, limit).await,
+        }
+    }
+
+    /// Lists the objects the sharing key grants access to without their
+    /// slabs.
+    pub(crate) async fn shared_object_summaries(
+        &self,
+        sharing_key: &PrivateKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<SealedObjectSummary>, Error> {
+        match self {
+            Self::Http(c) => c.shared_object_summaries(sharing_key, offset, limit).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.shared_object_summaries(sharing_key, offset, limit).await,
         }
     }
 
