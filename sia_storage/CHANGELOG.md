@@ -1,3 +1,71 @@
+## 0.13.0 (2026-10-09)
+
+### Breaking Changes
+
+- Take a cutoff on `prune_slabs`
+
+#### Remove `Sdk::slab`
+
+A slab id is `Slab::digest()`, derived from the sector roots rather than stored,
+and no binding exposed a way to obtain one. `sdk.slab(id)` therefore took an
+argument its callers could not produce. The lookup is gone from the native SDK
+and from the uniffi, napi and wasm bindings, along with the `PinnedSlab` each of
+them mirrored for it. `sia_storage::PinnedSlab` goes too, since nothing public
+returned it once the lookup was gone.
+
+#### Replace fixed RPC deadlines with a per-RPC idle timeout
+
+Sector reads and writes no longer run under a fixed 90 second deadline. Each RPC now fails once its stream has gone 6 seconds without making progress, so a stalled host is dropped quickly while a slow transfer that is still moving data is allowed to finish. `RPCError::Elapsed` is removed, along with the never-constructed `UploadError::Timeout` and `DownloadError::Timeout`; a stalled RPC surfaces as a timed-out I/O error.
+
+### Features
+
+- Add `SharedSdk::object_summaries`, `objectSummaries` in the WASM and NAPI bindings, which lists shared objects without their slabs and returns each one's id, size, decrypted metadata and timestamps.
+
+#### Negotiate CBOR responses from the indexer
+
+The SDK prefers CBOR responses from the indexer and decodes them according to their content type, with JSON fallback for older indexers. Set `Builder::with_cbor(false)` or connect with `SharedSdk::connect_with_cbor(url, seed, false)` to request JSON for easier inspection; the FFI, N-API, and WASM bindings expose the same `withCbor` builder method and `connectWithCbor` constructor. Request bodies remain JSON. Malformed CBOR responses return the new `AppApiError::Cbor` variant.
+
+`EncryptionKey` and the encrypted keys and metadata of a `SealedObject` now serialize as byte strings in non-human-readable formats instead of strings or fixed-size tuples.
+
+Null timestamps from the indexer decode as Go's zero time and null lists as empty lists.
+
+### Fixes
+
+- All SDK instances now share the same underlying connection pool.
+- Apply the object keystream in bulk rather than per 64-byte segment.
+- Back off the download inflight limit when sector reads time out, instead of waiting for a goodput window that reads flat on a saturated link.
+- Back off the inflight limit on a window with no successes.
+- Decay the per host failure rate over time
+- Keep a SiaMux dial running when the RPC that started it is cancelled, for as long as another RPC is waiting on it.
+- Fail a download immediately when too few hosts are reachable
+- Improved WebTransport connection pooling due to Chrome connection limits.
+- Increased parallelism during WebTransport downloads and uploads.
+- Try every sector of the chunk the reader is waiting on at once instead of racing slow hosts in.
+- Refresh the host list when an upload finds too few hosts, rather than leaving uploads failing until the next scheduled refresh.
+- Request gzip or zstd compressed responses from the indexer.
+- Request the host list 500 hosts at a time, the indexer's maximum, so the current network loads in one request instead of three.
+- Fixed cancelled upload attempts losing their host for the rest of the slab
+- Serialize concurrent price table fetches to the same host behind a single RPC.
+
+#### Record a host failure when a sector read times out
+
+`read_sector` recorded a failure only when the RPC itself returned an error. A
+timeout dropped that future without the hook running, so a host that stopped
+answering reads kept no samples and a 0% failure rate, which host selection
+ranks above every measured host as a discovery preference. The host that just
+timed out was picked first again. `write_sector` already had this arm.
+
+#### Reupload slabs rejected by the indexer as too old
+
+Fresh slab pin requests now include each sector's upload time. If the indexer
+rejects a slab as too old, the SDK reuploads its retained shards and retries
+pinning with fresh timestamps, up to three upload attempts. This replaces the
+age estimate based on host-reported block heights and requires indexd#1068.
+
+#### Sample the download inflight controller per chunk rather than per sector read, and let it climb further before settling.
+
+The controller also backs off when reads time out, since a saturated link reads as flat goodput rather than as a decline. Timeouts count once per host and decay as windows complete, so neither one unreachable peer nor strays spread over a long download narrows the pipeline.
+
 ## 0.12.0 (2026-09-14)
 
 ### Breaking Changes

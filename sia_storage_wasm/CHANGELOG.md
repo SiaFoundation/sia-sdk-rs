@@ -1,3 +1,66 @@
+## 0.8.0 (2026-10-09)
+
+### Breaking Changes
+
+- Take a cutoff on `prune_slabs`
+
+#### Remove `Sdk::slab`
+
+A slab id is `Slab::digest()`, derived from the sector roots rather than stored,
+and no binding exposed a way to obtain one. `sdk.slab(id)` therefore took an
+argument its callers could not produce. The lookup is gone from the native SDK
+and from the uniffi, napi and wasm bindings, along with the `PinnedSlab` each of
+them mirrored for it. `sia_storage::PinnedSlab` goes too, since nothing public
+returned it once the lookup was gone.
+
+#### Replace fixed RPC deadlines with a per-RPC idle timeout
+
+Sector reads and writes no longer run under a fixed 90 second deadline. Each RPC now fails once its stream has gone 6 seconds without making progress, so a stalled host is dropped quickly while a slow transfer that is still moving data is allowed to finish. `RPCError::Elapsed` is removed, along with the never-constructed `UploadError::Timeout` and `DownloadError::Timeout`; a stalled RPC surfaces as a timed-out I/O error.
+
+### Features
+
+- Add `SharedSdk::object_summaries`, `objectSummaries` in the WASM and NAPI bindings, which lists shared objects without their slabs and returns each one's id, size, decrypted metadata and timestamps.
+
+### Fixes
+
+- All SDK instances now share the same underlying connection pool.
+- Apply the object keystream in bulk rather than per 64-byte segment.
+- Back off the download inflight limit when sector reads time out, instead of waiting for a goodput window that reads flat on a saturated link.
+- Back off the inflight limit on a window with no successes.
+- Fail a download immediately when too few hosts are reachable
+- Improved WebTransport connection pooling due to Chrome connection limits.
+- Increased parallelism during WebTransport downloads and uploads.
+- Try every sector of the chunk the reader is waiting on at once instead of racing slow hosts in.
+- Refresh the host list when an upload finds too few hosts, rather than leaving uploads failing until the next scheduled refresh.
+- Request the host list 500 hosts at a time, the indexer's maximum, so the current network loads in one request instead of three.
+- Serialize concurrent price table fetches to the same host behind a single RPC.
+- Fix the generated type declaration for `SharedSdk`
+
+#### Return an error from `encoded_size` when data shards is zero
+
+Zero data shards divided by zero in the core SDK. In Node that aborted the process, and in WASM it threw an opaque `unreachable` error. The bindings now return a "data shards cannot be zero" error instead. The UniFFI `encoded_size` now throws, so Swift callers need `try`.
+
+#### Report a whole slab free once one fills
+
+A slab that filled exactly reported 0 bytes free instead of a whole empty slab. A caller using it 
+to decide what to add next was told every further object would start a new slab.
+
+#### Sample the download inflight controller per chunk rather than per sector read, and let it climb further before settling.
+
+The controller also backs off when reads time out, since a saturated link reads as flat goodput rather than as a decline. Timeouts count once per host and decay as windows complete, so neither one unreachable peer nor strays spread over a long download narrows the pipeline.
+
+#### Negotiate CBOR responses from the indexer
+
+The SDK prefers CBOR responses from the indexer and decodes them according to their content type, with JSON fallback for older indexers. Set `Builder::with_cbor(false)` or connect with `SharedSdk::connect_with_cbor(url, seed, false)` to request JSON for easier inspection; the FFI, N-API, and WASM bindings expose the same `withCbor` builder method and `connectWithCbor` constructor. Request bodies remain JSON. Malformed CBOR responses return the new `AppApiError::Cbor` variant.
+
+`EncryptionKey` and the encrypted keys and metadata of a `SealedObject` now serialize as byte strings in non-human-readable formats instead of strings or fixed-size tuples.
+
+Null timestamps from the indexer decode as Go's zero time and null lists as empty lists.
+
+#### Type WASM upload and download options
+
+Generate typed optional parameters for `Sdk.upload`, `Sdk.download`, and `Sdk.uploadPacked` so TypeScript rejects unknown option fields and incorrect values.
+
 ## 0.7.0 (2026-09-15)
 
 ### Breaking Changes
