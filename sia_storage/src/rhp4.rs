@@ -20,6 +20,8 @@ mod web_transport;
 #[cfg(any(test, feature = "mock"))]
 pub(crate) mod mock;
 
+mod pool;
+pub(crate) use pool::default_client;
 /// The transport used to talk to hosts. One real backend exists per
 /// target. The `mock` feature adds an in-memory backend alongside it.
 #[derive(Clone)]

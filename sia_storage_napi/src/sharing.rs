@@ -41,6 +41,31 @@ impl From<sia_storage::KeyStats> for KeyStats {
     }
 }
 
+/// An object listed without its slabs, as `SharedSdk.objectSummaries`
+/// returns it. It cannot be downloaded. Fetch the full object with
+/// `SharedSdk.object(id)` to download it.
+#[napi(object)]
+pub struct ObjectSummary {
+    pub id: String,
+    /// The object's size in bytes.
+    pub size: BigInt,
+    pub metadata: Buffer,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<sia_storage::ObjectSummary> for ObjectSummary {
+    fn from(s: sia_storage::ObjectSummary) -> Self {
+        Self {
+            id: s.id.to_string(),
+            size: BigInt::from(s.size),
+            metadata: Buffer::from(s.metadata),
+            created_at: s.created_at,
+            updated_at: s.updated_at,
+        }
+    }
+}
+
 /// A sharing key, granting read-only access to the objects attached to it.
 ///
 /// It is just the credential; the operations that use it live on `Sdk`.
@@ -282,6 +307,18 @@ impl SharedSdk {
                 inner: Mutex::new(o),
             })
             .collect())
+    }
+
+    /// Lists a page of the objects the key grants access to without their
+    /// slabs, which is much smaller and faster than `objects`.
+    #[napi]
+    pub async fn object_summaries(&self, offset: u32, limit: u32) -> Result<Vec<ObjectSummary>> {
+        let summaries = self
+            .inner
+            .object_summaries(Some(offset as u64), Some(limit as u64))
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(summaries.into_iter().map(ObjectSummary::from).collect())
     }
 
     /// Returns the hosts serving this key's objects, optionally filtered by a

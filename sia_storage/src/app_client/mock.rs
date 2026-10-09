@@ -16,7 +16,7 @@ use super::{
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
 use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
-use crate::slabs::Slab;
+use crate::slabs::{SealedObjectSummary, Slab};
 use crate::time::Duration;
 use crate::{Account, App, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject};
 
@@ -670,6 +670,30 @@ impl Client {
     ) -> Result<Vec<SealedObject>, Error> {
         let state = self.state.read().unwrap();
         Ok(Self::shared(&state, sharing_key)?.page(offset, limit))
+    }
+
+    /// Reports each object's size, as indexers that include it in listings
+    /// without slabs do.
+    pub(crate) async fn shared_object_summaries(
+        &self,
+        sharing_key: &PrivateKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<SealedObjectSummary>, Error> {
+        let state = self.state.read().unwrap();
+        Ok(Self::shared(&state, sharing_key)?
+            .page(offset, limit)
+            .into_iter()
+            .map(|sealed| SealedObjectSummary {
+                object_id: sealed.id(),
+                size: sealed.slabs.iter().map(|s| s.length as u64).sum(),
+                encrypted_metadata_key: sealed.encrypted_metadata_key,
+                encrypted_metadata: sealed.encrypted_metadata,
+                metadata_signature: sealed.metadata_signature,
+                created_at: sealed.created_at,
+                updated_at: sealed.updated_at,
+            })
+            .collect())
     }
 
     pub(crate) async fn shared_object_by_id(

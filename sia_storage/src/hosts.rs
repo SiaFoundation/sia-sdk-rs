@@ -827,7 +827,7 @@ mod test {
     ///
     /// Each RPC gets its own host, so each starts unsampled and the assertion
     /// cannot be satisfied by the other RPC's failure.
-    #[tokio::test]
+    #[sia_core_derive::cross_target_test]
     async fn test_sector_rpc_timeout_records_a_host_failure() {
         let write_host = random_pubkey();
         let read_host = random_pubkey();

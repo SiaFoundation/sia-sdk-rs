@@ -97,7 +97,9 @@ pub use builder::{
 pub use download::{Download, DownloadError};
 pub use encryption::EncryptionKey;
 pub use hosts::{QueueError, RPCError};
-pub use slabs::{Object, ObjectEvent, SealedObject, SealedObjectError, Sector, Slab, SlabVersion};
+pub use slabs::{
+    Object, ObjectEvent, ObjectSummary, SealedObject, SealedObjectError, Sector, Slab, SlabVersion,
+};
 pub use upload::{PackedUpload, UploadError};
 
 /// A unique identifier for an indexer application. It should be constant for an application.

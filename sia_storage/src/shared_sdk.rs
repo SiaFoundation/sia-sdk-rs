@@ -9,13 +9,13 @@ use sia_core::types::Hash256;
 
 use crate::app_client::IntoUrl;
 use crate::hosts::{Host, Hosts};
-use crate::rhp4::Client;
+use crate::rhp4::{Client, default_client};
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, sleep};
 use crate::tokens::AccountTokenSource;
 use crate::{
     BuilderError, Download, DownloadError, DownloadOptions, Error, HostQuery, KeyStats, Object,
-    SharingKey, app_client,
+    ObjectSummary, SharingKey, app_client,
 };
 
 /// How often to replace the account tokens. Tokens are issued with a fixed
@@ -90,7 +90,7 @@ impl SharedSdk {
     ) -> Result<Self, BuilderError> {
         let mut api_client = app_client::Client::new(indexer_url)?;
         api_client.set_cbor(cbor);
-        Self::with_backends(api_client, Client::new(), SharingKey::import(seed)).await
+        Self::with_backends(api_client, default_client(), SharingKey::import(seed)).await
     }
 
     /// Connects as the recipient of a sharing key, seeding the host list and
@@ -207,6 +207,26 @@ impl SharedSdk {
             .collect()
     }
 
+    /// Lists a page of the objects the sharing key grants access to without
+    /// their slabs, which makes the response a small fraction of the size
+    /// of [SharedSdk::objects]. Each summary's metadata is verified and
+    /// decrypted. Omit `offset` or `limit` to use the indexer's default
+    /// paging.
+    pub async fn object_summaries(
+        &self,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<ObjectSummary>, Error> {
+        let sealed = self
+            .api_client
+            .shared_object_summaries(&self.sharing_key.0, offset, limit)
+            .await?;
+        sealed
+            .into_iter()
+            .map(|s| s.open_with(&self.sharing_key.0).map_err(Error::from))
+            .collect()
+    }
+
     /// Retrieves the hosts serving this key's objects from the indexer,
     /// matching the provided query. Mirrors [`Sdk::hosts`](crate::Sdk::hosts)
     /// but is scoped to the sharing key.
@@ -241,8 +261,9 @@ impl SharedSdk {
     }
 }
 
+/// Integration tests requiring httptest, a TCP mock server. Native only.
 #[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
+mod native_tests {
     use super::*;
     use crate::app_client::SharedHost;
     use crate::hosts::Host;

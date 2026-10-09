@@ -311,6 +311,81 @@ impl SealedObject {
     }
 }
 
+/// An object listed without its slabs: its id, size, metadata and timestamps.
+/// Enough to show the object, not to download it. Fetch the full [Object] by
+/// id to download it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectSummary {
+    /// The object's unique identifier.
+    pub id: Hash256,
+    /// The object's size in bytes.
+    pub size: u64,
+    /// Application-defined metadata, decrypted.
+    pub metadata: Vec<u8>,
+    /// The time the object was created.
+    pub created_at: DateTime<Utc>,
+    /// The time the object was last updated.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// An [ObjectSummary] as the indexer returns it, with the metadata still
+/// sealed. Its data key and data signature are also in the response but go
+/// unused, since a summary cannot be downloaded.
+#[serde_as]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SealedObjectSummary {
+    /// Sent alongside the object because it is a hash of the slabs, which
+    /// the listing leaves out.
+    #[serde(rename = "objectID")]
+    pub object_id: Hash256,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde_as(as = "DefaultOnNull<Base64OrBytes>")]
+    pub encrypted_metadata_key: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde_as(as = "DefaultOnNull<Base64OrBytes>")]
+    pub encrypted_metadata: Vec<u8>,
+    pub metadata_signature: Signature,
+    #[serde(with = "sia_core::types::null_as_zero_time")]
+    pub created_at: DateTime<Utc>,
+    #[serde(with = "sia_core::types::null_as_zero_time")]
+    pub updated_at: DateTime<Utc>,
+    pub size: u64,
+}
+
+impl SealedObjectSummary {
+    /// Verifies the metadata signature against the object id the indexer
+    /// sent and decrypts the metadata with the key the object was sealed
+    /// under. A forged id fails here, since the signature covers it.
+    pub(crate) fn open_with(self, key: &PrivateKey) -> Result<ObjectSummary, SealedObjectError> {
+        let sig_hash = SealedObject::meta_sig_hash(
+            &self.object_id,
+            &self.encrypted_metadata_key,
+            &self.encrypted_metadata,
+        );
+        if !key
+            .public_key()
+            .verify(sig_hash.as_ref(), &self.metadata_signature)
+        {
+            return Err(SealedObjectError::InvalidSignature);
+        }
+        let metadata = if !self.encrypted_metadata.is_empty() {
+            let metadata_key =
+                open_metadata_key(key, &self.object_id, &self.encrypted_metadata_key)?;
+            open_metadata(&metadata_key, &self.encrypted_metadata)?
+        } else {
+            Vec::new()
+        };
+        Ok(ObjectSummary {
+            id: self.object_id,
+            size: self.size,
+            metadata,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
 /// An ObjectEvent represents an object and whether it was deleted or not.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectEvent {
@@ -545,6 +620,82 @@ mod test {
         let mut buf = [0u8; 32];
         getrandom::fill(&mut buf).unwrap();
         buf
+    }
+
+    fn sealed_summary(object: &Object, key: &PrivateKey) -> SealedObjectSummary {
+        let sealed = object.seal_with(key);
+        SealedObjectSummary {
+            object_id: object.id(),
+            encrypted_metadata_key: sealed.encrypted_metadata_key,
+            encrypted_metadata: sealed.encrypted_metadata,
+            metadata_signature: sealed.metadata_signature,
+            created_at: sealed.created_at,
+            updated_at: sealed.updated_at,
+            size: object.size(),
+        }
+    }
+
+    fn summary_object(metadata: &[u8]) -> Object {
+        Object {
+            data_key: random_bytes_32().into(),
+            slabs: vec![Slab {
+                version: SlabVersion::V1,
+                encryption_key: random_bytes_32().into(),
+                min_shards: 1,
+                sectors: vec![Sector {
+                    root: Hash256::new(random_bytes_32()),
+                    host_key: PrivateKey::from_seed(&random_bytes_32()).public_key(),
+                }],
+                offset: 0,
+                length: 4096,
+            }],
+            metadata: metadata.to_vec(),
+            ..Object::default()
+        }
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_summary_opens_metadata() {
+        let key = PrivateKey::from_seed(&random_bytes_32());
+        let object = summary_object(b"{\"name\":\"movie.mp4\"}");
+        let summary = sealed_summary(&object, &key).open_with(&key).unwrap();
+        assert_eq!(summary.id, object.id());
+        assert_eq!(summary.metadata, object.metadata);
+        assert_eq!(summary.size, 4096);
+        assert_eq!(summary.created_at, object.created_at);
+        assert_eq!(summary.updated_at, object.updated_at);
+
+        let empty = summary_object(b"");
+        let summary = sealed_summary(&empty, &key).open_with(&key).unwrap();
+        assert!(summary.metadata.is_empty());
+    }
+
+    /// The metadata signature covers the object id, so neither a swapped id
+    /// nor altered metadata gets through, and another key cannot open it.
+    #[sia_core_derive::cross_target_test]
+    fn test_summary_rejects_tampering() {
+        let key = PrivateKey::from_seed(&random_bytes_32());
+        let object = summary_object(b"metadata");
+
+        let mut wrong_id = sealed_summary(&object, &key);
+        wrong_id.object_id = Hash256::new(random_bytes_32());
+        assert!(matches!(
+            wrong_id.open_with(&key),
+            Err(SealedObjectError::InvalidSignature)
+        ));
+
+        let mut altered = sealed_summary(&object, &key);
+        altered.encrypted_metadata[0] ^= 1;
+        assert!(matches!(
+            altered.open_with(&key),
+            Err(SealedObjectError::InvalidSignature)
+        ));
+
+        let other = PrivateKey::from_seed(&random_bytes_32());
+        assert!(matches!(
+            sealed_summary(&object, &key).open_with(&other),
+            Err(SealedObjectError::InvalidSignature)
+        ));
     }
 
     #[sia_core_derive::cross_target_test]

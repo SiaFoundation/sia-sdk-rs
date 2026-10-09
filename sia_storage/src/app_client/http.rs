@@ -19,6 +19,7 @@ use crate::app_client::{ERROR_OBJECT_UNPINNED_SLAB, PinObjectError};
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
 use crate::sharing::{KeyRequest, SharedObjectRequest};
+use crate::slabs::SealedObjectSummary;
 use crate::time::Duration;
 use crate::{Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject};
 
@@ -474,6 +475,20 @@ impl Client {
             .await
     }
 
+    /// Lists the objects the sharing key grants access to without their
+    /// slabs.
+    pub(crate) async fn shared_object_summaries(
+        &self,
+        sharing_key: &PrivateKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<SealedObjectSummary>, Error> {
+        let mut query = Self::pagination_query(offset, limit);
+        query.push(("includeslabs", "false".to_string()));
+        self.get_list("shared/objects", sharing_key, Some(&query))
+            .await
+    }
+
     /// Retrieves a single object the sharing key grants access to.
     pub(crate) async fn shared_object_by_id(
         &self,
@@ -659,9 +674,86 @@ async fn delete(client: &reqwest::Client, url: Url, app_key: &PrivateKey) -> Res
     .map(|_| ())
 }
 
-/// Integration tests requiring httptest (native TCP mock server) — native only.
+#[cfg(test)]
+mod test {
+    use sia_core::rhp4::AccountToken;
+
+    use super::*;
+
+    #[sia_core_derive::cross_target_test]
+    fn test_pagination_query() {
+        assert!(Client::pagination_query(None, None).is_empty());
+        assert_eq!(
+            Client::pagination_query(Some(5), None),
+            vec![("offset", "5".to_string())]
+        );
+        assert_eq!(
+            Client::pagination_query(None, Some(10)),
+            vec![("limit", "10".to_string())]
+        );
+        assert_eq!(
+            Client::pagination_query(Some(5), Some(10)),
+            vec![("offset", "5".to_string()), ("limit", "10".to_string())]
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_key_stats_deserializes_go_wire_format() {
+        // A literal body pins the wire format (Go's camelCase JSON tags) rather
+        // than round-tripping our own struct.
+        const KEY_STATS_JSON: &str = r#"{
+            "objectCount": 3,
+            "objectSize": 1024,
+            "pinnedData": 2048,
+            "pinnedSize": 6144,
+            "expiresAt": "2027-01-02T03:04:05Z",
+            "createdAt": "2026-01-02T03:04:05Z",
+            "updatedAt": "2026-02-02T03:04:05Z"
+        }"#;
+
+        assert_eq!(
+            serde_json::from_str::<KeyStats>(KEY_STATS_JSON).unwrap(),
+            KeyStats {
+                object_count: 3,
+                object_size: 1024,
+                pinned_data: 2048,
+                pinned_size: 6144,
+                expires_at: Some("2027-01-02T03:04:05Z".parse().unwrap()),
+                created_at: "2026-01-02T03:04:05Z".parse().unwrap(),
+                updated_at: "2026-02-02T03:04:05Z".parse().unwrap(),
+            }
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_shared_host_flattens_host_fields() {
+        let shared_host = SharedHost {
+            host: Host {
+                public_key: PublicKey::new([4u8; 32]),
+                addresses: vec![],
+                country_code: "US".to_string(),
+                latitude: 1.5,
+                longitude: 2.5,
+                good_for_upload: true,
+            },
+            token: AccountToken::new(
+                &PrivateKey::from_seed(&[5u8; 32]),
+                PublicKey::new([4u8; 32]),
+            ),
+        };
+
+        // The host fields must flatten to the top level, matching Go's embedded
+        // HostInfo, not nest under a "host" key.
+        let json = serde_json::to_value(&shared_host).unwrap();
+        assert!(json.get("publicKey").is_some(), "host fields not flattened");
+        assert!(json.get("host").is_none(), "host fields wrongly nested");
+        assert!(json.get("token").is_some());
+    }
+}
+
+/// Integration tests requiring httptest, a native TCP mock server. Native only.
 #[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
+mod native_tests {
     use base64::engine::general_purpose::URL_SAFE;
     use chrono::FixedOffset;
     use sia_core::rhp4::AccountToken;
@@ -768,23 +860,6 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{content_type}: {e}"));
             assert!(slab_ids.is_empty(), "{content_type}");
         }
-    }
-
-    #[test]
-    fn test_pagination_query() {
-        assert!(Client::pagination_query(None, None).is_empty());
-        assert_eq!(
-            Client::pagination_query(Some(5), None),
-            vec![("offset", "5".to_string())]
-        );
-        assert_eq!(
-            Client::pagination_query(None, Some(10)),
-            vec![("limit", "10".to_string())]
-        );
-        assert_eq!(
-            Client::pagination_query(Some(5), Some(10)),
-            vec![("offset", "5".to_string()), ("limit", "10".to_string())]
-        );
     }
 
     /// Validates a signed HTTP request by reconstructing the URL from the
@@ -2298,57 +2373,136 @@ mod tests {
             .unwrap()
     }
 
-    #[test]
-    fn test_key_stats_deserializes_go_wire_format() {
-        // A literal body pins the wire format (Go's camelCase JSON tags) rather
-        // than round-tripping our own struct.
-        const KEY_STATS_JSON: &str = r#"{
-            "objectCount": 3,
-            "objectSize": 1024,
-            "pinnedData": 2048,
-            "pinnedSize": 6144,
-            "expiresAt": "2027-01-02T03:04:05Z",
-            "createdAt": "2026-01-02T03:04:05Z",
-            "updatedAt": "2026-02-02T03:04:05Z"
-        }"#;
+    /// A sealed summary as indexd lists it with `includeslabs=false`, in the
+    /// given response encoding.
+    /// Built field by field from Go's JSON tags rather than from our own
+    /// struct, so the test checks the wire format.
+    fn summary_body(cbor: bool, sealed: &SealedObject, id: Hash256, size: u64) -> Vec<u8> {
+        use ciborium::value::Value;
 
-        assert_eq!(
-            serde_json::from_str::<KeyStats>(KEY_STATS_JSON).unwrap(),
-            KeyStats {
-                object_count: 3,
-                object_size: 1024,
-                pinned_data: 2048,
-                pinned_size: 6144,
-                expires_at: Some("2027-01-02T03:04:05Z".parse().unwrap()),
-                created_at: "2026-01-02T03:04:05Z".parse().unwrap(),
-                updated_at: "2026-02-02T03:04:05Z".parse().unwrap(),
-            }
-        );
+        let time = |t: DateTime<Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let bytes = |b: &[u8]| -> (Value, serde_json::Value) {
+            (Value::Bytes(b.to_vec()), BASE64_STANDARD.encode(b).into())
+        };
+        let fields: Vec<(&str, Value, serde_json::Value)> = vec![
+            (
+                "objectID",
+                Value::Bytes(AsRef::<[u8]>::as_ref(&id).to_vec()),
+                serde_json::to_value(id).unwrap(),
+            ),
+            {
+                let (c, j) = bytes(&sealed.encrypted_data_key);
+                ("encryptedDataKey", c, j)
+            },
+            (
+                "dataSignature",
+                Value::Bytes(sealed.data_signature.as_ref().to_vec()),
+                serde_json::to_value(&sealed.data_signature).unwrap(),
+            ),
+            {
+                let (c, j) = bytes(&sealed.encrypted_metadata_key);
+                ("encryptedMetadataKey", c, j)
+            },
+            {
+                let (c, j) = bytes(&sealed.encrypted_metadata);
+                ("encryptedMetadata", c, j)
+            },
+            (
+                "metadataSignature",
+                Value::Bytes(sealed.metadata_signature.as_ref().to_vec()),
+                serde_json::to_value(&sealed.metadata_signature).unwrap(),
+            ),
+            (
+                "createdAt",
+                Value::Text(time(sealed.created_at)),
+                time(sealed.created_at).into(),
+            ),
+            (
+                "updatedAt",
+                Value::Text(time(sealed.updated_at)),
+                time(sealed.updated_at).into(),
+            ),
+            ("size", Value::Integer(size.into()), size.into()),
+        ];
+        if cbor {
+            let map = fields
+                .into_iter()
+                .map(|(k, c, _)| (Value::Text(k.to_string()), c))
+                .collect();
+            let mut buf = Vec::new();
+            ciborium::into_writer(&Value::Array(vec![Value::Map(map)]), &mut buf).unwrap();
+            buf
+        } else {
+            let map: serde_json::Map<_, _> = fields
+                .into_iter()
+                .map(|(k, _, j)| (k.to_string(), j))
+                .collect();
+            serde_json::to_vec(&vec![map]).unwrap()
+        }
     }
 
-    #[test]
-    fn test_shared_host_flattens_host_fields() {
-        let shared_host = SharedHost {
-            host: Host {
-                public_key: PublicKey::new([4u8; 32]),
-                addresses: vec![],
-                country_code: "US".to_string(),
-                latitude: 1.5,
-                longitude: 2.5,
-                good_for_upload: true,
-            },
-            token: AccountToken::new(
-                &PrivateKey::from_seed(&[5u8; 32]),
-                PublicKey::new([4u8; 32]),
-            ),
+    /// Summaries decode from both response encodings and are requested with
+    /// `includeslabs=false` so the indexer leaves the slabs out.
+    #[tokio::test]
+    async fn test_shared_object_summaries_wire_format() {
+        let sharing_key = PrivateKey::from_seed(&rand::random());
+        let object = Object {
+            data_key: [9u8; 32].into(),
+            slabs: vec![Slab {
+                version: V0,
+                encryption_key: [1u8; 32].into(),
+                min_shards: 1,
+                sectors: vec![Sector {
+                    root: Hash256::new([2u8; 32]),
+                    host_key: PublicKey::new([3u8; 32]),
+                }],
+                offset: 0,
+                length: 256,
+            }],
+            metadata: b"a movie".to_vec(),
+            created_at: "2026-01-02T03:04:05.123456789Z".parse().unwrap(),
+            updated_at: "2026-02-02T03:04:05Z".parse().unwrap(),
         };
+        let sealed = object.seal_with(&sharing_key);
+        let id = object.id();
 
-        // The host fields must flatten to the top level, matching Go's embedded
-        // HostInfo, not nest under a "host" key.
-        let json = serde_json::to_value(&shared_host).unwrap();
-        assert!(json.get("publicKey").is_some(), "host fields not flattened");
-        assert!(json.get("host").is_none(), "host fields wrongly nested");
-        assert!(json.get("token").is_some());
+        let size = 256;
+        for cbor in [false, true] {
+            let server = Server::run();
+            let content_type = if cbor {
+                "application/cbor"
+            } else {
+                "application/json"
+            };
+            server.expect(
+                Expectation::matching(all_of![
+                    signed_get("/shared/objects", sharing_key.public_key()),
+                    request::query(url_decoded(contains(("includeslabs", "false")))),
+                    request::query(url_decoded(contains(("limit", "10")))),
+                ])
+                .respond_with(ok_typed(
+                    content_type,
+                    summary_body(cbor, &sealed, id, size),
+                )),
+            );
+            let client = Client::new(server.url("/").to_string()).unwrap();
+            let summaries = client
+                .shared_object_summaries(&sharing_key, Some(0), Some(10))
+                .await
+                .unwrap_or_else(|e| panic!("decode failed (cbor {cbor}): {e}"));
+            assert_eq!(summaries.len(), 1);
+            let summary = &summaries[0];
+            assert_eq!(summary.object_id, id);
+            assert_eq!(summary.size, size, "cbor {cbor}");
+            assert_eq!(summary.encrypted_metadata, sealed.encrypted_metadata);
+            assert_eq!(
+                summary.encrypted_metadata_key,
+                sealed.encrypted_metadata_key
+            );
+            assert_eq!(summary.metadata_signature, sealed.metadata_signature);
+            assert_eq!(summary.created_at, object.created_at);
+            assert_eq!(summary.updated_at, object.updated_at);
+        }
     }
 
     #[tokio::test]

@@ -50,7 +50,7 @@ mod tests {
     use super::*;
     use sia_core::signing::PrivateKey;
 
-    #[tokio::test]
+    #[sia_core_derive::cross_target_test]
     async fn test_shared_token_lookup() {
         let host = PublicKey::new([1u8; 32]);
         let missing = PublicKey::new([2u8; 32]);
@@ -69,7 +69,7 @@ mod tests {
         assert!(matches!(source.token(missing), Err(RPCError::NoToken(pk)) if pk == missing));
     }
 
-    #[tokio::test]
+    #[sia_core_derive::cross_target_test]
     async fn test_expired_shared_token_is_absent() {
         let host = PublicKey::new([1u8; 32]);
         let mut expired = AccountToken::new(&PrivateKey::from_seed(&[3u8; 32]), host);
@@ -87,7 +87,7 @@ mod tests {
         assert!(matches!(source.token(host), Err(RPCError::NoToken(pk)) if pk == host));
     }
 
-    #[test]
+    #[sia_core_derive::cross_target_test]
     fn test_mint_token_matches_host() {
         let key: Arc<AppKey> = Arc::new(AppKey(PrivateKey::from_seed(&[4u8; 32])));
         let host = PublicKey::new([5u8; 32]);
