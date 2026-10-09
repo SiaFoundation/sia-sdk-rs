@@ -208,6 +208,15 @@ extern "C"
 	// copies the metadata into buf.
 	size_t sia_object_metadata(const sia_object_t *o, uint8_t *buf, size_t cap);
 	void sia_object_set_metadata(sia_object_t *o, const uint8_t *data, size_t len);
+	// Encodes the whole object so a caller can hold it in its own memory and
+	// rebuild it later with sia_object_decode. Returns the encoded length
+	// whether or not it was written, so pass a NULL buf to size a buffer and
+	// call again. Not a storage format: it carries the data key in the clear,
+	// so use sia_object_seal_json for anything persisted.
+	size_t sia_object_encode(const sia_object_t *o, uint8_t *buf, size_t cap);
+	// Rebuilds an object encoded by sia_object_encode. Free the result with
+	// sia_object_free.
+	int32_t sia_object_decode(const uint8_t *data, size_t len, sia_object_t **out, char **err);
 
 	size_t sia_events_len(const sia_events_t *evs);
 	// Transfers ownership of the event's object (NULL for deletions) to the

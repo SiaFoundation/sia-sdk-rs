@@ -1781,6 +1781,159 @@ fn hosts_reject_null_handles() {
     }
 }
 
+#[test]
+fn object_encoding_roundtrip() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [211u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let payload: Vec<u8> = (0..(1 << 20)).map(|i| (i % 251) as u8).collect();
+        let obj = upload_object_for_test(sdk, &payload);
+        let meta = b"{\"name\":\"round trip\"}";
+        sia_object_set_metadata(obj, meta.as_ptr(), meta.len());
+
+        // Measuring with a null buffer reports the length without writing.
+        let n = sia_object_encode(obj, std::ptr::null_mut(), 0);
+        assert!(n > 0, "an uploaded object must encode to something");
+
+        // A buffer that is too small leaves it untouched rather than truncating.
+        let mut undersized = vec![0u8; n - 1];
+        assert_eq!(
+            sia_object_encode(obj, undersized.as_mut_ptr(), undersized.len()),
+            n,
+            "the length is reported whether or not it was written"
+        );
+        assert!(
+            undersized.iter().all(|&b| b == 0),
+            "a short buffer must not be partly filled"
+        );
+
+        let mut encoded = vec![0u8; n];
+        assert_eq!(
+            sia_object_encode(obj, encoded.as_mut_ptr(), encoded.len()),
+            n
+        );
+
+        let mut decoded = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_object_decode(
+                encoded.as_ptr(),
+                encoded.len(),
+                &raw mut decoded,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_object_decode: {}",
+            take_err(err)
+        );
+
+        let (mut want, mut got) = ([0u8; 32], [0u8; 32]);
+        sia_object_id(obj, want.as_mut_ptr());
+        sia_object_id(decoded, got.as_mut_ptr());
+        assert_eq!(want, got, "the decoded object must keep its id");
+        assert_eq!(sia_object_size(decoded), sia_object_size(obj));
+        assert_eq!(
+            sia_object_created_at(decoded),
+            sia_object_created_at(obj),
+            "timestamps survive the crossing"
+        );
+
+        let mut round_meta = vec![0u8; meta.len()];
+        assert_eq!(
+            sia_object_metadata(decoded, round_meta.as_mut_ptr(), round_meta.len()),
+            meta.len()
+        );
+        assert_eq!(round_meta, meta, "the metadata survives the crossing");
+
+        // The data key crosses too, so the decoded object can read its own data.
+        let dopts = default_download_options();
+        let mut dl = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_download_start(sdk, decoded, &raw const dopts, &raw mut dl, &raw mut err),
+            SIA_OK,
+            "sia_download_start: {}",
+            take_err(err)
+        );
+        let mut read = Vec::with_capacity(payload.len());
+        let mut buf = vec![0u8; 256 << 10];
+        loop {
+            let mut n = 0usize;
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_download_read(
+                    dl,
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    std::ptr::null_mut(),
+                    &raw mut n,
+                    &raw mut err
+                ),
+                SIA_OK,
+                "sia_download_read: {}",
+                take_err(err)
+            );
+            if n == 0 {
+                break;
+            }
+            read.extend_from_slice(&buf[..n]);
+        }
+        sia_download_free(dl);
+        assert_eq!(
+            read, payload,
+            "the decoded object must download its own data"
+        );
+
+        sia_object_free(decoded);
+        sia_object_free(obj);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// Garbage must be refused rather than producing a half built object.
+#[test]
+fn decoding_rejects_bytes_that_are_not_an_object() {
+    unsafe {
+        let junk = [0xffu8; 16];
+        let mut out = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_object_decode(junk.as_ptr(), junk.len(), &raw mut out, &raw mut err),
+            SIA_ERR,
+            "random bytes must not decode"
+        );
+        assert!(
+            take_err(err).contains("failed to decode object"),
+            "the refusal must say what failed"
+        );
+        assert!(out.is_null(), "nothing is handed back on failure");
+
+        let mut out = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_object_decode(std::ptr::null(), 0, &raw mut out, &raw mut err),
+            SIA_ERR,
+            "an empty encoding is not an object"
+        );
+        let _ = take_err(err);
+    }
+}
+
 /// Uploads `data` to a fresh object and returns the pinned result.
 unsafe fn upload_object_for_test(sdk: *const Sdk, data: &[u8]) -> *mut Object {
     unsafe {

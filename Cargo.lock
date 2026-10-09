@@ -2608,6 +2608,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "sia_core",
  "sia_storage",
  "tokio",
  "tokio-util",

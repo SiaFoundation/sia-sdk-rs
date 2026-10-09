@@ -1,4 +1,5 @@
 use crate::abi::*;
+use crate::object_encoding;
 use sia_storage::{Object, Sdk, SealedObject};
 use std::ffi::c_char;
 
@@ -140,6 +141,69 @@ pub unsafe extern "C" fn sia_object_set_metadata(o: *mut Object, data: *const u8
         return;
     };
     o.metadata = meta;
+}
+
+/// Encodes the object so a caller can hold it in its own memory and rebuild it
+/// later with `sia_object_decode`.
+///
+/// The encoding carries the data key in the clear, so it is not a storage
+/// format. Use `sia_object_seal_json` for anything persisted.
+///
+/// Returns the encoded length, whether or not it was written, so a caller can
+/// size its buffer with a null `buf` and call again.
+///
+/// # Safety
+/// - `o` may be null, which returns 0. Otherwise it must be a live handle from `sia_object_new` or
+///   any call that returns an object that has not been freed.
+/// - `buf` may be null, which measures without writing. Otherwise it must be writable for `cap`
+///   bytes, and nothing is written unless `cap` covers the whole encoding.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_object_encode(o: *const Object, buf: *mut u8, cap: usize) -> usize {
+    let Some(o) = (unsafe { o.as_ref() }) else {
+        return 0;
+    };
+    let Ok(encoded) = object_encoding::encode(o) else {
+        return 0;
+    };
+    if !buf.is_null() && cap >= encoded.len() {
+        unsafe { std::slice::from_raw_parts_mut(buf, encoded.len()) }.copy_from_slice(&encoded);
+    }
+    encoded.len()
+}
+
+/// Rebuilds an object encoded by `sia_object_encode`. The result is owned by
+/// the caller and must be released with `sia_object_free`.
+///
+/// # Safety
+/// - `data` must be readable for `len` bytes.
+/// - `out` must be non null and writable. On success it receives an owned handle.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_object_decode(
+    data: *const u8,
+    len: usize,
+    out: *mut *mut Object,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    guarded(err, || {
+        if data.is_null() && len != 0 {
+            return set_err(err, SIA_ERR, "data is null");
+        }
+        let bytes = if len == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(data, len) }
+        };
+        match object_encoding::decode(bytes) {
+            Ok(obj) => {
+                unsafe { *out = Box::into_raw(Box::new(obj)) }
+                SIA_OK
+            }
+            Err(e) => set_err(err, SIA_ERR, format!("failed to decode object: {e}")),
+        }
+    })
 }
 
 /// # Safety

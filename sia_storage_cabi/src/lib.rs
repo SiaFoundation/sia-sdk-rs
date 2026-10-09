@@ -57,6 +57,7 @@ mod hosts;
 #[cfg(feature = "mock")]
 mod mock;
 mod object;
+mod object_encoding;
 mod sdk;
 mod shared_sdk;
 mod sharing;
