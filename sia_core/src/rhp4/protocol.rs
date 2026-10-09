@@ -687,8 +687,28 @@ pub struct RPCWriteSector<State> {
     state: PhantomData<State>,
 }
 
+/// The request header has been sent and the caller is writing the sector
+/// body itself.
+pub struct RPCBody;
+
 impl RPCWriteSector<RPCInit> {
     const SPECIFIER: Specifier = specifier!("WriteSector");
+
+    fn encode_header(
+        prices: &HostPrices,
+        token: AccountToken,
+        data_len: usize,
+    ) -> Result<Bytes, Error> {
+        let request = RPCWriteSectorRequest {
+            prices: prices.clone(),
+            token,
+            data_len,
+        };
+        let mut buf = Vec::with_capacity(16 + request.encoded_length());
+        Self::SPECIFIER.encode(&mut buf)?;
+        request.encode(&mut buf)?;
+        Ok(Bytes::from(buf))
+    }
 
     pub async fn send_request(
         w: &mut (impl AsyncWrite + Unpin),
@@ -697,21 +717,55 @@ impl RPCWriteSector<RPCInit> {
         data: Bytes,
     ) -> Result<RPCWriteSector<RPCComplete>, Error> {
         let usage = Usage::write_sector(&prices, data.len());
-        let request = RPCWriteSectorRequest {
-            prices,
-            token,
-            data_len: data.len(),
-        };
-        let mut buf = Vec::with_capacity(16 + request.encoded_length());
-        Self::SPECIFIER.encode(&mut buf)?;
-        request.encode(&mut buf)?;
-        let header = Bytes::from(buf);
+        let header = Self::encode_header(&prices, token, data.len())?;
         w.write_all_buf(&mut header.chain(data.clone())).await?;
 
         Ok(RPCWriteSector {
             data,
             usage,
             state: PhantomData,
+        })
+    }
+
+    /// Sends only the request header for a sector of `data_len` bytes. The
+    /// caller then writes exactly `data_len` body bytes to the same stream,
+    /// in order, and finishes with [`RPCWriteSector::<RPCBody>::complete`]
+    /// and the root it computed over them. This lets a sector be sent while
+    /// it is still being produced.
+    pub async fn send_header(
+        w: &mut (impl AsyncWrite + Unpin),
+        prices: HostPrices,
+        token: AccountToken,
+        data_len: usize,
+    ) -> Result<RPCWriteSector<RPCBody>, Error> {
+        let usage = Usage::write_sector(&prices, data_len);
+        let header = Self::encode_header(&prices, token, data_len)?;
+        w.write_all(&header).await?;
+
+        Ok(RPCWriteSector {
+            data: Bytes::new(),
+            usage,
+            state: PhantomData,
+        })
+    }
+}
+
+impl RPCWriteSector<RPCBody> {
+    /// Reads the host's response once the whole body has been written and
+    /// checks its root against `root`, the caller's root of the body.
+    pub async fn complete(
+        self,
+        r: &mut (impl AsyncRead + Unpin),
+        root: Hash256,
+    ) -> Result<RPCWriteSectorResult, Error> {
+        let response: RPCWriteSectorResponse = read_response(r).await?;
+        if response.root != root {
+            return Err(Error::SectorRootMismatch);
+        }
+
+        Ok(RPCWriteSectorResult {
+            root: response.root,
+            usage: self.usage,
         })
     }
 }

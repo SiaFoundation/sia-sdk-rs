@@ -16,6 +16,7 @@ use tokio::sync::watch;
 
 use crate::hosts::metrics::{HostMetric, HostScore, RPCAverage, Transfer};
 use crate::rhp4::{Client, HostEndpoint, Transport};
+use crate::sector_stream::SectorBody;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Instant};
 use crate::{AppKey, app_client};
@@ -583,7 +584,7 @@ impl Hosts {
         &self,
         host_key: PublicKey,
         account_key: &PrivateKey,
-        sector: bytes::Bytes,
+        sector: SectorBody,
         idle_timeout: Duration,
     ) -> Result<Hash256, RPCError> {
         let host = self.host_endpoint(host_key)?;
@@ -868,7 +869,7 @@ mod test {
             .write_sector(
                 write_host,
                 &account,
-                bytes::Bytes::from(vec![0u8; 4096]),
+                SectorBody::from_bytes(bytes::Bytes::from(vec![0u8; 4096])),
                 Duration::from_millis(50),
             )
             .await

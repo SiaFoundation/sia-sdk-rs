@@ -60,6 +60,7 @@ mod hosts;
 mod object_encryption;
 mod rhp4;
 mod sdk;
+mod sector_stream;
 mod shared_sdk;
 mod sharing;
 mod slabs;
@@ -310,6 +311,10 @@ pub type ShardProgressCallback = Arc<dyn Fn(ShardProgress) + Send + Sync + 'stat
 pub type ShardProgressCallback = Arc<dyn Fn(ShardProgress) + 'static>;
 
 /// Information about a successfully uploaded or downloaded shard, used for progress reporting.
+///
+/// For uploads, `elapsed` is measured from when the write to the host began.
+/// Sectors are sent while the slab is still being read and encoded, so the
+/// first shards of a slab include time spent waiting for their bytes.
 pub struct ShardProgress {
     pub host_key: PublicKey,
     pub shard_size: usize,

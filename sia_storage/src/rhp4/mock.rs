@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
@@ -12,6 +12,7 @@ use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::{Currency, Hash256};
 
 use super::{Error as RHP4Error, HostEndpoint, Transport};
+use crate::sector_stream::SectorBody;
 use crate::time::{Duration, Instant, sleep};
 
 #[derive(Clone)]
@@ -28,6 +29,19 @@ pub struct Client {
     price_requests: Arc<AtomicUsize>,
     price_failures: Arc<AtomicUsize>,
     read_requests: Arc<AtomicUsize>,
+    /// Key sectors by a fast hash instead of their Merkle root.
+    fast_roots: Arc<AtomicBool>,
+    /// When the first write began, received its first byte, and finished,
+    /// since the last reset. For benchmarks.
+    write_timeline: Arc<RwLock<WriteTimeline>>,
+}
+
+/// Instants of the first sector write since the last reset.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct WriteTimeline {
+    pub first_call: Option<Instant>,
+    pub first_byte: Option<Instant>,
+    pub first_done: Option<Instant>,
 }
 
 impl Default for Client {
@@ -49,7 +63,35 @@ impl Client {
             price_requests: Arc::new(AtomicUsize::new(0)),
             price_failures: Arc::new(AtomicUsize::new(0)),
             read_requests: Arc::new(AtomicUsize::new(0)),
+            fast_roots: Arc::new(AtomicBool::new(false)),
+            write_timeline: Arc::new(RwLock::new(WriteTimeline::default())),
         }
+    }
+
+    /// Keys written sectors by an xxh3 hash of their contents instead of
+    /// their Merkle root, which costs 10 ms per sector in wasm. The client
+    /// treats the root as opaque, so only benchmarks notice; roots written
+    /// this way are not real sector roots.
+    pub fn set_fast_roots(&self, enabled: bool) {
+        self.fast_roots.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn reset_write_timeline(&self) {
+        *self.write_timeline.write().unwrap() = WriteTimeline::default();
+    }
+
+    pub fn write_timeline(&self) -> WriteTimeline {
+        *self.write_timeline.read().unwrap()
+    }
+
+    fn sector_key(&self, sector: &[u8]) -> Hash256 {
+        if !self.fast_roots.load(Ordering::Relaxed) {
+            return sia_core::rhp4::sector_root(sector);
+        }
+        let mut key = [0u8; 32];
+        key[..16].copy_from_slice(&xxhash_rust::xxh3::xxh3_128_with_seed(sector, 0).to_le_bytes());
+        key[16..].copy_from_slice(&xxhash_rust::xxh3::xxh3_128_with_seed(sector, 1).to_le_bytes());
+        Hash256::from(key)
     }
 
     pub fn clear(&self) {
@@ -174,17 +216,41 @@ impl Transport for Client {
         host: &HostEndpoint,
         _: HostPrices,
         _: &PrivateKey,
-        sector: Bytes,
+        sector: SectorBody,
         idle_timeout: Duration,
     ) -> Result<(Hash256, Duration), RHP4Error> {
         if host.addresses.is_empty() {
             return Err(RHP4Error::Transport("host has no addresses".to_string()));
         }
         let start = Instant::now();
+        self.write_timeline
+            .write()
+            .unwrap()
+            .first_call
+            .get_or_insert(start);
         self.stall(&host.public_key, idle_timeout).await?;
 
+        // Receive the body as the producer publishes it, like a host would.
+        let mut data = bytes::BytesMut::with_capacity(sector.len());
+        let mut sector = sector;
+        while let Some(chunk) = sector.next_chunk().await {
+            if data.is_empty() {
+                self.write_timeline
+                    .write()
+                    .unwrap()
+                    .first_byte
+                    .get_or_insert(Instant::now());
+            }
+            data.extend_from_slice(&chunk);
+        }
+        let sector = data.freeze();
         sleep(Duration::from_millis(3)).await; // simulate network latency ~ 10Gbps
-        let sector_root = sia_core::rhp4::sector_root(&sector);
+        let sector_root = self.sector_key(&sector);
+        self.write_timeline
+            .write()
+            .unwrap()
+            .first_done
+            .get_or_insert(Instant::now());
         let mut sectors = self.sectors.write().unwrap();
         let host_sectors = sectors.entry(host.public_key).or_default();
         host_sectors.insert(sector_root, sector);

@@ -58,6 +58,25 @@ impl MockNetwork {
         self.transport.reset_slow_hosts();
     }
 
+    /// Keys sectors on the mock hosts by a fast hash instead of their Merkle
+    /// root. The real root costs 10 ms per 4 MiB sector in wasm and is pure
+    /// host-side work, so benchmarks of the client turn it off. Off by
+    /// default.
+    pub fn set_fast_roots(&self, enabled: bool) {
+        self.transport.set_fast_roots(enabled);
+    }
+
+    /// Forgets the recorded write timeline.
+    pub fn reset_write_timeline(&self) {
+        self.transport.reset_write_timeline();
+    }
+
+    /// When the first sector write since the last reset began, received its
+    /// first byte, and finished.
+    pub fn write_timeline(&self) -> mock::WriteTimeline {
+        self.transport.write_timeline()
+    }
+
     /// Discards every sector stored by the hosts. The indexer's objects and
     /// slabs are untouched, so anything pinned before this becomes
     /// undownloadable.

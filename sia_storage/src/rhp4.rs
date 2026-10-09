@@ -9,6 +9,7 @@ use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
 use thiserror::Error;
 
+use crate::sector_stream::SectorBody;
 use crate::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -83,7 +84,7 @@ impl Transport for Client {
         host: &HostEndpoint,
         prices: HostPrices,
         account_key: &PrivateKey,
-        sector: Bytes,
+        sector: SectorBody,
         idle_timeout: Duration,
     ) -> Result<(Hash256, Duration), Error> {
         match self {
@@ -214,7 +215,7 @@ pub(crate) trait Transport: Clone + Unpin + MaybeSendSync + 'static {
         host: &HostEndpoint,
         prices: HostPrices,
         account_key: &PrivateKey,
-        sector: Bytes,
+        sector: SectorBody,
         idle_timeout: Duration,
     ) -> impl Future<Output = Result<(Hash256, Duration), Error>> + MaybeSendSync;
     fn read_sector(

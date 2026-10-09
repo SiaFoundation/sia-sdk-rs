@@ -1,3 +1,4 @@
+use crate::sector_stream::SectorBody;
 use crate::time::{Elapsed, Instant, timeout};
 
 use bytes::Bytes;
@@ -9,6 +10,7 @@ use std::num::ParseIntError;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, Weak};
 use thiserror::{self, Error};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, lookup_host};
 use tokio::sync::watch;
 
@@ -219,17 +221,21 @@ impl Transport for Client {
         host: &HostEndpoint,
         prices: HostPrices,
         account_key: &PrivateKey,
-        data: Bytes,
+        mut data: SectorBody,
         idle_timeout: Duration,
     ) -> Result<(Hash256, Duration), TransportError> {
         let token = AccountToken::new(account_key, host.public_key);
         let mut stream = self.host_stream(host).await?;
         stream.set_idle_timeout(Some(idle_timeout));
         let start = Instant::now();
-        let resp = RPCWriteSector::send_request(&mut stream, prices, token, data)
-            .await?
-            .complete(&mut stream)
-            .await?;
+        let req = RPCWriteSector::send_header(&mut stream, prices, token, data.len()).await?;
+        // The body follows as the producer publishes it.
+        while let Some(chunk) = data.next_chunk().await {
+            stream.write_all(&chunk).await?;
+        }
+        stream.flush().await?;
+        let root = data.root().await;
+        let resp = req.complete(&mut stream, root).await?;
         Ok((resp.root, start.elapsed()))
     }
 

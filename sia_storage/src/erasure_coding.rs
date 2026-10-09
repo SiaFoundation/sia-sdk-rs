@@ -1,13 +1,18 @@
-use std::mem;
+use std::sync::{Arc, OnceLock};
 
-use bytes::Bytes;
-use sia_core::rhp4::{SECTOR_SIZE, SEGMENT_SIZE};
+use bytes::{Bytes, BytesMut};
+use sia_core::rhp4::{SECTOR_SIZE, SEGMENT_SIZE, SectorRootAccumulator};
+use sia_core::types::Hash256;
 use sia_reed_solomon::ReedSolomon;
 use thiserror::Error;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::oneshot;
+
+use crate::task::AbortOnDropHandle;
 
 use crate::EncryptionKey;
-use crate::encryption::Chacha20Cipher;
+use crate::encryption::{Chacha20Cipher, encrypt_shard};
+use crate::sector_stream::ShardStream;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -35,9 +40,14 @@ impl ErasureCoder {
         self.encoder.data_shards()
     }
 
-    /// encodes the shards using reed solomon erasure coding,
-    /// computing the parity shards and overwriting their values.
-    pub fn encode_shards(&self, shards: &mut [Vec<u8>]) -> Result<()> {
+    pub fn total_shards(&self) -> usize {
+        self.encoder.total_shards()
+    }
+
+    /// Encodes the shards using reed solomon erasure coding, computing the
+    /// parity shards and overwriting their values. Rows are independent, so
+    /// this works on any equal-length slice of every shard.
+    pub fn encode_shards<T: AsRef<[u8]> + AsMut<[u8]>>(&self, shards: &mut [T]) -> Result<()> {
         self.encoder.encode(shards)?;
         Ok(())
     }
@@ -82,30 +92,70 @@ impl ErasureCoder {
     }
 }
 
-/// A streaming reader that interleaves incoming bytes across a slab's data
-/// shards as they become available. Yields a [ReadSlab] whenever a full slab
-/// has been accumulated; call [SlabReader::finish] to recover any trailing
-/// partial slab.
-pub(crate) struct SlabReader {
-    data_shards: usize,
-    encryption_key: EncryptionKey,
-    shards: Vec<Vec<u8>>,
-    /// Contiguous landing area for incoming data. The object keystream is
-    /// applied to it in one call per fill, then the bytes are scattered into
-    /// the interleaved shard layout. Allocated once and reused, so a slab
-    /// costs no allocation here.
-    read_buffer: Vec<u8>,
-    length: usize,
-    total_length: u64,
-}
+/// Bytes of each sector published per step. A slab's rows are parity
+/// encoded, encrypted and hashed in steps of this many bytes per sector, and
+/// each step is handed to the sector writers as soon as it is done. 256 KiB
+/// is 16 steps per sector: the encoder and cipher still run over bulk
+/// buffers, and the first bytes leave for the hosts after 2.5 MiB of input
+/// instead of after the whole slab. It must be a power of two of segments
+/// that divides the sector, for the chunked sector root.
+pub(crate) const STEP_BYTES: usize = 256 << 10;
 
 /// How much data is buffered before a single `apply_keystream` call.
 const READ_BUFFER_SIZE: usize = 64 << 10;
 
-pub(crate) struct ReadSlab {
+/// The slab being produced. Created on the first byte of a slab and dropped
+/// once its last step is published.
+struct ActiveSlab {
+    encryption_key: EncryptionKey,
+    /// The unpublished tail of every sector. Published steps are split off
+    /// the front, so index `i` here is sector offset `published + i`.
+    shards: Vec<BytesMut>,
+    streams: Vec<Arc<ShardStream>>,
+    /// Input bytes landed in this slab.
+    length: usize,
+    /// Bytes of each sector cut into steps so far.
+    published: usize,
+    /// The slab's final length, for the slab task. Set by the last step.
+    final_length: Arc<OnceLock<usize>>,
+    /// Completion of the most recent step, carrying the sector root
+    /// accumulators to the next one so steps publish in order.
+    prev_step: Option<oneshot::Receiver<Vec<SectorRootAccumulator>>>,
+}
+
+/// What the slab task needs when a slab starts: the sector streams it will
+/// upload from while the producer fills them.
+pub(crate) struct SlabStart {
     pub encryption_key: EncryptionKey,
-    pub length: usize,
-    pub shards: Vec<Vec<u8>>,
+    pub streams: Vec<Arc<ShardStream>>,
+    /// The slab's length in bytes. Set before the streams finish, so it is
+    /// there once the last sector has been uploaded.
+    pub length: Arc<OnceLock<usize>>,
+}
+
+pub(crate) struct ReadProgress {
+    /// Bytes read from the reader by this call.
+    pub read: usize,
+    /// Set when this call read the first byte of a new slab.
+    pub started: Option<SlabStart>,
+}
+
+/// Interleaves incoming bytes across a slab's data shards and publishes the
+/// slab's sectors step by step, so an upload can start sending a sector
+/// before the slab is fully read. Reports a [`SlabStart`] when a slab
+/// begins; call [`SlabReader::finish`] to pad and publish a trailing partial
+/// slab.
+pub(crate) struct SlabReader {
+    coder: Arc<ErasureCoder>,
+    /// Contiguous landing area for incoming data. The object keystream is
+    /// applied to it in one call per fill, then the bytes are scattered into
+    /// the interleaved shard layout. Allocated once and reused.
+    read_buffer: Vec<u8>,
+    slab: Option<ActiveSlab>,
+    total_length: u64,
+    /// Steps still producing, across slabs. Aborted with the reader;
+    /// awaited by [`SlabReader::finish`].
+    step_tasks: Vec<AbortOnDropHandle<io::Result<()>>>,
 }
 
 /// Reads as many bytes as possible from `r` into `buf`, stopping at end of
@@ -125,81 +175,112 @@ async fn fill_buf<R: AsyncRead + Unpin>(r: &mut R, buf: &mut [u8]) -> io::Result
     Ok(read_total)
 }
 
+/// One step of a slab, owning only that step's chunk of every sector:
+/// parity for its rows, then shard encryption and the chunk's Merkle root
+/// per sector, then each chunk frozen for its writers. Steps run on their
+/// own tasks, so natively several encode at once on the blocking pool.
+fn produce_step(
+    coder: &ErasureCoder,
+    key: &EncryptionKey,
+    offset: usize,
+    mut step: Vec<BytesMut>,
+) -> Result<Vec<(Bytes, Hash256)>> {
+    coder.encode_shards(&mut step)?;
+    Ok(step
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut chunk)| {
+            encrypt_shard(key, i as u8, offset, &mut chunk);
+            let root = SectorRootAccumulator::chunk_root(&chunk);
+            (chunk.freeze(), root)
+        })
+        .collect())
+}
+
 impl SlabReader {
-    pub(crate) fn new(data_shards: usize, parity_shards: usize) -> Self {
-        let total_shards = data_shards + parity_shards;
+    pub(crate) fn new(coder: Arc<ErasureCoder>) -> Self {
         Self {
-            data_shards,
-            encryption_key: rand::random::<[u8; 32]>().into(),
-            shards: vec![vec![0u8; SECTOR_SIZE]; total_shards],
+            coder,
             read_buffer: vec![0u8; READ_BUFFER_SIZE],
-            length: 0,
+            slab: None,
             total_length: 0,
+            step_tasks: Vec::new(),
         }
     }
 
+    /// Input bytes in the slab being produced.
     pub fn length(&self) -> usize {
-        self.length
+        self.slab.as_ref().map_or(0, |s| s.length)
     }
 
-    /// Cumulative bytes that have landed in the pipeline across all
-    /// `read_slab` calls, including bytes from reads that errored part-way.
-    /// Unlike [length](Self::length), this never resets when a slab is
-    /// finalized.
     pub fn total_length(&self) -> u64 {
         self.total_length
     }
 
-    /// The optimal slab size for streaming reads
     pub fn optimal_data_size(&self) -> usize {
-        self.data_shards * SECTOR_SIZE
+        self.coder.data_shards() * SECTOR_SIZE
     }
 
-    /// Finalizes the slab reader, returning any remaining data as a slab.
-    pub fn finish(mut self) -> Option<ReadSlab> {
-        if self.length == 0 {
-            return None;
-        }
-        let length = self.length;
-        let shards = mem::take(&mut self.shards);
-        let encryption_key = mem::replace(&mut self.encryption_key, [0u8; 32].into());
-        Some(ReadSlab {
+    fn stripe_size(&self) -> usize {
+        SEGMENT_SIZE * self.coder.data_shards()
+    }
+
+    fn start_slab(&mut self) -> SlabStart {
+        let total = self.coder.total_shards();
+        let encryption_key: EncryptionKey = rand::random::<[u8; 32]>().into();
+        let streams: Vec<_> = (0..total).map(|_| ShardStream::new()).collect();
+        let final_length = Arc::new(OnceLock::new());
+        self.slab = Some(ActiveSlab {
+            encryption_key: encryption_key.clone(),
+            shards: (0..total).map(|_| BytesMut::zeroed(SECTOR_SIZE)).collect(),
+            streams: streams.clone(),
+            length: 0,
+            published: 0,
+            final_length: final_length.clone(),
+            prev_step: None,
+        });
+        SlabStart {
             encryption_key,
-            length,
-            shards,
-        })
+            streams,
+            length: final_length,
+        }
     }
 
-    /// Reads data from the reader until reaching the optimal slab size or EOF,
-    /// whichever comes first. This should be called in a loop until EOF is
-    /// reached.
-    ///
-    /// If the optimal slab size is reached, the completed slab is returned.
-    /// Any remaining data should be retrieved using [finish](Self::finish).
+    /// Reads from `r`, publishing each step of the slab's sectors as its
+    /// rows complete, until the slab is full or the reader is done. A call
+    /// also returns as soon as it has started a slab, so the caller can
+    /// spawn the slab's upload before the next call carries on filling it.
+    /// A full slab is completed here and the next call starts a new one.
     pub async fn read_slab<R: AsyncRead + Unpin>(
         &mut self,
         data_key: EncryptionKey,
         r: &mut R,
-    ) -> io::Result<(usize, Option<ReadSlab>)> {
-        if self.length == self.optimal_data_size() {
-            return Ok((0, None));
-        }
-        let mut cipher = Chacha20Cipher::new_v1(data_key, self.length as u64, &self.encryption_key);
+    ) -> io::Result<ReadProgress> {
+        let mut started = None;
         let mut total_read = 0;
-        let stripe_size = SEGMENT_SIZE * self.data_shards;
+        let stripe_size = self.stripe_size();
+        let optimal = self.optimal_data_size();
+        let mut cipher = None;
 
-        while self.length < self.optimal_data_size() {
+        loop {
             // Fill the buffer, then encrypt it in one pass. `want` never
             // exceeds what is left of the slab, so the reader is never taken
             // past the boundary.
-            let remaining = self.optimal_data_size() - self.length;
+            let remaining = optimal - self.length();
             let want = remaining.min(self.read_buffer.len());
             let filled = fill_buf(r, &mut self.read_buffer[..want]).await?;
             if filled == 0 {
                 break;
             }
+            if self.slab.is_none() {
+                started = Some(self.start_slab());
+            }
+            let slab = self.slab.as_mut().expect("slab started");
+            let cipher = cipher.get_or_insert_with(|| {
+                Chacha20Cipher::new_v1(data_key.clone(), slab.length as u64, &slab.encryption_key)
+            });
 
-            let start_len = self.length;
+            let start_len = slab.length;
             cipher.apply_keystream(&mut self.read_buffer[..filled]);
 
             let mut off = 0;
@@ -208,37 +289,125 @@ impl SlabReader {
                 let shard_index = (logical % stripe_size) / SEGMENT_SIZE;
                 let byte_in_seg = logical % SEGMENT_SIZE;
                 let seg_start = (logical / stripe_size) * SEGMENT_SIZE;
-                let dst = seg_start + byte_in_seg;
+                let dst = seg_start + byte_in_seg - slab.published;
                 let take = (SEGMENT_SIZE - byte_in_seg).min(filled - off);
-                self.shards[shard_index][dst..dst + take]
+                slab.shards[shard_index][dst..dst + take]
                     .copy_from_slice(&self.read_buffer[off..off + take]);
                 off += take;
             }
 
-            self.length += filled;
+            slab.length += filled;
             self.total_length += filled as u64;
             total_read += filled;
 
-            // A short fill means the reader is done.
-            if filled < want {
+            // Publish every step whose rows are all complete.
+            while self.completed_rows_bytes() >= self.published() + STEP_BYTES {
+                self.publish_step().await?;
+            }
+            if self.length() == optimal {
+                self.complete_slab().await?;
+                break;
+            }
+            // A short fill means the reader is done. A started slab is
+            // handed to the caller before more of it is read.
+            if filled < want || started.is_some() {
                 break;
             }
         }
-        let slab = if self.length == self.optimal_data_size() {
-            let length = mem::take(&mut self.length);
-            let total_shards = self.shards.len();
-            let shards = mem::replace(&mut self.shards, vec![vec![0u8; SECTOR_SIZE]; total_shards]);
-            let encryption_key =
-                mem::replace(&mut self.encryption_key, rand::random::<[u8; 32]>().into());
-            Some(ReadSlab {
-                encryption_key,
-                length,
-                shards,
-            })
-        } else {
-            None
-        };
-        Ok((total_read, slab))
+        Ok(ReadProgress {
+            read: total_read,
+            started,
+        })
+    }
+
+    /// Pads and publishes the rest of a partial slab, then waits for every
+    /// step still producing. Nothing to pad when no slab has started since
+    /// the last one completed.
+    pub async fn finish(&mut self) -> io::Result<()> {
+        if self.slab.is_some() {
+            self.complete_slab().await?;
+        }
+        while let Some(task) = self.step_tasks.pop() {
+            task.await??;
+        }
+        Ok(())
+    }
+
+    /// Bytes per sector covered by rows that are complete across every data
+    /// shard.
+    fn completed_rows_bytes(&self) -> usize {
+        self.length() / self.stripe_size() * SEGMENT_SIZE
+    }
+
+    fn published(&self) -> usize {
+        self.slab.as_ref().map_or(0, |s| s.published)
+    }
+
+    /// Cuts the remaining steps of the slab, zero padded past its length.
+    /// The last step records the slab's length and finishes its streams.
+    async fn complete_slab(&mut self) -> io::Result<()> {
+        while self.published() < SECTOR_SIZE {
+            self.publish_step().await?;
+        }
+        self.slab = None;
+        Ok(())
+    }
+
+    /// Cuts the next step off every sector and spawns its production. The
+    /// step publishes itself once the step before it has, so chunks reach
+    /// the writers in order while the producer reads on.
+    async fn publish_step(&mut self) -> io::Result<()> {
+        let slab = self.slab.as_mut().expect("slab started");
+        let step: Vec<BytesMut> = slab
+            .shards
+            .iter_mut()
+            .map(|s| s.split_to(STEP_BYTES))
+            .collect();
+        let offset = slab.published;
+        slab.published += STEP_BYTES;
+        let last = slab.published == SECTOR_SIZE;
+        let (done_tx, done_rx) = oneshot::channel();
+        let prev = slab.prev_step.replace(done_rx);
+        let coder = self.coder.clone();
+        let key = slab.encryption_key.clone();
+        let streams = slab.streams.clone();
+        let final_length = slab.final_length.clone();
+        let length = slab.length;
+
+        let task = maybe_spawn!(async move {
+            let produced = maybe_spawn_blocking!(
+                produce_step(&coder, &key, offset, step).map_err(io::Error::other)
+            )?;
+            let mut roots = match prev {
+                Some(prev) => prev
+                    .await
+                    .map_err(|_| io::Error::other("the previous step of the slab was abandoned"))?,
+                None => streams
+                    .iter()
+                    .map(|_| SectorRootAccumulator::new())
+                    .collect::<Vec<_>>(),
+            };
+            for ((stream, root), (chunk, chunk_root)) in
+                streams.iter().zip(roots.iter_mut()).zip(produced)
+            {
+                root.insert_chunk_root(chunk_root, STEP_BYTES);
+                stream.push(chunk);
+            }
+            if last {
+                let _ = final_length.set(length);
+                for (stream, root) in streams.iter().zip(&roots) {
+                    stream.finish(root.root());
+                }
+            }
+            let _ = done_tx.send(roots);
+            Ok::<_, io::Error>(())
+        });
+        self.step_tasks.retain(|task| !task.is_finished());
+        self.step_tasks.push(AbortOnDropHandle::new(task));
+        // On a single-threaded runtime the step and the writers only run
+        // when the producer yields; give them the step before reading on.
+        tokio::task::yield_now().await;
+        Ok(())
     }
 }
 
@@ -247,6 +416,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+    use crate::sector_stream::SectorBody;
 
     fn init_shard(i: u8) -> Vec<u8> {
         vec![i; SECTOR_SIZE]
@@ -310,6 +480,53 @@ mod tests {
         }
     }
 
+    /// Drives `read_slab` until the reader is exhausted or a slab completes,
+    /// as `Upload::read` does, returning the bytes read and the slab.
+    async fn read_whole<R: AsyncRead + Unpin>(
+        reader: &mut SlabReader,
+        data_key: &EncryptionKey,
+        r: &mut R,
+    ) -> (usize, SlabStart) {
+        let mut total = 0;
+        let mut slab = None;
+        loop {
+            let progress = reader.read_slab(data_key.clone(), r).await.unwrap();
+            total += progress.read;
+            if let Some(started) = progress.started {
+                assert!(slab.is_none(), "a second slab started");
+                slab = Some(started);
+            }
+            // A completed slab resets the reader's length to zero.
+            let complete = slab.is_some() && reader.length() == 0;
+            if progress.read == 0 || complete {
+                return (total, slab.expect("the first byte starts a slab"));
+            }
+        }
+    }
+
+    /// Reads a slab's sectors back out of its streams, checks each root
+    /// against a whole-sector hash, and undoes the shard encryption, leaving
+    /// the object-keystream-encrypted data shards and the parity over them.
+    async fn collect_sectors(slab: &SlabStart) -> Vec<Vec<u8>> {
+        let mut shards = Vec::new();
+        for (i, stream) in slab.streams.iter().enumerate() {
+            let mut body = SectorBody::new(stream.clone());
+            let mut shard = Vec::with_capacity(SECTOR_SIZE);
+            while let Some(chunk) = body.next_chunk().await {
+                shard.extend_from_slice(&chunk);
+            }
+            assert_eq!(shard.len(), SECTOR_SIZE, "shard {i} length");
+            assert_eq!(
+                body.root().await,
+                sia_core::rhp4::sector_root(&shard),
+                "shard {i} chunked root"
+            );
+            encrypt_shard(&slab.encryption_key, i as u8, 0, &mut shard);
+            shards.push(shard);
+        }
+        shards
+    }
+
     #[sia_core_derive::cross_target_test]
     async fn test_striped_read() {
         const DATA_SHARDS: usize = 3;
@@ -328,25 +545,34 @@ mod tests {
             getrandom::fill(&mut data).unwrap();
 
             let data_key = EncryptionKey::from([7u8; 32]);
-            let mut reader = SlabReader::new(DATA_SHARDS, PARITY_SHARDS);
-            let (n, slab) = reader
-                .read_slab(data_key.clone(), &mut Cursor::new(data.clone()))
-                .await
-                .unwrap();
-            assert_eq!(n, expected_size, "data size {data_size} read mismatch");
-
-            let (size, mut shards, slab_key) = if data_size >= SLAB_SIZE {
-                let slab = slab.expect("expected full slab");
-                (slab.length, slab.shards, slab.encryption_key)
-            } else {
+            let coder = Arc::new(ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).unwrap());
+            let mut reader = SlabReader::new(coder.clone());
+            let (read, slab) =
+                read_whole(&mut reader, &data_key, &mut Cursor::new(data.clone())).await;
+            assert_eq!(read, expected_size, "data size {data_size} read mismatch");
+            if data_size < SLAB_SIZE {
                 assert!(
-                    slab.is_none(),
-                    "data size {data_size} should not fill a slab"
+                    slab.length.get().is_none(),
+                    "data size {data_size} should not complete a slab"
                 );
-                let slab = reader.finish().unwrap();
-                (slab.length, slab.shards, slab.encryption_key)
-            };
-            decrypt_data_shards(&mut shards, DATA_SHARDS, &data_key, &slab_key, size);
+            }
+            reader.finish().await.unwrap();
+            let size = *slab.length.get().expect("slab complete");
+            let mut shards = collect_sectors(&slab).await;
+
+            // The parity published step by step matches one encode of the
+            // whole data shards.
+            let mut expected = shards.clone();
+            coder.encode_shards(&mut expected).unwrap();
+            assert_eq!(shards, expected, "data size {data_size} parity mismatch");
+
+            decrypt_data_shards(
+                &mut shards,
+                DATA_SHARDS,
+                &data_key,
+                &slab.encryption_key,
+                size,
+            );
 
             assert_eq!(size, expected_size, "data size {data_size} mismatch");
             assert_eq!(
@@ -374,7 +600,7 @@ mod tests {
     async fn test_striped_read_write() {
         const DATA_SHARDS: usize = 4;
         const PARITY_SHARDS: usize = 1;
-        let coder = ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).unwrap();
+        let coder = Arc::new(ErasureCoder::new(DATA_SHARDS, PARITY_SHARDS).unwrap());
 
         let mut data = vec![0u8; SECTOR_SIZE * 7 / 2]; // 3.5 shards of data
         data[..SECTOR_SIZE].fill(1);
@@ -384,16 +610,16 @@ mod tests {
         let data = Bytes::from(data);
 
         let data_key = EncryptionKey::from([7u8; 32]);
-        let mut reader = SlabReader::new(DATA_SHARDS, PARITY_SHARDS);
-        let (n, slab) = reader
-            .read_slab(data_key.clone(), &mut Cursor::new(data.clone()))
-            .await
-            .unwrap();
-        assert_eq!(n, data.len());
-        assert!(slab.is_none()); // 3.5 shards doesn't fill a 4-shard slab
-        let slab = reader.finish().unwrap();
-        let size = slab.length;
-        let mut shards = slab.shards;
+        let mut reader = SlabReader::new(coder.clone());
+        let (read, slab) = read_whole(&mut reader, &data_key, &mut Cursor::new(data.clone())).await;
+        assert_eq!(read, data.len());
+        assert!(slab.length.get().is_none()); // 3.5 shards doesn't fill a 4-shard slab
+        reader.finish().await.unwrap();
+        let size = *slab.length.get().expect("slab complete");
+        let mut shards = collect_sectors(&slab).await;
+        let mut expected = shards.clone();
+        coder.encode_shards(&mut expected).unwrap();
+        assert_eq!(shards, expected, "parity matches a re-encode");
         decrypt_data_shards(
             &mut shards,
             DATA_SHARDS,
@@ -403,10 +629,8 @@ mod tests {
         );
         assert_eq!(size, data.len());
 
-        // we expect 5 shards and the last one is an empty parity shard
         assert_eq!(shards.len(), 5);
         assert_eq!(size, SECTOR_SIZE * 7 / 2);
-        assert_eq!(shards[4], vec![0u8; SECTOR_SIZE]); // parity shard should be empty
 
         for shard in &shards[..4] {
             // every shard should be of SECTOR_SIZE

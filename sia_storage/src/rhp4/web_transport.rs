@@ -30,6 +30,7 @@ use tokio::sync::{Semaphore, watch};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::sector_stream::SectorBody;
 use crate::time::{Duration, Instant, sleep, timeout};
 
 use super::{Error, HostEndpoint, Transport};
@@ -488,7 +489,7 @@ impl Transport for Client {
         host: &HostEndpoint,
         prices: HostPrices,
         account_key: &PrivateKey,
-        data: Bytes,
+        mut data: SectorBody,
         idle_timeout: Duration,
     ) -> Result<(Hash256, Duration), Error> {
         let token = AccountToken::new(account_key, host.public_key);
@@ -496,10 +497,15 @@ impl Transport for Client {
         let mut stream = conn.open_stream().await?;
         stream.set_idle_timeout(Some(idle_timeout));
         let mut buf = Vec::new();
-        let req = RPCWriteSector::send_request(&mut buf, prices, token, data.clone()).await?;
+        let req = RPCWriteSector::send_header(&mut buf, prices, token, data.len()).await?;
         let start = Instant::now();
         stream.write_chunks(&buf).await?;
-        let resp = req.complete(&mut stream).await?;
+        // The body follows as the producer publishes it.
+        while let Some(chunk) = data.next_chunk().await {
+            stream.write_chunks(&chunk).await?;
+        }
+        let root = data.root().await;
+        let resp = req.complete(&mut stream, root).await?;
         Ok((resp.root, start.elapsed()))
     }
 

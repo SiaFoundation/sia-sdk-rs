@@ -37,6 +37,8 @@ web-time = "1"
 getrandom = "0.4"
 tokio-util = { version = "0.7.19", features = ["rt"] }
 sia_reed_solomon = "0.3.0"
+# Fast sector keys for the mock host; see `MockNetwork::set_fast_roots`.
+xxhash-rust = { version = "0.8.19", features = ["xxh3"], optional = true }
 
 # --- Native-only dependencies ---
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -71,6 +73,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 sia_core_derive = { path = "../sia_core_derive", version = "0.1.2" }
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.8.2", features = ["async_tokio"] }
@@ -87,7 +90,7 @@ tempfile = "3.27.0"
 wasm-bindgen-test = "0.3"
 
 [features]
-mock = []
+mock = ["dep:xxhash-rust"]
 less-safe-crypto = []
 # Adds `Sdk::upload_path`, `PackedUpload::add_path`, and
 # `Download::write_to_path`. Not usable on wasm32: tokio rejects its `fs`

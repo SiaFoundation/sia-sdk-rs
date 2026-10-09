@@ -24,6 +24,105 @@ pub fn sector_root(sector: &[u8]) -> Hash256 {
     nodes[0].into()
 }
 
+/// Computes a sector's root from its data in order, a chunk at a time, so a
+/// sector can be hashed while it is still being produced instead of once it
+/// is complete. It yields exactly [`sector_root`] of the concatenation.
+///
+/// Each chunk must be a power-of-two number of segments and start at a
+/// multiple of its own length, which holds whenever the sector is fed in
+/// fixed chunks that divide it.
+#[derive(Default)]
+pub struct SectorRootAccumulator {
+    acc: Accumulator,
+    len: usize,
+}
+
+impl SectorRootAccumulator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Bytes accumulated so far.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Adds the next `chunk` of the sector.
+    ///
+    /// # Panics
+    ///
+    /// If the chunk is not a power-of-two number of whole segments, is not
+    /// aligned to its own length, or runs past the sector.
+    pub fn update(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        self.insert_chunk_root(Self::chunk_root(chunk), chunk.len());
+    }
+
+    /// The Merkle root of one chunk on its own, for [`insert_chunk_root`].
+    /// Lets chunks be hashed on other threads or out of order and then
+    /// inserted in order.
+    ///
+    /// # Panics
+    ///
+    /// If the chunk is not a power-of-two number of whole segments.
+    ///
+    /// [`insert_chunk_root`]: Self::insert_chunk_root
+    pub fn chunk_root(chunk: &[u8]) -> Hash256 {
+        assert_eq!(chunk.len() % SEGMENT_SIZE, 0, "chunk is not whole segments");
+        let leaves = chunk.len() / SEGMENT_SIZE;
+        assert!(
+            leaves.is_power_of_two(),
+            "chunk is not a power of two of segments"
+        );
+
+        let mut nodes = vec![[0u8; 32]; leaves];
+        merkle::hash_leaves_many(&mut nodes, merkle::as_blocks(chunk));
+        while nodes.len() > 1 {
+            let mut parents = vec![[0u8; 32]; nodes.len() / 2];
+            merkle::hash_nodes_many(&mut parents, &nodes);
+            nodes = parents;
+        }
+        nodes[0].into()
+    }
+
+    /// Adds the next chunk of the sector by its [`chunk_root`] and length.
+    ///
+    /// # Panics
+    ///
+    /// If the chunk is not a power-of-two number of whole segments, is not
+    /// aligned to its own length, or runs past the sector.
+    ///
+    /// [`chunk_root`]: Self::chunk_root
+    pub fn insert_chunk_root(&mut self, root: Hash256, len: usize) {
+        assert_eq!(len % SEGMENT_SIZE, 0, "chunk is not whole segments");
+        let leaves = len / SEGMENT_SIZE;
+        assert!(
+            leaves.is_power_of_two(),
+            "chunk is not a power of two of segments"
+        );
+        assert_eq!(self.len % len, 0, "chunk is not aligned to its length");
+        assert!(self.len + len <= SECTOR_SIZE, "chunk runs past the sector");
+        self.acc.insert_node(root, leaves.trailing_zeros() as usize);
+        self.len += len;
+    }
+
+    /// The sector root.
+    ///
+    /// # Panics
+    ///
+    /// If fewer than [`SECTOR_SIZE`] bytes were accumulated.
+    pub fn root(&self) -> Hash256 {
+        assert_eq!(self.len, SECTOR_SIZE, "sector is incomplete");
+        self.acc.root()
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ProofValidationError {
     #[error("Invalid proof length")]
@@ -414,5 +513,63 @@ pub(crate) mod tests {
         let sector = fill_sector();
         let (golden, _, _) = sector_proof_24_42();
         assert_eq!(build_proof(&sector, 24, 42), golden);
+    }
+}
+
+#[cfg(test)]
+mod accumulator_tests {
+    use super::*;
+
+    fn random_sector() -> Vec<u8> {
+        let mut sector = vec![0u8; SECTOR_SIZE];
+        crate::test_util::fill(0x5ec7_0a00, &mut sector);
+        sector
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn fixed_chunks_match_sector_root() {
+        let sector = random_sector();
+        let expected = sector_root(&sector);
+        for chunk in [SEGMENT_SIZE, 1 << 12, 256 << 10, SECTOR_SIZE] {
+            let mut acc = SectorRootAccumulator::new();
+            for piece in sector.chunks(chunk) {
+                acc.update(piece);
+            }
+            assert_eq!(acc.len(), SECTOR_SIZE);
+            assert_eq!(acc.root(), expected, "chunk size {chunk}");
+        }
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn mixed_aligned_chunks_match_sector_root() {
+        let sector = random_sector();
+        let expected = sector_root(&sector);
+        // Larger chunks first, then smaller ones: each stays aligned to its
+        // own length.
+        let mut acc = SectorRootAccumulator::new();
+        let mut off = 0;
+        for chunk in [
+            2 << 20,
+            1 << 20,
+            512 << 10,
+            256 << 10,
+            128 << 10,
+            64 << 10,
+            64 << 10,
+        ] {
+            acc.update(&sector[off..off + chunk]);
+            off += chunk;
+        }
+        assert_eq!(off, SECTOR_SIZE);
+        assert_eq!(acc.root(), expected);
+    }
+
+    #[sia_core_derive::cross_target_test]
+    #[should_panic(expected = "not aligned")]
+    fn misaligned_chunk_panics() {
+        let sector = random_sector();
+        let mut acc = SectorRootAccumulator::new();
+        acc.update(&sector[..SEGMENT_SIZE]);
+        acc.update(&sector[SEGMENT_SIZE..SEGMENT_SIZE * 3]);
     }
 }

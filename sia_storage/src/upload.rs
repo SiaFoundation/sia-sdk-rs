@@ -6,9 +6,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::app_client::{self, SectorPinParams, SlabPinParams};
 use crate::congestion::{InflightController, SamplePermit};
-use crate::encryption::{EncryptionKey, encrypt_shard};
-use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
+use crate::encryption::EncryptionKey;
+use crate::erasure_coding::{self, ErasureCoder, SlabReader, SlabStart};
 use crate::hosts::{HostQueue, InflightGuard, QueueError, RPC_IDLE_TIMEOUT, RPCError};
+use crate::sector_stream::{SectorBody, ShardStream};
 use crate::slabs::SlabVersion;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Instant, sleep};
@@ -16,7 +17,6 @@ use crate::{
     AppKey, Download, DownloadOptions, Hosts, Object, PackedUploadOptions, Sector, ShardProgress,
     ShardProgressCallback, Slab, UploadOptions,
 };
-use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use log::debug;
 use sia_core::rhp4::SECTOR_SIZE;
@@ -57,7 +57,9 @@ struct ShardUpload {
     client: Hosts,
     hosts: Arc<Mutex<HostQueue>>,
     account_key: Arc<AppKey>,
-    data: Bytes,
+    /// The sector's bytes as the producer publishes them; every attempt
+    /// sends them from the start.
+    stream: Arc<ShardStream>,
     slab_index: usize,
     shard_index: usize,
     waiting: watch::Sender<usize>,
@@ -313,7 +315,7 @@ impl ShardUpload {
         let client = self.client.clone();
         let limiter = self.limiter.clone();
         let account_key = self.account_key.clone();
-        let data = self.data.clone();
+        let body = SectorBody::new(self.stream.clone());
         let slab_index = self.slab_index;
         let shard_index = self.shard_index;
         join_set_spawn!(tasks, async move {
@@ -326,7 +328,7 @@ impl ShardUpload {
             let start = Instant::now();
             let uploaded_at = Utc::now();
             let result = client
-                .write_sector(host_key, &account_key.0, data, idle_timeout)
+                .write_sector(host_key, &account_key.0, body, idle_timeout)
                 .await;
             let elapsed = start.elapsed();
             // one failed completion, which a window sized to the limit
@@ -409,7 +411,7 @@ impl ShardUpload {
         let mut last_event = Instant::now();
         let race_timeout = self
             .client
-            .write_estimate(self.data.len() as u32)
+            .write_estimate(SECTOR_SIZE as u32)
             .mul_f64(RACE_FACTOR);
         loop {
             tokio::select! {
@@ -601,15 +603,13 @@ impl Upload {
         let max_buffered_slabs = options
             .max_buffered_slabs
             .unwrap_or_else(|| default_slabs_in_memory(options.slab_size()));
+        let erasure_coder = Arc::new(erasure_coder);
         Ok(Self {
             client,
             api_client,
             app_key,
-            slab_buffer: Some(SlabReader::new(
-                options.data_shards as usize,
-                options.parity_shards as usize,
-            )),
-            erasure_coder: Arc::new(erasure_coder),
+            slab_buffer: Some(SlabReader::new(erasure_coder.clone())),
+            erasure_coder,
             total_shards,
             limiter: Arc::new(UploadLimiter::new(
                 INITIAL_INFLIGHT,
@@ -630,57 +630,32 @@ impl Upload {
         Ok(())
     }
 
-    async fn spawn_slab(&mut self, slab: ReadSlab) -> Result<(), UploadError> {
+    /// Starts uploading a slab whose sectors the producer is still filling.
+    /// Each shard's writer streams its sector to the host as the steps are
+    /// published, so the first bytes leave before the slab is fully read.
+    async fn spawn_slab(&mut self, slab: SlabStart) -> Result<(), UploadError> {
         let client = self.client.clone();
         let api_client = self.api_client.clone();
-        let rs = self.erasure_coder.clone();
         let limiter = self.limiter.clone();
         let app_key = self.app_key.clone();
         let min_shards = self.erasure_coder.data_shards() as u8;
         let progress_callback = self.shard_uploaded.clone();
         let slab_index = self.slab_tasks.len();
-        let shard_permits = limiter.reserve(slab.shards.len()).await;
+        let shard_permits = limiter.reserve(slab.streams.len()).await;
         // Count this slab's shards as waiting before the task spawns so the
         // racing gate can't open between buffering and encode.
         let waiting = self.waiting.clone();
         let mut waiting_guards: Vec<WaitingGuard> = slab
-            .shards
+            .streams
             .iter()
             .map(|_| WaitingGuard::new(waiting.clone()))
             .collect();
         let handle = AbortOnDropHandle::new(maybe_spawn!(async move {
-            let total_shards = slab.shards.len();
-            // The shards stay in memory for possible reupload, so hold their
+            let total_shards = slab.streams.len();
+            // The sectors stay in memory for possible reupload, so hold their
             // reservations just as long.
             let _shard_permits = shard_permits;
-
-            // Encode parity shards on a blocking thread; encryption runs
-            // per-shard below so it parallelizes across the blocking pool.
-            let mut shards = slab.shards;
-            let shards = maybe_spawn_blocking!({
-                let start = Instant::now();
-                rs.encode_shards(&mut shards)?;
-                debug!("slab {} encoded in {:?}", slab_index, start.elapsed());
-                Ok::<_, UploadError>(shards)
-            })?;
-
-            let owned_slab_key = Arc::new(slab.encryption_key.clone());
-            let mut encrypt_tasks: JoinSet<Result<(usize, Bytes), UploadError>> = JoinSet::new();
-            for (shard_index, mut shard) in shards.into_iter().enumerate() {
-                let owned_slab_key = owned_slab_key.clone();
-                join_set_spawn!(encrypt_tasks, async move {
-                    let shard = maybe_spawn_blocking!({
-                        encrypt_shard(&owned_slab_key, shard_index as u8, 0, &mut shard);
-                        shard
-                    });
-                    Ok((shard_index, Bytes::from(shard)))
-                });
-            }
-            let mut shards = vec![Bytes::new(); total_shards];
-            while let Some(res) = encrypt_tasks.join_next().await {
-                let (shard_index, shard) = res??;
-                shards[shard_index] = shard;
-            }
+            let shards = slab.streams;
 
             let mut attempt = 1;
             loop {
@@ -701,7 +676,7 @@ impl Upload {
                     Arc::new(Mutex::new(client.upload_queue(total_shards)));
                 let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> =
                     JoinSet::new();
-                for ((shard_index, data), waiting_guard) in
+                for ((shard_index, stream), waiting_guard) in
                     shards.iter().cloned().enumerate().zip(waiting_guards)
                 {
                     let shard_client = client.clone();
@@ -714,7 +689,7 @@ impl Upload {
                             limiter,
                             client: shard_client,
                             account_key: shard_account_key,
-                            data,
+                            stream,
                             slab_index,
                             shard_index,
                             hosts,
@@ -748,8 +723,15 @@ impl Upload {
                     min_shards,
                     sectors: sectors.into_iter().map(|s| s.unwrap()).collect(),
                 };
+                // The last sector cannot finish uploading before the
+                // producer published its last step, which is after it
+                // recorded the slab's length.
+                let length = *slab
+                    .length
+                    .get()
+                    .expect("slab length is set before its sectors finish");
                 let uploaded = Slab {
-                    length: slab.length as u32,
+                    length: length as u32,
                     ..Slab::from(&params)
                 };
                 match pin_uploaded_slab(&api_client, &app_key, params).await {
@@ -796,31 +778,28 @@ impl Upload {
         self.ensure_hosts().await?;
         let mut total_length: u64 = 0;
         loop {
-            let (n, slab) = self
+            let progress = self
                 .slab_buffer
                 .as_mut()
                 .unwrap()
                 .read_slab(data_key.clone(), &mut reader)
                 .await?;
-            if n == 0 {
-                return Ok(total_length);
-            }
-            total_length += n as u64;
-
-            if let Some(slab) = slab {
+            if let Some(slab) = progress.started {
                 self.spawn_slab(slab).await?;
             }
+            if progress.read == 0 {
+                return Ok(total_length);
+            }
+            total_length += progress.read as u64;
         }
     }
 
     /// Finalizes the pipeline, flushing any trailing partial slab and awaiting
     /// all in-flight uploads. Returns the uploaded slabs in order.
     pub(crate) async fn finish(mut self) -> Result<Vec<Slab>, UploadError> {
-        let last_slab = self.slab_buffer.take().unwrap().finish();
-        if let Some(slab) = last_slab {
-            self.ensure_hosts().await?;
-            self.spawn_slab(slab).await?;
-        }
+        // A trailing partial slab was spawned when its first byte arrived;
+        // this pads and publishes the rest of it.
+        self.slab_buffer.take().unwrap().finish().await?;
         let mut slabs = Vec::with_capacity(self.slab_tasks.len());
         while let Some(handle) = self.slab_tasks.pop_front() {
             slabs.push(handle.await??);
@@ -1070,7 +1049,7 @@ mod tests {
     use super::*;
     use crate::Host;
     use crate::rhp4::{Client, mock};
-    use bytes::BytesMut;
+    use bytes::{Bytes, BytesMut};
     use rand::Rng;
     use reqwest::StatusCode;
     use sia_core::signing::PrivateKey;
@@ -1152,7 +1131,7 @@ mod tests {
             client: hosts_manager.clone(),
             hosts: Arc::new(Mutex::new(hosts_manager.upload_queue(pending_initial))),
             account_key: app_key.clone(),
-            data: Bytes::from(vec![0u8; SECTOR_SIZE]),
+            stream: ShardStream::complete(Bytes::from(vec![0u8; SECTOR_SIZE])),
             slab_index: 0,
             shard_index: 0,
             waiting: waiting.clone(),
@@ -1796,6 +1775,170 @@ mod tests {
     /// Transient pin errors reuse the same request; the indexer rejecting the
     /// slab as too old reuploads every shard with fresh upload times and
     /// preserves the object's data.
+    /// Yields `head`, then stalls until `release` fires, then yields `tail`.
+    struct GatedReader {
+        head: Cursor<Vec<u8>>,
+        gate: Option<tokio::sync::oneshot::Receiver<()>>,
+        tail: Cursor<Vec<u8>>,
+    }
+
+    impl AsyncRead for GatedReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            use std::future::Future;
+
+            let this = &mut *self;
+            if this.head.position() < this.head.get_ref().len() as u64 {
+                return std::pin::Pin::new(&mut this.head).poll_read(cx, buf);
+            }
+            if let Some(gate) = this.gate.as_mut() {
+                match std::pin::Pin::new(gate).poll(cx) {
+                    std::task::Poll::Ready(_) => this.gate = None,
+                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                }
+            }
+            std::pin::Pin::new(&mut this.tail).poll_read(cx, buf)
+        }
+    }
+
+    /// Reads from a cursor and records when it handed out its last byte.
+    struct TimedReader {
+        inner: Cursor<Vec<u8>>,
+        done_at: Arc<Mutex<Option<Instant>>>,
+    }
+
+    impl AsyncRead for TimedReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            let this = &mut *self;
+            let result = std::pin::Pin::new(&mut this.inner).poll_read(cx, buf);
+            if this.inner.position() >= this.inner.get_ref().len() as u64 {
+                this.done_at
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_with(Instant::now);
+            }
+            result
+        }
+    }
+
+    fn pipelining_hosts(transport: &mock::Client) -> Hosts {
+        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        hosts.update(
+            (0..24)
+                .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
+                .collect(),
+            true,
+        );
+        hosts
+    }
+
+    /// The hosts receive a slab's first bytes while the reader is still
+    /// stalled on the rest of it.
+    #[sia_core_derive::cross_target_test]
+    async fn test_upload_streams_sectors_before_the_slab_is_read() {
+        let options = opts(3, 9);
+        let transport = mock::Client::new();
+        let hosts = pipelining_hosts(&transport);
+        let api = app_client::mock::Client::new();
+
+        // Enough input for a few steps, then a stall, then the rest.
+        let step_input = erasure_coding::STEP_BYTES * options.data_shards as usize;
+        let mut head = vec![0u8; 3 * step_input];
+        rand::rng().fill_bytes(&mut head);
+        let mut tail = vec![0u8; step_input + 1234];
+        rand::rng().fill_bytes(&mut tail);
+        let total = head.len() + tail.len();
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let reader = GatedReader {
+            head: Cursor::new(head),
+            gate: Some(gate),
+            tail: Cursor::new(tail),
+        };
+
+        let object = Object::default();
+        let data_key = object.data_key.clone();
+        let mut upload = Upload::new(
+            hosts,
+            app_client::Client::Mock(api.clone()),
+            Arc::new(AppKey::import(rand::random())),
+            options,
+        )
+        .unwrap();
+        let task = maybe_spawn!(async move {
+            upload.read(data_key, reader).await?;
+            upload.finish().await
+        });
+
+        // A sector write must have started and received bytes while the
+        // reader is still gated.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while transport.write_timeline().first_byte.is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "no sector received bytes while the slab was still being read"
+            );
+            sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            transport.write_timeline().first_done.is_none(),
+            "a sector finished before the reader delivered the rest of the slab"
+        );
+
+        release.send(()).unwrap();
+        let slabs = task.await.unwrap().unwrap();
+        assert_eq!(slabs.len(), 1);
+        assert_eq!(slabs[0].length as usize, total);
+        assert_eq!(api.pinned_slabs(), 1);
+    }
+
+    /// With a reader that never stalls, the first sector write still begins
+    /// before the reader has handed out the whole slab.
+    #[sia_core_derive::cross_target_test]
+    async fn test_upload_starts_sectors_during_a_fast_read() {
+        let options = opts(3, 9);
+        let transport = mock::Client::new();
+        let hosts = pipelining_hosts(&transport);
+        let api = app_client::mock::Client::new();
+        let mut data = vec![0u8; options.optimal_data_size()];
+        rand::rng().fill_bytes(&mut data);
+        let done_at = Arc::new(Mutex::new(None));
+        let reader = TimedReader {
+            inner: Cursor::new(data),
+            done_at: done_at.clone(),
+        };
+
+        let object = Object::default();
+        let data_key = object.data_key.clone();
+        let mut upload = Upload::new(
+            hosts,
+            app_client::Client::Mock(api.clone()),
+            Arc::new(AppKey::import(rand::random())),
+            options,
+        )
+        .unwrap();
+        upload.read(data_key, reader).await.unwrap();
+        let slabs = upload.finish().await.unwrap();
+        assert_eq!(slabs.len(), 1);
+
+        let first_call = transport
+            .write_timeline()
+            .first_call
+            .expect("a sector was written");
+        let done_at = done_at.lock().unwrap().expect("the reader was drained");
+        assert!(
+            first_call < done_at,
+            "the first sector write began {:?} after the reader was drained",
+            first_call.duration_since(done_at)
+        );
+    }
+
     #[sia_core_derive::cross_target_test]
     async fn test_upload_reuploads_when_indexer_rejects_slab() {
         use std::sync::atomic::{AtomicUsize, Ordering};

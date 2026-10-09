@@ -1029,7 +1029,7 @@ mod test {
                 .write_sector(
                     host_keys[i],
                     &app_key.0,
-                    Bytes::from(shard),
+                    crate::sector_stream::SectorBody::from_bytes(Bytes::from(shard)),
                     Duration::from_secs(5),
                 )
                 .await
