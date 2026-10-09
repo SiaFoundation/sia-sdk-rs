@@ -352,12 +352,16 @@ impl From<&SealedObject> for PinObjectRequest {
 }
 
 /// Requests pages until one comes back short, which ends the listing.
+///
+/// Pages are the largest the indexer accepts, so today's network
+/// of a few hundred hosts is one request. Each page waits for the one before
+/// it, so a smaller page costs a round trip per hundred hosts.
 async fn drain_pages<T, F, Fut>(page: F) -> Result<Vec<T>, Error>
 where
     F: Fn(HostQuery) -> Fut,
     Fut: Future<Output = Result<Vec<T>, Error>>,
 {
-    const PAGE_SIZE: u64 = 100;
+    const PAGE_SIZE: u64 = 500;
     let mut all = Vec::new();
     loop {
         let page = page(HostQuery {
