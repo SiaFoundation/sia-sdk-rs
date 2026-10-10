@@ -143,27 +143,6 @@ impl Builder {
         })
     }
 
-    /// Sets whether the SDK requests CBOR responses from the indexer (enabled
-    /// by default). Set to `false` to request JSON for easier inspection.
-    /// Only valid before connecting.
-    #[napi]
-    pub fn with_cbor(&self, enable: bool) -> Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| Error::from_reason("mutex poisoned"))?;
-        match state.take() {
-            Some(BuilderState::Disconnected(builder)) => {
-                *state = Some(BuilderState::Disconnected(builder.with_cbor(enable)));
-                Ok(())
-            }
-            other => {
-                *state = other;
-                Err(Error::from_reason("invalid state"))
-            }
-        }
-    }
-
     /// Attempts to connect using the provided app key.
     /// Returns the SDK if the app key is valid, otherwise returns null.
     #[napi]

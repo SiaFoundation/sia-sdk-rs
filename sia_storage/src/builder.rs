@@ -103,17 +103,6 @@ impl Builder<DisconnectedState> {
         })
     }
 
-    /// Sets whether the SDK requests CBOR responses from the indexer (enabled
-    /// by default). Responses are always decoded according to their content
-    /// type; request bodies remain JSON.
-    ///
-    /// # Arguments
-    /// * `enable` - Whether to request CBOR. Set to `false` to request JSON for easier inspection.
-    pub fn with_cbor(mut self, enable: bool) -> Self {
-        self.client.set_cbor(enable);
-        self
-    }
-
     /// Attempts to connect using the provided app key.
     /// If the app key is valid, returns Some([Sdk]), otherwise returns None.
     ///
