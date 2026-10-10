@@ -1,3 +1,9 @@
+## 0.11.1 (2026-10-10)
+
+### Fixes
+
+- Remove API response type configuration functions and default to CBOR with JSON fallback.
+
 ## 0.11.0 (2026-10-09)
 
 ### Breaking Changes
