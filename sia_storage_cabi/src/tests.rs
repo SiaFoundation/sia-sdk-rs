@@ -1781,6 +1781,126 @@ fn hosts_reject_null_handles() {
     }
 }
 
+/// A cancelled finish has already sent EOF, so the add task registers the
+/// object whether or not the caller is still waiting. Abort cannot take that
+/// back, so it must refuse rather than report a success that discarded nothing.
+#[test]
+fn abort_refuses_a_finish_that_was_cancelled() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [151u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let mut packed = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
+            SIA_OK,
+            "sia_packed_upload_start: {}",
+            take_err(err)
+        );
+
+        let payload = vec![5u8; 4096];
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_begin(packed, &raw mut err),
+            SIA_OK,
+            "add_begin: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_write(
+                packed,
+                payload.as_ptr(),
+                payload.len(),
+                std::ptr::null_mut(),
+                &raw mut err
+            ),
+            SIA_OK,
+            "add_write: {}",
+            take_err(err)
+        );
+
+        // Finish with a token that has already fired. EOF is sent regardless.
+        let cancel = sia_cancel_new();
+        sia_cancel_cancel(cancel);
+        let mut n = 0u64;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_finish(packed, cancel, &raw mut n, &raw mut err),
+            SIA_ERR_CANCELLED,
+            "setup: the finish must report cancellation"
+        );
+        let _ = take_err(err);
+        sia_cancel_free(cancel);
+
+        // Aborting now would claim to have withdrawn an object already on record.
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_abort(packed, std::ptr::null_mut(), &raw mut err),
+            SIA_ERR_INVALID_STATE,
+            "abort must refuse a finish that is already under way"
+        );
+        let message = take_err(err);
+        assert!(
+            message.contains("sia_packed_upload_add_finish"),
+            "the refusal must name the way out, got {message:?}"
+        );
+
+        // Retrying the finish is the way out, and the object is the one added.
+        let mut n = 0u64;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_finish(packed, std::ptr::null_mut(), &raw mut n, &raw mut err),
+            SIA_OK,
+            "retrying the finish: {}",
+            take_err(err)
+        );
+        assert_eq!(n, payload.len() as u64);
+
+        let mut objs = std::ptr::null_mut();
+        let mut len = 0usize;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_finalize(
+                packed,
+                std::ptr::null_mut(),
+                &raw mut objs,
+                &raw mut len,
+                &raw mut err
+            ),
+            SIA_OK,
+            "finalize: {}",
+            take_err(err)
+        );
+        assert_eq!(len, 1, "the object the finish committed is on record once");
+        let listed = std::slice::from_raw_parts(objs, len);
+        assert_eq!(sia_object_size(listed[0]), payload.len() as u64);
+
+        for o in listed {
+            sia_object_free(*o);
+        }
+        sia_object_array_free(objs, len);
+        sia_packed_upload_free(packed);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
 #[test]
 fn object_encoding_roundtrip() {
     unsafe {
@@ -3503,7 +3623,10 @@ fn abort_reports_a_panicked_add() {
         add_task: Some(task),
         remaining: AtomicU64::new(0),
         length: AtomicU64::new(0),
-        torn: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        // Torn, as a cancelled write leaves it. A writer already gone with the
+        // task still attached and nothing torn is a finish under way, which
+        // abort refuses rather than joining.
+        torn: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
     }));
 
     unsafe {

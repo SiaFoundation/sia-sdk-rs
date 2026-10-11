@@ -676,6 +676,16 @@ pub unsafe extern "C" fn sia_packed_upload_add_abort(
         let Some(up) = (unsafe { up.as_mut() }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
+        // A cancelled finish already sent EOF, so the object is committed or
+        // about to be and abort cannot take it back. Only that case leaves the
+        // writer gone, the task attached and nothing torn.
+        if up.writer.is_none() && up.add_task.is_some() && !up.torn.load(Ordering::Acquire) {
+            return set_err(
+                err,
+                SIA_ERR_INVALID_STATE,
+                "a finish is already under way; retry sia_packed_upload_add_finish",
+            );
+        }
         up.torn.store(true, Ordering::Release);
         drop(up.writer.take()); // unblock the reader so it can observe the tear
         if up.add_task.is_none() {
