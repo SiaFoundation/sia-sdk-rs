@@ -3095,61 +3095,15 @@ fn shared_sdk_lists_object_summaries() {
     }
 }
 
-/// Both shared SDK constructors reject a URL that is not one before they reach
-/// the network, and both honour a token that has already fired. Connecting for
-/// real needs an indexer, which the mock network does not stand in for.
+/// Connecting as a recipient refuses a URL that is not one, and honours a
+/// token that has already fired. Connecting for real needs an indexer, which
+/// the mock network does not stand in for.
 #[test]
 fn shared_sdk_connect_validates_before_it_dials() {
     unsafe {
         let seed = [3u8; 32];
         let bad_url = std::ffi::CString::new("not a url").unwrap();
 
-        for cbor in [true, false] {
-            let mut sdk = std::ptr::null_mut();
-            let mut err = std::ptr::null_mut();
-            assert_eq!(
-                sia_shared_sdk_connect_with_cbor(
-                    bad_url.as_ptr(),
-                    seed.as_ptr(),
-                    cbor,
-                    std::ptr::null_mut(),
-                    &raw mut sdk,
-                    &raw mut err,
-                ),
-                SIA_ERR,
-                "a malformed url must be refused"
-            );
-            // The client rejects it, so the message is its own rather than ours.
-            assert!(!take_err(err).is_empty(), "a refusal must say something");
-            assert!(sdk.is_null(), "nothing is handed back on failure");
-        }
-
-        // The encoding is chosen before the request, so a fired token stops it
-        // at the same place either way.
-        let url = std::ffi::CString::new("https://example.invalid").unwrap();
-        for cbor in [true, false] {
-            let cancel = sia_cancel_new();
-            sia_cancel_cancel(cancel);
-            let mut sdk = std::ptr::null_mut();
-            let mut err = std::ptr::null_mut();
-            assert_eq!(
-                sia_shared_sdk_connect_with_cbor(
-                    url.as_ptr(),
-                    seed.as_ptr(),
-                    cbor,
-                    cancel,
-                    &raw mut sdk,
-                    &raw mut err,
-                ),
-                SIA_ERR_CANCELLED,
-                "a fired token must stop the connect"
-            );
-            let _ = take_err(err);
-            assert!(sdk.is_null());
-            sia_cancel_free(cancel);
-        }
-
-        // The existing constructor is unchanged by the new one.
         let mut sdk = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
         assert_eq!(
@@ -3161,9 +3115,31 @@ fn shared_sdk_connect_validates_before_it_dials() {
                 &raw mut err,
             ),
             SIA_ERR,
+            "a malformed url must be refused"
         );
-        assert!(!take_err(err).is_empty());
+        // The client rejects it, so the message is its own rather than ours.
+        assert!(!take_err(err).is_empty(), "a refusal must say something");
+        assert!(sdk.is_null(), "nothing is handed back on failure");
+
+        let url = std::ffi::CString::new("https://example.invalid").unwrap();
+        let cancel = sia_cancel_new();
+        sia_cancel_cancel(cancel);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_shared_sdk_connect(
+                url.as_ptr(),
+                seed.as_ptr(),
+                cancel,
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_ERR_CANCELLED,
+            "a fired token must stop the connect"
+        );
+        let _ = take_err(err);
         assert!(sdk.is_null());
+        sia_cancel_free(cancel);
     }
 }
 
@@ -3216,13 +3192,10 @@ fn account_checks_need_an_approved_connection() {
             "the state is checked before the indexer is reached, got {message:?}"
         );
 
-        // Neither consumes, so the builder is still usable afterwards.
-        let mut err = std::ptr::null_mut();
-        assert_eq!(
-            sia_builder_with_cbor(b, false, &raw mut err),
-            SIA_OK,
-            "a check must not spend the builder: {}",
-            take_err(err)
+        // Neither consumes, so the builder is where it was.
+        assert!(
+            matches!(&*(*b).0.lock().unwrap(), BuilderState::Disconnected(_)),
+            "a check must not spend the builder"
         );
 
         let mut got = true;
@@ -3361,61 +3334,6 @@ fn connect_pre_authorized_rejects_absent_arguments() {
             "a null key must be refused rather than read"
         );
         assert!(take_err(err).contains("pre-authorized key"));
-
-        sia_builder_free(b);
-    }
-}
-
-/// Asking the indexer for JSON instead of CBOR is part of the builder's public
-/// contract. It changes the client the builder holds, so only one that has not
-/// started connecting can take it.
-#[test]
-fn with_cbor_applies_only_before_connecting() {
-    let meta = sia_storage::AppMetadata {
-        id: sia_storage::AppID::from([9u8; 32]),
-        name: "cbor",
-        description: "toggles the response encoding",
-        service_url: "https://example.invalid",
-        logo_url: None,
-        callback_url: None,
-    };
-    let builder = sia_storage::Builder::new("https://example.invalid", meta).expect("builder");
-    let b = Box::into_raw(Box::new(FfiBuilder(std::sync::Mutex::new(
-        BuilderState::Disconnected(builder),
-    ))));
-
-    unsafe {
-        for enable in [false, true, false] {
-            let mut err = std::ptr::null_mut();
-            assert_eq!(
-                sia_builder_with_cbor(b, enable, &raw mut err),
-                SIA_OK,
-                "a disconnected builder takes the setting: {}",
-                take_err(err)
-            );
-        }
-
-        // Past that point the client is the SDK's, so the setting has nowhere
-        // to land and saying so beats changing nothing quietly.
-        *(*b).0.lock().unwrap() = BuilderState::Consumed;
-        let mut err = std::ptr::null_mut();
-        assert_eq!(
-            sia_builder_with_cbor(b, false, &raw mut err),
-            SIA_ERR_INVALID_STATE,
-            "a builder that has moved on must refuse"
-        );
-        let message = take_err(err);
-        assert!(
-            message.contains("not disconnected"),
-            "the refusal must say why, got {message:?}"
-        );
-
-        let mut err = std::ptr::null_mut();
-        assert_eq!(
-            sia_builder_with_cbor(std::ptr::null_mut(), true, &raw mut err),
-            SIA_ERR_INVALID_HANDLE,
-        );
-        assert!(err.is_null(), "an absent handle sets no message");
 
         sia_builder_free(b);
     }

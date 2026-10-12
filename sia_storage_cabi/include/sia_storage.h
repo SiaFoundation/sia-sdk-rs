@@ -182,9 +182,6 @@ extern "C"
 	// "logoURL":...|null,"callbackURL":...|null}
 	int32_t sia_builder_new(const char *indexer_url, const char *app_meta_json, sia_builder_t **out, char **err);
 	void sia_builder_free(sia_builder_t *b);
-	// CBOR is the default; pass false for JSON responses. Must come before
-	// request_connection or connect.
-	int32_t sia_builder_with_cbor(sia_builder_t *b, bool enable, char **err);
 	// Returns SIA_ERR_UNAUTHORIZED when the app key is not authorized.
 	int32_t sia_builder_connect(sia_builder_t *b, const uint8_t app_key[32], sia_cancel_t *cancel, sia_sdk_t **out, char **err);
 	// Cancelling request_connection or register consumes the builder; the flow
@@ -392,9 +389,6 @@ extern "C"
 	// seed is the whole credential, the 32 bytes sia_sharing_key_export writes.
 	// There is no registration or approval step.
 	int32_t sia_shared_sdk_connect(const char *indexer_url, const uint8_t seed[32], sia_cancel_t *cancel, sia_shared_sdk_t **out, char **err);
-	// Like sia_shared_sdk_connect, but chooses the response encoding. connect
-	// asks for CBOR; pass false for JSON. Request bodies are JSON either way.
-	int32_t sia_shared_sdk_connect_with_cbor(const char *indexer_url, const uint8_t seed[32], bool cbor, sia_cancel_t *cancel, sia_shared_sdk_t **out, char **err);
 	// Safe to call while a download started from this handle is still running;
 	// the download keeps its own token refresh alive.
 	void sia_shared_sdk_free(sia_shared_sdk_t *sdk);

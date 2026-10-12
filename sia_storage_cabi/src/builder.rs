@@ -170,43 +170,6 @@ pub unsafe extern "C" fn sia_builder_connect(
     })
 }
 
-/// Sets whether the SDK asks the indexer for CBOR responses, which it does by
-/// default. Pass false for JSON.
-/// Request bodies are JSON either way.
-///
-/// Only a builder that has not started connecting can be changed, so this has
-/// to come before `sia_builder_request_connection` or `sia_builder_connect`.
-///
-/// # Safety
-/// - `b` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
-///   from `sia_builder_new` that has not been freed.
-/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
-///   with `sia_string_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn sia_builder_with_cbor(
-    b: *mut FfiBuilder,
-    enable: bool,
-    err: *mut *mut c_char,
-) -> i32 {
-    let err = unsafe { ErrOut::new(err) };
-    guarded(err, || {
-        let Some(b) = (unsafe { b.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
-        let mut state = b.state();
-        match std::mem::replace(&mut *state, BuilderState::Consumed) {
-            BuilderState::Disconnected(builder) => {
-                *state = BuilderState::Disconnected(builder.with_cbor(enable));
-                SIA_OK
-            }
-            other => {
-                *state = other;
-                set_err(err, SIA_ERR_INVALID_STATE, "builder is not disconnected")
-            }
-        }
-    })
-}
-
 /// # Safety
 /// - `b` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_builder_new` that has not been freed.
