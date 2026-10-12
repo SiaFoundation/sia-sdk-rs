@@ -69,6 +69,7 @@ extern "C"
 	typedef struct sia_cancel sia_cancel_t;
 	typedef struct sia_sharing_key sia_sharing_key_t;
 	typedef struct sia_key_records sia_key_records_t;
+	typedef struct sia_object_summaries sia_object_summaries_t;
 	typedef struct sia_shared_sdk sia_shared_sdk_t;
 	typedef struct sia_mock sia_mock_t;
 
@@ -83,6 +84,16 @@ extern "C"
 		bool has_expiry; // false means the key never expires
 		int64_t expires_at_unix_us;
 	} sia_key_stats_t;
+
+	// The fixed part of an object summary. Metadata is variable length, so it
+	// is read separately with sia_object_summaries_metadata.
+	typedef struct
+	{
+		uint8_t id[32];
+		uint64_t size;
+		int64_t created_at_unix_us;
+		int64_t updated_at_unix_us;
+	} sia_object_summary_t;
 
 	typedef struct
 	{
@@ -389,6 +400,21 @@ extern "C"
 	// *out_objs receives a heap array of owned object handles. Free the array
 	// (not the objects) with sia_object_array_free.
 	int32_t sia_shared_sdk_objects(const sia_shared_sdk_t *sdk, uint64_t offset, uint64_t limit, sia_cancel_t *cancel, sia_object_t ***out_objs, size_t *out_len, char **err);
+	// Lists the same objects without their slabs, which is a small fraction of
+	// the size. Enough to show an object, not to download it: fetch the full
+	// object by id for that. Pass 0 for offset or limit to take the indexer's
+	// default paging.
+	int32_t sia_shared_sdk_object_summaries(const sia_shared_sdk_t *sdk, uint64_t offset, uint64_t limit, sia_cancel_t *cancel, sia_object_summaries_t **out, char **err);
+
+	size_t sia_object_summaries_len(const sia_object_summaries_t *s);
+	// Copies the summary at i out. Returns false when i is out of range,
+	// leaving out untouched.
+	bool sia_object_summaries_at(const sia_object_summaries_t *s, size_t i, sia_object_summary_t *out);
+	// Returns the metadata length of the summary at i. If buf is non-NULL and
+	// cap is large enough, copies the metadata into buf. An i out of range
+	// reports 0.
+	size_t sia_object_summaries_metadata(const sia_object_summaries_t *s, size_t i, uint8_t *buf, size_t cap);
+	void sia_object_summaries_free(sia_object_summaries_t *s);
 	// Reads with sia_download_read and frees with sia_download_free, like a
 	// download started from a sia_sdk_t. It keeps its own token refresh alive,
 	// so it stays usable after sia_shared_sdk_free.

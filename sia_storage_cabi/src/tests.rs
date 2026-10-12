@@ -2932,6 +2932,163 @@ fn packed_getters_do_not_wait_on_an_add() {
     }
 }
 
+/// A summary carries what a listing shows: id, size, timestamps and metadata,
+/// and no slabs. The id must be the object's own, since that is what a caller
+/// fetches the full object by.
+#[test]
+fn shared_sdk_lists_object_summaries() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [41u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let payload: Vec<u8> = (0..(1 << 20)).map(|i| (i % 251) as u8).collect();
+        let uploaded = upload_object_for_test(sdk, &payload);
+        let meta = b"{\"name\":\"summary\"}";
+        sia_object_set_metadata(uploaded, meta.as_ptr(), meta.len());
+
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_pin_object(sdk, uploaded, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "sia_sdk_pin_object: {}",
+            take_err(err)
+        );
+
+        let desc = CString::new("summaries").unwrap();
+        let mut key = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_create_sharing_key(
+                sdk,
+                desc.as_ptr(),
+                false,
+                0,
+                std::ptr::null_mut(),
+                &raw mut key,
+                &raw mut err,
+            ),
+            SIA_OK,
+            "sia_sdk_create_sharing_key: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_share_object(sdk, key, uploaded, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "sia_sdk_share_object: {}",
+            take_err(err)
+        );
+
+        let mut seed = [0u8; 32];
+        sia_sharing_key_export(key, seed.as_mut_ptr());
+        let mut shared = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_shared_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut shared,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_shared_sdk: {}",
+            take_err(err)
+        );
+
+        let mut summaries = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_shared_sdk_object_summaries(
+                shared,
+                0,
+                0,
+                std::ptr::null_mut(),
+                &raw mut summaries,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_shared_sdk_object_summaries: {}",
+            take_err(err)
+        );
+        assert_eq!(
+            sia_object_summaries_len(summaries),
+            1,
+            "one object is shared"
+        );
+
+        let mut got = std::mem::MaybeUninit::<ObjectSummaryC>::uninit();
+        assert!(
+            sia_object_summaries_at(summaries, 0, got.as_mut_ptr()),
+            "the first summary must be readable"
+        );
+        let got = got.assume_init();
+
+        let mut want_id = [0u8; 32];
+        sia_object_id(uploaded, want_id.as_mut_ptr());
+        assert_eq!(got.id, want_id, "a summary must carry the object's own id");
+        assert_eq!(got.size, payload.len() as u64);
+        assert!(
+            got.created_at_unix_us > 0,
+            "the indexer sets the timestamps"
+        );
+
+        // Measuring with a null buffer reports the length without writing.
+        let n = sia_object_summaries_metadata(summaries, 0, std::ptr::null_mut(), 0);
+        assert_eq!(n, meta.len(), "the metadata is decrypted and carried");
+        let mut undersized = vec![0u8; n - 1];
+        assert_eq!(
+            sia_object_summaries_metadata(summaries, 0, undersized.as_mut_ptr(), undersized.len()),
+            n,
+            "the length is reported whether or not it was written"
+        );
+        assert!(
+            undersized.iter().all(|&b| b == 0),
+            "a short buffer must not be partly filled"
+        );
+        let mut buf = vec![0u8; n];
+        assert_eq!(
+            sia_object_summaries_metadata(summaries, 0, buf.as_mut_ptr(), buf.len()),
+            n
+        );
+        assert_eq!(buf, meta);
+
+        // Out of range reports nothing rather than reading past the end.
+        let mut spare = std::mem::MaybeUninit::<ObjectSummaryC>::uninit();
+        assert!(!sia_object_summaries_at(summaries, 1, spare.as_mut_ptr()));
+        assert_eq!(
+            sia_object_summaries_metadata(summaries, 1, std::ptr::null_mut(), 0),
+            0
+        );
+        assert_eq!(sia_object_summaries_len(std::ptr::null()), 0);
+        assert!(!sia_object_summaries_at(
+            std::ptr::null(),
+            0,
+            spare.as_mut_ptr()
+        ));
+
+        sia_object_summaries_free(summaries);
+        sia_shared_sdk_free(shared);
+        sia_sharing_key_free(key);
+        sia_object_free(uploaded);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
 /// Both shared SDK constructors reject a URL that is not one before they reach
 /// the network, and both honour a token that has already fired. Connecting for
 /// real needs an indexer, which the mock network does not stand in for.
@@ -3653,6 +3810,14 @@ fn header_structs_keep_their_layout() {
     assert_eq!(offset_of!(DownloadOptionsC, max_buffered_chunks), 24);
     assert_eq!(offset_of!(DownloadOptionsC, on_shard), 32);
     assert_eq!(offset_of!(DownloadOptionsC, userdata), 40);
+
+    // sia_object_summary_t
+    assert_eq!(size_of::<ObjectSummaryC>(), 56, "sia_object_summary_t");
+    assert_eq!(align_of::<ObjectSummaryC>(), 8, "sia_object_summary_t");
+    assert_eq!(offset_of!(ObjectSummaryC, id), 0);
+    assert_eq!(offset_of!(ObjectSummaryC, size), 32);
+    assert_eq!(offset_of!(ObjectSummaryC, created_at_unix_us), 40);
+    assert_eq!(offset_of!(ObjectSummaryC, updated_at_unix_us), 48);
 
     // sia_key_stats_t
     assert_eq!(size_of::<KeyStatsC>(), 56, "sia_key_stats_t");
@@ -5257,8 +5422,10 @@ fn canonical_base(name: &str) -> Option<&'static str> {
         "FfiDownload" | "sia_download_t" => "sia_download_t",
         "FfiEvents" | "sia_events_t" => "sia_events_t",
         "FfiKeyRecords" | "sia_key_records_t" => "sia_key_records_t",
+        "FfiObjectSummaries" | "sia_object_summaries_t" => "sia_object_summaries_t",
         "FfiMock" | "sia_mock_t" => "sia_mock_t",
         "KeyStatsC" | "sia_key_stats_t" => "sia_key_stats_t",
+        "ObjectSummaryC" | "sia_object_summary_t" => "sia_object_summary_t",
         "HostQueryC" | "sia_host_query_t" => "sia_host_query_t",
         "UploadOptionsC" | "sia_upload_options_t" => "sia_upload_options_t",
         "DownloadOptionsC" | "sia_download_options_t" => "sia_download_options_t",
