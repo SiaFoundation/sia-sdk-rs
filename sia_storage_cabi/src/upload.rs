@@ -474,6 +474,25 @@ pub unsafe extern "C" fn sia_packed_upload_optimal_data_size(up: *const FfiPacke
     up.optimal_data_size
 }
 
+/// Number of slabs the finalized upload will occupy.
+///
+/// # Safety
+/// - `up` may be null, which returns 0. Otherwise it must be a live handle from
+///   `sia_packed_upload_start` that has not been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_packed_upload_slabs(up: *const FfiPacked) -> u64 {
+    let Some(up) = (unsafe { up.as_ref() }) else {
+        return 0;
+    };
+    if up.optimal_data_size == 0 {
+        return 0;
+    }
+    refresh_packed_stats(up);
+    up.length
+        .load(Ordering::Relaxed)
+        .div_ceil(up.optimal_data_size)
+}
+
 /// # Safety
 /// - `up` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_packed_upload_start` that has not been freed.

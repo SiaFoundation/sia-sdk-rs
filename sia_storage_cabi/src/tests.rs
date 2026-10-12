@@ -4755,6 +4755,11 @@ fn packed_figures_survive_an_add_with_no_earlier_getter_call() {
             sia_packed_upload_optimal_data_size(packed) - first.len() as u64,
             "remaining during an add matches that same moment"
         );
+        assert_eq!(
+            sia_packed_upload_slabs(packed),
+            1,
+            "slabs comes from the same moment, not a live read"
+        );
 
         let mut n = 0u64;
         let mut err = std::ptr::null_mut();
@@ -4763,6 +4768,66 @@ fn packed_figures_survive_an_add_with_no_earlier_getter_call() {
             SIA_OK,
             "add_finish: {}",
             take_err(err)
+        );
+
+        sia_packed_upload_free(packed);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// The slab count is derived from the length, so an upload holding nothing
+/// occupies nothing and any data at all occupies a slab.
+#[test]
+fn packed_upload_counts_its_slabs() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [61u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_upload_options();
+        let mut packed = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
+            SIA_OK,
+            "sia_packed_upload_start: {}",
+            take_err(err)
+        );
+
+        assert_eq!(
+            sia_packed_upload_slabs(packed),
+            0,
+            "an upload with nothing in it occupies no slabs"
+        );
+
+        add_one_object(packed, &vec![1u8; 4096]);
+        assert_eq!(
+            sia_packed_upload_slabs(packed),
+            1,
+            "a partial slab still counts as one"
+        );
+        assert!(
+            sia_packed_upload_length(packed) < sia_packed_upload_optimal_data_size(packed),
+            "setup: the object must not fill a slab"
+        );
+
+        assert_eq!(
+            sia_packed_upload_slabs(std::ptr::null()),
+            0,
+            "an absent handle reports nothing"
         );
 
         sia_packed_upload_free(packed);

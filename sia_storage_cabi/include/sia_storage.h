@@ -292,13 +292,15 @@ extern "C"
 	// object's data is exhausted, then add_finish (which reports the number of
 	// bytes packed). finalize returns the packed objects.
 	int32_t sia_packed_upload_start(const sia_sdk_t *sdk, const sia_upload_options_t *opts, sia_packed_upload_t **out, char **err);
-	// Both return immediately, including while an add is in progress. During an
-	// add they report the figures from before it began, since the bytes it will
-	// contribute are not settled until add_finish. Call them between adds for
-	// an exact answer.
+	// These return immediately, including while an add is in progress. During
+	// an add they report the figures from before it began, since the bytes it
+	// will contribute are not settled until add_finish. Call them between adds
+	// for an exact answer.
 	uint64_t sia_packed_upload_remaining(const sia_packed_upload_t *up);
 	uint64_t sia_packed_upload_length(const sia_packed_upload_t *up);
 	uint64_t sia_packed_upload_optimal_data_size(const sia_packed_upload_t *up);
+	// Slabs the finalized upload will occupy.
+	uint64_t sia_packed_upload_slabs(const sia_packed_upload_t *up);
 	int32_t sia_packed_upload_add_begin(sia_packed_upload_t *up, char **err);
 	// Any status other than SIA_OK ends the add, SIA_ERR_CANCELLED included.
 	// Part of the buffer may already be in the stream and there is no count to
