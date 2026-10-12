@@ -2932,6 +2932,90 @@ fn packed_getters_do_not_wait_on_an_add() {
     }
 }
 
+/// Both checks ask whether an account already exists, which only an approved
+/// connection can answer, so both refuse every other state. Nothing here
+/// touches the network: an unroutable host would surface as a different error.
+#[test]
+fn account_checks_need_an_approved_connection() {
+    let meta = sia_storage::AppMetadata {
+        id: sia_storage::AppID::from([13u8; 32]),
+        name: "account checks",
+        description: "reconnecting and matches_existing_app_key",
+        service_url: "https://example.invalid",
+        logo_url: None,
+        callback_url: None,
+    };
+    let builder = sia_storage::Builder::new("https://example.invalid", meta).expect("builder");
+    let b = Box::into_raw(Box::new(FfiBuilder(std::sync::Mutex::new(
+        BuilderState::Disconnected(builder),
+    ))));
+    let phrase = std::ffi::CString::new("anything").unwrap();
+
+    unsafe {
+        let mut got = true;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_reconnecting(b, &raw mut got, &raw mut err),
+            SIA_ERR_INVALID_STATE,
+            "a disconnected builder has nothing to report"
+        );
+        assert!(take_err(err).contains("not approved"));
+
+        let mut got = true;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_matches_existing_app_key(
+                b,
+                phrase.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut got,
+                &raw mut err
+            ),
+            SIA_ERR_INVALID_STATE,
+            "nor can a phrase be checked against one"
+        );
+        let message = take_err(err);
+        assert!(message.contains("not approved"));
+        assert!(
+            !message.contains("example.invalid"),
+            "the state is checked before the indexer is reached, got {message:?}"
+        );
+
+        // Neither consumes, so the builder is still usable afterwards.
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_with_cbor(b, false, &raw mut err),
+            SIA_OK,
+            "a check must not spend the builder: {}",
+            take_err(err)
+        );
+
+        let mut got = true;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_reconnecting(std::ptr::null(), &raw mut got, &raw mut err),
+            SIA_ERR_INVALID_HANDLE,
+        );
+        assert!(err.is_null(), "an absent handle sets no message");
+
+        let mut got = true;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_matches_existing_app_key(
+                std::ptr::null(),
+                phrase.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut got,
+                &raw mut err
+            ),
+            SIA_ERR_INVALID_HANDLE,
+        );
+        assert!(err.is_null(), "an absent handle sets no message");
+
+        sia_builder_free(b);
+    }
+}
+
 /// The pre-authorized flow checks the recovery phrase before it spends a use of
 /// the key, so a bad phrase costs nothing. The indexer URL here is unroutable:
 /// reaching it at all would be the failure this guards against.

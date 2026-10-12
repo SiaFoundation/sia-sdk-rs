@@ -356,6 +356,94 @@ pub unsafe extern "C" fn sia_builder_connect_pre_authorized(
     })
 }
 
+/// Reports whether the connect key the user approved with already has an
+/// account for this application.
+///
+/// The connect key may hold accounts under more than one recovery phrase, so
+/// this does not say whether any particular phrase is the one already
+/// registered. `sia_builder_matches_existing_app_key` answers that.
+///
+/// Leaves the builder as it was.
+///
+/// # Safety
+/// - `b` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_builder_new` that has not been freed.
+/// - `out` must be non null and writable.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_builder_reconnecting(
+    b: *const FfiBuilder,
+    out: *mut bool,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    guarded(err, || {
+        let Some(b) = (unsafe { b.as_ref() }) else {
+            return SIA_ERR_INVALID_HANDLE;
+        };
+        let state = b.state();
+        match &*state {
+            BuilderState::Approved(builder) => {
+                unsafe { *out = builder.reconnecting() }
+                SIA_OK
+            }
+            _ => set_err(err, SIA_ERR_INVALID_STATE, "connection not approved"),
+        }
+    })
+}
+
+/// Reports whether `mnemonic` derives an application key the indexer already
+/// knows, so a caller can tell a reconnect from a new registration before
+/// committing to one.
+///
+/// Independent of `sia_builder_reconnecting`: that asks about the connect key,
+/// this asks about one phrase. Registers nothing and leaves the builder as it
+/// was, so it can be called for as many phrases as the caller wants to try.
+///
+/// # Safety
+/// - `b` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_builder_new` that has not been freed.
+/// - `mnemonic` must be non null and NUL terminated.
+/// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
+///   from `sia_cancel_new`.
+/// - `out` must be non null and writable.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_builder_matches_existing_app_key(
+    b: *const FfiBuilder,
+    mnemonic: *const c_char,
+    cancel: *mut CancellationToken,
+    out: *mut bool,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
+    guarded(err, || {
+        let Some(b) = (unsafe { b.as_ref() }) else {
+            return SIA_ERR_INVALID_HANDLE;
+        };
+        let phrase = match unsafe { cstr(&mnemonic) } {
+            Ok(s) => s,
+            Err(e) => return set_err(err, SIA_ERR, format!("invalid mnemonic: {e}")),
+        };
+        let state = b.state();
+        let builder = match &*state {
+            BuilderState::Approved(builder) => builder,
+            _ => return set_err(err, SIA_ERR_INVALID_STATE, "connection not approved"),
+        };
+        match block_on(cancel, builder.matches_existing_app_key(phrase)) {
+            None => set_cancelled(err),
+            Some(Ok(matches)) => {
+                unsafe { *out = matches }
+                SIA_OK
+            }
+            Some(Err(e)) => builder_error(err, e),
+        }
+    })
+}
+
 /// # Safety
 /// - `b` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_builder_new` that has not been freed.

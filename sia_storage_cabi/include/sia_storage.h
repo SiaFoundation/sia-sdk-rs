@@ -180,6 +180,12 @@ extern "C"
 	// waiting, and calling it again reattaches to the same request.
 	int32_t sia_builder_request_connection(sia_builder_t *b, sia_cancel_t *cancel, char **response_url, char **err);
 	int32_t sia_builder_wait_for_approval(sia_builder_t *b, sia_cancel_t *cancel, char **err);
+	// Both ask about an approved connection and leave the builder as it was.
+	// reconnecting asks whether the connect key already has an account for this
+	// application; matches_existing_app_key asks whether one phrase is the one
+	// already registered, since a connect key may hold accounts under several.
+	int32_t sia_builder_reconnecting(const sia_builder_t *b, bool *out, char **err);
+	int32_t sia_builder_matches_existing_app_key(const sia_builder_t *b, const char *mnemonic, sia_cancel_t *cancel, bool *out, char **err);
 	int32_t sia_builder_register(sia_builder_t *b, const char *mnemonic, sia_cancel_t *cancel, sia_sdk_t **out, char **err);
 	// Connects with a key the indexer has already authorized, doing request,
 	// approve and register in one call with nothing to wait for. Consumes the
