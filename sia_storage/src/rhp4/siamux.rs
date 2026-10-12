@@ -5,7 +5,6 @@ use core::fmt::Debug;
 use ed25519_dalek::{SignatureError, VerifyingKey};
 use log::debug;
 use std::collections::HashMap;
-use std::num::ParseIntError;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, Weak};
 use thiserror::{self, Error};
@@ -35,14 +34,8 @@ pub enum ConnectError {
     #[error("mux error: {0}")]
     Mux(#[from] sia_mux::MuxError),
 
-    #[error("invalid address: {0}")]
-    InvalidAddress(String),
-
     #[error("timeout error: {0}")]
     Elapsed(#[from] Elapsed),
-
-    #[error("invalid port: {0}")]
-    InvalidPort(#[from] ParseIntError),
 
     #[error("invalid public key: {0}")]
     InvalidPublicKey(#[from] SignatureError),
@@ -89,12 +82,9 @@ impl Client {
             if addr.protocol != Protocol::SiaMux {
                 continue;
             }
-            let (host_addr, port_str) = addr
-                .address
-                .rsplit_once(':')
-                .ok_or(ConnectError::InvalidAddress(addr.address.clone()))?;
-            let port: u16 = port_str.parse()?;
-            let resolved_addrs = lookup_host((host_addr, port)).await?;
+            let resolved_addrs = lookup_host(addr.address.as_str())
+                .await
+                .inspect_err(|e| debug!("failed to resolve {}: {e}", addr.address))?;
 
             for socket in resolved_addrs {
                 match TcpStream::connect(socket).await {
@@ -114,7 +104,7 @@ impl Client {
                         }
                     },
                     Err(e) => {
-                        debug!("TCP connect failed to {host_addr}:{port} ({socket}): {e}");
+                        debug!("TCP connect failed to {} ({socket}): {e}", addr.address);
                     }
                 }
             }
@@ -349,5 +339,49 @@ mod test {
             3,
             "an abandoned dial must not complete and populate the connection map"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sia_core::types::v2::NetAddress;
+    use tokio::net::TcpListener;
+
+    /// An announced IPv6 address is bracketed, and the brackets are not part
+    /// of the address. Splitting on the last colon left them attached to the
+    /// host, so every IPv6 host failed to resolve and no shard could reach it.
+    ///
+    /// The listener speaks no mux, so the connection is expected to fail. What
+    /// matters is where: NoEndpoint means the address resolved and the socket
+    /// connected, while a resolution failure surfaces as Io.
+    #[tokio::test]
+    async fn test_ipv6_address_resolves() {
+        let listener = match TcpListener::bind("[::1]:0").await {
+            Ok(l) => l,
+            // no IPv6 loopback on this machine, nothing to assert
+            Err(_) => return,
+        };
+        let port = listener.local_addr().unwrap().port();
+        // Accept and drop, so the mux handshake fails on EOF. new_conn has no
+        // timeout of its own, so a listener that never answers hangs forever.
+        tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        let host = HostEndpoint {
+            public_key: PublicKey::new([1; 32]),
+            addresses: vec![NetAddress {
+                protocol: Protocol::SiaMux,
+                address: format!("[::1]:{port}"),
+            }],
+        };
+
+        match Client::new_conn(&host).await {
+            Err(ConnectError::NoEndpoint) => {}
+            Err(ConnectError::Io(e)) => panic!("address did not resolve: {e}"),
+            Err(e) => panic!("expected NoEndpoint, got {e}"),
+            Ok(_) => panic!("expected the mux handshake to fail"),
+        }
     }
 }
