@@ -89,12 +89,11 @@ so a process holding nothing but the 32 byte seed can list, fetch and download
 what the key grants, with no account, registration or approval step. It is read
 only.
 
-Host listings (`sia_sdk_hosts`, `sia_shared_sdk_hosts`) and pinned slabs
-(`sia_sdk_slab`) cross as JSON rather than as typed structs, because both carry
-a variable length list a flat C struct cannot hold. The shapes match what the
-indexer returns.
+Host listings (`sia_sdk_hosts`, `sia_shared_sdk_hosts`) cross as JSON rather
+than as typed structs, because they carry a variable length list a flat C
+struct cannot hold. The shapes match what the indexer returns.
 
-Those three, plus `sia_sdk_account` and the sealed object crossing
+Those two, plus `sia_sdk_account` and the sealed object crossing
 (`sia_object_seal_json`, `sia_object_from_sealed_json`), hand back or take a
 string, which the Go side decodes with `encoding/json`. Everything else on the
 surface is typed.
