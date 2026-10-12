@@ -16,6 +16,7 @@ pub(crate) struct KeyStatsC {
     pub(crate) pinned_data: u64,
     pub(crate) pinned_size: u64,
     pub(crate) created_at_unix_us: i64,
+    pub(crate) updated_at_unix_us: i64,
     /// False when the key never expires, in which case `expires_at` is 0.
     pub(crate) has_expiry: bool,
     pub(crate) expires_at_unix_us: i64,
@@ -40,6 +41,7 @@ pub(crate) fn key_stats_c(s: &KeyStats) -> KeyStatsC {
         pinned_data: s.pinned_data,
         pinned_size: s.pinned_size,
         created_at_unix_us: s.created_at.timestamp_micros(),
+        updated_at_unix_us: s.updated_at.timestamp_micros(),
         has_expiry: s.expires_at.is_some(),
         expires_at_unix_us: s.expires_at.map(|t| t.timestamp_micros()).unwrap_or(0),
     }

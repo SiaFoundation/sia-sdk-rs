@@ -81,6 +81,7 @@ extern "C"
 		uint64_t pinned_data;
 		uint64_t pinned_size;
 		int64_t created_at_unix_us;
+		int64_t updated_at_unix_us;
 		bool has_expiry; // false means the key never expires
 		int64_t expires_at_unix_us;
 	} sia_key_stats_t;

@@ -360,6 +360,12 @@ fn sharing_key_lifecycle_against_the_mock() {
             "the description must survive the round trip"
         );
         sia_string_free(out_desc);
+        assert!(
+            stats.created_at_unix_us > 0 && stats.updated_at_unix_us > 0,
+            "both timestamps come from the indexer, got created={} updated={}",
+            stats.created_at_unix_us,
+            stats.updated_at_unix_us
+        );
 
         let mut recs = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
@@ -3820,15 +3826,16 @@ fn header_structs_keep_their_layout() {
     assert_eq!(offset_of!(ObjectSummaryC, updated_at_unix_us), 48);
 
     // sia_key_stats_t
-    assert_eq!(size_of::<KeyStatsC>(), 56, "sia_key_stats_t");
+    assert_eq!(size_of::<KeyStatsC>(), 64, "sia_key_stats_t");
     assert_eq!(align_of::<KeyStatsC>(), 8, "sia_key_stats_t");
     assert_eq!(offset_of!(KeyStatsC, object_count), 0);
     assert_eq!(offset_of!(KeyStatsC, object_size), 8);
     assert_eq!(offset_of!(KeyStatsC, pinned_data), 16);
     assert_eq!(offset_of!(KeyStatsC, pinned_size), 24);
     assert_eq!(offset_of!(KeyStatsC, created_at_unix_us), 32);
-    assert_eq!(offset_of!(KeyStatsC, has_expiry), 40);
-    assert_eq!(offset_of!(KeyStatsC, expires_at_unix_us), 48);
+    assert_eq!(offset_of!(KeyStatsC, updated_at_unix_us), 40);
+    assert_eq!(offset_of!(KeyStatsC, has_expiry), 48);
+    assert_eq!(offset_of!(KeyStatsC, expires_at_unix_us), 56);
 
     // sia_host_query_t
     assert_eq!(size_of::<HostQueryC>(), 48, "sia_host_query_t");
