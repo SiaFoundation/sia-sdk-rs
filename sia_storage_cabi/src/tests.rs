@@ -2932,6 +2932,121 @@ fn packed_getters_do_not_wait_on_an_add() {
     }
 }
 
+/// The pre-authorized flow checks the recovery phrase before it spends a use of
+/// the key, so a bad phrase costs nothing. The indexer URL here is unroutable:
+/// reaching it at all would be the failure this guards against.
+#[test]
+fn connect_pre_authorized_checks_the_phrase_first() {
+    let meta = sia_storage::AppMetadata {
+        id: sia_storage::AppID::from([11u8; 32]),
+        name: "preauth",
+        description: "checks the phrase before spending the key",
+        service_url: "https://example.invalid",
+        logo_url: None,
+        callback_url: None,
+    };
+    let builder = sia_storage::Builder::new("https://example.invalid", meta).expect("builder");
+    let b = Box::into_raw(Box::new(FfiBuilder(std::sync::Mutex::new(
+        BuilderState::Disconnected(builder),
+    ))));
+    let key = [7u8; 32];
+
+    unsafe {
+        let phrase = std::ffi::CString::new("not a recovery phrase").unwrap();
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        let code = sia_builder_connect_pre_authorized(
+            b,
+            key.as_ptr(),
+            phrase.as_ptr(),
+            std::ptr::null_mut(),
+            &raw mut sdk,
+            &raw mut err,
+        );
+        assert_ne!(code, SIA_OK, "a bad phrase must not connect");
+        let message = take_err(err);
+        assert!(
+            !message.contains("example.invalid"),
+            "the phrase must be rejected before the indexer is reached, got {message:?}"
+        );
+        assert!(sdk.is_null(), "nothing is handed back on failure");
+
+        // The builder is spent either way, as register is.
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_connect_pre_authorized(
+                b,
+                key.as_ptr(),
+                phrase.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err,
+            ),
+            SIA_ERR_INVALID_STATE,
+            "a spent builder must refuse"
+        );
+        let _ = take_err(err);
+
+        sia_builder_free(b);
+    }
+}
+
+/// The null cases a C caller can present.
+#[test]
+fn connect_pre_authorized_rejects_absent_arguments() {
+    unsafe {
+        let phrase = std::ffi::CString::new("anything").unwrap();
+        let key = [1u8; 32];
+
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_connect_pre_authorized(
+                std::ptr::null_mut(),
+                key.as_ptr(),
+                phrase.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err,
+            ),
+            SIA_ERR_INVALID_HANDLE,
+        );
+        assert!(err.is_null(), "an absent handle sets no message");
+
+        let meta = sia_storage::AppMetadata {
+            id: sia_storage::AppID::from([12u8; 32]),
+            name: "preauth",
+            description: "null arguments",
+            service_url: "https://example.invalid",
+            logo_url: None,
+            callback_url: None,
+        };
+        let builder = sia_storage::Builder::new("https://example.invalid", meta).expect("builder");
+        let b = Box::into_raw(Box::new(FfiBuilder(std::sync::Mutex::new(
+            BuilderState::Disconnected(builder),
+        ))));
+
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_connect_pre_authorized(
+                b,
+                std::ptr::null(),
+                phrase.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err,
+            ),
+            SIA_ERR,
+            "a null key must be refused rather than read"
+        );
+        assert!(take_err(err).contains("pre-authorized key"));
+
+        sia_builder_free(b);
+    }
+}
+
 /// Asking the indexer for JSON instead of CBOR is part of the builder's public
 /// contract. It changes the client the builder holds, so only one that has not
 /// started connecting can take it.

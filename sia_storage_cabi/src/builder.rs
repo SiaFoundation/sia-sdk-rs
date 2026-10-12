@@ -1,4 +1,5 @@
 use crate::abi::*;
+use sia_core::signing::PrivateKey;
 use sia_storage::{
     AppApiError, AppMetadata, ApprovedState, Builder, BuilderError, DisconnectedState, Hash256,
     RequestingApprovalState, Sdk,
@@ -290,6 +291,67 @@ pub unsafe extern "C" fn sia_builder_wait_for_approval(
             }
             Ok(Err(e)) => builder_error(err, e),
             Err(e) => set_err(err, SIA_ERR, format!("waiting for approval: {e}")),
+        }
+    })
+}
+
+/// Connects with a key the indexer has already authorized, doing the whole
+/// request, approve and register flow in one call.
+///
+/// Consumes the builder, cancellation included.
+///
+/// # Safety
+/// - `b` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_builder_new` that has not been freed.
+/// - `pre_authorized_key` must be readable for 32 bytes.
+/// - `mnemonic` must be non null and NUL terminated.
+/// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
+///   from `sia_cancel_new`.
+/// - `out` must be non null and writable. On success it receives an owned handle that must be
+///   released with `sia_sdk_free`.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_builder_connect_pre_authorized(
+    b: *mut FfiBuilder,
+    pre_authorized_key: *const u8,
+    mnemonic: *const c_char,
+    cancel: *mut CancellationToken,
+    out: *mut *mut Sdk,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
+    guarded(err, || {
+        let Some(b) = (unsafe { b.as_ref() }) else {
+            return SIA_ERR_INVALID_HANDLE;
+        };
+        if pre_authorized_key.is_null() {
+            return set_err(err, SIA_ERR, "pre-authorized key is null");
+        }
+        let phrase = match unsafe { cstr(&mnemonic) } {
+            Ok(s) => s,
+            Err(e) => return set_err(err, SIA_ERR, format!("invalid mnemonic: {e}")),
+        };
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(unsafe { std::slice::from_raw_parts(pre_authorized_key, 32) });
+        let key = PrivateKey::from_seed(&seed);
+
+        let mut state = b.state();
+        let builder = match std::mem::replace(&mut *state, BuilderState::Consumed) {
+            BuilderState::Disconnected(builder) => builder,
+            other => {
+                *state = other;
+                return set_err(err, SIA_ERR_INVALID_STATE, "builder is not disconnected");
+            }
+        };
+        match block_on(cancel, builder.connect_pre_authorized(&key, phrase)) {
+            None => set_cancelled(err),
+            Some(Ok(sdk)) => {
+                unsafe { *out = Box::into_raw(Box::new(sdk)) }
+                SIA_OK
+            }
+            Some(Err(e)) => builder_error(err, e),
         }
     })
 }
