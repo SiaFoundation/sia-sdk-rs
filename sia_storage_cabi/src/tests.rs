@@ -2932,6 +2932,78 @@ fn packed_getters_do_not_wait_on_an_add() {
     }
 }
 
+/// Both shared SDK constructors reject a URL that is not one before they reach
+/// the network, and both honour a token that has already fired. Connecting for
+/// real needs an indexer, which the mock network does not stand in for.
+#[test]
+fn shared_sdk_connect_validates_before_it_dials() {
+    unsafe {
+        let seed = [3u8; 32];
+        let bad_url = std::ffi::CString::new("not a url").unwrap();
+
+        for cbor in [true, false] {
+            let mut sdk = std::ptr::null_mut();
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_shared_sdk_connect_with_cbor(
+                    bad_url.as_ptr(),
+                    seed.as_ptr(),
+                    cbor,
+                    std::ptr::null_mut(),
+                    &raw mut sdk,
+                    &raw mut err,
+                ),
+                SIA_ERR,
+                "a malformed url must be refused"
+            );
+            // The client rejects it, so the message is its own rather than ours.
+            assert!(!take_err(err).is_empty(), "a refusal must say something");
+            assert!(sdk.is_null(), "nothing is handed back on failure");
+        }
+
+        // The encoding is chosen before the request, so a fired token stops it
+        // at the same place either way.
+        let url = std::ffi::CString::new("https://example.invalid").unwrap();
+        for cbor in [true, false] {
+            let cancel = sia_cancel_new();
+            sia_cancel_cancel(cancel);
+            let mut sdk = std::ptr::null_mut();
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_shared_sdk_connect_with_cbor(
+                    url.as_ptr(),
+                    seed.as_ptr(),
+                    cbor,
+                    cancel,
+                    &raw mut sdk,
+                    &raw mut err,
+                ),
+                SIA_ERR_CANCELLED,
+                "a fired token must stop the connect"
+            );
+            let _ = take_err(err);
+            assert!(sdk.is_null());
+            sia_cancel_free(cancel);
+        }
+
+        // The existing constructor is unchanged by the new one.
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_shared_sdk_connect(
+                bad_url.as_ptr(),
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err,
+            ),
+            SIA_ERR,
+        );
+        assert!(!take_err(err).is_empty());
+        assert!(sdk.is_null());
+    }
+}
+
 /// Both checks ask whether an account already exists, which only an approved
 /// connection can answer, so both refuse every other state. Nothing here
 /// touches the network: an unroutable host would surface as a different error.

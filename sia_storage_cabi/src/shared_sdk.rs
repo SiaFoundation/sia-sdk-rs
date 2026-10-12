@@ -51,6 +51,47 @@ pub unsafe extern "C" fn sia_shared_sdk_connect(
     })
 }
 
+/// Like `sia_shared_sdk_connect`, but chooses the response encoding. CBOR is
+/// what `sia_shared_sdk_connect` asks for; pass false for JSON. Request bodies
+/// are JSON either way.
+///
+/// # Safety
+/// - `indexer_url` must be non null and NUL terminated.
+/// - `seed` must be readable for 32 bytes.
+/// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
+///   from `sia_cancel_new`.
+/// - `out` must be non null and writable. On success it receives an owned handle that must be
+///   released with `sia_shared_sdk_free`.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_shared_sdk_connect_with_cbor(
+    indexer_url: *const c_char,
+    seed: *const u8,
+    cbor: bool,
+    cancel: *mut CancellationToken,
+    out: *mut *mut SharedSdk,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
+    guarded(err, || {
+        let url = match unsafe { cstr(&indexer_url) } {
+            Ok(s) => s,
+            Err(e) => return set_err(err, SIA_ERR, format!("invalid indexer url: {e}")),
+        };
+        let seed = unsafe { seed_from_ptr(seed) };
+        match block_on(cancel, SharedSdk::connect_with_cbor(url, seed, cbor)) {
+            None => set_cancelled(err),
+            Some(Ok(sdk)) => {
+                unsafe { *out = Box::into_raw(Box::new(sdk)) }
+                SIA_OK
+            }
+            Some(Err(e)) => builder_error(err, e),
+        }
+    })
+}
+
 /// Releases a shared SDK handle.
 ///
 /// A download started from it keeps its own token refresh alive, so freeing
