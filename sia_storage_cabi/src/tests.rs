@@ -2932,6 +2932,61 @@ fn packed_getters_do_not_wait_on_an_add() {
     }
 }
 
+/// Asking the indexer for JSON instead of CBOR is part of the builder's public
+/// contract. It changes the client the builder holds, so only one that has not
+/// started connecting can take it.
+#[test]
+fn with_cbor_applies_only_before_connecting() {
+    let meta = sia_storage::AppMetadata {
+        id: sia_storage::AppID::from([9u8; 32]),
+        name: "cbor",
+        description: "toggles the response encoding",
+        service_url: "https://example.invalid",
+        logo_url: None,
+        callback_url: None,
+    };
+    let builder = sia_storage::Builder::new("https://example.invalid", meta).expect("builder");
+    let b = Box::into_raw(Box::new(FfiBuilder(std::sync::Mutex::new(
+        BuilderState::Disconnected(builder),
+    ))));
+
+    unsafe {
+        for enable in [false, true, false] {
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_builder_with_cbor(b, enable, &raw mut err),
+                SIA_OK,
+                "a disconnected builder takes the setting: {}",
+                take_err(err)
+            );
+        }
+
+        // Past that point the client is the SDK's, so the setting has nowhere
+        // to land and saying so beats changing nothing quietly.
+        *(*b).0.lock().unwrap() = BuilderState::Consumed;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_with_cbor(b, false, &raw mut err),
+            SIA_ERR_INVALID_STATE,
+            "a builder that has moved on must refuse"
+        );
+        let message = take_err(err);
+        assert!(
+            message.contains("not disconnected"),
+            "the refusal must say why, got {message:?}"
+        );
+
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_with_cbor(std::ptr::null_mut(), true, &raw mut err),
+            SIA_ERR_INVALID_HANDLE,
+        );
+        assert!(err.is_null(), "an absent handle sets no message");
+
+        sia_builder_free(b);
+    }
+}
+
 /// A wait a cancelled call left running stays attached to the handle, so a Go
 /// caller polling with a deadline does not throw away a request the user may
 /// already have approved.

@@ -170,6 +170,9 @@ extern "C"
 	// "logoURL":...|null,"callbackURL":...|null}
 	int32_t sia_builder_new(const char *indexer_url, const char *app_meta_json, sia_builder_t **out, char **err);
 	void sia_builder_free(sia_builder_t *b);
+	// CBOR is the default; pass false for JSON responses. Must come before
+	// request_connection or connect.
+	int32_t sia_builder_with_cbor(sia_builder_t *b, bool enable, char **err);
 	// Returns SIA_ERR_UNAUTHORIZED when the app key is not authorized.
 	int32_t sia_builder_connect(sia_builder_t *b, const uint8_t app_key[32], sia_cancel_t *cancel, sia_sdk_t **out, char **err);
 	// Cancelling request_connection or register consumes the builder; the flow
