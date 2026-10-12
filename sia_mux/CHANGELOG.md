@@ -1,3 +1,11 @@
+## 0.1.4 (2026-10-09)
+
+### Features
+
+#### Detect idle streams in SiaMux
+
+Add an optional stream idle timeout that tracks incoming payloads and partial writes to the underlying connection.
+
 ## 0.1.3 (2026-09-14)
 
 ### Fixes

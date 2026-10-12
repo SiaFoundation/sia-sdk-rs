@@ -248,22 +248,9 @@ impl SharedSdk {
     /// from `seed`, the 32-byte seed the key's owner handed out.
     #[napi]
     pub async fn connect(indexer_url: String, seed: Buffer) -> Result<SharedSdk> {
-        Self::connect_with_cbor(indexer_url, seed, true).await
-    }
-
-    /// Like `connect`, but sets whether the SDK requests CBOR responses from
-    /// the indexer. Set `cbor` to `false` to request JSON for easier
-    /// inspection.
-    #[napi]
-    pub async fn connect_with_cbor(
-        indexer_url: String,
-        seed: Buffer,
-        cbor: bool,
-    ) -> Result<SharedSdk> {
-        let inner =
-            sia_storage::SharedSdk::connect_with_cbor(indexer_url, seed_from_buffer(seed)?, cbor)
-                .await
-                .map_err(|e| Error::from_reason(e.to_string()))?;
+        let inner = sia_storage::SharedSdk::connect(indexer_url, seed_from_buffer(seed)?)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
         Ok(SharedSdk { inner })
     }
 

@@ -394,16 +394,6 @@ impl Client {
         Ok(Self::Http(http::Client::new(base_url)?))
     }
 
-    /// Sets whether the client requests CBOR responses. The mock backend
-    /// ignores it.
-    pub(crate) fn set_cbor(&mut self, enable: bool) {
-        match self {
-            Self::Http(c) => c.set_cbor(enable),
-            #[cfg(any(test, feature = "mock"))]
-            Self::Mock(_) => {}
-        }
-    }
-
     /// Creates a client backed by the in-memory mock indexer. Use
     /// [`Client::Mock`] directly when the test needs to keep the
     /// [`mock::Client`] handle to inspect what was pinned.

@@ -25,7 +25,6 @@ use crate::{Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, Se
 
 const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(45);
 const ACCEPT_CBOR: &str = "application/cbor, application/json;q=0.9";
-const ACCEPT_JSON: &str = "application/json";
 
 #[derive(Clone)]
 pub(crate) struct Client {
@@ -49,13 +48,9 @@ impl<'de> serde::Deserialize<'de> for EmptyResponse {
 impl Client {
     pub(crate) fn new<U: IntoUrl>(base_url: U) -> Result<Self, Error> {
         Ok(Self {
-            client: http_client(true),
+            client: http_client(),
             url: base_url.into_url()?,
         })
-    }
-
-    pub(crate) fn set_cbor(&mut self, enable: bool) {
-        self.client = http_client(enable);
     }
 
     /// Checks if the application is authenticated with the indexer. It returns
@@ -597,12 +592,9 @@ impl Client {
     }
 }
 
-fn http_client(cbor: bool) -> reqwest::Client {
+fn http_client() -> reqwest::Client {
     let mut headers = HeaderMap::new();
-    headers.insert(
-        ACCEPT,
-        HeaderValue::from_static(if cbor { ACCEPT_CBOR } else { ACCEPT_JSON }),
-    );
+    headers.insert(ACCEPT, HeaderValue::from_static(ACCEPT_CBOR));
     reqwest::Client::builder()
         .default_headers(headers)
         .build()
@@ -782,34 +774,31 @@ mod native_tests {
         let expected: Account = ciborium::from_reader(cbor.as_slice()).unwrap();
         let json = serde_json::to_vec(&expected).unwrap();
 
-        for (cbor_enabled, accept) in [(true, ACCEPT_CBOR), (false, ACCEPT_JSON)] {
-            for (content_type, body) in [
-                (None, json.clone()),
-                (Some("application/json"), json.clone()),
-                (Some("application/cbor; charset=binary"), cbor.clone()),
-            ] {
-                let server = Server::run();
-                let mut response = Response::builder().status(StatusCode::OK);
-                if let Some(content_type) = content_type {
-                    response = response.header("content-type", content_type);
-                }
-                server.expect(
-                    Expectation::matching(all_of![
-                        request::method_path("GET", "/account"),
-                        request::headers(contains(("accept", accept))),
-                    ])
-                    .respond_with(response.body(body).unwrap()),
-                );
-
-                let app_key = PrivateKey::from_seed(&rand::random());
-                let mut client = Client::new(server.url("/").to_string()).unwrap();
-                client.set_cbor(cbor_enabled);
-                let account = client
-                    .account(&app_key)
-                    .await
-                    .unwrap_or_else(|e| panic!("{accept} {content_type:?}: {e}"));
-                assert_eq!(account, expected, "{accept} {content_type:?}");
+        for (content_type, body) in [
+            (None, json.clone()),
+            (Some("application/json"), json.clone()),
+            (Some("application/cbor; charset=binary"), cbor.clone()),
+        ] {
+            let server = Server::run();
+            let mut response = Response::builder().status(StatusCode::OK);
+            if let Some(content_type) = content_type {
+                response = response.header("content-type", content_type);
             }
+            server.expect(
+                Expectation::matching(all_of![
+                    request::method_path("GET", "/account"),
+                    request::headers(contains(("accept", ACCEPT_CBOR))),
+                ])
+                .respond_with(response.body(body).unwrap()),
+            );
+
+            let app_key = PrivateKey::from_seed(&rand::random());
+            let client = Client::new(server.url("/").to_string()).unwrap();
+            let account = client
+                .account(&app_key)
+                .await
+                .unwrap_or_else(|e| panic!("{content_type:?}: {e}"));
+            assert_eq!(account, expected, "{content_type:?}");
         }
     }
 
