@@ -1,15 +1,10 @@
 ---
-sia_storage_ffi: patch
-sia_storage_wasm: patch
-sia_storage: patch
-sia_storage_napi: patch
-sia_core_derive: patch
-sia_core: patch
-sia_mux: patch
+sia_storage: minor
+sia_storage_ffi: minor
+sia_storage_napi: minor
+sia_storage_wasm: minor
 ---
 
-# Sparse object listing
+# List object events without slabs
 
-#499 by @chris124567
-
-Close https://github.com/SiaFoundation/sia-sdk-rs/issues/466
+Add `Sdk::object_event_summaries` (`objectEventSummaries` in JavaScript), which lists the same object events as `Sdk::object_events` without the objects' slabs, making the response much smaller. Each event has an `ObjectSummary` with the object's id, size, decrypted metadata and timestamps, and paginates with the same cursor. Fetch the full object with `Sdk::object` to download it.
