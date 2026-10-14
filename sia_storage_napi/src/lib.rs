@@ -318,13 +318,13 @@ pub struct ObjectsCursor {
     pub after: DateTime<Utc>,
 }
 
-impl TryInto<sia_storage::ObjectsCursor> for ObjectsCursor {
+impl TryFrom<ObjectsCursor> for sia_storage::ObjectsCursor {
     type Error = napi::Error;
 
-    fn try_into(self) -> Result<sia_storage::ObjectsCursor> {
-        Ok(sia_storage::ObjectsCursor {
-            after: self.after,
-            id: Hash256::from_str(self.id.as_str())
+    fn try_from(c: ObjectsCursor) -> Result<Self> {
+        Ok(Self {
+            after: c.after,
+            id: Hash256::from_str(c.id.as_str())
                 .map_err(|e: HexParseError| Error::from_reason(e.to_string()))?,
         })
     }
