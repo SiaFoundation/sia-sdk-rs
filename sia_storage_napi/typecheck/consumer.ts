@@ -13,6 +13,7 @@
 import { Builder, SharedSdk } from '../examples/index.js'
 import type {
   AppKey,
+  ObjectEventSummary,
   ObjectSummary,
   PinnedObject,
   Sdk,
@@ -26,6 +27,7 @@ declare function useObject(object: PinnedObject): void
 declare function useKey(key: SharingKey): void
 declare function useSlab(slab: Slab): void
 declare function useSummary(summary: ObjectSummary): void
+declare function useEventSummary(event: ObjectEventSummary): void
 
 export async function check(
   builder: Builder,
@@ -39,6 +41,16 @@ export async function check(
     useSdk(sdk)
     const key = await sdk.createSharingKey('photos', null)
     useKey(key)
+    const events = await sdk.objectEventSummaries(null, 1)
+    if (events[0]) {
+      useEventSummary(events[0])
+      const id: string = events[0].id
+      const deleted: boolean = events[0].deleted
+      const updatedAt: Date = events[0].updatedAt
+      const object: ObjectSummary | null = events[0].object
+      const next = await sdk.objectEventSummaries({ id, after: updatedAt }, 1)
+      void [id, deleted, updatedAt, object, next]
+    }
   }
 
   const shared = await SharedSdk.connect(indexerUrl, seed)

@@ -145,6 +145,38 @@ impl ObjectEvent {
     }
 }
 
+/// An object event from the indexer, without the object's slabs.
+#[napi]
+pub struct ObjectEventSummary {
+    id: String,
+    deleted: bool,
+    updated_at: DateTime<Utc>,
+    object: Option<sia_storage::ObjectSummary>,
+}
+
+#[napi]
+impl ObjectEventSummary {
+    #[napi(getter)]
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    #[napi(getter)]
+    pub fn deleted(&self) -> bool {
+        self.deleted
+    }
+
+    #[napi(getter)]
+    pub fn updated_at(&self) -> DateTime<Utc> {
+        self.updated_at
+    }
+
+    #[napi(getter)]
+    pub fn object(&self) -> Option<ObjectSummary> {
+        self.object.clone().map(ObjectSummary::from)
+    }
+}
+
 /// Information about a storage provider on the Sia network.
 #[napi(object)]
 pub struct Host {
@@ -284,6 +316,18 @@ impl TryInto<sia_storage::Slab> for Slab {
 pub struct ObjectsCursor {
     pub id: String,
     pub after: DateTime<Utc>,
+}
+
+impl TryInto<sia_storage::ObjectsCursor> for ObjectsCursor {
+    type Error = napi::Error;
+
+    fn try_into(self) -> Result<sia_storage::ObjectsCursor> {
+        Ok(sia_storage::ObjectsCursor {
+            after: self.after,
+            id: Hash256::from_str(self.id.as_str())
+                .map_err(|e: HexParseError| Error::from_reason(e.to_string()))?,
+        })
+    }
 }
 
 /// Application info.
@@ -912,14 +956,8 @@ impl Sdk {
         cursor: Option<ObjectsCursor>,
         limit: u32,
     ) -> Result<Vec<ObjectEvent>> {
-        let cursor = match cursor {
-            Some(c) => Some(sia_storage::ObjectsCursor {
-                after: c.after,
-                id: Hash256::from_str(c.id.as_str())
-                    .map_err(|e: HexParseError| Error::from_reason(e.to_string()))?,
-            }),
-            None => None,
-        };
+        let cursor: Option<sia_storage::ObjectsCursor> =
+            cursor.map(|c| c.try_into()).transpose()?;
         let objects = self
             .inner
             .object_events(cursor, Some(limit as usize))
@@ -933,6 +971,32 @@ impl Sdk {
                 object: event.object.map(|o| PinnedObject {
                     inner: Mutex::new(o),
                 }),
+            })
+            .collect();
+        Ok(objects)
+    }
+
+    /// Returns object events from the indexer for syncing, without the
+    /// objects' slabs.
+    #[napi]
+    pub async fn object_event_summaries(
+        &self,
+        cursor: Option<ObjectsCursor>,
+        limit: u32,
+    ) -> Result<Vec<ObjectEventSummary>> {
+        let cursor: Option<sia_storage::ObjectsCursor> =
+            cursor.map(|c| c.try_into()).transpose()?;
+        let objects = self
+            .inner
+            .object_event_summaries(cursor, Some(limit as usize))
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?
+            .into_iter()
+            .map(|event| ObjectEventSummary {
+                id: event.id.to_string(),
+                deleted: event.deleted,
+                updated_at: event.updated_at,
+                object: event.object,
             })
             .collect();
         Ok(objects)

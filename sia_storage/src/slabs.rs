@@ -6,7 +6,7 @@ use crate::AppKey;
 use crate::encryption::EncryptionKey;
 use blake2b_simd::Params;
 use serde_with::base64::Base64;
-use serde_with::{Bytes, DefaultOnNull, IfIsHumanReadable, serde_as};
+use serde_with::{Bytes, DefaultOnNull, IfIsHumanReadable, PickFirst, serde_as};
 use sia_core::encoding::{self, SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;
@@ -173,7 +173,10 @@ pub enum SealedObjectError {
 
 /// (De)serializes bytes as a base64 string in human-readable formats and as a
 /// byte string otherwise.
-pub(crate) type Base64OrBytes = IfIsHumanReadable<Base64, Bytes>;
+///
+/// The byte fallback also accepts CBOR fields buffered by serde's flatten,
+/// which does not preserve the original format's is_human_readable flag.
+pub(crate) type Base64OrBytes = IfIsHumanReadable<PickFirst<(Base64, Bytes)>, Bytes>;
 
 #[serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -335,10 +338,6 @@ pub struct ObjectSummary {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SealedObjectSummary {
-    /// Sent alongside the object because it is a hash of the slabs, which
-    /// the listing leaves out.
-    #[serde(rename = "objectID")]
-    pub object_id: Hash256,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[serde_as(as = "DefaultOnNull<Base64OrBytes>")]
     pub encrypted_metadata_key: Vec<u8>,
@@ -357,12 +356,13 @@ impl SealedObjectSummary {
     /// Verifies the metadata signature against the object id the indexer
     /// sent and decrypts the metadata with the key the object was sealed
     /// under. A forged id fails here, since the signature covers it.
-    pub(crate) fn open_with(self, key: &PrivateKey) -> Result<ObjectSummary, SealedObjectError> {
-        let sig_hash = SealedObject::meta_sig_hash(
-            &self.object_id,
-            &self.encrypted_metadata_key,
-            &self.encrypted_metadata,
-        );
+    pub(crate) fn open_with(
+        self,
+        key: &PrivateKey,
+        id: &Hash256,
+    ) -> Result<ObjectSummary, SealedObjectError> {
+        let sig_hash =
+            SealedObject::meta_sig_hash(id, &self.encrypted_metadata_key, &self.encrypted_metadata);
         if !key
             .public_key()
             .verify(sig_hash.as_ref(), &self.metadata_signature)
@@ -370,14 +370,13 @@ impl SealedObjectSummary {
             return Err(SealedObjectError::InvalidSignature);
         }
         let metadata = if !self.encrypted_metadata.is_empty() {
-            let metadata_key =
-                open_metadata_key(key, &self.object_id, &self.encrypted_metadata_key)?;
+            let metadata_key = open_metadata_key(key, id, &self.encrypted_metadata_key)?;
             open_metadata(&metadata_key, &self.encrypted_metadata)?
         } else {
             Vec::new()
         };
         Ok(ObjectSummary {
-            id: self.object_id,
+            id: *id,
             size: self.size,
             metadata,
             created_at: self.created_at,
@@ -397,6 +396,20 @@ pub struct ObjectEvent {
     pub updated_at: DateTime<Utc>,
     /// The object, if it was not deleted.
     pub object: Option<Object>,
+}
+
+/// An [ObjectEvent] listed without the object's slabs. Fetch the full
+/// object with [Sdk::object](crate::Sdk::object) to download it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectEventSummary {
+    /// The unique identifier of the object.
+    pub id: Hash256,
+    /// Whether the object was deleted.
+    pub deleted: bool,
+    /// The time the event occurred.
+    pub updated_at: DateTime<Utc>,
+    /// The object summary, if it was not deleted.
+    pub object: Option<ObjectSummary>,
 }
 
 /// A file stored on the Sia network, consisting of erasure-coded slabs and
@@ -625,7 +638,6 @@ mod test {
     fn sealed_summary(object: &Object, key: &PrivateKey) -> SealedObjectSummary {
         let sealed = object.seal_with(key);
         SealedObjectSummary {
-            object_id: object.id(),
             encrypted_metadata_key: sealed.encrypted_metadata_key,
             encrypted_metadata: sealed.encrypted_metadata,
             metadata_signature: sealed.metadata_signature,
@@ -658,7 +670,9 @@ mod test {
     fn test_summary_opens_metadata() {
         let key = PrivateKey::from_seed(&random_bytes_32());
         let object = summary_object(b"{\"name\":\"movie.mp4\"}");
-        let summary = sealed_summary(&object, &key).open_with(&key).unwrap();
+        let summary = sealed_summary(&object, &key)
+            .open_with(&key, &object.id())
+            .unwrap();
         assert_eq!(summary.id, object.id());
         assert_eq!(summary.metadata, object.metadata);
         assert_eq!(summary.size, 4096);
@@ -666,7 +680,9 @@ mod test {
         assert_eq!(summary.updated_at, object.updated_at);
 
         let empty = summary_object(b"");
-        let summary = sealed_summary(&empty, &key).open_with(&key).unwrap();
+        let summary = sealed_summary(&empty, &key)
+            .open_with(&key, &empty.id())
+            .unwrap();
         assert!(summary.metadata.is_empty());
     }
 
@@ -677,23 +693,21 @@ mod test {
         let key = PrivateKey::from_seed(&random_bytes_32());
         let object = summary_object(b"metadata");
 
-        let mut wrong_id = sealed_summary(&object, &key);
-        wrong_id.object_id = Hash256::new(random_bytes_32());
         assert!(matches!(
-            wrong_id.open_with(&key),
+            sealed_summary(&object, &key).open_with(&key, &Hash256::new(random_bytes_32())),
             Err(SealedObjectError::InvalidSignature)
         ));
 
         let mut altered = sealed_summary(&object, &key);
         altered.encrypted_metadata[0] ^= 1;
         assert!(matches!(
-            altered.open_with(&key),
+            altered.open_with(&key, &object.id()),
             Err(SealedObjectError::InvalidSignature)
         ));
 
         let other = PrivateKey::from_seed(&random_bytes_32());
         assert!(matches!(
-            sealed_summary(&object, &key).open_with(&other),
+            sealed_summary(&object, &key).open_with(&other, &object.id()),
             Err(SealedObjectError::InvalidSignature)
         ));
     }

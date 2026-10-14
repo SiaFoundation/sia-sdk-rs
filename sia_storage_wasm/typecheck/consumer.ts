@@ -16,12 +16,20 @@
 // assignability failures appear, and they point at the consumer rather than at
 // the declaration that is wrong.
 import { SharedSdk } from '../pkg/sia_storage_wasm'
-import type { AppKey, Builder, ObjectSummary, PinnedObject, Sdk } from '../pkg/sia_storage_wasm'
+import type {
+  AppKey,
+  Builder,
+  ObjectEventSummary,
+  ObjectSummary,
+  PinnedObject,
+  Sdk,
+} from '../pkg/sia_storage_wasm'
 
 declare function useSdk(sdk: Sdk): void
 declare function useShared(sdk: SharedSdk): void
 declare function useObject(object: PinnedObject): void
 declare function useSummary(summary: ObjectSummary): void
+declare function useEventSummary(event: ObjectEventSummary): void
 
 export async function check(
   builder: Builder,
@@ -35,6 +43,16 @@ export async function check(
     useSdk(sdk)
     // A member that only the generated class declares.
     sdk.appKey()
+    const events = await sdk.objectEventSummaries(null, 1)
+    if (events[0]) {
+      useEventSummary(events[0])
+      const id: string = events[0].id
+      const deleted: boolean = events[0].deleted
+      const updatedAt: Date = events[0].updatedAt
+      const object: ObjectSummary | undefined = events[0].object
+      const next = await sdk.objectEventSummaries({ id, after: updatedAt }, 1)
+      void [id, deleted, updatedAt, object, next]
+    }
   }
 
   const shared = await SharedSdk.connect(indexerUrl, seed)
