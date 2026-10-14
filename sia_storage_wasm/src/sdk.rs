@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use js_sys::Reflect;
 use sia_core::types::Hash256;
 use sia_storage::{self, Sdk as StorageSdk};
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
@@ -15,7 +14,7 @@ use crate::run_local;
 use crate::sharing::{KeyRecord, SharingKey};
 use crate::stream_reader::js_stream_reader;
 use crate::types::{
-    self, HostQuery, ObjectEvent, download_options_from_js, ms_to_chrono,
+    self, HostQuery, ObjectEvent, ObjectEventSummary, download_options_from_js, ms_to_chrono,
     packed_upload_options_from_js, upload_options_from_js,
 };
 
@@ -171,29 +170,30 @@ impl Sdk {
         limit: u32,
     ) -> Result<Vec<ObjectEvent>, JsError> {
         let sdk = self.inner.clone();
-        let cursor = if cursor.is_null() || cursor.is_undefined() {
-            None
-        } else {
-            let id_js = Reflect::get(&cursor, &JsValue::from_str("id"))
-                .map_err(|e| JsError::new(&format!("read cursor.id: {e:?}")))?;
-            let id = id_js
-                .as_string()
-                .ok_or_else(|| JsError::new("cursor.id must be a string"))?;
-            let after_js = Reflect::get(&cursor, &JsValue::from_str("after"))
-                .map_err(|e| JsError::new(&format!("read cursor.after: {e:?}")))?;
-            let after: js_sys::Date = after_js
-                .dyn_into()
-                .map_err(|_| JsError::new("cursor.after must be a Date"))?;
-            Some(sia_storage::ObjectsCursor {
-                id: Hash256::from_str(&id).map_err(to_js_err)?,
-                after: ms_to_chrono(after.get_time())?,
-            })
-        };
+        let cursor = types::objects_cursor_from_js(cursor)?;
         let events =
             run_local(async move { sdk.object_events(cursor, Some(limit as usize)).await })
                 .await
                 .map_err(to_js_err)?;
         Ok(events.into_iter().map(ObjectEvent::from).collect())
+    }
+
+    /// Returns object events from the indexer without the objects' slabs.
+    #[wasm_bindgen(js_name = "objectEventSummaries")]
+    pub async fn object_event_summaries(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "ObjectsCursor | null | undefined")] cursor: JsValue,
+        limit: u32,
+    ) -> Result<Vec<ObjectEventSummary>, JsError> {
+        let sdk = self.inner.clone();
+        let cursor = types::objects_cursor_from_js(cursor)?;
+        let events = run_local(async move {
+            sdk.object_event_summaries(cursor, Some(limit as usize))
+                .await
+        })
+        .await
+        .map_err(to_js_err)?;
+        Ok(events.into_iter().map(ObjectEventSummary::from).collect())
     }
 
     /// Deletes an object from the indexer by its hex ID.

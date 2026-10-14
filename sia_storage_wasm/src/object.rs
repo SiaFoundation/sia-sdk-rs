@@ -85,9 +85,10 @@ impl PinnedObject {
     }
 }
 
-/// An object listed without its slabs, as `SharedSdk.objectSummaries` returns
-/// it. It describes the object but cannot be downloaded. Fetch the full
-/// object with `SharedSdk.object(id)` to download it.
+/// An object listed without its slabs, as `Sdk.objectEventSummaries` and
+/// `SharedSdk.objectSummaries` return it. It describes the object but cannot
+/// be downloaded. Fetch the full object with `Sdk.object(id)` or
+/// `SharedSdk.object(id)` to download it.
 #[wasm_bindgen]
 pub struct ObjectSummary(pub(crate) sia_storage::ObjectSummary);
 
