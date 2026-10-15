@@ -807,6 +807,9 @@ async fn write_loop<W: AsyncWrite + Unpin>(
             }
         }
 
+        // Without this a trailing frame flushes alone and is padded to a whole packet.
+        tokio::task::yield_now().await;
+
         // Take the write buffer, wake backpressure waiters
         let is_shutdown = {
             let mut s = mux_state.lock().unwrap();
@@ -1115,7 +1118,7 @@ mod tests {
         let mut cx = Context::from_waker(Waker::noop());
 
         // Block the socket with one batch, then fill the shared buffer exactly.
-        for _ in 0..2 {
+        for _ in 0..3 {
             loop {
                 let available = capacity - mux.state.lock().unwrap().write_buf.len();
                 if available == 0 {
