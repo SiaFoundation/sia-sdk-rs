@@ -587,16 +587,15 @@ pub unsafe extern "C" fn sia_packed_upload_add_write(
             }
             Some(Ok(())) => SIA_OK,
             Some(Err(_)) => {
+                // The pipe broke because the add task ended; report its real
+                // error instead of the write failure.
                 up.writer = None;
-                if up.add_task.is_none() {
+                let Some(mut task) = up.add_task.take() else {
                     return set_err(err, SIA_ERR, "add task already consumed");
-                }
-                // Owned across cancellation, as in add_finish above.
-                let task = up.add_task.as_mut().expect("checked above");
-                let Some(joined) = block_on(cancel, task) else {
-                    return set_cancelled(err);
                 };
-                up.add_task.take();
+                // The task has already ended, so this join is immediate
+                // and needs no cancellation token.
+                let joined = runtime().block_on(&mut task);
                 match joined {
                     Ok(Ok(_)) => set_err(err, SIA_ERR, "add ended before all data was written"),
                     Ok(Err((code, msg))) => set_err(err, code, msg),
