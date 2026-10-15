@@ -253,9 +253,7 @@ pub(crate) fn paging(offset: u64, limit: u64) -> (Option<u64>, Option<u64>) {
 /// # Safety
 /// - `ptr` must be non null and point to 32 readable bytes.
 pub(crate) unsafe fn hash_from_ptr(ptr: *const u8) -> Hash256 {
-    let mut buf = [0u8; 32];
-    buf.copy_from_slice(unsafe { std::slice::from_raw_parts(ptr, 32) });
-    Hash256::new(buf)
+    Hash256::new(unsafe { seed_from_ptr(ptr) })
 }
 
 /// # Safety
@@ -269,9 +267,7 @@ pub(crate) unsafe fn seed_from_ptr(ptr: *const u8) -> [u8; 32] {
 /// # Safety
 /// - `ptr` must be non null and point to 32 readable bytes.
 pub(crate) unsafe fn app_key_from_ptr(ptr: *const u8) -> AppKey {
-    let mut buf = [0u8; 32];
-    buf.copy_from_slice(unsafe { std::slice::from_raw_parts(ptr, 32) });
-    AppKey::import(buf)
+    AppKey::import(unsafe { seed_from_ptr(ptr) })
 }
 
 /// # Safety

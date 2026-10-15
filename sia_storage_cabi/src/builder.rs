@@ -296,9 +296,7 @@ pub unsafe extern "C" fn sia_builder_connect_pre_authorized(
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid mnemonic: {e}")),
         };
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(unsafe { std::slice::from_raw_parts(pre_authorized_key, 32) });
-        let key = PrivateKey::from_seed(&seed);
+        let key = PrivateKey::from_seed(&unsafe { seed_from_ptr(pre_authorized_key) });
 
         let mut state = b.state();
         let builder = match std::mem::replace(&mut *state, BuilderState::Consumed) {

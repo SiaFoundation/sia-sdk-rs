@@ -54,9 +54,7 @@ pub(crate) fn key_stats_c(s: &KeyStats) -> KeyStatsC {
 /// - `seed` must be readable for 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sharing_key_import(seed: *const u8) -> *mut SharingKey {
-    let mut buf = [0u8; 32];
-    buf.copy_from_slice(unsafe { std::slice::from_raw_parts(seed, 32) });
-    Box::into_raw(Box::new(SharingKey::import(buf)))
+    Box::into_raw(Box::new(SharingKey::import(unsafe { seed_from_ptr(seed) })))
 }
 
 /// # Safety
