@@ -2529,7 +2529,7 @@ dependencies = [
 
 [[package]]
 name = "sia_mux"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "blake2b_simd",
  "bytes",
@@ -2557,7 +2557,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage"
-version = "0.13.1"
+version = "0.13.2"
 dependencies = [
  "base64 0.23.1",
  "blake2b_simd",
@@ -2603,7 +2603,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_ffi"
-version = "0.13.1"
+version = "0.13.2"
 dependencies = [
  "async-trait",
  "log",
@@ -2619,7 +2619,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_napi"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "bytes",
  "chrono",
@@ -2638,7 +2638,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_wasm"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "chrono",
  "console_error_panic_hook",
