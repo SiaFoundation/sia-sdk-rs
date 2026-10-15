@@ -1,3 +1,13 @@
+## 0.8.2 (2026-10-15)
+
+### Fixes
+
+- Stop sending a chunk's trailing frame in a packet of its own
+
+#### Fix connecting to hosts that announce an IPv6 address
+
+An announced address is `host:port` with an IPv6 host bracketed. The siamux client split it on the last colon, which left the brackets attached to the host, and `getaddrinfo` rejects those, so every IPv6 host failed to resolve and no shard could reach it. The address is now resolved whole.
+
 ## 0.8.1 (2026-10-10)
 
 ### Fixes
