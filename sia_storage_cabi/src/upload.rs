@@ -6,7 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 use tokio::io::{AsyncRead, AsyncWriteExt, DuplexStream, ReadBuf};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -29,13 +29,18 @@ impl AsyncRead for AddReader {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
+        ready!(Pin::new(&mut self.inner).poll_read(cx, buf))?;
+        // Checked after the read rather than before it, since the tear can
+        // land in between and the read would then report the dropped writer
+        // as EOF. torn is set before the writer is dropped, so it is visible
+        // by the time EOF is.
         if self.torn.load(Ordering::Acquire) {
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "the add ended before the object was complete",
             )));
         }
-        Pin::new(&mut self.inner).poll_read(cx, buf)
+        Poll::Ready(Ok(()))
     }
 }
 
