@@ -296,8 +296,7 @@ impl Sdk {
         let events = self
             .api_client
             .object_summaries(&self.app_key.0, cursor, limit)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
+            .await?;
 
         let summaries = events
             .into_iter()
