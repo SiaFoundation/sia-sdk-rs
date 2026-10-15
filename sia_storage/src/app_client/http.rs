@@ -12,14 +12,14 @@ use sia_core::types::Hash256;
 use super::{
     AppConnectRequest, AuthApproval, AuthConnectStatusResponse, Error, IntoUrl, KeyResponse,
     PinObjectRequest, RegisterAppRequest, RegisterAppResponse, SHARE_URL_FETCH_SCHEME,
-    SHARE_URL_SCHEME, SealedObjectEvent, SharedHost, SharedObjectResponse, SlabPinParams, Url,
-    pre_authorization_sig_hash, register_app_sig_hash, sign,
+    SHARE_URL_SCHEME, SealedObjectEvent, SealedObjectEventSummary, SealedSharedObjectSummary,
+    SharedHost, SharedObjectResponse, SlabPinParams, Url, pre_authorization_sig_hash,
+    register_app_sig_hash, sign,
 };
 use crate::app_client::{ERROR_OBJECT_UNPINNED_SLAB, PinObjectError};
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
 use crate::sharing::{KeyRequest, SharedObjectRequest};
-use crate::slabs::SealedObjectSummary;
 use crate::time::Duration;
 use crate::{Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject};
 
@@ -205,6 +205,16 @@ impl Client {
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
     ) -> Result<Vec<SealedObjectEvent>, Error> {
+        let query_params = Self::objects_query(cursor, limit);
+        self.get_list("objects", app_key, Some(&query_params)).await
+    }
+
+    /// Builds the cursor and limit query params for an objects request,
+    /// omitting either that is not set.
+    fn objects_query(
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Vec<(&'static str, String)> {
         let mut query_params = Vec::new();
         if let Some(limit) = limit {
             query_params.push(("limit", limit.to_string()));
@@ -213,7 +223,20 @@ impl Client {
             query_params.push(("after", after.to_rfc3339())); // indexd expects RFC3339
             query_params.push(("key", id.to_string()));
         }
-        self.get_list("objects", app_key, Some(&query_params)).await
+        query_params
+    }
+
+    /// Fetches a list of objects from the indexer without their slabs. Can be
+    /// paginated using the cursor and limit arguments.
+    pub(crate) async fn object_summaries(
+        &self,
+        app_key: &PrivateKey,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SealedObjectEventSummary>, Error> {
+        let mut query = Self::objects_query(cursor, limit);
+        query.push(("includeslabs", "false".to_string()));
+        self.get_list("objects", app_key, Some(&query)).await
     }
 
     /// Pins an object to the indexer. If an object with the same ID already
@@ -477,7 +500,7 @@ impl Client {
         sharing_key: &PrivateKey,
         offset: Option<u64>,
         limit: Option<u64>,
-    ) -> Result<Vec<SealedObjectSummary>, Error> {
+    ) -> Result<Vec<SealedSharedObjectSummary>, Error> {
         let mut query = Self::pagination_query(offset, limit);
         query.push(("includeslabs", "false".to_string()));
         self.get_list("shared/objects", sharing_key, Some(&query))
@@ -686,6 +709,25 @@ mod test {
         assert_eq!(
             Client::pagination_query(Some(5), Some(10)),
             vec![("offset", "5".to_string()), ("limit", "10".to_string())]
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_objects_query() {
+        assert!(Client::objects_query(None, None).is_empty());
+        assert_eq!(
+            Client::objects_query(None, Some(10)),
+            vec![("limit", "10".to_string())]
+        );
+        let after: DateTime<Utc> = "2026-03-02T03:04:05Z".parse().unwrap();
+        let id = Hash256::new([4u8; 32]);
+        assert_eq!(
+            Client::objects_query(Some(ObjectsCursor { after, id }), Some(10)),
+            vec![
+                ("limit", "10".to_string()),
+                ("after", after.to_rfc3339()),
+                ("key", id.to_string()),
+            ]
         );
     }
 
@@ -2362,23 +2404,59 @@ mod native_tests {
             .unwrap()
     }
 
-    /// A sealed summary as indexd lists it with `includeslabs=false`, in the
-    /// given response encoding.
-    /// Built field by field from Go's JSON tags rather than from our own
-    /// struct, so the test checks the wire format.
-    fn summary_body(cbor: bool, sealed: &SealedObject, id: Hash256, size: u64) -> Vec<u8> {
+    /// A field's name and its value in the CBOR and JSON response encodings.
+    type WireField = (&'static str, ciborium::value::Value, serde_json::Value);
+
+    /// Formats a time as Go's JSON encoding does.
+    fn wire_time(t: DateTime<Utc>) -> String {
+        t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+    }
+
+    /// An object id field in both response encodings.
+    fn wire_id(name: &'static str, id: Hash256) -> WireField {
+        (
+            name,
+            ciborium::value::Value::Bytes(AsRef::<[u8]>::as_ref(&id).to_vec()),
+            serde_json::to_value(id).unwrap(),
+        )
+    }
+
+    /// Collects fields into a map in both response encodings.
+    fn wire_map(fields: Vec<WireField>) -> (ciborium::value::Value, serde_json::Value) {
         use ciborium::value::Value;
 
-        let time = |t: DateTime<Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let mut cbor = Vec::new();
+        let mut json = serde_json::Map::new();
+        for (k, c, j) in fields {
+            cbor.push((Value::Text(k.to_string()), c));
+            json.insert(k.to_string(), j);
+        }
+        (Value::Map(cbor), json.into())
+    }
+
+    /// Encodes a response body listing the given maps.
+    fn wire_list(cbor: bool, items: Vec<(ciborium::value::Value, serde_json::Value)>) -> Vec<u8> {
+        let (c, j): (Vec<_>, Vec<_>) = items.into_iter().unzip();
+        if cbor {
+            let mut buf = Vec::new();
+            ciborium::into_writer(&ciborium::value::Value::Array(c), &mut buf).unwrap();
+            buf
+        } else {
+            serde_json::to_vec(&j).unwrap()
+        }
+    }
+
+    /// A sealed summary's fields as indexd lists them with
+    /// `includeslabs=false`.
+    /// Built field by field from Go's JSON tags rather than from our own
+    /// struct, so the test checks the wire format.
+    fn summary_fields(sealed: &SealedObject, size: u64) -> Vec<WireField> {
+        use ciborium::value::Value;
+
         let bytes = |b: &[u8]| -> (Value, serde_json::Value) {
             (Value::Bytes(b.to_vec()), BASE64_STANDARD.encode(b).into())
         };
-        let fields: Vec<(&str, Value, serde_json::Value)> = vec![
-            (
-                "objectID",
-                Value::Bytes(AsRef::<[u8]>::as_ref(&id).to_vec()),
-                serde_json::to_value(id).unwrap(),
-            ),
+        vec![
             {
                 let (c, j) = bytes(&sealed.encrypted_data_key);
                 ("encryptedDataKey", c, j)
@@ -2403,31 +2481,24 @@ mod native_tests {
             ),
             (
                 "createdAt",
-                Value::Text(time(sealed.created_at)),
-                time(sealed.created_at).into(),
+                Value::Text(wire_time(sealed.created_at)),
+                wire_time(sealed.created_at).into(),
             ),
             (
                 "updatedAt",
-                Value::Text(time(sealed.updated_at)),
-                time(sealed.updated_at).into(),
+                Value::Text(wire_time(sealed.updated_at)),
+                wire_time(sealed.updated_at).into(),
             ),
             ("size", Value::Integer(size.into()), size.into()),
-        ];
-        if cbor {
-            let map = fields
-                .into_iter()
-                .map(|(k, c, _)| (Value::Text(k.to_string()), c))
-                .collect();
-            let mut buf = Vec::new();
-            ciborium::into_writer(&Value::Array(vec![Value::Map(map)]), &mut buf).unwrap();
-            buf
-        } else {
-            let map: serde_json::Map<_, _> = fields
-                .into_iter()
-                .map(|(k, _, j)| (k.to_string(), j))
-                .collect();
-            serde_json::to_vec(&vec![map]).unwrap()
-        }
+        ]
+    }
+
+    /// A sealed summary as indexd lists it with `includeslabs=false`, in the
+    /// given response encoding.
+    fn summary_body(cbor: bool, sealed: &SealedObject, id: Hash256, size: u64) -> Vec<u8> {
+        let mut fields = vec![wire_id("objectID", id)];
+        fields.extend(summary_fields(sealed, size));
+        wire_list(cbor, vec![wire_map(fields)])
     }
 
     /// Summaries decode from both response encodings and are requested with
@@ -2480,8 +2551,8 @@ mod native_tests {
                 .await
                 .unwrap_or_else(|e| panic!("decode failed (cbor {cbor}): {e}"));
             assert_eq!(summaries.len(), 1);
-            let summary = &summaries[0];
-            assert_eq!(summary.object_id, id);
+            assert_eq!(summaries[0].object_id, id);
+            let summary = &summaries[0].object;
             assert_eq!(summary.size, size, "cbor {cbor}");
             assert_eq!(summary.encrypted_metadata, sealed.encrypted_metadata);
             assert_eq!(
@@ -2491,6 +2562,116 @@ mod native_tests {
             assert_eq!(summary.metadata_signature, sealed.metadata_signature);
             assert_eq!(summary.created_at, object.created_at);
             assert_eq!(summary.updated_at, object.updated_at);
+        }
+    }
+
+    /// Object events decode from both response encodings and are requested
+    /// with `includeslabs=false` alongside the cursor.
+    #[tokio::test]
+    async fn test_object_summaries_wire_format() {
+        use crate::slabs::SealedObjectSummary;
+        use ciborium::value::Value;
+
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let object = Object {
+            data_key: [9u8; 32].into(),
+            slabs: vec![Slab {
+                version: V0,
+                encryption_key: [1u8; 32].into(),
+                min_shards: 1,
+                sectors: vec![Sector {
+                    root: Hash256::new([2u8; 32]),
+                    host_key: PublicKey::new([3u8; 32]),
+                }],
+                offset: 0,
+                length: 256,
+            }],
+            metadata: b"a movie".to_vec(),
+            created_at: "2026-01-02T03:04:05.123456789Z".parse().unwrap(),
+            updated_at: "2026-02-02T03:04:05Z".parse().unwrap(),
+        };
+        let sealed = object.seal_with(&app_key);
+        let id = object.id();
+        let deleted_id = Hash256::new([4u8; 32]);
+        let event_time: DateTime<Utc> = "2026-03-02T03:04:05Z".parse().unwrap();
+
+        let size = 256;
+        let event = |id: Hash256, deleted: bool, object: Option<Vec<WireField>>| {
+            let mut fields: Vec<WireField> = vec![
+                wire_id("key", id),
+                ("deleted", Value::Bool(deleted), deleted.into()),
+                (
+                    "updatedAt",
+                    Value::Text(wire_time(event_time)),
+                    wire_time(event_time).into(),
+                ),
+            ];
+            if let Some(object) = object {
+                let (c, j) = wire_map(object);
+                fields.push(("object", c, j));
+            }
+            wire_map(fields)
+        };
+        let expected = vec![
+            SealedObjectEventSummary {
+                id,
+                deleted: false,
+                updated_at: event_time,
+                object: Some(SealedObjectSummary {
+                    encrypted_metadata_key: sealed.encrypted_metadata_key.clone(),
+                    encrypted_metadata: sealed.encrypted_metadata.clone(),
+                    metadata_signature: sealed.metadata_signature.clone(),
+                    created_at: object.created_at,
+                    updated_at: object.updated_at,
+                    size,
+                }),
+            },
+            SealedObjectEventSummary {
+                id: deleted_id,
+                deleted: true,
+                updated_at: event_time,
+                object: None,
+            },
+        ];
+        for cbor in [false, true] {
+            let server = Server::run();
+            let content_type = if cbor {
+                "application/cbor"
+            } else {
+                "application/json"
+            };
+            let body = wire_list(
+                cbor,
+                vec![
+                    event(id, false, Some(summary_fields(&sealed, size))),
+                    event(deleted_id, true, None),
+                ],
+            );
+            server.expect(
+                Expectation::matching(all_of![
+                    signed_get("/objects", app_key.public_key()),
+                    request::query(url_decoded(all_of![
+                        contains(("limit", "10")),
+                        contains(("after", event_time.to_rfc3339())),
+                        contains(("key", id.to_string())),
+                        contains(("includeslabs", "false")),
+                    ])),
+                ])
+                .respond_with(ok_typed(content_type, body)),
+            );
+            let client = Client::new(server.url("/").to_string()).unwrap();
+            let events = client
+                .object_summaries(
+                    &app_key,
+                    Some(ObjectsCursor {
+                        after: event_time,
+                        id,
+                    }),
+                    Some(10),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("decode failed (cbor {cbor}): {e}"));
+            assert_eq!(events, expected, "cbor {cbor}");
         }
     }
 

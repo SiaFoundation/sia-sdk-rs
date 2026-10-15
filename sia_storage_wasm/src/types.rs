@@ -1,9 +1,13 @@
+use std::str::FromStr;
+
+use js_sys::Reflect;
+use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
 use tsify::Ts;
 use wasm_bindgen::prelude::*;
 
 use crate::helpers::to_js_err;
-use crate::object::PinnedObject;
+use crate::object::{ObjectSummary, PinnedObject};
 
 /// Progress information about a successfully uploaded or downloaded shard.
 #[derive(serde::Serialize, tsify::Tsify)]
@@ -267,8 +271,9 @@ pub(crate) fn ms_to_chrono(ms: f64) -> Result<chrono::DateTime<chrono::Utc>, JsE
     chrono::DateTime::from_timestamp(secs, nanos).ok_or_else(|| JsError::new("invalid timestamp"))
 }
 
-/// TS interface for `Sdk::objectEvents`'s `cursor` parameter. Field
-/// names must match the Reflect reads in `sdk.rs`.
+/// TS interface for the `cursor` parameter of `Sdk::objectEvents` and
+/// `Sdk::objectEventSummaries`. Field names must match the Reflect reads in
+/// `objects_cursor_from_js`.
 // dead_code because it exists only for tsify.
 #[derive(serde::Serialize, tsify::Tsify)]
 #[allow(dead_code)]
@@ -276,6 +281,30 @@ pub struct ObjectsCursor {
     pub id: String,
     #[tsify(type = "Date")]
     pub after: f64,
+}
+
+/// Reads an optional `ObjectsCursor` from JS, where null or undefined means
+/// the first page.
+pub(crate) fn objects_cursor_from_js(
+    cursor: JsValue,
+) -> Result<Option<sia_storage::ObjectsCursor>, JsError> {
+    if cursor.is_null() || cursor.is_undefined() {
+        return Ok(None);
+    }
+    let id_js = Reflect::get(&cursor, &JsValue::from_str("id"))
+        .map_err(|e| JsError::new(&format!("read cursor.id: {e:?}")))?;
+    let id = id_js
+        .as_string()
+        .ok_or_else(|| JsError::new("cursor.id must be a string"))?;
+    let after_js = Reflect::get(&cursor, &JsValue::from_str("after"))
+        .map_err(|e| JsError::new(&format!("read cursor.after: {e:?}")))?;
+    let after: js_sys::Date = after_js
+        .dyn_into()
+        .map_err(|_| JsError::new("cursor.after must be a Date"))?;
+    Ok(Some(sia_storage::ObjectsCursor {
+        id: Hash256::from_str(&id).map_err(to_js_err)?,
+        after: ms_to_chrono(after.get_time())?,
+    }))
 }
 
 /// An object event from the indexer.
@@ -319,6 +348,51 @@ impl From<sia_storage::ObjectEvent> for ObjectEvent {
             deleted: e.deleted,
             updated_at: e.updated_at,
             object: e.object.map(PinnedObject),
+        }
+    }
+}
+
+/// An object event from the indexer, without the object's slabs.
+#[wasm_bindgen]
+pub struct ObjectEventSummary {
+    id: String,
+    deleted: bool,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    object: Option<ObjectSummary>,
+}
+
+#[wasm_bindgen]
+impl ObjectEventSummary {
+    #[wasm_bindgen(getter)]
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn deleted(&self) -> bool {
+        self.deleted
+    }
+
+    /// Returns the time the event occurred.
+    #[wasm_bindgen(getter, js_name = "updatedAt")]
+    pub fn updated_at(&self) -> js_sys::Date {
+        js_sys::Date::new(&JsValue::from(self.updated_at.timestamp_millis() as f64))
+    }
+
+    /// Returns the object associated with this event, if it exists.
+    #[wasm_bindgen(getter)]
+    pub fn object(&self) -> Option<ObjectSummary> {
+        self.object.as_ref().map(|o| ObjectSummary(o.0.clone()))
+    }
+}
+
+impl From<sia_storage::ObjectEventSummary> for ObjectEventSummary {
+    fn from(e: sia_storage::ObjectEventSummary) -> Self {
+        Self {
+            id: e.id.to_string(),
+            deleted: e.deleted,
+            updated_at: e.updated_at,
+            object: e.object.map(ObjectSummary),
         }
     }
 }

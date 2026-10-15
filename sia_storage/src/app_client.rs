@@ -16,7 +16,10 @@ use serde::{Deserialize, Serialize};
 use crate::object_encryption::DecryptError;
 use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
 use crate::slabs::{Base64OrBytes, SealedObjectSummary, Sector, SlabVersion};
-use crate::{Account, AppMetadata, HostQuery, Object, ObjectsCursor, SealedObject, Slab};
+use crate::{
+    Account, AppMetadata, HostQuery, Object, ObjectSummary, ObjectsCursor, SealedObject,
+    SealedObjectError, Slab,
+};
 use sia_core::rhp4::AccountToken;
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;
@@ -221,6 +224,19 @@ pub(crate) struct SealedObjectEvent {
     pub object: Option<SealedObject>,
 }
 
+/// An object event as returned by `GET /objects` with `includeslabs=false`,
+/// with the object's slabs left out.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SealedObjectEventSummary {
+    #[serde(rename = "key")]
+    pub id: Hash256,
+    pub deleted: bool,
+    #[serde(with = "sia_core::types::null_as_zero_time")]
+    pub updated_at: DateTime<Utc>,
+    pub object: Option<SealedObjectSummary>,
+}
+
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -240,6 +256,26 @@ pub(crate) struct SharedHost {
     #[serde(flatten)]
     pub host: Host,
     pub token: AccountToken,
+}
+
+/// An object summary and its id, as returned by `GET /shared/objects` with
+/// `includeslabs=false`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct SealedSharedObjectSummary {
+    /// Sent alongside the object because it is a hash of the slabs, which
+    /// the listing leaves out.
+    #[serde(rename = "objectID")]
+    pub object_id: Hash256,
+    #[serde(flatten)]
+    pub object: SealedObjectSummary,
+}
+
+impl SealedSharedObjectSummary {
+    /// Opens the summary as [SealedObjectSummary::open_with] does, using
+    /// the object id sent alongside it.
+    pub(crate) fn open_with(self, key: &PrivateKey) -> Result<ObjectSummary, SealedObjectError> {
+        self.object.open_with(key, &self.object_id)
+    }
 }
 
 /// What a recipient can see about the sharing key they hold: how many objects
@@ -526,6 +562,21 @@ impl Client {
         }
     }
 
+    /// Fetches a list of objects from the indexer without their slabs. Can be
+    /// paginated using the cursor and limit arguments.
+    pub(crate) async fn object_summaries(
+        &self,
+        app_key: &PrivateKey,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SealedObjectEventSummary>, Error> {
+        match self {
+            Self::Http(c) => c.object_summaries(app_key, cursor, limit).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.object_summaries(app_key, cursor, limit).await,
+        }
+    }
+
     /// Pins an object to the indexer. If an object with the same ID already
     /// exists for the account, it is overwritten.
     pub(crate) async fn pin_object(
@@ -653,7 +704,7 @@ impl Client {
         sharing_key: &PrivateKey,
         offset: Option<u64>,
         limit: Option<u64>,
-    ) -> Result<Vec<SealedObjectSummary>, Error> {
+    ) -> Result<Vec<SealedSharedObjectSummary>, Error> {
         match self {
             Self::Http(c) => c.shared_object_summaries(sharing_key, offset, limit).await,
             #[cfg(any(test, feature = "mock"))]

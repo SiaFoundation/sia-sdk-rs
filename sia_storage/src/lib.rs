@@ -98,7 +98,8 @@ pub use download::{Download, DownloadError};
 pub use encryption::EncryptionKey;
 pub use hosts::{QueueError, RPCError};
 pub use slabs::{
-    Object, ObjectEvent, ObjectSummary, SealedObject, SealedObjectError, Sector, Slab, SlabVersion,
+    Object, ObjectEvent, ObjectEventSummary, ObjectSummary, SealedObject, SealedObjectError,
+    Sector, Slab, SlabVersion,
 };
 pub use upload::{PackedUpload, UploadError};
 
@@ -202,7 +203,8 @@ impl AppKey {
     }
 }
 
-/// A cursor for paginating through object events returned by [Sdk::object_events].
+/// A cursor for paginating through events returned by [Sdk::object_events]
+/// or [Sdk::object_event_summaries].
 pub struct ObjectsCursor {
     /// Only return events after this timestamp.
     pub after: DateTime<Utc>,

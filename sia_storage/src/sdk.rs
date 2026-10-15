@@ -21,8 +21,8 @@ use crate::time::Duration;
 use crate::upload::{PackedUpload, upload_object};
 use crate::{
     Account, AppKey, BuilderError, Download, DownloadError, DownloadOptions, Host, HostQuery,
-    Object, ObjectEvent, ObjectsCursor, PackedUploadOptions, SealedObjectError, SharingKeyOptions,
-    UploadError, UploadOptions,
+    Object, ObjectEvent, ObjectEventSummary, ObjectsCursor, PackedUploadOptions, SealedObjectError,
+    SharingKeyOptions, UploadError, UploadOptions,
 };
 
 /// The `Sdk` sharing methods live here so they can reach this module's private
@@ -244,7 +244,8 @@ impl Sdk {
     }
 
     /// Retrieves a list of object events from the indexer. This
-    /// can be used to synchronize local state with the indexer.
+    /// can be used to synchronize local state with the indexer. Use
+    /// [Sdk::object_event_summaries] to leave out the objects' slabs.
     ///
     /// # Arguments
     /// * `cursor` - An optional cursor to continue from a previous call.
@@ -277,6 +278,43 @@ impl Sdk {
             .collect::<Result<_, Error>>()?;
 
         Ok(objs)
+    }
+
+    /// Retrieves a list of object events from the indexer without the
+    /// objects' slabs, which makes the response a small fraction of the size
+    /// of [Sdk::object_events]. Each summary's metadata is verified and
+    /// decrypted. Fetch the full object with [Sdk::object] to download it.
+    ///
+    /// # Arguments
+    /// * `cursor` - An optional cursor to continue from a previous call.
+    /// * `limit` - An optional limit on the number of events to retrieve.
+    pub async fn object_event_summaries(
+        &self,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<ObjectEventSummary>, Error> {
+        let events = self
+            .api_client
+            .object_summaries(&self.app_key.0, cursor, limit)
+            .await?;
+
+        let summaries = events
+            .into_iter()
+            .map(|event| {
+                let object = match event.object {
+                    Some(sealed) => Some(sealed.open_with(&self.app_key.0, &event.id)?),
+                    None => None,
+                };
+                Ok(ObjectEventSummary {
+                    id: event.id,
+                    deleted: event.deleted,
+                    updated_at: event.updated_at,
+                    object,
+                })
+            })
+            .collect::<Result<_, Error>>()?;
+
+        Ok(summaries)
     }
 
     /// Prunes unused slabs from the indexer. This helps to free up
@@ -892,6 +930,73 @@ mod test {
 
         sdk.prune_slabs(None).await.expect("prune failed");
         assert_eq!(network.pinned_slabs(), 0);
+    }
+
+    /// Object events listed without slabs carry each object's decrypted
+    /// metadata, page with the same cursor as full events, and report
+    /// deletions with no object.
+    #[sia_core_derive::cross_target_test]
+    async fn test_mock_network_object_event_summaries() {
+        use std::io::Cursor;
+
+        use crate::mock::MockNetwork;
+
+        let network = MockNetwork::new();
+        network.add_hosts(40);
+
+        let sdk = network
+            .sdk(AppKey::import(random_seed()))
+            .await
+            .expect("sdk creation failed");
+
+        let data: Vec<u8> = (0..4096).map(|i| i as u8).collect();
+        let object = sdk
+            .upload(
+                Object::new(Some(b"metadata".to_vec())),
+                Cursor::new(data.clone()),
+                UploadOptions::default(),
+            )
+            .await
+            .expect("upload failed");
+        sdk.pin_object(&object).await.expect("pin failed");
+
+        let events = sdk
+            .object_event_summaries(None, None)
+            .await
+            .expect("list failed");
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert!(!event.deleted);
+        let summary = event.object.as_ref().expect("missing object");
+        assert_eq!(summary.id, object.id());
+        assert_eq!(summary.size, data.len() as u64);
+        assert_eq!(summary.metadata, b"metadata".to_vec());
+
+        // the event's own cursor is past the last event
+        let next = sdk
+            .object_event_summaries(
+                Some(ObjectsCursor {
+                    after: event.updated_at,
+                    id: event.id,
+                }),
+                None,
+            )
+            .await
+            .expect("next page failed");
+        assert!(next.is_empty());
+
+        // a deletion is still listed, without its object
+        sdk.delete_object(&object.id())
+            .await
+            .expect("delete failed");
+        let events = sdk
+            .object_event_summaries(None, None)
+            .await
+            .expect("list failed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, object.id());
+        assert!(events[0].deleted);
+        assert!(events[0].object.is_none());
     }
 
     #[sia_core_derive::cross_target_test]
