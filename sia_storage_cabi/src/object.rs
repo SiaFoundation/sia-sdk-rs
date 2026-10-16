@@ -125,23 +125,6 @@ pub unsafe extern "C" fn sia_object_metadata(o: *const Object, buf: *mut u8, cap
     meta.len()
 }
 
-/// # Safety
-/// - `o` may be null, which does nothing. Otherwise it must be a live handle from `sia_object_new`
-///   or any call that returns an object that has not been freed.
-/// - `data` must be readable for `len` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn sia_object_set_metadata(o: *mut Object, data: *const u8, len: usize) {
-    let meta = if data.is_null() || len == 0 {
-        Vec::new()
-    } else {
-        unsafe { std::slice::from_raw_parts(data, len) }.to_vec()
-    };
-    let Some(o) = (unsafe { o.as_mut() }) else {
-        return;
-    };
-    o.metadata = meta;
-}
-
 /// A copy of `o` carrying `data` as its metadata, leaving the original
 /// untouched, so the caller frees both.
 ///

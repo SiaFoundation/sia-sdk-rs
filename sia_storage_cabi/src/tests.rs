@@ -451,9 +451,8 @@ fn sealed_object_json_round_trips() {
 
         // An uploaded object, so the sealed form carries real slabs and
         // sectors rather than an empty slab list.
-        let obj = sia_object_new();
         let meta = b"round trip metadata".to_vec();
-        sia_object_set_metadata(obj, meta.as_ptr(), meta.len());
+        let obj = with_metadata_for_test(sia_object_new(), &meta);
         let opts = default_upload_options();
         let mut up = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
@@ -1907,6 +1906,16 @@ fn abort_refuses_a_finish_that_was_cancelled() {
     }
 }
 
+/// Replaces `o` with a copy carrying `metadata`, releasing the original. The
+/// ABI has no setter: an object cannot be mutated once it exists.
+unsafe fn with_metadata_for_test(o: *mut Object, metadata: &[u8]) -> *mut Object {
+    unsafe {
+        let next = sia_object_with_metadata(o, metadata.as_ptr(), metadata.len());
+        sia_object_free(o);
+        next
+    }
+}
+
 /// Uploads `data` to a fresh object and returns the pinned result.
 unsafe fn upload_object_for_test(sdk: *const Sdk, data: &[u8]) -> *mut Object {
     unsafe {
@@ -2187,9 +2196,8 @@ fn packed_upload_refuses_a_start_offset() {
 #[test]
 fn object_with_metadata_copies() {
     unsafe {
-        let obj = sia_object_new();
         let first = b"{\"name\":\"original\"}";
-        sia_object_set_metadata(obj, first.as_ptr(), first.len());
+        let obj = with_metadata_for_test(sia_object_new(), first);
 
         let second = b"{\"name\":\"copy\"}";
         let copy = sia_object_with_metadata(obj, second.as_ptr(), second.len());
@@ -2856,7 +2864,7 @@ fn shared_sdk_lists_object_summaries() {
         let payload: Vec<u8> = (0..(1 << 20)).map(|i| (i % 251) as u8).collect();
         let uploaded = upload_object_for_test(sdk, &payload);
         let meta = b"{\"name\":\"summary\"}";
-        sia_object_set_metadata(uploaded, meta.as_ptr(), meta.len());
+        let uploaded = with_metadata_for_test(uploaded, meta);
 
         let mut err = std::ptr::null_mut();
         assert_eq!(
@@ -4709,7 +4717,7 @@ fn the_sdk_object_entry_points_round_trip() {
         let obj = upload_bytes(sdk, std::ptr::null(), &opts, &payload);
 
         let meta = b"content-type: application/octet-stream";
-        sia_object_set_metadata(obj, meta.as_ptr(), meta.len());
+        let obj = with_metadata_for_test(obj, meta);
 
         let mut err = std::ptr::null_mut();
         assert_eq!(
@@ -4748,7 +4756,7 @@ fn the_sdk_object_entry_points_round_trip() {
 
         // Metadata updated in place on the indexer.
         let replaced = b"content-type: text/plain";
-        sia_object_set_metadata(fetched, replaced.as_ptr(), replaced.len());
+        let fetched = with_metadata_for_test(fetched, replaced);
         let mut err = std::ptr::null_mut();
         assert_eq!(
             sia_sdk_update_object_metadata(sdk, fetched, std::ptr::null_mut(), &raw mut err),

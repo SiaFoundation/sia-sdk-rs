@@ -231,7 +231,6 @@ extern "C"
 	// Returns the metadata length. If buf is non-NULL and cap is large enough,
 	// copies the metadata into buf.
 	size_t sia_object_metadata(const sia_object_t *o, uint8_t *buf, size_t cap);
-	void sia_object_set_metadata(sia_object_t *o, const uint8_t *data, size_t len);
 	// A copy of o carrying data as its metadata, or NULL when o is NULL. A NULL
 	// data or a zero len clears it on the copy. o is untouched, so free both.
 	sia_object_t *sia_object_with_metadata(const sia_object_t *o, const uint8_t *data, size_t len);
