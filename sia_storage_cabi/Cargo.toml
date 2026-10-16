@@ -17,10 +17,7 @@ crate-type = ["staticlib"]
 mock = ["sia_storage/mock"]
 
 [dependencies]
-# less-safe-crypto exposes an object's data key and the constructor that
-# rebuilds one from its parts, which is what object_encoding needs to carry a
-# whole object across the ABI.
-sia_storage = { version = "0.13.1", path = "../sia_storage", features = ["less-safe-crypto"] }
+sia_storage = { version = "0.13.1", path = "../sia_storage" }
 sia_core = { path = "../sia_core", version = "0.6.0" }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "io-util", "time", "macros"] }
 tokio-util = "0.7.19"
