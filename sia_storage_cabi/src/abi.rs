@@ -328,6 +328,35 @@ pub unsafe extern "C" fn sia_generate_recovery_phrase() -> *mut c_char {
     lossy_cstring(sia_storage::generate_recovery_phrase()).into_raw()
 }
 
+/// Reports whether `phrase` is a valid BIP-39 recovery phrase, so a caller can
+/// refuse one before it reaches a connect flow that would derive a different
+/// account from it.
+///
+/// # Safety
+/// - `phrase` must be non null and NUL terminated.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_validate_recovery_phrase(
+    phrase: *const c_char,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    guarded(err, || {
+        if phrase.is_null() {
+            return set_err(err, SIA_ERR, "phrase is null");
+        }
+        let phrase = match unsafe { cstr(&phrase) } {
+            Ok(p) => p,
+            Err(e) => return set_err(err, SIA_ERR, format!("phrase is not UTF-8: {e}")),
+        };
+        match sia_storage::validate_recovery_phrase(phrase) {
+            Ok(()) => SIA_OK,
+            Err(e) => set_err(err, SIA_ERR, format!("invalid recovery phrase: {e}")),
+        }
+    })
+}
+
 /// # Safety
 /// - This function is only callable across the C ABI and takes no pointers.
 #[unsafe(no_mangle)]

@@ -173,6 +173,9 @@ extern "C"
 
 	// Returns a new BIP-39 12-word recovery phrase. Free with sia_string_free.
 	char *sia_generate_recovery_phrase(void);
+	// Checks a BIP-39 recovery phrase, so a caller can refuse one before a
+	// connect flow derives a different account from it.
+	int32_t sia_validate_recovery_phrase(const char *phrase, char **err);
 
 	sia_cancel_t *sia_cancel_new(void);
 	void sia_cancel_cancel(const sia_cancel_t *c);

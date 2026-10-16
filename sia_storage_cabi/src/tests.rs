@@ -2192,6 +2192,57 @@ fn packed_upload_refuses_a_start_offset() {
 
 /// Truncation shortens the object, leaves the original alone, and the result
 /// The copy carries the new metadata, the original keeps its own, and a null
+/// A generated phrase validates, and anything else is refused with a message
+/// rather than silently deriving a different account.
+#[test]
+fn validate_recovery_phrase_accepts_only_real_phrases() {
+    unsafe {
+        let phrase = sia_generate_recovery_phrase();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_validate_recovery_phrase(phrase, &raw mut err),
+            SIA_OK,
+            "a generated phrase must validate: {}",
+            take_err(err)
+        );
+        sia_string_free(phrase);
+
+        let junk = CString::new("not a recovery phrase at all").unwrap();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_validate_recovery_phrase(junk.as_ptr(), &raw mut err),
+            SIA_ERR,
+            "junk must not validate"
+        );
+        assert!(
+            take_err(err).contains("invalid recovery phrase"),
+            "the refusal must say what failed"
+        );
+
+        // A word off the list, so the phrase is the right shape and still wrong.
+        let wrong = CString::new(
+            "abandon abandon abandon abandon abandon abandon \
+             abandon abandon abandon abandon abandon abandon",
+        )
+        .unwrap();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_validate_recovery_phrase(wrong.as_ptr(), &raw mut err),
+            SIA_ERR,
+            "a phrase failing its checksum must not validate"
+        );
+        let _ = take_err(err);
+
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_validate_recovery_phrase(std::ptr::null(), &raw mut err),
+            SIA_ERR,
+            "a null phrase must be refused"
+        );
+        assert!(take_err(err).contains("null"));
+    }
+}
+
 /// or empty payload clears it on the copy.
 #[test]
 fn object_with_metadata_copies() {
