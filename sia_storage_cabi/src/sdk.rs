@@ -27,6 +27,8 @@ pub unsafe extern "C" fn sia_sdk_app_key(sdk: *const Sdk, out: *mut u8) {
     unsafe { std::slice::from_raw_parts_mut(out, 32) }.copy_from_slice(&seed);
 }
 
+/// `out_json` receives the account encoded as JSON.
+///
 /// # Safety
 /// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_builder_connect`, `sia_builder_register` or `sia_mock_sdk` that has not been freed.

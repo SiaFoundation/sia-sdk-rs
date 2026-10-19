@@ -12,6 +12,9 @@ pub(crate) struct FfiMock {
     pub(crate) hosts: Vec<sia_storage::PublicKey>,
 }
 
+/// In-memory mock backend for tests. Real erasure coding, encryption and
+/// upload and download pipelines run against fake in-process hosts.
+///
 /// # Safety
 /// - This function is only callable across the C ABI and takes no pointers.
 #[unsafe(no_mangle)]

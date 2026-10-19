@@ -66,6 +66,9 @@ pub(crate) fn builder_error(err: ErrOut, e: BuilderError) -> i32 {
     set_err(err, code, e.to_string())
 }
 
+/// `app_meta_json` is `{"appID":"<hex>","name":...,"description":...,
+/// "serviceURL":...,"logoURL":...|null,"callbackURL":...|null}`.
+///
 /// # Safety
 /// - `indexer_url` must be non null and NUL terminated.
 /// - `app_meta_json` must be non null and NUL terminated.
@@ -128,6 +131,8 @@ pub unsafe extern "C" fn sia_builder_free(b: *mut FfiBuilder) {
     }
 }
 
+/// Returns `SIA_ERR_UNAUTHORIZED` when the app key is not authorized.
+///
 /// # Safety
 /// - `b` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_builder_new` that has not been freed.
@@ -170,6 +175,10 @@ pub unsafe extern "C" fn sia_builder_connect(
     })
 }
 
+/// Cancelling this or `sia_builder_register` consumes the builder; the flow
+/// starts again from a new one. Cancelling `sia_builder_wait_for_approval` only
+/// stops waiting, and calling it again reattaches to the same request.
+///
 /// # Safety
 /// - `b` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_builder_new` that has not been freed.

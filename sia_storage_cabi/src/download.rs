@@ -92,6 +92,10 @@ pub unsafe extern "C" fn sia_download_start(
     })
 }
 
+/// Blocks until at least one byte is available and then opportunistically fills
+/// as much of `buf` as is ready without blocking again. An `n` of 0 signals
+/// EOF, so a `cap` of 0 is rejected with `SIA_ERR` rather than read as one.
+///
 /// # Safety
 /// - `dl` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_download_start` that has not been freed.
@@ -170,6 +174,9 @@ pub unsafe extern "C" fn sia_download_read(
     })
 }
 
+/// Cancels any in-flight recovery. It must not race a blocked `sia_download_read`:
+/// cancel first.
+///
 /// # Safety
 /// - `dl` may be null. Otherwise it must come from `sia_download_start` and must not be used again
 ///   after this returns.

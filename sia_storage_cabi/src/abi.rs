@@ -311,6 +311,12 @@ pub(crate) fn level_filter(max_level: i32) -> log::LevelFilter {
     }
 }
 
+/// Installs a process-wide logger bridging the Rust `log` crate. May only be
+/// called once; subsequent calls are ignored.
+///
+/// `max_level` admits everything at or below it. 0 or less logs nothing, and a
+/// value past 5 is treated as 5.
+///
 /// # Safety
 /// - This function is only callable across the C ABI and takes no pointers.
 #[unsafe(no_mangle)]

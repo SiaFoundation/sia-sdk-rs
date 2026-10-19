@@ -203,6 +203,12 @@ pub(crate) unsafe fn start_packed(packed: PackedUpload, out: *mut *mut FfiPacked
     SIA_OK
 }
 
+/// The upload streams the data pushed through `sia_upload_write`. Call
+/// `sia_upload_finish` to signal EOF and wait for completion; it returns the
+/// finished object.
+///
+/// Pass a null `obj` to upload into a fresh object, which is the common case.
+///
 /// # Safety
 /// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_builder_connect`, `sia_builder_register` or `sia_mock_sdk` that has not been freed.
@@ -250,6 +256,9 @@ pub unsafe extern "C" fn sia_upload_start(
     })
 }
 
+/// A cancelled write is not an error the handle cannot recover from: resume by
+/// writing `data + *written` onward.
+///
 /// # Safety
 /// - `up` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_upload_start` that has not been freed.
@@ -353,6 +362,11 @@ pub unsafe extern "C" fn sia_upload_write(
     })
 }
 
+/// Leaves the upload unusable whatever it returns, but does not release it:
+/// call `sia_upload_free` afterwards either way. On `SIA_ERR_CANCELLED` it
+/// aborts the transfer rather than leaving it running, so a cancelled finish
+/// yields no object and uploads nothing further.
+///
 /// # Safety
 /// - `up` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_upload_start` that has not been freed.
@@ -408,6 +422,11 @@ pub unsafe extern "C" fn sia_upload_free(up: *mut FfiUpload) {
     }
 }
 
+/// Objects are added one at a time: `sia_packed_upload_add_begin`, then
+/// `sia_packed_upload_add_write` until the object's data is exhausted, then
+/// `sia_packed_upload_add_finish`, which reports the number of bytes packed.
+/// `sia_packed_upload_finalize` returns the packed objects.
+///
 /// # Safety
 /// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_builder_connect`, `sia_builder_register` or `sia_mock_sdk` that has not been freed.
@@ -444,6 +463,11 @@ pub unsafe extern "C" fn sia_packed_upload_start(
     })
 }
 
+/// Returns immediately, including while an add is in progress. During an add it
+/// reports the figure from before the add began, since the bytes it will
+/// contribute are not settled until `sia_packed_upload_add_finish`. Call it
+/// between adds for an exact answer.
+///
 /// # Safety
 /// - `up` may be null, which returns 0. Otherwise it must be a live handle from
 ///   `sia_packed_upload_start` that has not been freed.
@@ -545,6 +569,10 @@ pub unsafe extern "C" fn sia_packed_upload_add_begin(
     })
 }
 
+/// Part of the buffer may already be in the stream and there is no count to
+/// resume from, unlike `sia_upload_write`. Call `sia_packed_upload_add_abort` to
+/// discard the object and add it again from the start.
+///
 /// # Safety
 /// - `up` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_packed_upload_start` that has not been freed.

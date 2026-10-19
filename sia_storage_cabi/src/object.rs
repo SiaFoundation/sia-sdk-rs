@@ -109,6 +109,9 @@ pub unsafe extern "C" fn sia_object_updated_at(o: *const Object) -> i64 {
     o.updated_at.timestamp_micros()
 }
 
+/// Returns the metadata length. If `buf` is non null and `cap` is large enough,
+/// copies the metadata into it.
+///
 /// # Safety
 /// - `o` may be null, which returns 0. Otherwise it must be a live handle from `sia_object_new` or
 ///   any call that returns an object that has not been freed.
@@ -165,6 +168,9 @@ pub unsafe extern "C" fn sia_events_len(evs: *const FfiEvents) -> usize {
     evs.0.len()
 }
 
+/// Returns false when `i` is out of range or has already been read, leaving
+/// every out parameter untouched.
+///
 /// # Safety
 /// - `evs` may be null, which returns false. Otherwise it must be a live handle from
 ///   `sia_sdk_object_events` that has not been freed.
