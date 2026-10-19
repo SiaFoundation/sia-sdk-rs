@@ -65,6 +65,22 @@ pub(crate) struct UploadOptionsC {
     pub(crate) start_offset: u64,
 }
 
+/// A packed upload carries no `start_offset`: each object is appended into a
+/// shared slab rather than overwriting a range of its own.
+#[repr(C)]
+pub(crate) struct PackedUploadOptionsC {
+    pub(crate) data_shards: u8,
+    pub(crate) parity_shards: u8,
+    pub(crate) set_redundancy: bool,
+    pub(crate) max_buffered_slabs: u64,
+    /// Keep `userdata` valid until the transfer handle is freed, or until
+    /// `sia_packed_upload_finalize` consumes the transfer. Those calls wait
+    /// for active callbacks and prevent later ones, including on failure or
+    /// cancellation.
+    pub(crate) on_shard: Option<unsafe extern "C" fn(usize, *const ShardProgressC)>,
+    pub(crate) userdata: usize,
+}
+
 pub(crate) struct FfiUpload {
     pub(crate) writer: Option<DuplexStream>,
     pub(crate) task: Option<JoinHandle<Result<Object, (i32, String)>>>,
@@ -116,12 +132,8 @@ pub(crate) fn make_upload_options(c: &UploadOptionsC) -> (UploadOptions, Callbac
     (o, guard)
 }
 
-/// Packed uploads take their own options type, which carries no `start_offset`
-/// because each object is appended into a shared slab rather than overwriting
-/// a range of its own. A caller that sets one is refused rather than having it
-/// silently dropped.
 pub(crate) fn make_packed_upload_options(
-    c: &UploadOptionsC,
+    c: &PackedUploadOptionsC,
 ) -> (PackedUploadOptions, CallbackGuard) {
     let mut o = PackedUploadOptions::default();
     if c.set_redundancy {
@@ -449,7 +461,7 @@ pub unsafe extern "C" fn sia_upload_free(up: *mut FfiUpload) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_packed_upload_start(
     sdk: *const Sdk,
-    opts: *const UploadOptionsC,
+    opts: *const PackedUploadOptionsC,
     out: *mut *mut FfiPacked,
     err: *mut *mut c_char,
 ) -> i32 {
@@ -458,13 +470,6 @@ pub unsafe extern "C" fn sia_packed_upload_start(
         let (Some(sdk), Some(opts)) = (unsafe { (sdk.as_ref(), opts.as_ref()) }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        if opts.has_start_offset {
-            return set_err(
-                err,
-                SIA_ERR_INVALID_STATE,
-                "a packed upload appends and cannot take a start offset",
-            );
-        }
         let (options, callback_guard) = make_packed_upload_options(opts);
         let _guard = runtime().enter();
         match sdk.upload_packed(options) {

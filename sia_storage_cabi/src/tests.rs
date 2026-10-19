@@ -35,6 +35,17 @@ fn default_upload_options() -> UploadOptionsC {
     }
 }
 
+fn default_packed_upload_options() -> PackedUploadOptionsC {
+    PackedUploadOptionsC {
+        data_shards: 0,
+        parity_shards: 0,
+        set_redundancy: false,
+        max_buffered_slabs: 0,
+        on_shard: None,
+        userdata: 0,
+    }
+}
+
 fn default_download_options() -> DownloadOptionsC {
     DownloadOptionsC {
         offset: 0,
@@ -1119,7 +1130,7 @@ fn aborted_add_leaves_no_object() {
             take_err(err)
         );
 
-        let opts = default_upload_options();
+        let opts = default_packed_upload_options();
         let mut packed = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
         assert_eq!(
@@ -2011,7 +2022,7 @@ fn abort_refuses_a_finish_that_was_cancelled() {
             take_err(err)
         );
 
-        let opts = default_upload_options();
+        let opts = default_packed_upload_options();
         let mut packed = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
         assert_eq!(
@@ -2353,46 +2364,6 @@ fn upload_start_offset_past_the_end_is_out_of_range() {
     }
 }
 
-/// A packed add always appends, so a start offset there is refused rather
-/// than quietly dropped.
-#[test]
-fn packed_upload_refuses_a_start_offset() {
-    unsafe {
-        let mock = sia_mock_new(40);
-        let mut sdk = std::ptr::null_mut();
-        let mut err = std::ptr::null_mut();
-        assert_eq!(
-            sia_mock_sdk(
-                mock,
-                [79u8; 32].as_ptr(),
-                std::ptr::null_mut(),
-                &raw mut sdk,
-                &raw mut err
-            ),
-            SIA_OK,
-            "sia_mock_sdk: {}",
-            take_err(err)
-        );
-
-        let mut opts = default_upload_options();
-        opts.has_start_offset = true;
-        opts.start_offset = 64;
-        let mut packed = std::ptr::null_mut();
-        let mut err = std::ptr::null_mut();
-        assert_eq!(
-            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
-            SIA_ERR_INVALID_STATE,
-        );
-        assert!(
-            take_err(err).contains("start offset"),
-            "the refusal must say why"
-        );
-
-        sia_sdk_free(sdk);
-        sia_mock_free(mock);
-    }
-}
-
 /// Truncation shortens the object, leaves the original alone, and the result
 /// The copy carries the new metadata, the original keeps its own, and a null
 /// A generated phrase validates, and anything else is refused with a message
@@ -2670,7 +2641,7 @@ fn cancelled_add_abort_reports_cancelled_and_stays_retryable() {
             take_err(err)
         );
 
-        let opts = default_upload_options();
+        let opts = default_packed_upload_options();
         let mut packed = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
         assert_eq!(
@@ -2803,7 +2774,7 @@ fn cancelled_add_finish_stays_retryable() {
             take_err(err)
         );
 
-        let opts = default_upload_options();
+        let opts = default_packed_upload_options();
         let mut packed = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
         assert_eq!(
@@ -2933,7 +2904,7 @@ fn packed_getters_do_not_wait_on_an_add() {
             take_err(err)
         );
 
-        let opts = default_upload_options();
+        let opts = default_packed_upload_options();
         let mut packed = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
         assert_eq!(
@@ -3550,8 +3521,9 @@ fn empty_buffers_are_not_read_as_end_of_stream() {
 
         let mut packed = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
+        let packed_opts = default_packed_upload_options();
         assert_eq!(
-            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
+            sia_packed_upload_start(sdk, &raw const packed_opts, &raw mut packed, &raw mut err),
             SIA_OK,
             "sia_packed_upload_start: {}",
             take_err(err)
@@ -3806,6 +3778,24 @@ fn header_structs_keep_their_layout() {
     assert_eq!(offset_of!(UploadOptionsC, has_start_offset), 32);
     assert_eq!(offset_of!(UploadOptionsC, start_offset), 40);
 
+    // sia_packed_upload_options_t
+    assert_eq!(
+        size_of::<PackedUploadOptionsC>(),
+        32,
+        "sia_packed_upload_options_t"
+    );
+    assert_eq!(
+        align_of::<PackedUploadOptionsC>(),
+        8,
+        "sia_packed_upload_options_t"
+    );
+    assert_eq!(offset_of!(PackedUploadOptionsC, data_shards), 0);
+    assert_eq!(offset_of!(PackedUploadOptionsC, parity_shards), 1);
+    assert_eq!(offset_of!(PackedUploadOptionsC, set_redundancy), 2);
+    assert_eq!(offset_of!(PackedUploadOptionsC, max_buffered_slabs), 8);
+    assert_eq!(offset_of!(PackedUploadOptionsC, on_shard), 16);
+    assert_eq!(offset_of!(PackedUploadOptionsC, userdata), 24);
+
     // sia_download_options_t
     assert_eq!(size_of::<DownloadOptionsC>(), 48, "sia_download_options_t");
     assert_eq!(align_of::<DownloadOptionsC>(), 8, "sia_download_options_t");
@@ -3954,7 +3944,7 @@ fn add_begin_after_finalize_is_refused() {
             take_err(err)
         );
 
-        let opts = default_upload_options();
+        let opts = default_packed_upload_options();
         let mut packed = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
         assert_eq!(
@@ -4024,7 +4014,7 @@ fn cancelled_finalize_consumes_the_upload() {
         );
 
         let calls = AtomicUsize::new(0);
-        let mut opts = default_upload_options();
+        let mut opts = default_packed_upload_options();
         opts.on_shard = Some(count_shard);
         opts.userdata = &raw const calls as usize;
         let mut packed = std::ptr::null_mut();
@@ -4450,7 +4440,7 @@ fn a_cancelled_add_write_recovers_through_abort() {
             take_err(err)
         );
 
-        let opts = default_upload_options();
+        let opts = default_packed_upload_options();
         let mut packed = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
         assert_eq!(
@@ -4571,7 +4561,7 @@ fn a_cancelled_add_write_cannot_be_finished() {
             take_err(err)
         );
 
-        let opts = default_upload_options();
+        let opts = default_packed_upload_options();
         let mut packed = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
         assert_eq!(
@@ -4697,7 +4687,7 @@ fn packed_figures_survive_an_add_with_no_earlier_getter_call() {
             take_err(err)
         );
 
-        let opts = default_upload_options();
+        let opts = default_packed_upload_options();
         let mut packed = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
         assert_eq!(
@@ -4801,7 +4791,7 @@ fn packed_upload_counts_its_slabs() {
             take_err(err)
         );
 
-        let opts = default_upload_options();
+        let opts = default_packed_upload_options();
         let mut packed = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
         assert_eq!(

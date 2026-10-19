@@ -179,6 +179,21 @@ typedef struct {
     uint64_t start_offset;
 } sia_upload_options_t;
 
+// A packed upload carries no `start_offset`: each object is appended into a
+// shared slab rather than overwriting a range of its own.
+typedef struct {
+    uint8_t data_shards;
+    uint8_t parity_shards;
+    bool set_redundancy;
+    uint64_t max_buffered_slabs;
+    // Keep `userdata` valid until the transfer handle is freed, or until
+    // `sia_packed_upload_finalize` consumes the transfer. Those calls wait
+    // for active callbacks and prevent later ones, including on failure or
+    // cancellation.
+    void (*on_shard)(uintptr_t, const sia_shard_progress_t*);
+    uintptr_t userdata;
+} sia_packed_upload_options_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -1302,7 +1317,7 @@ void sia_upload_free(sia_upload_t *up);
 // - `err` may be null. Otherwise it receives an owned message on failure that must be released
 //   with `sia_string_free`.
 int32_t sia_packed_upload_start(const sia_sdk_t *sdk,
-                                const sia_upload_options_t *opts,
+                                const sia_packed_upload_options_t *opts,
                                 sia_packed_upload_t **out,
                                 char **err);
 

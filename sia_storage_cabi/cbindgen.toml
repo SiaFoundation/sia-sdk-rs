@@ -81,6 +81,7 @@ parse_deps = false
 "ObjectSummaryC" = "sia_object_summary_t"
 "ShardProgressC" = "sia_shard_progress_t"
 "UploadOptionsC" = "sia_upload_options_t"
+"PackedUploadOptionsC" = "sia_packed_upload_options_t"
 "DownloadOptionsC" = "sia_download_options_t"
 "HostQueryC" = "sia_host_query_t"
 
