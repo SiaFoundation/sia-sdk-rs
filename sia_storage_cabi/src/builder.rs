@@ -5,10 +5,11 @@ use sia_storage::{
     RequestingApprovalState, Sdk,
 };
 use std::ffi::c_char;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum BuilderState {
     Disconnected(Builder<DisconnectedState>),
     Requesting(Builder<RequestingApprovalState>),
@@ -16,7 +17,9 @@ pub(crate) enum BuilderState {
     /// status URL and holds no state of its own, so the next call reattaches
     /// rather than discarding a request the user may already have approved.
     Waiting(JoinHandle<Result<Builder<ApprovedState>, BuilderError>>),
-    Approved(Builder<ApprovedState>),
+    /// Shared, so `sia_builder_matches_existing_app_key` can take a handle
+    /// and run its request with the state lock free.
+    Approved(Arc<Builder<ApprovedState>>),
     Consumed,
 }
 
@@ -258,7 +261,7 @@ pub unsafe extern "C" fn sia_builder_wait_for_approval(
         };
         match joined {
             Ok(Ok(approved)) => {
-                *state = BuilderState::Approved(approved);
+                *state = BuilderState::Approved(Arc::new(approved));
                 SIA_OK
             }
             Ok(Err(e)) => builder_error(err, e),
@@ -398,10 +401,16 @@ pub unsafe extern "C" fn sia_builder_matches_existing_app_key(
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid mnemonic: {e}")),
         };
-        let state = b.state();
-        let builder = match &*state {
-            BuilderState::Approved(builder) => builder,
-            _ => return set_err(err, SIA_ERR_INVALID_STATE, "connection not approved"),
+        // Taken as a handle so the request below runs with the lock free. The
+        // header lets two const calls run at once, and a second one blocked in
+        // state() could not reach its cancellation token until the first
+        // returned from the network.
+        let builder = {
+            let state = b.state();
+            match &*state {
+                BuilderState::Approved(builder) => builder.clone(),
+                _ => return set_err(err, SIA_ERR_INVALID_STATE, "connection not approved"),
+            }
         };
         match block_on(cancel, builder.matches_existing_app_key(phrase)) {
             None => set_cancelled(err),
@@ -444,7 +453,19 @@ pub unsafe extern "C" fn sia_builder_register(
         };
         let mut state = b.state();
         let builder = match std::mem::replace(&mut *state, BuilderState::Consumed) {
-            BuilderState::Approved(builder) => builder,
+            BuilderState::Approved(builder) => match Arc::try_unwrap(builder) {
+                Ok(builder) => builder,
+                // A matches_existing_app_key call is still holding it. Register
+                // consumes the builder, so it has to wait for that to return.
+                Err(builder) => {
+                    *state = BuilderState::Approved(builder);
+                    return set_err(
+                        err,
+                        SIA_ERR_INVALID_STATE,
+                        "a check is still running on this builder",
+                    );
+                }
+            },
             other => {
                 *state = other;
                 return set_err(err, SIA_ERR_INVALID_STATE, "connection not approved");
