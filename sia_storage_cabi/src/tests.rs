@@ -5263,3 +5263,32 @@ fn the_logger_bridge_reaches_c() {
         "the record is formatted, not raw"
     );
 }
+
+/// The header is generated, so the one thing that can go wrong is a committed
+/// copy that no longer matches the crate. Regenerating here means a stale
+/// header fails `cargo test` rather than reaching a consumer as a link error
+/// or a silently wrong signature.
+#[test]
+fn committed_header_matches_the_crate() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config = cbindgen::Config::from_file(root.join("cbindgen.toml"))
+        .expect("cbindgen.toml must be readable");
+    let bindings = cbindgen::Builder::new()
+        .with_crate(root)
+        .with_config(config)
+        .generate()
+        .expect("the crate must be parseable");
+
+    let mut generated = Vec::new();
+    bindings.write(&mut generated);
+    let generated = String::from_utf8(generated).expect("cbindgen emits UTF-8");
+    let committed = std::fs::read_to_string(root.join("include/sia_storage.h"))
+        .expect("the committed header must be readable");
+
+    assert_eq!(
+        generated, committed,
+        "include/sia_storage.h is out of date. Regenerate it from the \
+         workspace root:\n    cbindgen sia_storage_cabi -o \
+         sia_storage_cabi/include/sia_storage.h"
+    );
+}
