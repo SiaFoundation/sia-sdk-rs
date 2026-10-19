@@ -2364,8 +2364,62 @@ fn upload_start_offset_past_the_end_is_out_of_range() {
     }
 }
 
-/// Truncation shortens the object, leaves the original alone, and the result
-/// The copy carries the new metadata, the original keeps its own, and a null
+/// The estimate has to match what an uploaded object reports, since pricing an
+/// upload beforehand is the whole point, and zero data shards is refused
+/// rather than panicking across the boundary.
+#[test]
+fn encoded_size_estimates_what_an_upload_will_occupy() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [71u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let data = vec![5u8; 3 << 20];
+        let obj = upload_object_for_test(sdk, &data);
+
+        // upload_object_for_test takes the SDK's defaults, which UploadOptions
+        // declares as ten data shards and twenty parity.
+        let actual = sia_object_encoded_size(obj);
+        let mut estimate = 0u64;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_encoded_size(data.len() as u64, 10, 20, &raw mut estimate, &raw mut err),
+            SIA_OK,
+            "sia_encoded_size: {}",
+            take_err(err)
+        );
+        assert_eq!(
+            estimate, actual,
+            "the estimate must be what the uploaded object reports"
+        );
+
+        let mut out = 0u64;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_encoded_size(1 << 20, 0, 20, &raw mut out, &raw mut err),
+            SIA_ERR,
+            "zero data shards must be refused"
+        );
+        assert!(take_err(err).contains("data shards"));
+
+        sia_object_free(obj);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
 /// A generated phrase validates, and anything else is refused with a message
 /// rather than silently deriving a different account.
 #[test]
@@ -2503,6 +2557,7 @@ fn an_app_key_seals_and_opens_without_an_sdk() {
     }
 }
 
+/// The copy carries the new metadata, the original keeps its own, and a null
 /// or empty payload clears it on the copy.
 #[test]
 fn object_with_metadata_copies() {
@@ -2547,6 +2602,7 @@ fn object_with_metadata_copies() {
     }
 }
 
+/// Truncation shortens the object, leaves the original alone, and the result
 /// downloads as the leading prefix of what was uploaded.
 #[test]
 fn object_truncate_shortens_and_copies() {
@@ -2704,9 +2760,6 @@ fn upload_start_accepts_a_null_object() {
     }
 }
 
-/// A cancelled abort says so, and leaves the add observable rather than
-/// detaching it: the writer is already gone, so a second abort finishes the
-/// job and the object still goes. Reporting SIA_OK here would tell a caller
 /// An aborted add leaves its committed bytes in the stream as padding, so the
 /// figures move even though no object was registered. The getters fall back to
 /// a cache while an add holds the lock, so a getter during the next add has to
@@ -2832,6 +2885,9 @@ fn an_aborted_add_updates_the_figures_before_the_next_one() {
     }
 }
 
+/// A cancelled abort says so, and leaves the add observable rather than
+/// detaching it: the writer is already gone, so a second abort finishes the
+/// job and the object still goes. Reporting SIA_OK here would tell a caller
 /// the object was discarded when it was not.
 #[test]
 fn cancelled_add_abort_reports_cancelled_and_stays_retryable() {

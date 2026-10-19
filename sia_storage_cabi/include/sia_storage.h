@@ -219,6 +219,20 @@ void sia_set_logger(void (*cb)(uintptr_t, int32_t, const char*, const char*),
 // - This function is only callable across the C ABI and takes no pointers.
 char *sia_generate_recovery_phrase(void);
 
+// Estimates what `data_size` bytes will occupy on the network once erasure
+// coded, so a caller can price an upload before making it. The figure is the
+// one `sia_object_encoded_size` reports for an object that already exists.
+//
+// # Safety
+// - `out` must be non null and writable. It receives the estimate on success.
+// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+//   with `sia_string_free`.
+int32_t sia_encoded_size(uint64_t data_size,
+                         uint8_t data_shards,
+                         uint8_t parity_shards,
+                         uint64_t *out,
+                         char **err);
+
 // Reports whether `phrase` is a valid BIP-39 recovery phrase, so a caller can
 // refuse one before it reaches a connect flow that would derive a different
 // account from it.

@@ -377,6 +377,32 @@ pub unsafe extern "C" fn sia_generate_recovery_phrase() -> *mut c_char {
     lossy_cstring(sia_storage::generate_recovery_phrase()).into_raw()
 }
 
+/// Estimates what `data_size` bytes will occupy on the network once erasure
+/// coded, so a caller can price an upload before making it. The figure is the
+/// one `sia_object_encoded_size` reports for an object that already exists.
+///
+/// # Safety
+/// - `out` must be non null and writable. It receives the estimate on success.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_encoded_size(
+    data_size: u64,
+    data_shards: u8,
+    parity_shards: u8,
+    out: *mut u64,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    guarded(err, || {
+        if data_shards == 0 {
+            return set_err(err, SIA_ERR, "data shards cannot be zero");
+        }
+        unsafe { *out = sia_storage::encoded_size(data_size, data_shards, parity_shards) }
+        SIA_OK
+    })
+}
+
 /// Reports whether `phrase` is a valid BIP-39 recovery phrase, so a caller can
 /// refuse one before it reaches a connect flow that would derive a different
 /// account from it.
