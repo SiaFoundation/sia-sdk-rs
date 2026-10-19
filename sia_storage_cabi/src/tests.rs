@@ -2621,6 +2621,131 @@ fn upload_start_accepts_a_null_object() {
 /// A cancelled abort says so, and leaves the add observable rather than
 /// detaching it: the writer is already gone, so a second abort finishes the
 /// job and the object still goes. Reporting SIA_OK here would tell a caller
+/// An aborted add leaves its committed bytes in the stream as padding, so the
+/// figures move even though no object was registered. The getters fall back to
+/// a cache while an add holds the lock, so a getter during the next add has to
+/// see the figures from after the abort rather than from before it.
+#[test]
+fn an_aborted_add_updates_the_figures_before_the_next_one() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [57u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let opts = default_packed_upload_options();
+        let mut packed = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
+            SIA_OK,
+            "sia_packed_upload_start: {}",
+            take_err(err)
+        );
+
+        let before = sia_packed_upload_length(packed);
+
+        // An add large enough to commit whole buffers, then abandoned.
+        let payload = vec![3u8; 24 << 20];
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_begin(packed, &raw mut err),
+            SIA_OK,
+            "add_begin: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_write(
+                packed,
+                payload.as_ptr(),
+                payload.len(),
+                std::ptr::null_mut(),
+                &raw mut err
+            ),
+            SIA_OK,
+            "add_write: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_abort(packed, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "add_abort: {}",
+            take_err(err)
+        );
+
+        // Begin the next add without a getter in between, so only the cache
+        // the abort left behind can answer.
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_begin(packed, &raw mut err),
+            SIA_OK,
+            "second add_begin: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_write(
+                packed,
+                payload.as_ptr(),
+                8192,
+                std::ptr::null_mut(),
+                &raw mut err
+            ),
+            SIA_OK,
+            "second add_write: {}",
+            take_err(err)
+        );
+
+        // Wait until the add task holds the lock, so the getter below falls
+        // back to the cache instead of reading through to the upload.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while packed
+            .as_ref()
+            .expect("live handle")
+            .inner
+            .try_lock()
+            .is_ok()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the add task never took the lock"
+            );
+            std::thread::yield_now();
+        }
+
+        let during = sia_packed_upload_length(packed);
+        assert!(
+            during > before,
+            "length is {during} during the second add, but the abandoned bytes \
+             took it past {before}"
+        );
+
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_packed_upload_add_abort(packed, std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "cleanup abort: {}",
+            take_err(err)
+        );
+        sia_packed_upload_free(packed);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
 /// the object was discarded when it was not.
 #[test]
 fn cancelled_add_abort_reports_cancelled_and_stays_retryable() {

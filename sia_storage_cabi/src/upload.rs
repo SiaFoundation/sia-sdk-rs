@@ -771,6 +771,10 @@ pub unsafe extern "C" fn sia_packed_upload_add_abort(
         up.add_task.take();
         up.torn.store(false, Ordering::Release);
 
+        // The abandoned bytes stay in the stream as padding, so the figures
+        // moved. Take them now: a getter during the next add reads this cache.
+        refresh_packed_stats(up);
+
         // The failed reader is what the task reports, and a task that failed
         // registered no object, which is the abort's own goal. Only a panic is
         // a bug, and it gets a message as add_finish gives it.
