@@ -2417,6 +2417,92 @@ fn validate_recovery_phrase_accepts_only_real_phrases() {
     }
 }
 
+/// Sealing and opening are local, so an app key the caller holds is enough:
+/// the round trip has to work with no SDK in hand, and a different key has to
+/// be refused rather than returning something that will not decrypt.
+#[test]
+fn an_app_key_seals_and_opens_without_an_sdk() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        let seed = [91u8; 32];
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let data = vec![19u8; 1 << 20];
+        let obj = upload_object_for_test(sdk, &data);
+        let meta = b"{\"name\":\"offline\"}";
+        let obj = with_metadata_for_test(obj, meta);
+
+        // The key the SDK is carrying, as a caller would have stored it.
+        let mut app_key = [0u8; 32];
+        sia_sdk_app_key(sdk, app_key.as_mut_ptr());
+
+        let mut json = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_object_seal_json_with_key(app_key.as_ptr(), obj, &raw mut json, &raw mut err),
+            SIA_OK,
+            "seal with key: {}",
+            take_err(err)
+        );
+
+        let mut reopened = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_object_from_sealed_json_with_key(
+                app_key.as_ptr(),
+                json,
+                &raw mut reopened,
+                &raw mut err
+            ),
+            SIA_OK,
+            "open with key: {}",
+            take_err(err)
+        );
+
+        let (mut want, mut got) = ([0u8; 32], [0u8; 32]);
+        sia_object_id(obj, want.as_mut_ptr());
+        sia_object_id(reopened, got.as_mut_ptr());
+        assert_eq!(want, got, "the reopened object must keep its id");
+        let mut round = vec![0u8; meta.len()];
+        assert_eq!(
+            sia_object_metadata(reopened, round.as_mut_ptr(), round.len()),
+            meta.len()
+        );
+        assert_eq!(round, meta, "the metadata must survive the round trip");
+
+        // A different key must not open it.
+        let wrong = [92u8; 32];
+        let mut bad = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_ne!(
+            sia_object_from_sealed_json_with_key(wrong.as_ptr(), json, &raw mut bad, &raw mut err),
+            SIA_OK,
+            "another key must not open the object"
+        );
+        let _ = take_err(err);
+        assert!(bad.is_null(), "nothing is handed back on failure");
+
+        sia_string_free(json);
+        sia_object_free(reopened);
+        sia_object_free(obj);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
 /// or empty payload clears it on the copy.
 #[test]
 fn object_with_metadata_copies() {

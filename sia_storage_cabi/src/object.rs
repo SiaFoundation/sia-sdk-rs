@@ -257,12 +257,44 @@ pub unsafe extern "C" fn sia_object_seal_json(
     out_json: *mut *mut c_char,
     err: *mut *mut c_char,
 ) -> i32 {
+    let Some(sdk) = (unsafe { sdk.as_ref() }) else {
+        return SIA_ERR_INVALID_HANDLE;
+    };
+    let seed = sdk.app_key().export();
+    unsafe { sia_object_seal_json_with_key(seed.as_ptr(), obj, out_json, err) }
+}
+
+/// Seals an object under an app key the caller holds, rather than one a
+/// connected SDK carries. Sealing is local, so this works with the indexer
+/// unreachable, which is what a process restarting from a saved seed needs to
+/// re-seal what it already has.
+///
+/// Free the result with `sia_string_free`.
+///
+/// # Safety
+/// - `app_key` must be readable for 32 bytes.
+/// - `obj` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_object_new` or any call that returns an object that has not been freed.
+/// - `out_json` must be non null and writable. On success it receives an owned string that must be
+///   released with `sia_string_free`.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_object_seal_json_with_key(
+    app_key: *const u8,
+    obj: *const Object,
+    out_json: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> i32 {
     let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
-        let (Some(sdk), Some(obj)) = (unsafe { (sdk.as_ref(), obj.as_ref()) }) else {
+        let Some(obj) = (unsafe { obj.as_ref() }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        let sealed = obj.seal(sdk.app_key());
+        if app_key.is_null() {
+            return set_err(err, SIA_ERR, "app key is null");
+        }
+        let sealed = obj.seal(&unsafe { app_key_from_ptr(app_key) });
         match serde_json::to_string(&sealed) {
             Ok(s) => {
                 unsafe { *out_json = lossy_cstring(s).into_raw() }
@@ -292,11 +324,37 @@ pub unsafe extern "C" fn sia_object_from_sealed_json(
     out: *mut *mut Object,
     err: *mut *mut c_char,
 ) -> i32 {
+    let Some(sdk) = (unsafe { sdk.as_ref() }) else {
+        return SIA_ERR_INVALID_HANDLE;
+    };
+    let seed = sdk.app_key().export();
+    unsafe { sia_object_from_sealed_json_with_key(seed.as_ptr(), json, out, err) }
+}
+
+/// Opens a sealed object with an app key the caller holds, rather than one a
+/// connected SDK carries. Opening verifies signatures and decrypts locally, so
+/// a process restarting from a saved seed can read what it persisted while the
+/// indexer is unreachable.
+///
+/// # Safety
+/// - `app_key` must be readable for 32 bytes.
+/// - `json` must be non null and NUL terminated.
+/// - `out` must be non null and writable. On success it receives an owned handle that must be
+///   released with `sia_object_free`.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_object_from_sealed_json_with_key(
+    app_key: *const u8,
+    json: *const c_char,
+    out: *mut *mut Object,
+    err: *mut *mut c_char,
+) -> i32 {
     let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
-        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
-            return SIA_ERR_INVALID_HANDLE;
-        };
+        if app_key.is_null() {
+            return set_err(err, SIA_ERR, "app key is null");
+        }
         let s = match unsafe { cstr(&json) } {
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid sealed object json: {e}")),
@@ -305,7 +363,7 @@ pub unsafe extern "C" fn sia_object_from_sealed_json(
             Ok(v) => v,
             Err(e) => return set_err(err, SIA_ERR, format!("failed to decode sealed object: {e}")),
         };
-        match sealed.open(sdk.app_key()) {
+        match sealed.open(&unsafe { app_key_from_ptr(app_key) }) {
             Ok(obj) => {
                 unsafe { *out = Box::into_raw(Box::new(obj)) }
                 SIA_OK

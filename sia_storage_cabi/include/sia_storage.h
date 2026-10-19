@@ -704,6 +704,26 @@ int32_t sia_object_seal_json(const sia_sdk_t *sdk,
                              char **out_json,
                              char **err);
 
+// Seals an object under an app key the caller holds, rather than one a
+// connected SDK carries. Sealing is local, so this works with the indexer
+// unreachable, which is what a process restarting from a saved seed needs to
+// re-seal what it already has.
+//
+// Free the result with `sia_string_free`.
+//
+// # Safety
+// - `app_key` must be readable for 32 bytes.
+// - `obj` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+//   from `sia_object_new` or any call that returns an object that has not been freed.
+// - `out_json` must be non null and writable. On success it receives an owned string that must be
+//   released with `sia_string_free`.
+// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+//   with `sia_string_free`.
+int32_t sia_object_seal_json_with_key(const uint8_t *app_key,
+                                      const sia_object_t *obj,
+                                      char **out_json,
+                                      char **err);
+
 // Decodes a sealed object from JSON and opens it with the account's app key,
 // verifying its signatures. This is how a caller that persisted the sealed
 // form gets a usable object back.
@@ -720,6 +740,23 @@ int32_t sia_object_from_sealed_json(const sia_sdk_t *sdk,
                                     const char *json,
                                     sia_object_t **out,
                                     char **err);
+
+// Opens a sealed object with an app key the caller holds, rather than one a
+// connected SDK carries. Opening verifies signatures and decrypts locally, so
+// a process restarting from a saved seed can read what it persisted while the
+// indexer is unreachable.
+//
+// # Safety
+// - `app_key` must be readable for 32 bytes.
+// - `json` must be non null and NUL terminated.
+// - `out` must be non null and writable. On success it receives an owned handle that must be
+//   released with `sia_object_free`.
+// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+//   with `sia_string_free`.
+int32_t sia_object_from_sealed_json_with_key(const uint8_t *app_key,
+                                             const char *json,
+                                             sia_object_t **out,
+                                             char **err);
 
 // # Safety
 // - `sdk` may be null. Otherwise it must come from `sia_builder_connect`, `sia_builder_register`
