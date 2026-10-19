@@ -320,7 +320,11 @@ pub(crate) fn level_filter(max_level: i32) -> log::LevelFilter {
 /// # Safety
 /// - This function is only callable across the C ABI and takes no pointers.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sia_set_logger(cb: Option<LogFn>, userdata: usize, max_level: i32) {
+pub unsafe extern "C" fn sia_set_logger(
+    cb: Option<unsafe extern "C" fn(usize, i32, *const c_char, *const c_char)>,
+    userdata: usize,
+    max_level: i32,
+) {
     let Some(cb) = cb else { return };
     if log::set_boxed_logger(Box::new(CLogger { cb, userdata })).is_ok() {
         log::set_max_level(level_filter(max_level));

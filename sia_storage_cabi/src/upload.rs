@@ -50,7 +50,7 @@ pub(crate) struct UploadOptionsC {
     pub(crate) parity_shards: u8,
     pub(crate) set_redundancy: bool,
     pub(crate) max_buffered_slabs: u64,
-    pub(crate) on_shard: Option<ProgressFn>,
+    pub(crate) on_shard: Option<unsafe extern "C" fn(usize, *const ShardProgressC)>,
     pub(crate) userdata: usize,
     /// When false, `start_offset` is ignored and the upload appends.
     pub(crate) has_start_offset: bool,

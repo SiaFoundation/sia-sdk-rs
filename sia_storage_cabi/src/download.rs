@@ -12,7 +12,7 @@ pub(crate) struct DownloadOptionsC {
     pub(crate) has_length: bool,
     pub(crate) length: u64,
     pub(crate) max_buffered_chunks: u64,
-    pub(crate) on_shard: Option<ProgressFn>,
+    pub(crate) on_shard: Option<unsafe extern "C" fn(usize, *const ShardProgressC)>,
     pub(crate) userdata: usize,
 }
 
