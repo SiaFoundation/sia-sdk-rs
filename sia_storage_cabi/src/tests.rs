@@ -4020,7 +4020,11 @@ fn cancelled_finalize_consumes_the_upload() {
         let mut packed = std::ptr::null_mut();
         let (options, guard) = make_packed_upload_options(&opts);
         let surviving_callback = options.shard_uploaded.clone().unwrap();
-        let upload = (*sdk).upload_packed(options).unwrap();
+        let upload = sdk
+            .as_ref()
+            .expect("the mock sdk is live")
+            .upload_packed(options)
+            .unwrap();
         assert_eq!(start_packed(upload, guard, &raw mut packed), SIA_OK);
         let cancel = sia_cancel_new();
         sia_cancel_cancel(cancel);
