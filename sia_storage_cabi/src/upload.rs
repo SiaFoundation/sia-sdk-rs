@@ -50,6 +50,10 @@ pub(crate) struct UploadOptionsC {
     pub(crate) parity_shards: u8,
     pub(crate) set_redundancy: bool,
     pub(crate) max_buffered_slabs: u64,
+    /// Keep `userdata` valid until the transfer handle is freed, or until
+    /// `sia_upload_finish` or `sia_packed_upload_finalize` consumes the
+    /// transfer. Those calls wait for active callbacks and prevent later
+    /// ones, including on failure or cancellation.
     pub(crate) on_shard: Option<unsafe extern "C" fn(usize, *const ShardProgressC)>,
     pub(crate) userdata: usize,
     /// When false, `start_offset` is ignored and the upload appends.
@@ -64,6 +68,7 @@ pub(crate) struct UploadOptionsC {
 pub(crate) struct FfiUpload {
     pub(crate) writer: Option<DuplexStream>,
     pub(crate) task: Option<JoinHandle<Result<Object, (i32, String)>>>,
+    pub(crate) callback_guard: CallbackGuard,
 }
 
 pub(crate) struct FfiPacked {
@@ -79,6 +84,7 @@ pub(crate) struct FfiPacked {
     /// Fails the add task's reader, for an add ended part way through the
     /// object. Shared with the reader the task holds, and reset by add_begin.
     pub(crate) torn: Arc<AtomicBool>,
+    pub(crate) callback_guard: CallbackGuard,
 }
 
 /// Takes both figures while the lock is free, leaving them for a getter called
@@ -93,7 +99,7 @@ fn refresh_packed_stats(up: &FfiPacked) {
     }
 }
 
-pub(crate) fn make_upload_options(c: &UploadOptionsC) -> UploadOptions {
+pub(crate) fn make_upload_options(c: &UploadOptionsC) -> (UploadOptions, CallbackGuard) {
     let mut o = UploadOptions::default();
     if c.set_redundancy {
         o.data_shards = c.data_shards;
@@ -105,21 +111,18 @@ pub(crate) fn make_upload_options(c: &UploadOptionsC) -> UploadOptions {
     if c.has_start_offset {
         o.start_offset = Some(c.start_offset);
     }
-    if let Some(cb) = c.on_shard {
-        let cb = CCallback {
-            cb,
-            userdata: c.userdata,
-        };
-        o = o.on_shard_uploaded(move |p| cb.invoke(p));
-    }
-    o
+    let (callback, guard) = progress_callback(c.on_shard, c.userdata);
+    o.shard_uploaded = callback;
+    (o, guard)
 }
 
 /// Packed uploads take their own options type, which carries no `start_offset`
 /// because each object is appended into a shared slab rather than overwriting
 /// a range of its own. A caller that sets one is refused rather than having it
 /// silently dropped.
-pub(crate) fn make_packed_upload_options(c: &UploadOptionsC) -> PackedUploadOptions {
+pub(crate) fn make_packed_upload_options(
+    c: &UploadOptionsC,
+) -> (PackedUploadOptions, CallbackGuard) {
     let mut o = PackedUploadOptions::default();
     if c.set_redundancy {
         o.data_shards = c.data_shards;
@@ -128,14 +131,9 @@ pub(crate) fn make_packed_upload_options(c: &UploadOptionsC) -> PackedUploadOpti
     if c.max_buffered_slabs > 0 {
         o.max_buffered_slabs = Some(c.max_buffered_slabs as usize);
     }
-    if let Some(cb) = c.on_shard {
-        let cb = CCallback {
-            cb,
-            userdata: c.userdata,
-        };
-        o.shard_uploaded = Some(Arc::new(move |p| cb.invoke(p)));
-    }
-    o
+    let (callback, guard) = progress_callback(c.on_shard, c.userdata);
+    o.shard_uploaded = callback;
+    (o, guard)
 }
 
 /// Starts a streaming upload: the returned handle owns the write half of an
@@ -144,7 +142,11 @@ pub(crate) fn make_packed_upload_options(c: &UploadOptionsC) -> PackedUploadOpti
 /// Always succeeds, so there is nothing to report through an `err` slot.
 /// # Safety
 /// - `out` must be non null and writable. It receives an owned handle.
-pub(crate) unsafe fn start_upload<F, Fut>(out: *mut *mut FfiUpload, upload: F) -> i32
+pub(crate) unsafe fn start_upload<F, Fut>(
+    out: *mut *mut FfiUpload,
+    callback_guard: CallbackGuard,
+    upload: F,
+) -> i32
 where
     F: FnOnce(DuplexStream) -> Fut,
     Fut: Future<Output = Result<Object, (i32, String)>> + Send + 'static,
@@ -156,6 +158,7 @@ where
         *out = Box::into_raw(Box::new(FfiUpload {
             writer: Some(writer),
             task: Some(task),
+            callback_guard,
         }));
     }
     SIA_OK
@@ -187,7 +190,11 @@ pub(crate) unsafe fn upload_result(
 
 /// # Safety
 /// - `out` must be non null and writable. It receives an owned handle.
-pub(crate) unsafe fn start_packed(packed: PackedUpload, out: *mut *mut FfiPacked) -> i32 {
+pub(crate) unsafe fn start_packed(
+    packed: PackedUpload,
+    callback_guard: CallbackGuard,
+    out: *mut *mut FfiPacked,
+) -> i32 {
     let optimal_data_size = packed.optimal_data_size() as u64;
     unsafe {
         *out = Box::into_raw(Box::new(FfiPacked {
@@ -198,6 +205,7 @@ pub(crate) unsafe fn start_packed(packed: PackedUpload, out: *mut *mut FfiPacked
             remaining: AtomicU64::new(optimal_data_size),
             length: AtomicU64::new(0),
             torn: Arc::new(AtomicBool::new(false)),
+            callback_guard,
         }));
     }
     SIA_OK
@@ -242,12 +250,12 @@ pub unsafe extern "C" fn sia_upload_start(
         let Some(opts) = (unsafe { opts.as_ref() }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        let options = make_upload_options(opts);
+        let (options, callback_guard) = make_upload_options(opts);
         if let Err(e) = options.validate() {
             return set_typed_err(err, &e);
         }
         unsafe {
-            start_upload(out, move |reader| async move {
+            start_upload(out, callback_guard, move |reader| async move {
                 sdk.upload(obj, reader, options)
                     .await
                     .map_err(|e| (status_for(&e), e.to_string()))
@@ -333,6 +341,7 @@ pub unsafe extern "C" fn sia_upload_write(
             None => set_cancelled(err),
             Some(Ok(())) => SIA_OK,
             Some(Err(_)) => {
+                let _callback_guard = std::mem::take(&mut up.callback_guard);
                 // The pipe broke because the upload task ended; report its
                 // real error instead of the write failure.
                 up.writer = None;
@@ -392,6 +401,8 @@ pub unsafe extern "C" fn sia_upload_finish(
         if up.task.is_none() {
             return set_err(err, SIA_ERR_INVALID_STATE, "upload has already ended");
         }
+        // Close callbacks on every exit, including cancellation and panic.
+        let _callback_guard = std::mem::take(&mut up.callback_guard);
         drop(up.writer.take()); // signal EOF
 
         // Awaited by reference so the handle stays owned here. Awaiting it by
@@ -454,10 +465,10 @@ pub unsafe extern "C" fn sia_packed_upload_start(
                 "a packed upload appends and cannot take a start offset",
             );
         }
-        let options = make_packed_upload_options(opts);
+        let (options, callback_guard) = make_packed_upload_options(opts);
         let _guard = runtime().enter();
         match sdk.upload_packed(options) {
-            Ok(packed) => unsafe { start_packed(packed, out) },
+            Ok(packed) => unsafe { start_packed(packed, callback_guard, out) },
             Err(e) => set_typed_err(err, &e),
         }
     })
@@ -807,6 +818,7 @@ pub unsafe extern "C" fn sia_packed_upload_finalize(
             return set_err(err, SIA_ERR_INVALID_STATE, "upload already finalized");
         };
         drop(guard);
+        let _callback_guard = std::mem::take(&mut up.callback_guard);
         let result = block_on(cancel, async move {
             packed
                 .finalize()

@@ -112,6 +112,10 @@ typedef struct {
     bool has_length;
     uint64_t length;
     uint64_t max_buffered_chunks;
+    // Keep `userdata` valid until the transfer handle is freed, or until
+    // `sia_upload_finish` or `sia_packed_upload_finalize` consumes the
+    // transfer. Those calls wait for active callbacks and prevent later
+    // ones, including on failure or cancellation.
     void (*on_shard)(uintptr_t, const sia_shard_progress_t*);
     uintptr_t userdata;
 } sia_download_options_t;
@@ -160,6 +164,10 @@ typedef struct {
     uint8_t parity_shards;
     bool set_redundancy;
     uint64_t max_buffered_slabs;
+    // Keep `userdata` valid until the transfer handle is freed, or until
+    // `sia_upload_finish` or `sia_packed_upload_finalize` consumes the
+    // transfer. Those calls wait for active callbacks and prevent later
+    // ones, including on failure or cancellation.
     void (*on_shard)(uintptr_t, const sia_shard_progress_t*);
     uintptr_t userdata;
     // When false, `start_offset` is ignored and the upload appends.

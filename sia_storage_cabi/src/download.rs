@@ -12,6 +12,10 @@ pub(crate) struct DownloadOptionsC {
     pub(crate) has_length: bool,
     pub(crate) length: u64,
     pub(crate) max_buffered_chunks: u64,
+    /// Keep `userdata` valid until the transfer handle is freed, or until
+    /// `sia_upload_finish` or `sia_packed_upload_finalize` consumes the
+    /// transfer. Those calls wait for active callbacks and prevent later
+    /// ones, including on failure or cancellation.
     pub(crate) on_shard: Option<unsafe extern "C" fn(usize, *const ShardProgressC)>,
     pub(crate) userdata: usize,
 }
@@ -19,9 +23,10 @@ pub(crate) struct DownloadOptionsC {
 pub(crate) struct FfiDownload {
     pub(crate) reader: Pin<Box<dyn AsyncRead + Send>>,
     pub(crate) pending_err: Option<std::io::Error>,
+    pub(crate) _callback_guard: CallbackGuard,
 }
 
-pub(crate) fn make_download_options(c: &DownloadOptionsC) -> DownloadOptions {
+pub(crate) fn make_download_options(c: &DownloadOptionsC) -> (DownloadOptions, CallbackGuard) {
     let mut o = DownloadOptions {
         offset: c.offset,
         ..Default::default()
@@ -32,26 +37,23 @@ pub(crate) fn make_download_options(c: &DownloadOptionsC) -> DownloadOptions {
     if c.max_buffered_chunks > 0 {
         o.max_buffered_chunks = Some(c.max_buffered_chunks as usize);
     }
-    if let Some(cb) = c.on_shard {
-        let cb = CCallback {
-            cb,
-            userdata: c.userdata,
-        };
-        o = o.on_shard_downloaded(move |p| cb.invoke(p));
-    }
-    o
+    let (callback, guard) = progress_callback(c.on_shard, c.userdata);
+    o.shard_downloaded = callback;
+    (o, guard)
 }
 
 /// # Safety
 /// - `out` must be non null and writable. It receives an owned handle.
 pub(crate) unsafe fn start_download(
     reader: Pin<Box<dyn AsyncRead + Send>>,
+    callback_guard: CallbackGuard,
     out: *mut *mut FfiDownload,
 ) -> i32 {
     unsafe {
         *out = Box::into_raw(Box::new(FfiDownload {
             reader,
             pending_err: None,
+            _callback_guard: callback_guard,
         }));
     }
     SIA_OK
@@ -82,11 +84,11 @@ pub unsafe extern "C" fn sia_download_start(
         else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        let options = make_download_options(opts);
+        let (options, callback_guard) = make_download_options(opts);
         // Download::new spawns tasks; enter the runtime context for the call.
         let _guard = runtime().enter();
         match sdk.download(obj, options) {
-            Ok(dl) => unsafe { start_download(Box::pin(dl), out) },
+            Ok(dl) => unsafe { start_download(Box::pin(dl), callback_guard, out) },
             Err(e) => set_typed_err(err, &e),
         }
     })

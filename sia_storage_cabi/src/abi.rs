@@ -3,12 +3,14 @@
 //! containment, the async bridge, argument conversion, and the callbacks that
 //! run outward into C.
 
-use sia_storage::{AppKey, DownloadError, Hash256, QueueError, ShardProgress, UploadError};
+use sia_storage::{
+    AppKey, DownloadError, Hash256, QueueError, ShardProgress, ShardProgressCallback, UploadError,
+};
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char};
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, RwLock};
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
@@ -80,6 +82,43 @@ impl CCallback {
         };
         unsafe { (self.cb)(self.userdata, &raw const c) }
     }
+}
+
+/// Dropping the guard waits for active callbacks and prevents future calls.
+#[derive(Default)]
+pub(crate) struct CallbackGuard(Option<Arc<RwLock<bool>>>);
+
+impl Drop for CallbackGuard {
+    fn drop(&mut self) {
+        if let Some(enabled) = &self.0 {
+            *enabled
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+        }
+    }
+}
+
+pub(crate) fn progress_callback(
+    cb: Option<ProgressFn>,
+    userdata: usize,
+) -> (Option<ShardProgressCallback>, CallbackGuard) {
+    let Some(cb) = cb else {
+        return (None, CallbackGuard::default());
+    };
+    let cb = CCallback { cb, userdata };
+    let enabled = Arc::new(RwLock::new(true));
+    let guard = CallbackGuard(Some(enabled.clone()));
+    let callback = Arc::new(move |p| {
+        // Hold the read lock through the C call so dropping the guard waits
+        // for every caller, while callbacks may still run concurrently.
+        let enabled = enabled
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *enabled {
+            cb.invoke(p);
+        }
+    });
+    (Some(callback), guard)
 }
 
 pub(crate) struct CLogger {

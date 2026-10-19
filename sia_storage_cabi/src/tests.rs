@@ -46,6 +46,209 @@ fn default_download_options() -> DownloadOptionsC {
     }
 }
 
+fn shard_progress() -> sia_storage::ShardProgress {
+    sia_storage::ShardProgress {
+        host_key: sia_storage::PublicKey::new([0; 32]),
+        shard_size: 0,
+        shard_index: 0,
+        slab_index: 0,
+        elapsed: std::time::Duration::ZERO,
+    }
+}
+
+unsafe extern "C" fn count_shard(userdata: usize, _: *const ShardProgressC) {
+    unsafe { &*(userdata as *const std::sync::atomic::AtomicUsize) }
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[test]
+fn shutdown_waits_for_active_callbacks_and_closes_surviving_clones() {
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
+
+    struct State {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    unsafe extern "C" fn on_shard(userdata: usize, _: *const ShardProgressC) {
+        let state = unsafe { &*(userdata as *const State) };
+        let _ = state.entered.send(());
+        // Bound the wait without panicking across the C boundary if the
+        // test fails before it releases the callbacks.
+        let _ = state
+            .release
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recv_timeout(Duration::from_secs(10));
+    }
+
+    let (entered, entries) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let state = Arc::new(State {
+        entered,
+        release: Mutex::new(released),
+    });
+    let (callback, guard) = progress_callback(Some(on_shard), Arc::as_ptr(&state) as usize);
+    let callback = callback.unwrap();
+    let workers: Vec<_> = (0..2)
+        .map(|_| {
+            let callback = callback.clone();
+            let state = state.clone();
+            std::thread::spawn(move || {
+                callback(shard_progress());
+                drop(state);
+            })
+        })
+        .collect();
+    // Both must be inside C at once; shutdown must wait for both, without
+    // serializing normal callbacks behind each other.
+    for _ in 0..2 {
+        entries.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    let (closing, started) = mpsc::channel();
+    let (closed, finished) = mpsc::channel();
+    let shutdown = std::thread::spawn(move || {
+        closing.send(()).unwrap();
+        drop(guard);
+        closed.send(()).unwrap();
+    });
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        finished.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout),
+        "shutdown returned while callbacks were still in C"
+    );
+    release.send(()).unwrap();
+    assert_eq!(
+        finished.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout),
+        "shutdown returned before the second callback left C"
+    );
+    release.send(()).unwrap();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    finished.recv_timeout(Duration::from_secs(5)).unwrap();
+    shutdown.join().unwrap();
+
+    // A descendant task may retain its callback clone after the transfer
+    // has ended. The caller can now free userdata, so the clone must be inert.
+    callback(shard_progress());
+    assert_eq!(entries.try_recv(), Err(mpsc::TryRecvError::Empty));
+}
+
+/// A callback retained by a descendant task must stop working as soon as a
+/// consuming call returns, even when that task has not observed its abort yet.
+#[test]
+fn upload_completion_closes_callbacks_on_success_error_and_cancellation() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for (status, fail_write) in [
+        (SIA_OK, false),
+        (SIA_ERR, false),
+        (SIA_ERR_CANCELLED, false),
+        (SIA_ERR, true),
+    ] {
+        let calls = AtomicUsize::new(0);
+        let mut opts = default_upload_options();
+        opts.on_shard = Some(count_shard);
+        opts.userdata = &raw const calls as usize;
+        let (options, guard) = make_upload_options(&opts);
+        let surviving_callback = options.shard_uploaded.unwrap();
+        unsafe {
+            let mut up = std::ptr::null_mut();
+            start_upload(&raw mut up, guard, move |_reader| async move {
+                match status {
+                    SIA_OK => Ok(Object::default()),
+                    SIA_ERR => Err((SIA_ERR, "failed upload".to_string())),
+                    _ => std::future::pending().await,
+                }
+            });
+            let cancel = sia_cancel_new();
+            if status == SIA_ERR_CANCELLED {
+                sia_cancel_cancel(cancel);
+            }
+            let mut obj = std::ptr::null_mut();
+            let mut err = std::ptr::null_mut();
+            let code = if fail_write {
+                // Exceed the pipe capacity so this cannot succeed before the
+                // task drops its reader and reports its error.
+                let data = vec![0u8; UPLOAD_PIPE_CAPACITY + 1];
+                sia_upload_write(
+                    up,
+                    data.as_ptr(),
+                    data.len(),
+                    cancel,
+                    std::ptr::null_mut(),
+                    &raw mut err,
+                )
+            } else {
+                sia_upload_finish(up, cancel, &raw mut obj, &raw mut err)
+            };
+            assert_eq!(code, status);
+            let _ = take_err(err);
+
+            surviving_callback(shard_progress());
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+            sia_object_free(obj);
+            sia_upload_free(up);
+            sia_cancel_free(cancel);
+        }
+    }
+}
+
+/// Freeing any kind of transfer closes its registration independently of
+/// whether the underlying async tasks have finished dropping their clones.
+#[test]
+fn freeing_transfers_closes_callbacks() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for kind in ["upload", "packed", "download"] {
+        let calls = AtomicUsize::new(0);
+        let (callback, guard) = progress_callback(Some(count_shard), &raw const calls as usize);
+        let surviving_callback = callback.unwrap();
+        unsafe {
+            match kind {
+                "upload" => {
+                    let mut up = std::ptr::null_mut();
+                    start_upload(&raw mut up, guard, |_reader| std::future::pending());
+                    sia_upload_free(up);
+                }
+                "packed" => {
+                    let up = Box::into_raw(Box::new(FfiPacked {
+                        inner: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                        optimal_data_size: 0,
+                        writer: None,
+                        add_task: None,
+                        remaining: 0.into(),
+                        length: 0.into(),
+                        torn: std::sync::Arc::new(false.into()),
+                        callback_guard: guard,
+                    }));
+                    sia_packed_upload_free(up);
+                }
+                _ => {
+                    let mut dl = std::ptr::null_mut();
+                    start_download(
+                        Box::pin(std::io::Cursor::new(Vec::<u8>::new())),
+                        guard,
+                        &raw mut dl,
+                    );
+                    sia_download_free(dl);
+                }
+            }
+        }
+        surviving_callback(shard_progress());
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "{kind} callback survived free"
+        );
+    }
+}
+
 /// Streams a payload out through `sia_upload_*` and back in through
 /// `sia_download_*`, against in-process hosts. This is the only test that
 /// covers the streaming entry points the Go SDK is built on, and it runs
@@ -3800,6 +4003,8 @@ fn add_begin_after_finalize_is_refused() {
 /// is not left guessing whether a retry resumes it or reports it gone.
 #[test]
 fn cancelled_finalize_consumes_the_upload() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     unsafe {
         let mock = sia_mock_new(40);
         let seed = [67u8; 32];
@@ -3818,16 +4023,15 @@ fn cancelled_finalize_consumes_the_upload() {
             take_err(err)
         );
 
-        let opts = default_upload_options();
+        let calls = AtomicUsize::new(0);
+        let mut opts = default_upload_options();
+        opts.on_shard = Some(count_shard);
+        opts.userdata = &raw const calls as usize;
         let mut packed = std::ptr::null_mut();
-        let mut err = std::ptr::null_mut();
-        assert_eq!(
-            sia_packed_upload_start(sdk, &raw const opts, &raw mut packed, &raw mut err),
-            SIA_OK,
-            "sia_packed_upload_start: {}",
-            take_err(err)
-        );
-
+        let (options, guard) = make_packed_upload_options(&opts);
+        let surviving_callback = options.shard_uploaded.clone().unwrap();
+        let upload = (*sdk).upload_packed(options).unwrap();
+        assert_eq!(start_packed(upload, guard, &raw mut packed), SIA_OK);
         let cancel = sia_cancel_new();
         sia_cancel_cancel(cancel);
         let mut objs = std::ptr::null_mut();
@@ -3840,6 +4044,9 @@ fn cancelled_finalize_consumes_the_upload() {
             take_err(err)
         );
         sia_cancel_free(cancel);
+
+        surviving_callback(shard_progress());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
 
         let mut objs = std::ptr::null_mut();
         let mut len = 0usize;
@@ -3921,6 +4128,7 @@ fn abort_reports_a_panicked_add() {
         // task still attached and nothing torn is a finish under way, which
         // abort refuses rather than joining.
         torn: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        callback_guard: CallbackGuard::default(),
     }));
 
     unsafe {

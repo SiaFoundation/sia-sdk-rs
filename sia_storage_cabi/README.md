@@ -70,6 +70,11 @@ uncancellable; otherwise cancelling the token unblocks it with
 
 **Timestamps are Unix microseconds, UTC.**
 
+**Progress callback userdata lives until the transfer handle is freed.** Freeing
+waits for active callbacks and prevents later invocations. Upload finish and
+packed finalize also stop callbacks once they consume the transfer, including
+on failure or cancellation.
+
 **Constness says whether a handle can be shared between threads.** Every handle
 moves between threads freely. A call taking a `const` handle may run alongside
 other `const` calls on the same one; a call taking a non-const handle needs

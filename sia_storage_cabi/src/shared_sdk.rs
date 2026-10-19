@@ -349,11 +349,11 @@ pub unsafe extern "C" fn sia_shared_sdk_download_start(
         else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        let options = make_download_options(opts);
+        let (options, callback_guard) = make_download_options(opts);
         // Download::new spawns tasks; enter the runtime context for the call.
         let _guard = runtime().enter();
         match sdk.download(obj, options) {
-            Ok(dl) => unsafe { start_download(Box::pin(dl), out) },
+            Ok(dl) => unsafe { start_download(Box::pin(dl), callback_guard, out) },
             Err(e) => set_typed_err(err, &e),
         }
     })
