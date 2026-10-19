@@ -12,43 +12,43 @@ use std::sync::OnceLock;
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
-pub(crate) const SIA_OK: i32 = 0;
+pub const SIA_OK: i32 = 0;
 
-pub(crate) const SIA_ERR: i32 = 1;
+pub const SIA_ERR: i32 = 1;
 
-pub(crate) const SIA_ERR_UNAUTHORIZED: i32 = 2;
+pub const SIA_ERR_UNAUTHORIZED: i32 = 2;
 
-pub(crate) const SIA_ERR_USER_REJECTED: i32 = 3;
+pub const SIA_ERR_USER_REJECTED: i32 = 3;
 
-pub(crate) const SIA_ERR_REQUEST_EXPIRED: i32 = 4;
+pub const SIA_ERR_REQUEST_EXPIRED: i32 = 4;
 
-pub(crate) const SIA_ERR_CANCELLED: i32 = 5;
+pub const SIA_ERR_CANCELLED: i32 = 5;
 
-pub(crate) const SIA_ERR_INVALID_STATE: i32 = 6;
+pub const SIA_ERR_INVALID_STATE: i32 = 6;
 
-pub(crate) const SIA_ERR_OBJECT_NOT_ATTACHED: i32 = 7;
+pub const SIA_ERR_OBJECT_NOT_ATTACHED: i32 = 7;
 
-pub(crate) const SIA_ERR_KEY_MISMATCH: i32 = 8;
+pub const SIA_ERR_KEY_MISMATCH: i32 = 8;
 
 /// A required handle was missing. Returned instead of dereferencing it, so a
 /// caller that passes null gets an error rather than undefined behaviour. A
 /// handle that is present must still be live: this catches an absent handle,
 /// not a dangling one. Out parameters are not checked; they are written only
 /// on success, and passing a null one is undefined.
-pub(crate) const SIA_ERR_INVALID_HANDLE: i32 = 9;
+pub const SIA_ERR_INVALID_HANDLE: i32 = 9;
 
 /// Not enough shards survived to satisfy the erasure coding.
-pub(crate) const SIA_ERR_NOT_ENOUGH_SHARDS: i32 = 10;
+pub const SIA_ERR_NOT_ENOUGH_SHARDS: i32 = 10;
 
 /// Host selection ran out of candidates.
-pub(crate) const SIA_ERR_NO_MORE_HOSTS: i32 = 11;
+pub const SIA_ERR_NO_MORE_HOSTS: i32 = 11;
 
 /// An overwrite started past the end of the object it was rewriting.
-pub(crate) const SIA_ERR_OUT_OF_RANGE: i32 = 12;
+pub const SIA_ERR_OUT_OF_RANGE: i32 = 12;
 
-pub(crate) type ProgressFn = unsafe extern "C" fn(usize, *const ShardProgressC);
+pub type ProgressFn = unsafe extern "C" fn(usize, *const ShardProgressC);
 
-pub(crate) type LogFn = unsafe extern "C" fn(usize, i32, *const c_char, *const c_char);
+pub type LogFn = unsafe extern "C" fn(usize, i32, *const c_char, *const c_char);
 
 #[repr(C)]
 pub(crate) struct ShardProgressC {
