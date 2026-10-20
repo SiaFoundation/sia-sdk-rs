@@ -18,6 +18,8 @@ mod siamux;
 #[cfg(target_arch = "wasm32")]
 mod web_transport;
 
+mod dial_failures;
+
 #[cfg(any(test, feature = "mock"))]
 pub(crate) mod mock;
 
@@ -157,6 +159,9 @@ pub enum Error {
 
     #[error("no account token for host: {0}")]
     NoToken(PublicKey),
+
+    #[error("WebTransport handshake refused: {0}")]
+    DialRefused(String),
 }
 
 impl Clone for Error {
@@ -169,6 +174,7 @@ impl Clone for Error {
             Self::InvalidSignature => Self::InvalidSignature,
             Self::Transport(s) => Self::Transport(s.clone()),
             Self::NoToken(host) => Self::NoToken(*host),
+            Self::DialRefused(s) => Self::DialRefused(s.clone()),
         }
     }
 }
