@@ -41,9 +41,9 @@ impl From<sia_storage::KeyStats> for KeyStats {
     }
 }
 
-/// An object listed without its slabs, as `SharedSdk::object_summaries`
-/// returns it. It cannot be downloaded. Fetch the full object with
-/// `SharedSdk::object` to download it.
+/// An object listed without its slabs, as `Sdk::object_event_summaries` and
+/// `SharedSdk::object_summaries` return it. It cannot be downloaded. Fetch the
+/// full object with `Sdk::object` or `SharedSdk::object` to download it.
 #[derive(uniffi::Record)]
 pub struct ObjectSummary {
     pub id: String,

@@ -11,7 +11,8 @@ use sia_core::types::Hash256;
 
 use super::{
     AuthApproval, Error, KeyResponse, PinObjectError, RegisterAppResponse, SHARE_URL_SCHEME,
-    SealedObjectEvent, SharedHost, SlabPinParams, Url, sign,
+    SealedObjectEvent, SealedObjectEventSummary, SealedSharedObjectSummary, SharedHost,
+    SlabPinParams, Url, sign,
 };
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
@@ -244,6 +245,27 @@ impl Client {
         }
         events.truncate(limit.unwrap_or(usize::MAX));
         Ok(events)
+    }
+
+    /// Reports each object's size, as indexers that include it in listings
+    /// without slabs do.
+    pub(crate) async fn object_summaries(
+        &self,
+        app_key: &PrivateKey,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SealedObjectEventSummary>, Error> {
+        Ok(self
+            .objects(app_key, cursor, limit)
+            .await?
+            .into_iter()
+            .map(|event| SealedObjectEventSummary {
+                id: event.id,
+                deleted: event.deleted,
+                updated_at: event.updated_at,
+                object: event.object.map(Self::summarize),
+            })
+            .collect())
     }
 
     pub(crate) async fn pin_object(
@@ -656,6 +678,19 @@ impl Client {
             })
     }
 
+    /// Leaves out a sealed object's slabs, as a listing with
+    /// `includeslabs=false` does, keeping the size they add up to.
+    fn summarize(sealed: SealedObject) -> SealedObjectSummary {
+        SealedObjectSummary {
+            size: sealed.slabs.iter().map(|s| s.length as u64).sum(),
+            encrypted_metadata_key: sealed.encrypted_metadata_key,
+            encrypted_metadata: sealed.encrypted_metadata,
+            metadata_signature: sealed.metadata_signature,
+            created_at: sealed.created_at,
+            updated_at: sealed.updated_at,
+        }
+    }
+
     pub(crate) async fn shared_stats(&self, sharing_key: &PrivateKey) -> Result<KeyStats, Error> {
         let state = self.state.read().unwrap();
         let record = Self::shared(&state, sharing_key)?.response();
@@ -679,19 +714,14 @@ impl Client {
         sharing_key: &PrivateKey,
         offset: Option<u64>,
         limit: Option<u64>,
-    ) -> Result<Vec<SealedObjectSummary>, Error> {
+    ) -> Result<Vec<SealedSharedObjectSummary>, Error> {
         let state = self.state.read().unwrap();
         Ok(Self::shared(&state, sharing_key)?
             .page(offset, limit)
             .into_iter()
-            .map(|sealed| SealedObjectSummary {
+            .map(|sealed| SealedSharedObjectSummary {
                 object_id: sealed.id(),
-                size: sealed.slabs.iter().map(|s| s.length as u64).sum(),
-                encrypted_metadata_key: sealed.encrypted_metadata_key,
-                encrypted_metadata: sealed.encrypted_metadata,
-                metadata_signature: sealed.metadata_signature,
-                created_at: sealed.created_at,
-                updated_at: sealed.updated_at,
+                object: Self::summarize(sealed),
             })
             .collect())
     }

@@ -368,6 +368,15 @@ pub struct ObjectEvent {
     pub object: Option<Arc<PinnedObject>>,
 }
 
+/// An `ObjectEvent` listed without the object's slabs.
+#[derive(uniffi::Record)]
+pub struct ObjectEventSummary {
+    pub id: String,
+    pub deleted: bool,
+    pub updated_at: SystemTime,
+    pub object: Option<ObjectSummary>,
+}
+
 /// Information about a storage provider on the
 /// Sia network.
 #[derive(uniffi::Record)]
@@ -553,6 +562,17 @@ impl From<sia_storage::ObjectsCursor> for ObjectsCursor {
             id: c.id.to_string(),
             after: c.after.into(),
         }
+    }
+}
+
+impl TryFrom<ObjectsCursor> for sia_storage::ObjectsCursor {
+    type Error = HexParseError;
+
+    fn try_from(c: ObjectsCursor) -> Result<Self, Self::Error> {
+        Ok(Self {
+            after: c.after.into(),
+            id: Hash256::from_str(c.id.as_str())?,
+        })
     }
 }
 
@@ -1095,13 +1115,8 @@ impl Sdk {
         cursor: Option<ObjectsCursor>,
         limit: u32,
     ) -> Result<Vec<ObjectEvent>, Error> {
-        let cursor = match cursor {
-            Some(c) => Some(sia_storage::ObjectsCursor {
-                after: c.after.into(),
-                id: Hash256::from_str(c.id.as_str())?,
-            }),
-            None => None,
-        };
+        let cursor: Option<sia_storage::ObjectsCursor> =
+            cursor.map(|c| c.try_into()).transpose()?;
         let sdk = self.inner.clone();
         spawn(async move {
             let objects = sdk
@@ -1121,6 +1136,38 @@ impl Sdk {
                     })
                 })
                 .collect::<Result<Vec<ObjectEvent>, SealedObjectError>>()?;
+            Ok(objects)
+        })
+        .await?
+    }
+
+    /// Returns objects stored in the indexer without their slabs, which is
+    /// much smaller and faster than `object_events`. Paginate with `cursor`
+    /// as for `object_events`.
+    ///
+    /// # Arguments
+    /// * `cursor` can be used to paginate through the results. If `cursor` is `None`, the first page of results will be returned.
+    /// * `limit` specifies the maximum number of objects to return.
+    pub async fn object_event_summaries(
+        &self,
+        cursor: Option<ObjectsCursor>,
+        limit: u32,
+    ) -> Result<Vec<ObjectEventSummary>, Error> {
+        let cursor: Option<sia_storage::ObjectsCursor> =
+            cursor.map(|c| c.try_into()).transpose()?;
+        let sdk = self.inner.clone();
+        spawn(async move {
+            let objects = sdk
+                .object_event_summaries(cursor, Some(limit as usize))
+                .await?
+                .into_iter()
+                .map(|event| ObjectEventSummary {
+                    id: event.id.to_string(),
+                    deleted: event.deleted,
+                    updated_at: event.updated_at.into(),
+                    object: event.object.map(ObjectSummary::from),
+                })
+                .collect();
             Ok(objects)
         })
         .await?
