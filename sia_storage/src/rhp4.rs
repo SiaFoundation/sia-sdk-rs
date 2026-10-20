@@ -2,14 +2,15 @@ use std::ops::Range;
 
 use bytes::Bytes;
 use sia_core::encoding;
+use sia_core::rhp4::HostPrices;
 use sia_core::rhp4::protocol::Error as RHP4Error;
-use sia_core::rhp4::{AccountToken, HostPrices};
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
 use thiserror::Error;
 
 use crate::time::Duration;
+use crate::tokens::AccountTokenSource;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod siamux;
@@ -109,7 +110,7 @@ impl Transport for Client {
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
-        token: AccountToken,
+        tokens: &AccountTokenSource,
         root: Hash256,
         range: Range<usize>,
         idle_timeout: Duration,
@@ -117,17 +118,17 @@ impl Transport for Client {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
             Self::SiaMux(c) => {
-                c.read_sector(host, prices, token, root, range, idle_timeout)
+                c.read_sector(host, prices, tokens, root, range, idle_timeout)
                     .await
             }
             #[cfg(target_arch = "wasm32")]
             Self::WebTransport(c) => {
-                c.read_sector(host, prices, token, root, range, idle_timeout)
+                c.read_sector(host, prices, tokens, root, range, idle_timeout)
                     .await
             }
             #[cfg(any(test, feature = "mock"))]
             Self::Mock(c) => {
-                c.read_sector(host, prices, token, root, range, idle_timeout)
+                c.read_sector(host, prices, tokens, root, range, idle_timeout)
                     .await
             }
         }
@@ -153,6 +154,9 @@ pub enum Error {
 
     #[error("transport error: {0}")]
     Transport(String),
+
+    #[error("no account token for host: {0}")]
+    NoToken(PublicKey),
 }
 
 impl Clone for Error {
@@ -164,6 +168,7 @@ impl Clone for Error {
             Self::InvalidPrices => Self::InvalidPrices,
             Self::InvalidSignature => Self::InvalidSignature,
             Self::Transport(s) => Self::Transport(s.clone()),
+            Self::NoToken(host) => Self::NoToken(*host),
         }
     }
 }
@@ -221,7 +226,7 @@ pub(crate) trait Transport: Clone + Unpin + MaybeSendSync + 'static {
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
-        token: AccountToken,
+        tokens: &AccountTokenSource,
         root: Hash256,
         range: Range<usize>,
         idle_timeout: Duration,

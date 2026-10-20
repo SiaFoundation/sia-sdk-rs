@@ -254,22 +254,11 @@ impl SlabRecovery<AwaitingRecovery> {
             // visible to concurrent `prioritize` calls, then dropped here on
             // either success or error.
             let _inflight = inflight;
-            // No RPC is attempted without a token, so nothing has elapsed.
-            let token = match tokens.token(task.sector.host_key) {
-                Ok(token) => token,
-                Err(error) => {
-                    return DownloadResult {
-                        task,
-                        elapsed: Duration::ZERO,
-                        result: Err(error),
-                    };
-                }
-            };
             let start = Instant::now();
             let result = client
                 .read_sector(
                     task.sector.host_key,
-                    token,
+                    &tokens,
                     task.sector.root,
                     sector_offset,
                     sector_length,

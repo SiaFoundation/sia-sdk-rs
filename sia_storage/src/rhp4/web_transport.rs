@@ -33,6 +33,7 @@ use wasm_bindgen_futures::JsFuture;
 use crate::time::{Duration, Instant, sleep, timeout};
 
 use super::{Error, HostEndpoint, Transport};
+use crate::tokens::AccountTokenSource;
 
 #[wasm_bindgen]
 extern "C" {
@@ -507,13 +508,16 @@ impl Transport for Client {
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
-        token: AccountToken,
+        tokens: &AccountTokenSource,
         root: Hash256,
         range: Range<usize>,
         idle_timeout: Duration,
     ) -> Result<(Bytes, Duration), Error> {
         let conn = self.connection(host).await?;
         let mut stream = conn.open_stream().await?;
+        let token = tokens
+            .token(host.public_key)
+            .map_err(|_| Error::NoToken(host.public_key))?;
         stream.set_idle_timeout(Some(idle_timeout));
         let mut buf = Vec::new();
         let req =

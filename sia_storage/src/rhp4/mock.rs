@@ -6,13 +6,14 @@ use std::sync::{Arc, RwLock};
 use bytes::Bytes;
 use chrono::Utc;
 use sia_core::encoding;
+use sia_core::rhp4::HostPrices;
 use sia_core::rhp4::protocol::Error as ProtocolError;
-use sia_core::rhp4::{AccountToken, HostPrices};
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::{Currency, Hash256};
 
 use super::{Error as RHP4Error, HostEndpoint, Transport};
 use crate::time::{Duration, Instant, sleep};
+use crate::tokens::AccountTokenSource;
 
 #[derive(Clone)]
 pub struct Client {
@@ -198,7 +199,7 @@ impl Transport for Client {
         &self,
         host: &HostEndpoint,
         _: HostPrices,
-        _: AccountToken,
+        tokens: &AccountTokenSource,
         root: Hash256,
         range: Range<usize>,
         idle_timeout: Duration,
@@ -209,6 +210,9 @@ impl Transport for Client {
         }
         let start = Instant::now();
         self.stall(&host.public_key, idle_timeout).await?;
+        tokens
+            .token(host.public_key)
+            .map_err(|_| RHP4Error::NoToken(host.public_key))?;
 
         let fail = {
             let mut failures = self.read_failures.write().unwrap();
