@@ -10,8 +10,10 @@ Sia is a decentralized cloud storage platform where data is stored across a glob
 |-------|-------------|
 | [`sia_core`](sia_core/) | Core Sia types: addresses, keys, transactions, encoding, and the RHP4 protocol. |
 | [`sia_storage`](sia_storage/) | High-level SDK for uploading and downloading data through an indexer. |
+| [`sia_storage_cabi`](sia_storage_cabi/) | Raw C ABI for `sia_storage`, shaped for cgo and consumed by [`go.sia.tech/siastorage`](https://github.com/SiaFoundation/sia-storage-go). |
 | [`sia_storage_ffi`](sia_storage_ffi/) | UniFFI bindings for `sia_storage`, targeting Swift, Kotlin, and Python. |
 | [`sia_storage_napi`](sia_storage_napi/) | Node.js bindings for `sia_storage` via N-API. |
+| [`sia_storage_wasm`](sia_storage_wasm/) | WebAssembly bindings for `sia_storage`, targeting the browser via wasm-bindgen. |
 | [`sia_mux`](sia_mux/) | Multiplexed stream transport used by the RHP4 protocol. |
 
 ## Status
