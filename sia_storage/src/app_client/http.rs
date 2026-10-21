@@ -618,7 +618,23 @@ impl Client {
 fn http_client() -> reqwest::Client {
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, HeaderValue::from_static(ACCEPT_CBOR));
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder();
+    #[cfg(target_os = "android")]
+    let builder = {
+        // Bundled roots avoid the platform verifier's Android JNI initialization.
+        let roots =
+            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let mut tls = rustls::ClientConfig::builder_with_provider(
+            rustls::crypto::aws_lc_rs::default_provider().into(),
+        )
+        .with_safe_default_protocol_versions()
+        .expect("TLS protocol versions are valid")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        builder.tls_backend_preconfigured(tls)
+    };
+    builder
         .default_headers(headers)
         .build()
         .expect("http client configuration is valid")
