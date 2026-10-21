@@ -1,3 +1,33 @@
+## 0.13.2 (2026-10-21)
+
+### Features
+
+#### List object events without slabs
+
+Add `Sdk::object_event_summaries` (`objectEventSummaries` in JavaScript), which lists the same object events as `Sdk::object_events` without the objects' slabs, making the response much smaller. Each event has an `ObjectSummary` with the object's id, size, decrypted metadata and timestamps, and paginates with the same cursor. Fetch the full object with `Sdk::object` to download it.
+
+### Fixes
+
+- Stop sending a chunk's trailing frame in a packet of its own
+
+#### Fix connecting to hosts that announce an IPv6 address
+
+An announced address is `host:port` with an IPv6 host bracketed. The siamux client split it on the last colon, which left the brackets attached to the host, and `getaddrinfo` rejects those, so every IPv6 host failed to resolve and no shard could reach it. The address is now resolved whole.
+
+#### Fix a crash reading a slab with a host the SDK does not know
+
+A slab whose sectors include a host missing from the SDK's host list, such as one an indexer stopped listing, crashed the download with "index out of bounds: the len is 29 but the index is 29". Sectors on unknown hosts are dropped before reading, and the array the recovered shards are stored in was sized from the sectors left rather than from the slab's shard count, while each shard is stored at its index in the slab. A read from the host at the slab's last index then wrote past the end. In a browser the panic stops the WebAssembly module, so every stream in the page froze with no error. The array is now sized from the slab's shard count.
+
+#### Take a read's account token once the stream to the host is open
+
+A sector read took its account token before reaching the host. When reaching the host took a long time, as in a browser delaying WebTransport connections after failed handshakes, the token expired on the way and the host rejected the read with "account token expired". The transports now take the token from the token source after the stream to the host is open.
+
+#### Upgrade reqwest and update TLS security dependencies
+
+Upgrade reqwest to 0.13.5, using platform certificate verification on native platforms except Android. Android uses a preconfigured Rustls client with bundled roots to avoid requiring JNI initialization. Browser builds continue using browser TLS.
+
+Update `webpki-roots` to 1.0.10 and `rustls-webpki` to 0.103.16 in the lockfile to address RUSTSEC-2026-0381 and RUSTSEC-2026-0382.
+
 ## 0.13.1 (2026-10-10)
 
 ### Fixes

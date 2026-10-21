@@ -1,3 +1,9 @@
+## 0.1.5 (2026-10-21)
+
+### Fixes
+
+- Stop sending a chunk's trailing frame in a packet of its own
+
 ## 0.1.4 (2026-10-09)
 
 ### Features

@@ -1,12 +1,12 @@
----
-sia_storage: patch
-sia_storage_cabi: patch
-sia_storage_ffi: patch
-sia_storage_napi: patch
-sia_storage_wasm: patch
----
+## 0.1.1 (2026-10-21)
 
-# Upgrade reqwest and update TLS security dependencies
+### Features
+
+- Added a C ABI for the storage SDK.
+
+### Fixes
+
+#### Upgrade reqwest and update TLS security dependencies
 
 Upgrade reqwest to 0.13.5, using platform certificate verification on native platforms except Android. Android uses a preconfigured Rustls client with bundled roots to avoid requiring JNI initialization. Browser builds continue using browser TLS.
 
