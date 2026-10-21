@@ -18,6 +18,8 @@ use crate::time::Duration;
 use super::{Error as TransportError, Transport};
 use sia_core::rhp4::protocol::{RPCReadSector, RPCSettings, RPCWriteSector};
 use sia_core::rhp4::{AccountToken, HostPrices};
+
+use crate::tokens::AccountTokenSource;
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::Protocol;
@@ -227,12 +229,15 @@ impl Transport for Client {
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
-        token: AccountToken,
+        tokens: &AccountTokenSource,
         root: Hash256,
         range: Range<usize>,
         idle_timeout: Duration,
     ) -> Result<(Bytes, Duration), TransportError> {
         let mut stream = self.host_stream(host).await?;
+        let token = tokens
+            .token(host.public_key)
+            .map_err(|_| TransportError::NoToken(host.public_key))?;
         stream.set_idle_timeout(Some(idle_timeout));
         let start = Instant::now();
         let resp =

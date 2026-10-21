@@ -7,7 +7,7 @@ use chrono::Utc;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnNull, serde_as};
-use sia_core::rhp4::{AccountToken, HostPrices, SECTOR_SIZE};
+use sia_core::rhp4::{HostPrices, SECTOR_SIZE};
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
@@ -18,6 +18,7 @@ use crate::hosts::metrics::{HostMetric, HostScore, RPCAverage, Transfer};
 use crate::rhp4::{Client, HostEndpoint, Transport};
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Instant};
+use crate::tokens::AccountTokenSource;
 use crate::{AppKey, app_client};
 
 mod metrics;
@@ -605,7 +606,7 @@ impl Hosts {
     pub async fn read_sector(
         &self,
         host_key: PublicKey,
-        token: AccountToken,
+        tokens: &AccountTokenSource,
         root: Hash256,
         offset: usize,
         length: usize,
@@ -619,13 +620,19 @@ impl Hosts {
             .read_sector(
                 &host,
                 prices,
-                token,
+                tokens,
                 root,
                 offset..offset + length,
                 idle_timeout,
             )
             .await
-            .inspect_err(|_| self.hosts.add_failure(host_key))?;
+            .map_err(|e| match e {
+                crate::rhp4::Error::NoToken(host) => RPCError::NoToken(host),
+                e => {
+                    self.hosts.add_failure(host_key);
+                    e.into()
+                }
+            })?;
         self.record_read_sample(host_key, bytes, elapsed);
         Ok(data)
     }
@@ -885,7 +892,7 @@ mod test {
         let err = hosts
             .read_sector(
                 read_host,
-                AccountToken::new(&account, read_host),
+                &AccountTokenSource::from(Arc::new(AppKey::import([7u8; 32]))),
                 Hash256::new([0u8; 32]),
                 0,
                 4096,
