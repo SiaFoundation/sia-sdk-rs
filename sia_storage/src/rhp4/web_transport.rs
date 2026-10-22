@@ -32,6 +32,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::time::{Duration, Instant, sleep, timeout};
 
+use super::dial_failures::DialFailures;
 use super::{Error, HostEndpoint, Transport};
 use crate::tokens::AccountTokenSource;
 
@@ -150,7 +151,7 @@ async fn connect(addr: &str) -> Result<Connection, Error> {
 
     let options = web_sys::WebTransportOptions::new();
     let wt = web_sys::WebTransport::new_with_options(&url, &options).map_err(|e| {
-        Error::Transport(format!("WebTransport constructor: {}", js_err_message(&e)))
+        Error::DialRefused(format!("WebTransport constructor: {}", js_err_message(&e)))
     })?;
 
     let conn = Connection { transport: wt };
@@ -176,7 +177,7 @@ async fn connect(addr: &str) -> Result<Connection, Error> {
 
     JsFuture::from(conn.transport.ready())
         .await
-        .map_err(|e| Error::Transport(format!("WebTransport ready: {}", js_err_message(&e))))?;
+        .map_err(|e| Error::DialRefused(format!("WebTransport ready: {}", js_err_message(&e))))?;
 
     debug!("[WT] connected to {url}");
     Ok(conn)
@@ -368,6 +369,7 @@ type PoolEntry = watch::Receiver<DialOutcome>;
 pub struct Client {
     pool: Rc<RefCell<HashMap<PublicKey, PoolEntry>>>,
     dial_sema: Rc<Semaphore>,
+    failures: Rc<RefCell<DialFailures>>,
 }
 
 impl Default for Client {
@@ -381,6 +383,7 @@ impl Client {
         Client {
             pool: Rc::new(RefCell::new(HashMap::new())),
             dial_sema: Rc::new(Semaphore::new(MAX_PENDING_CONNS)),
+            failures: Rc::new(RefCell::new(DialFailures::default())),
         }
     }
 
@@ -413,6 +416,19 @@ impl Client {
                 "no QUIC/WebTransport address for host {key}"
             )));
         }
+        let now = Instant::now();
+        let addresses: Vec<String> = {
+            let mut failures = self.failures.borrow_mut();
+            addresses
+                .into_iter()
+                .filter(|addr| !failures.in_backoff(addr, now))
+                .collect()
+        };
+        if addresses.is_empty() {
+            return Err(Error::DialRefused(format!(
+                "every address of host {key} refused a handshake in the last five minutes"
+            )));
+        }
 
         let (tx, rx) = watch::channel(None);
         self.pool.borrow_mut().insert(key, rx.clone());
@@ -441,6 +457,16 @@ impl Client {
             .map_err(|e| Error::Transport(format!("dial semaphore closed: {e}")))?;
         let mut last_err = None;
         for addr in addresses {
+            // Checked again here, after waiting for a dial slot, for an address
+            // listed twice or refused while this dial waited.
+            if self.failures.borrow_mut().in_backoff(addr, Instant::now()) {
+                last_err = Some(Error::DialRefused(format!(
+                    "{addr} refused a handshake in the last five minutes"
+                )));
+                continue;
+            }
+            // A timeout is not recorded. Chrome can hold a healthy host back
+            // for up to a minute while it is counting earlier failures.
             let result = timeout(CONNECT_TIMEOUT, connect(addr))
                 .await
                 .unwrap_or_else(|_| Err(Error::Transport("WebTransport connect: timeout".into())));
@@ -448,6 +474,9 @@ impl Client {
                 Ok(conn) => return Ok(Rc::new(conn)),
                 Err(e) => {
                     debug!("[WT] connect to {addr} failed: {e}");
+                    if matches!(e, Error::DialRefused(_)) {
+                        self.failures.borrow_mut().record(addr, Instant::now());
+                    }
                     last_err = Some(e);
                 }
             }
@@ -568,6 +597,58 @@ mod tests {
 
     /// Idle limit for tests that must not time out.
     const IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+
+    #[wasm_bindgen_test]
+    async fn test_refused_address_is_not_dialed_again() {
+        // The space makes the URL invalid, so the browser rejects the session at once.
+        let address = "not a host:9984";
+        let host = HostEndpoint {
+            public_key: PrivateKey::from_seed(&[1u8; 32]).public_key(),
+            addresses: vec![sia_core::types::v2::NetAddress {
+                protocol: Protocol::QUIC,
+                address: address.to_string(),
+            }],
+        };
+        let client = Client::new();
+
+        assert!(client.connection(&host).await.is_err());
+        assert!(
+            client
+                .failures
+                .borrow_mut()
+                .in_backoff(address, Instant::now())
+        );
+        match client.dial(&host) {
+            Err(Error::DialRefused(_)) => {}
+            Err(e) => panic!("expected DialRefused, got {e}"),
+            Ok(_) => panic!("the refused address was dialed again"),
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_address_listed_twice_is_dialed_once() {
+        let address = "not a host either:9984";
+        let quic = || sia_core::types::v2::NetAddress {
+            protocol: Protocol::QUIC,
+            address: address.to_string(),
+        };
+        let host = HostEndpoint {
+            public_key: PrivateKey::from_seed(&[2u8; 32]).public_key(),
+            addresses: vec![quic(), quic()],
+        };
+        let client = Client::new();
+
+        // The second copy is skipped once the first is refused, so the error is the skip's.
+        let err = client
+            .connection(&host)
+            .await
+            .err()
+            .expect("the dial fails");
+        assert!(
+            err.to_string().contains("in the last five minutes"),
+            "the second copy was dialed: {err}"
+        );
+    }
 
     /// Creates a Stream backed by separate read/write TransformStreams.
     /// Returns (stream, feeder_for_reads, reader_for_writes).
