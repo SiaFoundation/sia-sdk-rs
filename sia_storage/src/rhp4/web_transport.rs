@@ -89,16 +89,16 @@ impl Drop for Connection {
 
 impl Connection {
     async fn open_stream(&self) -> Result<Stream, Error> {
-        let bidi: web_sys::WebTransportBidirectionalStream = timeout(
-            OPEN_STREAM_TIMEOUT,
-            JsFuture::from(self.transport.create_bidirectional_stream()),
-        )
-        .await
-        .map_err(|_| Error::Transport("createBidirectionalStream: timeout".into()))?
-        .map_err(|e| {
-            Error::Transport(format!("createBidirectionalStream: {}", js_err_message(&e)))
-        })?
-        .unchecked_into();
+        let promise = self.transport.create_bidirectional_stream();
+        let mut pending = PendingStream(Some(promise.clone()));
+        let bidi: web_sys::WebTransportBidirectionalStream =
+            timeout(OPEN_STREAM_TIMEOUT, JsFuture::from(promise))
+                .await
+                .map_err(|_| Error::Transport("createBidirectionalStream: timeout".into()))?
+                .map_err(|e| {
+                    Error::Transport(format!("createBidirectionalStream: {}", js_err_message(&e)))
+                })?
+                .unchecked_into();
         let reader = bidi
             .readable()
             .get_reader()
@@ -107,7 +107,28 @@ impl Connection {
             .writable()
             .get_writer()
             .map_err(|e| Error::Transport(format!("get_writer: {}", js_err_message(&e))))?;
+        pending.0 = None;
         Ok(Stream::new(reader, writer))
+    }
+}
+
+/// Closes a stream whose open was abandoned. Without this, a stream that
+/// resolves after a timeout or a cancelled read stays open on the session.
+struct PendingStream(Option<js_sys::Promise<web_sys::WebTransportBidirectionalStream>>);
+
+impl Drop for PendingStream {
+    fn drop(&mut self) {
+        let Some(promise) = self.0.take() else {
+            return;
+        };
+        wasm_bindgen_futures::spawn_local(async move {
+            let Ok(bidi) = JsFuture::from(promise).await else {
+                return;
+            };
+            let write = JsFuture::from(bidi.writable().abort());
+            let read = JsFuture::from(bidi.readable().cancel());
+            let _ = tokio::join!(write, read);
+        });
     }
 }
 
