@@ -52,10 +52,15 @@ impl Drop for WaitingGuard {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+type SharedHostQueue = Arc<Mutex<HostQueue>>;
+#[cfg(target_arch = "wasm32")]
+type SharedHostQueue = std::rc::Rc<Mutex<HostQueue>>;
+
 struct ShardUpload {
     limiter: Arc<UploadLimiter>,
     client: Hosts,
-    hosts: Arc<Mutex<HostQueue>>,
+    hosts: SharedHostQueue,
     account_key: Arc<AppKey>,
     data: Bytes,
     slab_index: usize,
@@ -75,13 +80,13 @@ struct SectorUploadResult {
 /// Holds a host until the shard accepts its result. Dropping it returns
 /// the host to the pool without charging an attempt.
 struct HostGuard {
-    hosts: Arc<Mutex<HostQueue>>,
+    hosts: SharedHostQueue,
     host_key: Option<PublicKey>,
     inflight: Option<InflightGuard>,
 }
 
 impl HostGuard {
-    fn new(hosts: Arc<Mutex<HostQueue>>, host_key: PublicKey, inflight: InflightGuard) -> Self {
+    fn new(hosts: SharedHostQueue, host_key: PublicKey, inflight: InflightGuard) -> Self {
         Self {
             hosts,
             host_key: Some(host_key),
@@ -423,7 +428,6 @@ impl ShardUpload {
                                     "slab {} shard {} upload to host {beaten} lost a race",
                                     self.slab_index, self.shard_index
                                 );
-                                self.client.add_failure(beaten);
                             }
                             return Ok(result);
                         }
@@ -697,8 +701,7 @@ impl Upload {
                 // duplicate sectors break redundancy and the indexer rejects
                 // them. Failed hosts can still be re-picked, up to the slab's
                 // attempt cap.
-                let hosts: Arc<Mutex<HostQueue>> =
-                    Arc::new(Mutex::new(client.upload_queue(total_shards)));
+                let hosts = SharedHostQueue::new(Mutex::new(client.upload_queue(total_shards)));
                 let mut shard_tasks: JoinSet<Result<SectorUploadResult, UploadError>> =
                     JoinSet::new();
                 for ((shard_index, data), waiting_guard) in
@@ -1069,7 +1072,8 @@ fn slab_at_offset(slabs: &[Slab], offset: u64) -> (usize, u64) {
 mod tests {
     use super::*;
     use crate::Host;
-    use crate::rhp4::{Client, mock};
+    use crate::client::Client;
+    use crate::rhp4::mock;
     use bytes::BytesMut;
     use rand::Rng;
     use reqwest::StatusCode;
@@ -1119,7 +1123,7 @@ mod tests {
     /// 50ms floor so a racer (when allowed) beats the slow host comfortably.
     fn racing_setup(slow_delay: Duration) -> (Hosts, Arc<AppKey>, PublicKey) {
         let transport = mock::Client::new();
-        let hosts_manager = Hosts::new(Client::Mock(transport.clone()));
+        let hosts_manager = Hosts::new(Client::from_mock(transport.clone()));
         let app_key = Arc::new(AppKey::import(rand::random()));
         let fast: Vec<PublicKey> = (0..FAST_HOSTS)
             .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
@@ -1150,7 +1154,7 @@ mod tests {
         ShardUpload {
             limiter: Arc::new(UploadLimiter::new(4, 2, 4)),
             client: hosts_manager.clone(),
-            hosts: Arc::new(Mutex::new(hosts_manager.upload_queue(pending_initial))),
+            hosts: SharedHostQueue::new(Mutex::new(hosts_manager.upload_queue(pending_initial))),
             account_key: app_key.clone(),
             data: Bytes::from(vec![0u8; SECTOR_SIZE]),
             slab_index: 0,
@@ -1342,18 +1346,15 @@ mod tests {
 
     #[sia_core_derive::cross_target_test]
     async fn test_upload_race_when_idle() {
-        assert_race_penalizes_initial_host(false).await;
+        assert_race_restores_initial_host(false).await;
     }
 
     #[sia_core_derive::cross_target_test]
-    async fn test_upload_race_penalizes_retry() {
-        assert_race_penalizes_initial_host(true).await;
+    async fn test_upload_race_restores_retry() {
+        assert_race_restores_initial_host(true).await;
     }
 
-    /// Checks the beaten initial host is demoted below hosts that
-    /// delivered. When `failed_initial` is set, the beaten attempt is a
-    /// retry.
-    async fn assert_race_penalizes_initial_host(failed_initial: bool) {
+    async fn assert_race_restores_initial_host(failed_initial: bool) {
         let (hosts_manager, app_key, slow) = racing_setup(Duration::from_millis(600));
         if failed_initial {
             // The broken host picks first and fails, so its retry gets raced.
@@ -1393,7 +1394,6 @@ mod tests {
         let mut hosts = hosts.lock().unwrap();
         let remaining: Vec<_> = std::iter::from_fn(|| hosts.pick()).collect();
         assert_eq!(remaining.len(), FAST_HOSTS + usize::from(failed_initial));
-        assert_ne!(remaining[0].0, slow, "the beaten host should be penalized");
         assert!(remaining.iter().any(|(host_key, _)| *host_key == slow));
         assert!(
             remaining
@@ -1522,7 +1522,7 @@ mod tests {
     ) -> (Object, Object) {
         let options = UploadOptions::default();
         let transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -1723,7 +1723,7 @@ mod tests {
         ] {
             let options = opts(3, 9);
             let total_shards = options.data_shards as usize + options.parity_shards as usize;
-            let hosts = Hosts::new(Client::Mock(mock::Client::new()));
+            let hosts = Hosts::new(Client::from_mock(mock::Client::new()));
             hosts.update(
                 (0..total_shards * 2)
                     .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
@@ -1764,7 +1764,7 @@ mod tests {
     #[sia_core_derive::cross_target_test]
     async fn test_upload_pins_every_slab() {
         let transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
@@ -1803,7 +1803,7 @@ mod tests {
         let options = opts(3, 9);
         let total_shards = options.data_shards as usize + options.parity_shards as usize;
         let transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(transport));
+        let hosts = Hosts::new(Client::from_mock(transport));
         // Two host sets let the reupload use previously unsampled hosts.
         hosts.update(
             (0..total_shards * 2)
@@ -1902,7 +1902,7 @@ mod tests {
         let options = opts(3, 9);
         let total_shards = options.data_shards as usize + options.parity_shards as usize;
         let transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(transport));
+        let hosts = Hosts::new(Client::from_mock(transport));
         hosts.update(
             (0..total_shards * 2)
                 .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))

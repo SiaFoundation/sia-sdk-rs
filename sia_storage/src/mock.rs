@@ -3,7 +3,8 @@ use std::sync::Arc;
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::v2::{NetAddress, Protocol};
 
-use crate::rhp4::{Client, mock};
+use crate::client::Client;
+use crate::rhp4::mock;
 use crate::time::Duration;
 use crate::{AppKey, BuilderError, Host, Sdk, SharedSdk, SharingKey, app_client};
 
@@ -14,13 +15,16 @@ use crate::{AppKey, BuilderError, Host, Sdk, SharedSdk, SharingKey, app_client};
 pub struct MockNetwork {
     api: app_client::mock::Client,
     transport: mock::Client,
+    client: Client,
 }
 
 impl MockNetwork {
     pub fn new() -> Self {
+        let transport = mock::Client::new();
         Self {
             api: app_client::mock::Client::new(),
-            transport: mock::Client::new(),
+            client: Client::from_mock(transport.clone()),
+            transport,
         }
     }
 
@@ -86,7 +90,7 @@ impl MockNetwork {
     pub async fn sdk(&self, app_key: AppKey) -> Result<Sdk, BuilderError> {
         Sdk::with_backends(
             app_client::Client::Mock(self.api.clone()),
-            Client::Mock(self.transport.clone()),
+            self.client.clone(),
             Arc::new(app_key),
         )
         .await
@@ -97,7 +101,7 @@ impl MockNetwork {
     pub async fn shared_sdk(&self, seed: [u8; 32]) -> Result<SharedSdk, BuilderError> {
         SharedSdk::with_backends(
             app_client::Client::Mock(self.api.clone()),
-            Client::Mock(self.transport.clone()),
+            self.client.clone(),
             SharingKey::import(seed),
         )
         .await

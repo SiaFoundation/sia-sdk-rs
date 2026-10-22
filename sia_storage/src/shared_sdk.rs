@@ -8,8 +8,8 @@ use sia_core::signing::PublicKey;
 use sia_core::types::Hash256;
 
 use crate::app_client::IntoUrl;
+use crate::client::{Client, default_client};
 use crate::hosts::{Host, Hosts};
-use crate::rhp4::{Client, default_client};
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, sleep};
 use crate::tokens::AccountTokenSource;
