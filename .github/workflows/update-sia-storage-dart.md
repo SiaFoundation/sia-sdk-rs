@@ -266,24 +266,36 @@ may have left API updates outstanding.
    actually tested. Flutter consumer dependency resolution is checked by the target
    repository's CI; do not claim that check passed locally.
 
-6. **Write the changeset.** When the update changes dependencies, bindings, or the
-   public API, create or update `.changeset/sdk-update.md`, including for
-   dependency-only updates. Follow the target repository's existing changeset
-   format and package keys; if none exists, use:
+6. **Write a changeset for each user-facing change in the upstream release.**
+   Use the SDK changesets consumed by the release as the source of truth for both
+   the description and each change's `major`, `minor`, or `patch` classification.
+   Cover every release between the old and target pins in `/tmp/gh-aw/sdk-update.json`,
+   using each crate's own pin range when they differ. Read the released changelog
+   entries in `/tmp/gh-aw/sia-sdk-rs/` and recover the original `.changeset/` files and
+   frontmatter from git history before the release consumed them. Do not use
+   unreleased changesets or infer the classification from the overall version bump.
+   `/tmp/gh-aw/changelog.md` is only a preview; read the full release entries.
 
-   ```
-   ---
-   default: patch
-   ---
+   For each upstream change that reaches this wrapper's users, create a separate
+   `.changeset/<release>-<change>.md`. Preserve the upstream change's classification
+   for the relevant crate, map its package keys to the target repository's package
+   keys, and adapt the wording only for the exposed language APIs and supported
+   platforms. Use the target repository's changeset format (`default` as the package
+   key if no existing convention is available). Include inherited fixes and security
+   updates even when no wrapper code changes. Deduplicate the same change appearing
+   in multiple crate changelogs, and omit changes that do not affect this wrapper.
+   Explain omissions or any classification adjustment in the PR body. If the original
+   classification cannot be recovered, report that explicitly instead of silently
+   defaulting to `patch`.
 
-   #### Update sia_storage to vX.Y.Z
-   ```
-
-   Use the target version from `/tmp/gh-aw/sdk-update.json`. Use `minor` instead
-   of `patch` when the update adds public Dart APIs. Describe the user-facing
-   changes in prose. Preserve unrelated existing entries and avoid duplicating
-   an entry for the same release. Leave package versions and the release-managed
-   changelog unchanged.
+   Do not replace these entries with a generic dependency-update changeset. Preserve
+   unrelated existing changesets. If an automated pin bump already created a generic
+   `.changeset/sdk-update.md` for this release, replace that entry with the individual
+   release-derived entries; reuse any matching entries that already exist. Changeset
+   files are an exception to the rule against adding new files. Describe any additional
+   user-facing wrapper changes separately: `major` for breaking changes, `minor` for
+   backward-compatible additions, and `patch` for backward-compatible fixes. Leave
+   package versioning to the existing release process.
 
 7. **Check scope.** Run `git status` and `git diff --check`. Keep only changes under
    the allowed paths above. Do not change `.github/` workflows or release configuration.
