@@ -138,11 +138,7 @@ mod imp {
         fn rpc(runtime: &Runtime, host: &HostEndpoint) {
             let err = runtime
                 .block_on(async {
-                    timeout(
-                        Duration::from_secs(5),
-                        default_client().host_prices(host, Duration::from_secs(5)),
-                    )
-                    .await
+                    timeout(Duration::from_secs(5), default_client().host_prices(host)).await
                 })
                 .expect("rpc hung")
                 .expect_err("server always answers with an error");

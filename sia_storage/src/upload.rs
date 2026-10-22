@@ -8,7 +8,7 @@ use crate::app_client::{self, SectorPinParams, SlabPinParams};
 use crate::congestion::{InflightController, SamplePermit};
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
-use crate::hosts::{HostQueue, InflightGuard, QueueError, RPC_IDLE_TIMEOUT, RPCError};
+use crate::hosts::{HostQueue, InflightGuard, QueueError, RPCError};
 use crate::slabs::SlabVersion;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Instant, sleep};
@@ -312,7 +312,6 @@ impl ShardUpload {
         &self,
         tasks: &mut JoinSet<ShardAttempt>,
         host: HostGuard,
-        idle_timeout: Duration,
         permit: UploadPermit,
     ) {
         let client = self.client.clone();
@@ -330,9 +329,7 @@ impl ShardUpload {
             let sample = limiter.sample();
             let start = Instant::now();
             let uploaded_at = Utc::now();
-            let result = client
-                .write_sector(host_key, &account_key.0, data, idle_timeout)
-                .await;
+            let result = client.write_sector(host_key, &account_key.0, data).await;
             let elapsed = start.elapsed();
             // one failed completion, which a window sized to the limit
             // dilutes; enough hosts stalling at once is the pipeline
@@ -409,7 +406,7 @@ impl ShardUpload {
         // Host of the lone attempt in flight, the only one a racer can beat.
         // Cleared once it completes: a failure is penalized by the RPC itself.
         let mut initial = Some(host.host_key());
-        self.spawn_write(&mut tasks, host, RPC_IDLE_TIMEOUT, permit);
+        self.spawn_write(&mut tasks, host, permit);
         let mut eligible = *waiting_rx.borrow_and_update() == 0;
         let mut last_event = Instant::now();
         let race_timeout = self
@@ -435,7 +432,7 @@ impl ShardUpload {
                             if tasks.is_empty() {
                                 let (host, permit) = self.acquire_host(Some(host)).await?;
                                 initial = Some(host.host_key());
-                                self.spawn_write(&mut tasks, host, RPC_IDLE_TIMEOUT, permit);
+                                self.spawn_write(&mut tasks, host, permit);
                             } else {
                                 let failed = host.into_host_key();
                                 initial = initial.filter(|h| *h != failed);
@@ -456,7 +453,7 @@ impl ShardUpload {
                                 "slab {} shard {} racing slow host with {} after {:?}",
                                 self.slab_index, self.shard_index, host.host_key(), elapsed
                             );
-                            self.spawn_write(&mut tasks, host, RPC_IDLE_TIMEOUT, racer);
+                            self.spawn_write(&mut tasks, host, racer);
                         }
                 },
                 _ = async { let _ = waiting_rx.wait_for(|waiting| *waiting == 0).await; }, if !eligible => {
@@ -1163,7 +1160,8 @@ mod tests {
         }
     }
 
-    #[sia_core_derive::cross_target_test]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test(start_paused = true))]
+    #[cfg_attr(target_arch = "wasm32", sia_core_derive::cross_target_test)]
     async fn test_upload_timeout_penalizes_host_before_swap() {
         let (hosts_manager, app_key, slow) = racing_setup(Duration::from_secs(60));
         let (waiting, _) = watch::channel(0);
@@ -1171,12 +1169,7 @@ mod tests {
         let host = upload.pick_next_host().unwrap();
         assert_eq!(host.host_key(), slow);
         let mut tasks = JoinSet::new();
-        upload.spawn_write(
-            &mut tasks,
-            host,
-            Duration::from_millis(10),
-            upload.limiter.acquire().await,
-        );
+        upload.spawn_write(&mut tasks, host, upload.limiter.acquire().await);
         let Err((host, e)) = tasks.join_next().await.unwrap().unwrap().accept() else {
             panic!("the write should time out");
         };
@@ -1414,12 +1407,7 @@ mod tests {
             let host = upload.pick_next_host().unwrap();
             assert_eq!(host.host_key(), slow);
             let mut tasks = JoinSet::new();
-            upload.spawn_write(
-                &mut tasks,
-                host,
-                RPC_IDLE_TIMEOUT,
-                upload.limiter.acquire().await,
-            );
+            upload.spawn_write(&mut tasks, host, upload.limiter.acquire().await);
             tasks.shutdown().await;
             assert_eq!(*upload.limiter.inflight.lock().unwrap(), 0);
         }
@@ -1430,12 +1418,7 @@ mod tests {
         let fast_host = upload.pick_next_host().unwrap();
         let fast_key = fast_host.host_key();
         let mut tasks = JoinSet::new();
-        upload.spawn_write(
-            &mut tasks,
-            fast_host,
-            RPC_IDLE_TIMEOUT,
-            upload.limiter.acquire().await,
-        );
+        upload.spawn_write(&mut tasks, fast_host, upload.limiter.acquire().await);
         let attempt = tasks.join_next().await.unwrap().unwrap();
         assert!(attempt.result.is_ok());
         assert_eq!(*upload.limiter.inflight.lock().unwrap(), 0);

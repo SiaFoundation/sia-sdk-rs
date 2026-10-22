@@ -22,10 +22,6 @@ use crate::time::{Duration, Instant};
 use crate::tokens::AccountTokenSource;
 use crate::{AppKey, app_client};
 
-/// How long a sector RPC may go without stream progress before the
-/// transport gives up on the host.
-pub(crate) const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(6);
-
 /// Represents a host in the Sia network. The
 /// addresses can be used to connect to the host.
 #[serde_as]
@@ -334,13 +330,12 @@ impl Hosts {
         host_key: PublicKey,
         account_key: &PrivateKey,
         sector: bytes::Bytes,
-        idle_timeout: Duration,
     ) -> Result<Hash256, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        let prices = self.transport.host_prices(&host, idle_timeout).await?;
+        let prices = self.transport.host_prices(&host).await?;
         let root = self
             .transport
-            .write_sector(&host, prices, account_key, sector, idle_timeout)
+            .write_sector(&host, prices, account_key, sector)
             .await?;
         Ok(root)
     }
@@ -356,20 +351,12 @@ impl Hosts {
         root: Hash256,
         offset: usize,
         length: usize,
-        idle_timeout: Duration,
     ) -> Result<bytes::Bytes, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        let prices = self.transport.host_prices(&host, idle_timeout).await?;
+        let prices = self.transport.host_prices(&host).await?;
         let data = self
             .transport
-            .read_sector(
-                &host,
-                prices,
-                tokens,
-                root,
-                offset..offset + length,
-                idle_timeout,
-            )
+            .read_sector(&host, prices, tokens, root, offset..offset + length)
             .await
             .map_err(|e| match e {
                 crate::rhp4::Error::NoToken(host) => RPCError::NoToken(host),
@@ -618,8 +605,8 @@ mod test {
         let account = PrivateKey::from_seed(&[7; 32]);
         let data = bytes::Bytes::from(vec![1; sia_core::rhp4::SECTOR_SIZE]);
         let (a, b) = tokio::join!(
-            first.write_sector(key, &account, data.clone(), RPC_IDLE_TIMEOUT),
-            second.write_sector(key, &account, data.clone(), RPC_IDLE_TIMEOUT),
+            first.write_sector(key, &account, data.clone()),
+            second.write_sector(key, &account, data.clone()),
         );
         assert_eq!(a.unwrap(), b.unwrap());
         assert_eq!(transport.price_requests(), 1);
@@ -628,15 +615,12 @@ mod test {
         drop(first);
         second.update(vec![], true);
         second.update(vec![host], true);
-        second
-            .write_sector(key, &account, data, RPC_IDLE_TIMEOUT)
-            .await
-            .unwrap();
+        second.write_sector(key, &account, data).await.unwrap();
         assert_eq!(transport.price_requests(), 1);
 
         let independent = Client::from_mock(transport.clone());
         independent
-            .host_prices(&second.host_endpoint(key).unwrap(), RPC_IDLE_TIMEOUT)
+            .host_prices(&second.host_endpoint(key).unwrap())
             .await
             .unwrap();
         assert_eq!(transport.price_requests(), 2);
@@ -662,7 +646,7 @@ mod test {
         let account = PrivateKey::from_seed(&[7; 32]);
         let data = bytes::Bytes::from(vec![1; sia_core::rhp4::SECTOR_SIZE]);
         let root = first
-            .write_sector(key, &account, data.clone(), RPC_IDLE_TIMEOUT)
+            .write_sector(key, &account, data.clone())
             .await
             .unwrap();
         assert_eq!(
@@ -674,7 +658,7 @@ mod test {
         let tokens = AccountTokenSource::from(Arc::new(AppKey::import([7; 32])));
         assert_eq!(
             second
-                .read_sector(key, &tokens, root, 0, data.len(), RPC_IDLE_TIMEOUT)
+                .read_sector(key, &tokens, root, 0, data.len())
                 .await
                 .unwrap(),
             data
@@ -721,7 +705,8 @@ mod test {
     ///
     /// Each RPC gets its own host, so each starts unsampled and the assertion
     /// cannot be satisfied by the other RPC's failure.
-    #[sia_core_derive::cross_target_test]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test(start_paused = true))]
+    #[cfg_attr(target_arch = "wasm32", sia_core_derive::cross_target_test)]
     async fn test_sector_rpc_timeout_records_a_host_failure() {
         let write_host = random_pubkey();
         let read_host = random_pubkey();
@@ -750,14 +735,9 @@ mod test {
 
         let account = PrivateKey::from_seed(&[7u8; 32]);
         let err = hosts
-            .write_sector(
-                write_host,
-                &account,
-                bytes::Bytes::from(vec![0u8; 4096]),
-                Duration::from_millis(50),
-            )
+            .write_sector(write_host, &account, bytes::Bytes::from(vec![0u8; 4096]))
             .await
-            .expect_err("a 30 second host cannot answer in 50ms");
+            .expect_err("a 30 second host must exceed the idle timeout");
         assert!(
             matches!(&err, RPCError::Rhp(e) if e.is_timeout()),
             "expected the idle timeout, got {err:?}"
@@ -774,10 +754,9 @@ mod test {
                 Hash256::new([0u8; 32]),
                 0,
                 4096,
-                Duration::from_millis(50),
             )
             .await
-            .expect_err("a 30 second host cannot answer in 50ms");
+            .expect_err("a 30 second host must exceed the idle timeout");
         assert!(
             matches!(&err, RPCError::Rhp(e) if e.is_timeout()),
             "expected the idle timeout, got {err:?}"
@@ -816,9 +795,7 @@ mod test {
         for _ in 0..8 {
             let cache = cache.clone();
             let host = host();
-            join_set_spawn!(set, async move {
-                cache.host_prices(&host, Duration::from_secs(5)).await
-            });
+            join_set_spawn!(set, async move { cache.host_prices(&host).await });
         }
         while let Some(result) = set.join_next().await {
             result.unwrap().expect("price fetch failed");
@@ -826,14 +803,14 @@ mod test {
         assert_eq!(transport.price_requests(), 1);
 
         cache
-            .host_prices(&host(), Duration::from_secs(5))
+            .host_prices(&host())
             .await
             .expect("price fetch failed");
         assert_eq!(transport.price_requests(), 1, "a valid table is reused");
 
         cache.expire_host_prices(host_key);
         cache
-            .host_prices(&host(), Duration::from_secs(5))
+            .host_prices(&host())
             .await
             .expect("price fetch failed");
         assert_eq!(
@@ -853,9 +830,7 @@ mod test {
         for _ in 0..8 {
             let cache = cache.clone();
             let host = host();
-            join_set_spawn!(set, async move {
-                cache.host_prices(&host, Duration::from_secs(5)).await
-            });
+            join_set_spawn!(set, async move { cache.host_prices(&host).await });
         }
         while let Some(result) = set.join_next().await {
             result
@@ -874,7 +849,7 @@ mod test {
         assert!(rate(&hosts) > 0, "the failed RPC must be sampled");
 
         cache
-            .host_prices(&host(), Duration::from_secs(5))
+            .host_prices(&host())
             .await
             .expect("a call after the failure must retry");
         assert_eq!(transport.price_requests(), 4);
@@ -907,9 +882,7 @@ mod test {
         let spawn_fetch = || {
             let cache = cache.clone();
             let host = host();
-            AbortOnDropHandle::new(maybe_spawn!(async move {
-                cache.host_prices(&host, Duration::from_secs(5)).await
-            }))
+            AbortOnDropHandle::new(maybe_spawn!(async move { cache.host_prices(&host).await }))
         };
 
         // the starter is cancelled; the waiter still gets the result of the
@@ -932,7 +905,7 @@ mod test {
         drop(abandoned);
         sleep(Duration::from_millis(300)).await;
         cache
-            .host_prices(&host(), Duration::from_secs(5))
+            .host_prices(&host())
             .await
             .expect("price fetch failed");
         assert_eq!(

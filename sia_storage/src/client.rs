@@ -37,6 +37,13 @@ pub(crate) struct Metrics {
     global_read_avg: RwLock<RPCAverage>,
 }
 
+#[cfg(test)]
+#[derive(Debug, PartialEq)]
+pub(crate) struct TransferRates {
+    pub(crate) read: Option<TransferRate>,
+    pub(crate) write: Option<TransferRate>,
+}
+
 impl Metrics {
     fn with_metric(&self, host: PublicKey, f: impl FnOnce(&mut HostMetric)) {
         f(self.hosts.write().unwrap().entry(host).or_default());
@@ -69,13 +76,35 @@ impl Metrics {
         }
     }
 
-    fn record_result<T>(&self, host: PublicKey, result: Result<T, Error>) -> Result<T, Error> {
+    pub(crate) fn record_result<T>(
+        &self,
+        host: PublicKey,
+        result: Result<T, Error>,
+    ) -> Result<T, Error> {
         match &result {
             Ok(_) => self.with_metric(host, |metric| metric.add_success()),
             Err(Error::NoToken(_)) => {}
             Err(_) => self.with_metric(host, |metric| metric.add_failure()),
         }
         result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failure_rate(&self, host: PublicKey) -> i64 {
+        self.hosts
+            .read()
+            .unwrap()
+            .get(&host)
+            .map(HostMetric::failure_rate)
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transfer_rates(&self) -> TransferRates {
+        TransferRates {
+            read: self.global_read_avg.read().unwrap().avg(),
+            write: self.global_write_avg.read().unwrap().avg(),
+        }
     }
 
     #[cfg(test)]
@@ -110,88 +139,12 @@ impl Client {
         Self::with_transport(rhp4::Client::Mock(transport))
     }
 
-    #[cfg(test)]
-    pub(crate) fn mock() -> Self {
-        Self::with_transport(rhp4::Client::mock())
-    }
-
     pub(crate) fn host_score(&self, host: &PublicKey, inflight: usize) -> HostScore {
         let metrics = self.metrics.hosts.read().unwrap();
         HostScore::new(
             metrics.get(host).unwrap_or(&HostMetric::default()),
             inflight,
         )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn expire_host_prices(&self, host: PublicKey) {
-        if let Some(PriceEntry::Cached(prices)) = self.prices.entries.lock().unwrap().get_mut(&host)
-        {
-            prices.valid_until = Utc::now() - chrono::Duration::seconds(1);
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn failure_rate(&self, host: PublicKey) -> i64 {
-        self.metrics
-            .hosts
-            .read()
-            .unwrap()
-            .get(&host)
-            .map(HostMetric::failure_rate)
-            .unwrap_or(0)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn seed_metric(&self, host: PublicKey, f: impl FnOnce(&mut HostMetric)) {
-        self.metrics.with_metric(host, f);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn seed_failure(&self, host: PublicKey) {
-        self.metrics.add_failure(host);
-    }
-
-    /// Records a successful write for the host's metrics and the global
-    /// write throughput EMA. Zero-size or zero-duration transfers are
-    /// skipped rather than recorded as infinite throughput.
-    #[cfg(test)]
-    fn record_write_sample(&self, host_key: PublicKey, size: u32, elapsed: Duration) {
-        let Some(transfer) = Transfer::try_new(size, elapsed) else {
-            return;
-        };
-        self.metrics
-            .with_metric(host_key, |metric| metric.add_write_sample(transfer));
-        self.metrics
-            .global_write_avg
-            .write()
-            .unwrap()
-            .add_sample(transfer.rate());
-    }
-
-    /// Read equivalent of [`Self::record_write_sample`].
-    #[cfg(test)]
-    fn record_read_sample(&self, host_key: PublicKey, size: u32, elapsed: Duration) {
-        let Some(transfer) = Transfer::try_new(size, elapsed) else {
-            return;
-        };
-        self.metrics
-            .with_metric(host_key, |metric| metric.add_read_sample(transfer));
-        self.metrics
-            .global_read_avg
-            .write()
-            .unwrap()
-            .add_sample(transfer.rate());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn seed_write_sample(&self, host: PublicKey, size: u32, elapsed: Duration) {
-        self.record_write_sample(host, size, elapsed);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn seed_read_sample(&self, host: PublicKey, size: u32, elapsed: Duration) {
-        self.record_read_sample(host, size, elapsed);
     }
 
     /// Expected duration of a `bytes`-sized write on a typical host.
@@ -222,7 +175,7 @@ impl Client {
             .unwrap_or_else(|| DEFAULT.estimate_duration(bytes))
     }
 
-    fn start_price_fetch(&self, host: &HostEndpoint, idle_timeout: Duration) -> Arc<PriceFetch> {
+    fn start_price_fetch(&self, host: &HostEndpoint) -> Arc<PriceFetch> {
         let host = HostEndpoint {
             public_key: host.public_key,
             addresses: host.addresses.clone(),
@@ -232,8 +185,7 @@ impl Client {
         let entries = self.prices.entries.clone();
         let (tx, outcome) = watch::channel(None);
         let task = maybe_spawn!(async move {
-            let result = transport.host_prices(&host, idle_timeout).await;
-            let outcome = metrics.record_result(host.public_key, result);
+            let outcome = transport.host_prices(&host, metrics).await;
             if let Ok(prices) = &outcome {
                 entries
                     .lock()
@@ -255,7 +207,6 @@ impl Client {
     pub(crate) async fn host_prices(
         &self,
         host: &HostEndpoint,
-        idle_timeout: Duration,
     ) -> Result<HostPrices, crate::rhp4::Error> {
         let fetch = {
             let mut entries = self.prices.entries.lock().unwrap();
@@ -271,7 +222,7 @@ impl Client {
                     fetch
                 }
                 _ => {
-                    let fetch = self.start_price_fetch(host, idle_timeout);
+                    let fetch = self.start_price_fetch(host);
                     entries.insert(
                         host.public_key,
                         PriceEntry::Fetching(Arc::downgrade(&fetch)),
@@ -294,20 +245,10 @@ impl Client {
         prices: HostPrices,
         account_key: &PrivateKey,
         sector: Bytes,
-        idle_timeout: Duration,
     ) -> Result<Hash256, Error> {
-        let result = self
-            .transport
-            .write_sector(
-                host,
-                prices,
-                account_key,
-                sector,
-                idle_timeout,
-                self.metrics.clone(),
-            )
-            .await;
-        self.metrics.record_result(host.public_key, result)
+        self.transport
+            .write_sector(host, prices, account_key, sector, self.metrics.clone())
+            .await
     }
 
     pub(crate) async fn read_sector(
@@ -317,21 +258,74 @@ impl Client {
         tokens: &AccountTokenSource,
         root: Hash256,
         range: Range<usize>,
-        idle_timeout: Duration,
     ) -> Result<Bytes, Error> {
-        let result = self
-            .transport
-            .read_sector(
-                host,
-                prices,
-                tokens,
-                root,
-                range,
-                idle_timeout,
-                self.metrics.clone(),
-            )
-            .await;
-        self.metrics.record_result(host.public_key, result)
+        self.transport
+            .read_sector(host, prices, tokens, root, range, self.metrics.clone())
+            .await
+    }
+}
+
+#[cfg(test)]
+impl Client {
+    pub(crate) fn mock() -> Self {
+        Self::with_transport(rhp4::Client::mock())
+    }
+
+    pub(crate) fn expire_host_prices(&self, host: PublicKey) {
+        if let Some(PriceEntry::Cached(prices)) = self.prices.entries.lock().unwrap().get_mut(&host)
+        {
+            prices.valid_until = Utc::now() - chrono::Duration::seconds(1);
+        }
+    }
+
+    pub(crate) fn failure_rate(&self, host: PublicKey) -> i64 {
+        self.metrics.failure_rate(host)
+    }
+
+    pub(crate) fn seed_metric(&self, host: PublicKey, f: impl FnOnce(&mut HostMetric)) {
+        self.metrics.with_metric(host, f);
+    }
+
+    pub(crate) fn seed_failure(&self, host: PublicKey) {
+        self.metrics.add_failure(host);
+    }
+
+    /// Records a successful write for the host's metrics and the global
+    /// write throughput EMA. Zero-size or zero-duration transfers are
+    /// skipped rather than recorded as infinite throughput.
+    fn record_write_sample(&self, host_key: PublicKey, size: u32, elapsed: Duration) {
+        let Some(transfer) = Transfer::try_new(size, elapsed) else {
+            return;
+        };
+        self.metrics
+            .with_metric(host_key, |metric| metric.add_write_sample(transfer));
+        self.metrics
+            .global_write_avg
+            .write()
+            .unwrap()
+            .add_sample(transfer.rate());
+    }
+
+    /// Read equivalent of [`Self::record_write_sample`].
+    fn record_read_sample(&self, host_key: PublicKey, size: u32, elapsed: Duration) {
+        let Some(transfer) = Transfer::try_new(size, elapsed) else {
+            return;
+        };
+        self.metrics
+            .with_metric(host_key, |metric| metric.add_read_sample(transfer));
+        self.metrics
+            .global_read_avg
+            .write()
+            .unwrap()
+            .add_sample(transfer.rate());
+    }
+
+    pub(crate) fn seed_write_sample(&self, host: PublicKey, size: u32, elapsed: Duration) {
+        self.record_write_sample(host, size, elapsed);
+    }
+
+    pub(crate) fn seed_read_sample(&self, host: PublicKey, size: u32, elapsed: Duration) {
+        self.record_read_sample(host, size, elapsed);
     }
 }
 
@@ -351,10 +345,10 @@ mod tests {
         client.seed_write_sample(host.public_key, 1024, Duration::from_secs(1));
         let rate = || client.failure_rate(host.public_key);
 
-        drop(client.host_prices(&host, Duration::from_secs(120)));
+        drop(client.host_prices(&host));
         assert_eq!(rate(), 0);
 
-        let mut rpc = Box::pin(client.host_prices(&host, Duration::from_secs(120)));
+        let mut rpc = Box::pin(client.host_prices(&host));
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(rpc.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
@@ -372,20 +366,12 @@ mod tests {
         assert_eq!(rate(), 0);
 
         transport.set_price_delay(Duration::ZERO);
-        client
-            .host_prices(&host, Duration::from_secs(120))
-            .await
-            .unwrap();
+        client.host_prices(&host).await.unwrap();
         assert_eq!(rate(), 0);
 
         transport.set_price_failures(1);
         client.expire_host_prices(host.public_key);
-        assert!(
-            client
-                .host_prices(&host, Duration::from_secs(120))
-                .await
-                .is_err()
-        );
+        assert!(client.host_prices(&host).await.is_err());
         assert_eq!(rate(), 20);
     }
     #[sia_core_derive::cross_target_test]
@@ -399,23 +385,14 @@ mod tests {
                 address: "localhost:9984".into(),
             }],
         };
-        let prices = client
-            .host_prices(&host, Duration::from_secs(120))
-            .await
-            .unwrap();
+        let prices = client.host_prices(&host).await.unwrap();
         let tokens = AccountTokenSource::from(Arc::new(crate::AppKey::import([7; 32])));
         client.seed_read_sample(host.public_key, 1024, Duration::from_secs(1));
         transport.set_slow_hosts([host.public_key], Duration::from_secs(60));
         let estimate = client.read_estimate(1024);
 
-        let mut rpc = Box::pin(client.read_sector(
-            &host,
-            prices,
-            &tokens,
-            Hash256::default(),
-            0..1024,
-            Duration::from_secs(120),
-        ));
+        let mut rpc =
+            Box::pin(client.read_sector(&host, prices, &tokens, Hash256::default(), 0..1024));
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(rpc.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
@@ -436,10 +413,7 @@ mod tests {
                 address: "localhost:9984".into(),
             }],
         };
-        let prices = client
-            .host_prices(&host, Duration::from_secs(120))
-            .await
-            .unwrap();
+        let prices = client.host_prices(&host).await.unwrap();
         let tokens = AccountTokenSource::Shared {
             tokens: Arc::default(),
             _refresh: Arc::new(crate::task::AbortOnDropHandle::new(maybe_spawn!(
@@ -450,17 +424,161 @@ mod tests {
         client.seed_failure(host.public_key);
         let estimate = client.read_estimate(1024);
         let result = client
-            .read_sector(
-                &host,
-                prices,
-                &tokens,
-                Hash256::default(),
-                0..1024,
-                Duration::from_secs(120),
-            )
+            .read_sector(&host, prices, &tokens, Hash256::default(), 0..1024)
             .await;
         assert!(matches!(result, Err(Error::NoToken(key)) if key == host.public_key));
         assert_eq!(client.failure_rate(host.public_key), 20);
         assert_eq!(client.read_estimate(1024), estimate);
+    }
+    #[test]
+    fn partial_samples_do_not_record_an_rpc_success() {
+        let client = Client::mock();
+        let host = PublicKey::new([1; 32]);
+        client.seed_failure(host);
+        client.metrics.record_transfer(
+            host,
+            TransferRate::try_new(1024, Duration::from_secs(1)),
+            TransferRate::try_new(2048, Duration::from_secs(1)),
+        );
+        assert_eq!(client.failure_rate(host), 100);
+        assert_eq!(client.read_estimate(1024), Duration::from_secs(1));
+        assert_eq!(client.write_estimate(2048), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn zero_progress_does_not_change_metrics() {
+        let client = Client::mock();
+        let host = PublicKey::new([1; 32]);
+        client.seed_read_sample(host, 1024, Duration::from_secs(1));
+        client.seed_write_sample(host, 1024, Duration::from_secs(1));
+        for _ in 0..250 {
+            client.metrics.record_transfer(
+                host,
+                TransferRate::try_new(0, Duration::from_secs(2)),
+                TransferRate::try_new(0, Duration::from_secs(2)),
+            );
+        }
+        assert_eq!(client.failure_rate(host), 0);
+        assert_eq!(client.read_estimate(1024), Duration::from_secs(1));
+        assert_eq!(client.write_estimate(1024), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn stalled_direction_is_ignored_and_partial_progress_is_preserved() {
+        let client = Client::mock();
+        let host = PublicKey::new([1; 32]);
+        client.seed_read_sample(host, 1024, Duration::from_secs(1));
+        client.metrics.record_transfer(
+            host,
+            TransferRate::try_new(0, Duration::from_secs(2)),
+            TransferRate::try_new(2048, Duration::from_secs(1)),
+        );
+        assert_eq!(client.failure_rate(host), 0);
+        assert_eq!(client.read_estimate(1024), Duration::from_secs(1));
+        assert_eq!(client.write_estimate(2048), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn missing_rates_are_ignored() {
+        let client = Client::mock();
+        let host = PublicKey::new([1; 32]);
+        client.metrics.record_transfer(
+            host,
+            TransferRate::try_new(1024, Duration::ZERO),
+            TransferRate::try_new(0, Duration::ZERO),
+        );
+        assert_eq!(client.failure_rate(host), 0);
+    }
+
+    #[test]
+    fn idle_timeout_without_progress_records_failure() {
+        let client = Client::mock();
+        let host = PublicKey::new([1; 32]);
+        client.seed_read_sample(host, 1024, Duration::from_secs(1));
+        client.metrics.record_transfer(
+            host,
+            TransferRate::try_new(0, Duration::from_secs(2)),
+            TransferRate::try_new(0, Duration::ZERO),
+        );
+        let result: Result<(), Error> =
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "stream idle").into());
+        assert!(client.metrics.record_result(host, result).is_err());
+        assert_eq!(client.failure_rate(host), 20);
+        assert_eq!(client.read_estimate(1024), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn both_directions_record_one_rpc_outcome() {
+        let client = Client::mock();
+        let host = PublicKey::new([1; 32]);
+        client.seed_failure(host);
+        for success in [true, false] {
+            client.metrics.record_transfer(
+                host,
+                TransferRate::try_new(1024, Duration::from_secs(1)),
+                TransferRate::try_new(2048, Duration::from_secs(1)),
+            );
+            let result = if success {
+                Ok(())
+            } else {
+                Err(Error::Transport("failed".into()))
+            };
+            assert_eq!(client.metrics.record_result(host, result).is_ok(), success);
+            assert_eq!(client.failure_rate(host), if success { 80 } else { 84 });
+        }
+        assert_eq!(client.read_estimate(1024), Duration::from_secs(1));
+        assert_eq!(client.write_estimate(2048), Duration::from_secs(1));
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn every_rpc_samples_both_directions() {
+        let client = Client::mock();
+        let host = HostEndpoint {
+            public_key: PublicKey::new([1; 32]),
+            addresses: vec![sia_core::types::v2::NetAddress {
+                protocol: sia_core::types::v2::Protocol::SiaMux,
+                address: "localhost:9984".into(),
+            }],
+        };
+        let assert_and_reset = || {
+            assert!(
+                client
+                    .metrics
+                    .global_read_avg
+                    .read()
+                    .unwrap()
+                    .avg()
+                    .is_some()
+            );
+            assert!(
+                client
+                    .metrics
+                    .global_write_avg
+                    .read()
+                    .unwrap()
+                    .avg()
+                    .is_some()
+            );
+            *client.metrics.global_read_avg.write().unwrap() = RPCAverage::default();
+            *client.metrics.global_write_avg.write().unwrap() = RPCAverage::default();
+        };
+        let prices = client.host_prices(&host).await.unwrap();
+        assert_and_reset();
+        let account = PrivateKey::from_seed(&[7; 32]);
+        let data = Bytes::from(vec![1; SECTOR_SIZE]);
+        let root = client
+            .write_sector(&host, prices.clone(), &account, data.clone())
+            .await
+            .unwrap();
+        assert_and_reset();
+        let tokens = AccountTokenSource::from(Arc::new(crate::AppKey::import([7; 32])));
+        assert_eq!(
+            client
+                .read_sector(&host, prices, &tokens, root, 0..data.len())
+                .await
+                .unwrap(),
+            data
+        );
+        assert_and_reset();
     }
 }
