@@ -1,3 +1,15 @@
+## 0.8.3 (2026-10-22)
+
+### Fixes
+
+#### Close WebTransport streams whose open was abandoned
+
+When opening a bidirectional stream timed out or the read waiting on it was cancelled, a stream the browser opened afterwards was never used or closed. These streams piled up on the host's session until it stopped accepting new ones, and reads from that host stalled. A stream that opens after its caller gave up is now closed right away.
+
+#### Stop redialing hosts that refused a WebTransport handshake
+
+Chrome counts every failed WebTransport handshake against the whole browser for five minutes, and while any are counted it delays each new connection by 10 ms doubled per failure, up to a minute. The browser client dialed a host again on the next read after its handshake failed, so a few unreachable hosts kept adding failures, and within minutes dials to healthy hosts took 35 to 60 seconds. An address that refuses a handshake is now not dialed again for five minutes, and a host whose addresses have all refused fails at once with `DialRefused`, so the download moves to other hosts. A dial that only times out is not counted, since Chrome can hold a healthy host back for up to a minute while it is counting failures.
+
 ## 0.8.2 (2026-10-21)
 
 ### Features
