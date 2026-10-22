@@ -192,6 +192,7 @@ safe-outputs:
     labels: [dependencies]
     draft: false
     allowed-files:
+      - ".changeset/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "Package.swift"
@@ -205,7 +206,7 @@ safe-outputs:
       - ".gitignore"
     protected-files:
       policy: request_review
-      exclude: ["gradle.properties", "README.md"]
+      exclude: [".changeset/", "gradle.properties", "README.md"]
 ---
 
 # Update sia-storage-sdk for a new sia_storage_ffi release
@@ -320,8 +321,26 @@ the xcframework and a macOS toolchain. Regenerating `SiaStorageSDK.swift` and up
 `Wrappers.swift` is all you can verify — the repository's own `swift.yml` builds and
 tests Swift on the pull request. Say so in the body rather than implying Swift passed.
 
-6. **Check the changed files.** Run `git status` and revert any change outside
-   `Cargo.toml`, `Cargo.lock`, `Package.swift`, `SiaStorageSDK.podspec`, `python/`,
+6. **Write the changeset.** Create or update `.changeset/sdk-update.md` for this
+   release, including dependency-only updates. Follow the target repository's
+   existing changeset format and package keys; if none exists, use:
+
+   ```
+   ---
+   default: patch
+   ---
+
+   #### Update sia_storage_ffi to vX.Y.Z
+   ```
+
+   Use the target version from `/tmp/gh-aw/sdk-update.json`. Use `minor` instead
+   of `patch` when the update adds public wrapper APIs. Describe the user-facing
+   changes in prose. Preserve unrelated existing entries and avoid duplicating
+   an entry for the same release. This changeset is an exception to the rule
+   against adding new files.
+
+7. **Check the changed files.** Run `git status` and revert any change outside
+   `.changeset/`, `Cargo.toml`, `Cargo.lock`, `Package.swift`, `SiaStorageSDK.podspec`, `python/`,
    `swift/`, `kotlin/`, `examples/`, `src/`, `README.md`, and `.gitignore`. Any other
    file rejects the whole pull request. List what you reverted in the body, along with
    any `.github/` workflow change the update needs.
@@ -338,6 +357,5 @@ cover, in prose:
 - anything left undone: a binding you could not wrap, or a failing check
 
 Call `noop` with a short explanation instead of opening a pull request when `repinned` is
-false, or when the regenerated bindings and all three wrappers come out byte-identical
-and every check passes — that is the expected outcome for a release that only changes
-crate internals.
+false. A repin still needs a pull request and changeset when the regenerated bindings
+and all three wrappers are unchanged.

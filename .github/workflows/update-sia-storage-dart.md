@@ -166,6 +166,7 @@ safe-outputs:
     labels: [dependencies]
     draft: false
     allowed-files:
+      - ".changeset/**"
       - "rust/Cargo.toml"
       - "rust/Cargo.lock"
       - "rust/rust-toolchain.toml"
@@ -180,7 +181,7 @@ safe-outputs:
       - "README.md"
     protected-files:
       policy: request_review
-      exclude: ["README.md"]
+      exclude: [".changeset/", "README.md"]
 ---
 
 # Update sia_storage_dart for a new sia_storage release
@@ -265,7 +266,26 @@ may have left API updates outstanding.
    actually tested. Flutter consumer dependency resolution is checked by the target
    repository's CI; do not claim that check passed locally.
 
-6. **Check scope.** Run `git status` and `git diff --check`. Keep only changes under
+6. **Write the changeset.** When the update changes dependencies, bindings, or the
+   public API, create or update `.changeset/sdk-update.md`, including for
+   dependency-only updates. Follow the target repository's existing changeset
+   format and package keys; if none exists, use:
+
+   ```
+   ---
+   default: patch
+   ---
+
+   #### Update sia_storage to vX.Y.Z
+   ```
+
+   Use the target version from `/tmp/gh-aw/sdk-update.json`. Use `minor` instead
+   of `patch` when the update adds public Dart APIs. Describe the user-facing
+   changes in prose. Preserve unrelated existing entries and avoid duplicating
+   an entry for the same release. Leave package versions and the release-managed
+   changelog unchanged.
+
+7. **Check scope.** Run `git status` and `git diff --check`. Keep only changes under
    the allowed paths above. Do not change `.github/` workflows or release configuration.
    Describe any required changes outside the allowed paths in the PR body.
 
