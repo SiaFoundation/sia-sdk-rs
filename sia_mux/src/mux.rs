@@ -110,6 +110,48 @@ fn packet_reader_error_is_conn_close(err: &PacketReaderError) -> bool {
     }
 }
 
+/// Payload bytes and accumulated active I/O time.
+#[derive(Default)]
+struct StreamMetric {
+    bytes: u64,
+    elapsed: time::Duration,
+    start: Option<time::Instant>,
+}
+
+impl StreamMetric {
+    fn start(&mut self, now: time::Instant) {
+        self.start = Some(now);
+    }
+
+    fn start_if_idle(&mut self) {
+        self.start.get_or_insert_with(time::Instant::now);
+    }
+
+    fn record(&mut self, bytes: usize, now: time::Instant) {
+        if bytes == 0 {
+            return;
+        }
+        self.bytes += bytes as u64;
+        self.stop(now);
+    }
+
+    fn stop(&mut self, now: time::Instant) {
+        if let Some(start) = self.start.take() {
+            self.elapsed += now.duration_since(start);
+        }
+    }
+
+    fn sample(&self) -> (u64, time::Duration) {
+        (
+            self.bytes,
+            self.elapsed
+                + self
+                    .start
+                    .map_or(time::Duration::ZERO, |start| start.elapsed()),
+        )
+    }
+}
+
 /// Per-stream read/write state, protected by its own mutex (separate from the mux lock).
 struct StreamState {
     /// Buffered read data delivered by the read loop.
@@ -120,6 +162,22 @@ struct StreamState {
     waker: Option<Waker>,
     /// Time of the last payload received or written to the underlying connection.
     last_progress: time::Instant,
+    read_metric: StreamMetric,
+    write_metric: StreamMetric,
+    pending_write_bytes: usize,
+    write_blocked: bool,
+}
+
+impl StreamState {
+    fn finish_metrics(&mut self) {
+        let now = time::Instant::now();
+        if self.read_buf.is_empty() {
+            self.read_metric.stop(now);
+        } else {
+            self.read_metric.start = None;
+        }
+        self.write_metric.stop(now);
+    }
 }
 
 /// Tracks a recently-closed stream to absorb in-flight frames from the peer.
@@ -226,6 +284,10 @@ impl Mux {
             err: None,
             waker: None,
             last_progress: time::Instant::now(),
+            read_metric: StreamMetric::default(),
+            write_metric: StreamMetric::default(),
+            pending_write_bytes: 0,
+            write_blocked: false,
         }));
         s.streams.insert(id, ss.clone());
 
@@ -329,6 +391,24 @@ pub struct Stream {
 }
 
 impl Stream {
+    /// Returns received payload bytes and accumulated time waiting for payloads.
+    /// Buffered reads do not add time. Cancelling a pending read does not reset
+    /// its timing; RPC callers drop the stream when cancelling an RPC.
+    pub fn read_metric(&self) -> (u64, time::Duration) {
+        let state = self.stream_state.lock().unwrap();
+        if state.read_buf.is_empty() {
+            state.read_metric.sample()
+        } else {
+            (state.read_metric.bytes, state.read_metric.elapsed)
+        }
+    }
+
+    /// Returns payload bytes written to the connection and accumulated time with
+    /// writes pending, including backpressure and stalls.
+    pub fn write_metric(&self) -> (u64, time::Duration) {
+        self.stream_state.lock().unwrap().write_metric.sample()
+    }
+
     /// Set both read and write deadlines.
     ///
     /// Once expiry is observed, all subsequent reads and writes return the
@@ -383,6 +463,7 @@ impl Stream {
         if !deadline.is_some_and(|deadline| time::Instant::now() >= deadline) {
             return Ok(());
         }
+        state.finish_metrics();
         state.err = Some(error.clone());
         let reader = state.waker.take();
         drop(state);
@@ -414,6 +495,7 @@ impl Stream {
         if let Some(deadline) = idle_deadline
             && time::Instant::now() >= deadline
         {
+            state.finish_metrics();
             state.err = Some(MuxError::IdleTimeout);
             return Poll::Ready(Err(MuxError::IdleTimeout.into()));
         }
@@ -448,6 +530,7 @@ impl Stream {
     /// and would treat the frame as an unknown stream, failing the entire mux.
     fn send_close_frame(&mut self) -> Option<MuxError> {
         self.closed = true;
+        self.stream_state.lock().unwrap().finish_metrics();
 
         let mut s = self.mux_state.lock().unwrap();
         let err = s.err.clone();
@@ -508,11 +591,18 @@ impl AsyncRead for Stream {
         // Lock per-stream state
         let mut ss = this.stream_state.lock().unwrap();
 
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
         // If data is available, return it
         if !ss.read_buf.is_empty() {
             let n = buf.remaining().min(ss.read_buf.len());
             buf.put_slice(&ss.read_buf[..n]);
             let _ = ss.read_buf.split_to(n);
+            if ss.read_buf.is_empty() {
+                ss.read_metric.start = None;
+            }
             return Poll::Ready(Ok(()));
         }
 
@@ -523,6 +613,8 @@ impl AsyncRead for Stream {
                 e => Poll::Ready(Err(e.clone().into())),
             };
         }
+
+        ss.read_metric.start_if_idle();
 
         // Register waker and return Pending
         ss.waker = Some(cx.waker().clone());
@@ -565,9 +657,18 @@ impl AsyncWrite for Stream {
             return Poll::Ready(Err(err.clone().into()));
         }
 
+        if n > 0 {
+            this.stream_state
+                .lock()
+                .unwrap()
+                .write_metric
+                .start_if_idle();
+        }
+
         // Backpressure check
         let max_buf_size = max_payload * MAX_WRITE_BUF_FACTOR;
         if s.write_buf.len() + frame_size > max_buf_size {
+            this.stream_state.lock().unwrap().write_blocked = n > 0;
             s.buffer_wakers
                 .entry(this.id)
                 .and_modify(|waker| waker.clone_from(cx.waker()))
@@ -596,6 +697,12 @@ impl AsyncWrite for Stream {
             length: n as u16,
             flags,
         };
+
+        if n > 0 {
+            let mut state = this.stream_state.lock().unwrap();
+            state.write_blocked = false;
+            state.pending_write_bytes += n;
+        }
 
         // Single copy: directly into shared write buffer
         append_frame(&mut s.write_buf, header, &buf[..n]);
@@ -692,6 +799,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         err: None,
                         waker: None,
                         last_progress: time::Instant::now(),
+                        read_metric: StreamMetric::default(),
+                        write_metric: StreamMetric::default(),
+                        pending_write_bytes: 0,
+                        write_blocked: false,
                     }));
                     s.streams.insert(h.id, ss.clone());
 
@@ -745,6 +856,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     state.read_buf.extend_from_slice(&payload);
                     if !payload.is_empty() {
                         state.last_progress = time::Instant::now();
+                        let now = state.last_progress;
+                        state.read_metric.record(payload.len(), now);
+                        state.read_metric.start(now);
                     }
                     if let Some(w) = state.waker.take() {
                         w.wake();
@@ -754,6 +868,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             Action::Close(ss, err) => {
                 let mut state = ss.lock().unwrap();
                 if state.err.is_none() {
+                    state.finish_metrics();
                     state.err = Some(err);
                 }
                 if let Some(w) = state.waker.take() {
@@ -886,6 +1001,15 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                 {
                     let mut state = state.lock().unwrap();
                     state.last_progress = state.last_progress.max(now);
+                    let bytes = written.min(end) - previous.max(payload_start);
+                    if state.err.is_none() {
+                        state.write_metric.record(bytes, now);
+                    }
+                    state.pending_write_bytes -= bytes;
+                    if state.err.is_none() && (state.pending_write_bytes > 0 || state.write_blocked)
+                    {
+                        state.write_metric.start(now);
+                    }
                 }
                 if written < end {
                     break;
@@ -935,6 +1059,7 @@ fn set_fatal_error(mux_state: &Arc<StdMutex<MuxState>>, err: MuxError) {
     for (_, ss) in s.streams.drain() {
         let mut state = ss.lock().unwrap();
         if state.err.is_none() {
+            state.finish_metrics();
             state.err = Some(err.clone());
         }
         if let Some(w) = state.waker.take() {
@@ -1047,6 +1172,109 @@ mod tests {
         (client.unwrap(), server.unwrap())
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn read_metrics_preserve_progress_after_timeout() {
+        let (client, server) = memory_pair().await;
+        let mut stream = client.dial_stream().unwrap();
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(stream.read_metric(), (0, Duration::ZERO));
+        assert_eq!(stream.write_metric(), (0, Duration::ZERO));
+        stream.write_all(b"request").await.unwrap();
+        let mut peer = server.accept_stream().await.unwrap();
+        stream.set_idle_timeout(Some(Duration::from_secs(5)));
+        let send = async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            peer.write_all(b"ab").await.unwrap();
+        };
+        let read = async { stream.read_u8().await.unwrap() };
+        let (_, byte) = tokio::join!(send, read);
+        assert_eq!(byte, b'a');
+        let metric = stream.read_metric();
+        assert_eq!(metric, (2, Duration::from_secs(1)));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(stream.read_u8().await.unwrap(), b'b');
+        assert_eq!(stream.read_metric(), metric);
+        assert_idle(&stream.read_u8().await.unwrap_err());
+        assert_eq!(stream.read_metric(), (2, Duration::from_secs(5)));
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(stream.read_metric(), (2, Duration::from_secs(5)));
+        assert_eq!(stream.write_metric().0, 7);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_metrics_cover_buffered_bursts_and_pending_stalls() {
+        use std::pin::Pin;
+        use std::task::{Context, Waker};
+        use tokio::io::{AsyncRead, ReadBuf};
+
+        let (client, server) = memory_pair().await;
+        let mut stream = client.dial_stream().unwrap();
+        stream.write_all(b"request").await.unwrap();
+        let mut peer = server.accept_stream().await.unwrap();
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut bytes = [0; 2];
+        let mut buf = ReadBuf::new(&mut bytes);
+        assert!(
+            Pin::new(&mut stream)
+                .poll_read(&mut cx, &mut buf)
+                .is_pending()
+        );
+
+        for expected in 1..=2 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            peer.write_all(b"a").await.unwrap();
+            while stream.read_metric().0 < expected {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(stream.read_metric(), (2, Duration::from_secs(2)));
+        tokio::time::advance(Duration::from_secs(30)).await;
+        stream.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(stream.read_metric(), (2, Duration::from_secs(2)));
+
+        let mut buf = ReadBuf::new(&mut bytes);
+        assert!(
+            Pin::new(&mut stream)
+                .poll_read(&mut cx, &mut buf)
+                .is_pending()
+        );
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert_eq!(stream.read_metric(), (2, Duration::from_secs(6)));
+        stream.close().unwrap();
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(stream.read_metric(), (2, Duration::from_secs(6)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn metrics_exclude_gaps_between_operations() {
+        let (client, server) = memory_pair().await;
+        let mut stream = client.dial_stream().unwrap();
+        stream.write_all(b"a").await.unwrap();
+        let mut peer = server.accept_stream().await.unwrap();
+        assert_eq!(peer.read_u8().await.unwrap(), b'a');
+        let first_write = stream.write_metric();
+        assert_eq!(first_write.0, 1);
+
+        for expected_bytes in 1..=2 {
+            tokio::time::advance(Duration::from_secs(30)).await;
+            let send = async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                peer.write_all(b"b").await.unwrap();
+            };
+            let read = async { stream.read_u8().await.unwrap() };
+            let (_, byte) = tokio::join!(send, read);
+            assert_eq!(byte, b'b');
+            assert_eq!(
+                stream.read_metric(),
+                (expected_bytes, Duration::from_secs(expected_bytes))
+            );
+        }
+
+        stream.write_all(b"c").await.unwrap();
+        assert_eq!(peer.read_u8().await.unwrap(), b'c');
+        assert_eq!(stream.write_metric(), (2, first_write.1));
+    }
+
     fn assert_idle(err: &std::io::Error) {
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         assert!(
@@ -1133,6 +1361,31 @@ mod tests {
             tokio::task::yield_now().await;
         }
         (mux, peer, stream)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn write_metrics_include_initial_backpressure() {
+        use std::pin::Pin;
+        use std::task::{Context, Waker};
+        use tokio::io::AsyncWrite;
+
+        let (mux, mut peer, _busy) = backpressured_writer().await;
+        let mut stream = mux.dial_stream().unwrap();
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(Pin::new(&mut stream).poll_write(&mut cx, b"a").is_pending());
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(stream.write_metric(), (0, Duration::from_secs(3)));
+
+        let drain = tokio::spawn(async move { copy(&mut peer, &mut sink()).await });
+        stream.write_all(b"a").await.unwrap();
+        while stream.write_metric().0 == 0 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(stream.write_metric(), (1, Duration::from_secs(3)));
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(stream.write_metric(), (1, Duration::from_secs(3)));
+        mux.close().await.unwrap();
+        drain.await.unwrap().unwrap();
     }
 
     #[tokio::test(start_paused = true)]
@@ -1339,6 +1592,16 @@ mod tests {
                 };
                 assert_idle(&err);
                 assert_eq!(start.elapsed(), Duration::from_secs(16));
+                let (bytes, elapsed) = stream.write_metric();
+                assert!(bytes > 0 && bytes < size as u64);
+                assert_eq!(elapsed, Duration::from_secs(16));
+                assert_eq!(
+                    stream.read_metric(),
+                    (
+                        0,
+                        Duration::from_secs(if size == 20 * 1024 { 16 } else { 0 })
+                    )
+                );
             };
             let drain = async {
                 for _ in 0..12 {
