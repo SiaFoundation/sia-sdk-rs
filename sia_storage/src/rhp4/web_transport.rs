@@ -89,25 +89,52 @@ impl Drop for Connection {
 
 impl Connection {
     async fn open_stream(&self) -> Result<Stream, Error> {
-        let bidi: web_sys::WebTransportBidirectionalStream = timeout(
-            OPEN_STREAM_TIMEOUT,
-            JsFuture::from(self.transport.create_bidirectional_stream()),
-        )
-        .await
-        .map_err(|_| Error::Transport("createBidirectionalStream: timeout".into()))?
-        .map_err(|e| {
-            Error::Transport(format!("createBidirectionalStream: {}", js_err_message(&e)))
-        })?
-        .unchecked_into();
-        let reader = bidi
-            .readable()
-            .get_reader()
-            .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
-        let writer = bidi
-            .writable()
-            .get_writer()
-            .map_err(|e| Error::Transport(format!("get_writer: {}", js_err_message(&e))))?;
-        Ok(Stream::new(reader, writer))
+        open_bidi_stream(self.transport.create_bidirectional_stream()).await
+    }
+}
+
+/// Waits for a `createBidirectionalStream` promise and wraps the result.
+async fn open_bidi_stream(
+    promise: js_sys::Promise<web_sys::WebTransportBidirectionalStream>,
+) -> Result<Stream, Error> {
+    let mut pending = PendingStream(Some(promise.clone()));
+    let bidi: web_sys::WebTransportBidirectionalStream =
+        timeout(OPEN_STREAM_TIMEOUT, JsFuture::from(promise))
+            .await
+            .map_err(|_| Error::Transport("createBidirectionalStream: timeout".into()))?
+            .map_err(|e| {
+                Error::Transport(format!("createBidirectionalStream: {}", js_err_message(&e)))
+            })?
+            .unchecked_into();
+    let reader = bidi
+        .readable()
+        .get_reader()
+        .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
+    let writer = bidi
+        .writable()
+        .get_writer()
+        .map_err(|e| Error::Transport(format!("get_writer: {}", js_err_message(&e))))?;
+    pending.0 = None;
+    Ok(Stream::new(reader, writer))
+}
+
+/// Closes a stream whose open was abandoned. Without this, a stream that
+/// resolves after a timeout or a cancelled read stays open on the session.
+struct PendingStream(Option<js_sys::Promise<web_sys::WebTransportBidirectionalStream>>);
+
+impl Drop for PendingStream {
+    fn drop(&mut self) {
+        let Some(promise) = self.0.take() else {
+            return;
+        };
+        wasm_bindgen_futures::spawn_local(async move {
+            let Ok(bidi) = JsFuture::from(promise).await else {
+                return;
+            };
+            let write = JsFuture::from(bidi.writable().abort());
+            let read = JsFuture::from(bidi.readable().cancel());
+            let _ = tokio::join!(write, read);
+        });
     }
 }
 
@@ -792,5 +819,90 @@ mod tests {
         let mut buf = vec![0u8; 10];
         stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"helloworld");
+    }
+
+    /// Returns a stand-in for a `WebTransportBidirectionalStream` with the
+    /// feeder for its readable and the reader for its writable.
+    fn bidi_fixture() -> (
+        JsValue,
+        web_sys::WritableStreamDefaultWriter,
+        web_sys::ReadableStreamDefaultReader,
+    ) {
+        let read_ts = web_sys::TransformStream::new().unwrap();
+        let write_ts = web_sys::TransformStream::new().unwrap();
+        let bidi = js_sys::Object::new();
+        js_sys::Reflect::set(&bidi, &"readable".into(), &read_ts.readable()).unwrap();
+        js_sys::Reflect::set(&bidi, &"writable".into(), &write_ts.writable()).unwrap();
+        let feeder = read_ts.writable().get_writer().unwrap();
+        let out_reader = write_ts
+            .readable()
+            .get_reader()
+            .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
+        (bidi.into(), feeder, out_reader)
+    }
+
+    /// Returns a promise that resolves to `bidi` once the sender fires.
+    fn deferred(
+        bidi: JsValue,
+    ) -> (
+        js_sys::Promise<web_sys::WebTransportBidirectionalStream>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let promise = wasm_bindgen_futures::future_to_promise(async move {
+            let _ = rx.await;
+            Ok(bidi)
+        });
+        (promise.unchecked_into(), tx)
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_abandoned_open_closes_late_stream() {
+        let (bidi, feeder, out_reader) = bidi_fixture();
+        let (promise, resolve) = deferred(bidi);
+        assert!(
+            timeout(Duration::from_millis(10), open_bidi_stream(promise))
+                .await
+                .is_err()
+        );
+        resolve.send(()).unwrap();
+
+        // Cancelling the readable errors its feeder; aborting the writable
+        // errors its reader.
+        assert!(
+            timeout(Duration::from_secs(1), JsFuture::from(feeder.closed()))
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            timeout(Duration::from_secs(1), JsFuture::from(out_reader.closed()))
+                .await
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_successful_open_keeps_stream() {
+        let (bidi, feeder, out_reader) = bidi_fixture();
+        let (promise, resolve) = deferred(bidi);
+        resolve.send(()).unwrap();
+        let mut stream = open_bidi_stream(promise).await.unwrap();
+        stream.set_idle_timeout(Some(IDLE_TIMEOUT));
+        // Give a wrongly armed cleanup time to run.
+        sleep(Duration::from_millis(50)).await;
+
+        feed_async(feeder, b"ping".to_vec());
+        let mut buf = [0u8; 4];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
+
+        spawn_local(async move {
+            stream.write_chunks(b"pong").await.unwrap();
+        });
+        let result = JsFuture::from(out_reader.read()).await.unwrap();
+        let chunk: ReadableStreamReadResult = result.unchecked_into();
+        assert_eq!(Uint8Array::new(&chunk.value()).to_vec(), b"pong");
     }
 }
