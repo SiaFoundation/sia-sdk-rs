@@ -219,8 +219,8 @@ if you can, and state the divergence prominently at the top of the pull request 
 
 1. **Update the pin.** Set `napi` and `wasm` in `.sia-sdk-rs.json` to the target tags.
    If `pin_already_current` is true the daily `check-sdk-update.yml` job already landed
-   the bump — leave the file and the existing changeset alone and continue to step 2,
-   since the wrapper work may still be outstanding.
+   the bump — leave the pin file alone and continue to step 2, since the wrapper
+   work may still be outstanding. Reconcile existing changesets in step 6.
 
 2. **Build.** Run, in order:
 
@@ -266,21 +266,36 @@ if you can, and state the divergence prominently at the top of the pull request 
    test pass. If you cannot get them green, still open the pull request, but say plainly
    at the top of the body what is failing and paste the error.
 
-6. **Write the changeset.** Create `.changeset/sdk-update.md` (skip if step 1 found the
-   pin already current and the changeset already exists), matching the format
-   `check-sdk-update.yml` uses so the two paths do not produce conflicting entries:
+6. **Write a changeset for each user-facing change in the upstream release.**
+   Use the SDK changesets consumed by the release as the source of truth for both
+   the description and each change's `major`, `minor`, or `patch` classification.
+   Cover every release between the old and target pins in `/tmp/gh-aw/sdk-update.json`,
+   using each crate's own pin range when they differ. Read the released changelog
+   entries in `rust/sia-sdk-rs/` and recover the original `.changeset/` files and
+   frontmatter from git history before the release consumed them. Do not use
+   unreleased changesets or infer the classification from the overall version bump.
+   `/tmp/gh-aw/changelog.md` is only a preview; read the full release entries.
 
-   ```
-   ---
-   default: patch
-   ---
+   For each upstream change that reaches this wrapper's users, create a separate
+   `.changeset/<release>-<change>.md`. Preserve the upstream change's classification
+   for the relevant crate, map its package keys to the target repository's package
+   keys, and adapt the wording only for the exposed language APIs and supported
+   platforms. Use the target repository's changeset format (`default` as the package
+   key if no existing convention is available). Include inherited fixes and security
+   updates even when no wrapper code changes. Deduplicate the same change appearing
+   in multiple crate changelogs, and omit changes that do not affect this wrapper.
+   Explain omissions or any classification adjustment in the PR body. If the original
+   classification cannot be recovered, report that explicitly instead of silently
+   defaulting to `patch`.
 
-   #### Update sia-sdk-rs (napi v0.0.0, wasm v0.0.0)
-   ```
-
-   Use `minor` instead of `patch` when the update adds new exports to the wrapper's public
-   surface. Strip the `sia_storage_napi/` and `sia_storage_wasm/` prefixes from the tags in
-   the heading. If the entry needs more than the heading, follow it with prose — not a list.
+   Do not replace these entries with a generic dependency-update changeset. Preserve
+   unrelated existing changesets. If an automated pin bump already created a generic
+   `.changeset/sdk-update.md` for this release, replace that entry with the individual
+   release-derived entries; reuse any matching entries that already exist. Changeset
+   files are an exception to the rule against adding new files. Describe any additional
+   user-facing wrapper changes separately: `major` for breaking changes, `minor` for
+   backward-compatible additions, and `patch` for backward-compatible fixes. Leave
+   package versioning to the existing release process.
 
 7. **Update the README.** Its `## API` section documents the public API. Bring it in
    line with the target tag:
