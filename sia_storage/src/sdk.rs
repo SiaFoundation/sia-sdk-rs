@@ -13,8 +13,8 @@ use url::Url;
 
 use crate::app_client::PinObjectError::UnpinnedSlab;
 use crate::app_client::{self, KeyResponse, SLAB_PIN_BATCH_SIZE, SlabPinParams};
+use crate::client::{Client, default_client};
 use crate::hosts::Hosts;
-use crate::rhp4::{Client, default_client};
 use crate::sharing::{self, KeyRecord, KeyRequest, Nonce, SharingError, SharingKey};
 use crate::task::AbortOnDropHandle;
 use crate::time::Duration;
@@ -1132,7 +1132,7 @@ mod native_tests {
         let client = crate::app_client::Client::new(server.url("/").to_string()).unwrap();
         // no minimum between refreshes, so INTERVAL is the only pacing
         let hosts = Hosts::with_refresher(
-            crate::rhp4::Client::mock(),
+            crate::client::Client::mock(),
             app_key.clone(),
             client.clone(),
             Duration::ZERO,

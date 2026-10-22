@@ -1,3 +1,5 @@
+use crate::client::Metrics;
+use crate::client::metrics::TransferRate;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,7 +13,7 @@ use sia_core::rhp4::protocol::Error as ProtocolError;
 use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::{Currency, Hash256};
 
-use super::{Error as RHP4Error, HostEndpoint, Transport};
+use super::{Error as RHP4Error, HostEndpoint};
 use crate::time::{Duration, Instant, sleep};
 use crate::tokens::AccountTokenSource;
 
@@ -137,13 +139,12 @@ impl Client {
     }
 }
 
-impl Transport for Client {
-    async fn host_prices(
+impl Client {
+    pub(crate) async fn host_prices(
         &self,
         _: &HostEndpoint,
         _: Duration,
-    ) -> Result<(HostPrices, Duration), RHP4Error> {
-        let start = Instant::now();
+    ) -> Result<HostPrices, RHP4Error> {
         self.price_requests.fetch_add(1, Ordering::Relaxed);
         let delay = *self.price_delay.read().unwrap();
         if !delay.is_zero() {
@@ -167,21 +168,23 @@ impl Transport for Client {
             signature: Signature::default(),
             valid_until: Utc::now() + chrono::Duration::days(1),
         };
-        Ok((prices, start.elapsed()))
+        Ok(prices)
     }
 
-    async fn write_sector(
+    pub(crate) async fn write_sector(
         &self,
         host: &HostEndpoint,
         _: HostPrices,
         _: &PrivateKey,
         sector: Bytes,
         idle_timeout: Duration,
-    ) -> Result<(Hash256, Duration), RHP4Error> {
+        metrics: Arc<Metrics>,
+    ) -> Result<Hash256, RHP4Error> {
         if host.addresses.is_empty() {
             return Err(RHP4Error::Transport("host has no addresses".to_string()));
         }
         let start = Instant::now();
+        let bytes = sector.len() as u64;
         self.stall(&host.public_key, idle_timeout).await?;
 
         sleep(Duration::from_millis(3)).await; // simulate network latency ~ 10Gbps
@@ -192,10 +195,16 @@ impl Transport for Client {
         if let Some(delay) = *self.initial_read_delay.read().unwrap() {
             self.read_delays.write().unwrap().insert(sector_root, delay);
         }
-        Ok((sector_root, start.elapsed()))
+        metrics.record_transfer(
+            host.public_key,
+            None,
+            TransferRate::try_new(bytes, start.elapsed()),
+        );
+        Ok(sector_root)
     }
 
-    async fn read_sector(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn read_sector(
         &self,
         host: &HostEndpoint,
         _: HostPrices,
@@ -203,7 +212,8 @@ impl Transport for Client {
         root: Hash256,
         range: Range<usize>,
         idle_timeout: Duration,
-    ) -> Result<(Bytes, Duration), RHP4Error> {
+        metrics: Arc<Metrics>,
+    ) -> Result<Bytes, RHP4Error> {
         self.read_requests.fetch_add(1, Ordering::Relaxed);
         if host.addresses.is_empty() {
             return Err(RHP4Error::Transport("host has no addresses".to_string()));
@@ -250,6 +260,11 @@ impl Transport for Client {
             Bytes::copy_from_slice(&sector[range])
         };
         sleep(Duration::from_nanos(sector.len() as u64 * 8 / 10)).await; // simulate network latency ~ 10Gbps
-        Ok((sector, start.elapsed()))
+        metrics.record_transfer(
+            host.public_key,
+            TransferRate::try_new(sector.len() as u64, start.elapsed()),
+            None,
+        );
+        Ok(sector)
     }
 }

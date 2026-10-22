@@ -814,8 +814,9 @@ mod test {
     use sia_core::signing::PrivateKey;
     use sia_core::types::v2::NetAddress;
 
+    use crate::client::Client;
     use crate::hosts::Hosts;
-    use crate::rhp4::{Client, mock};
+    use crate::rhp4::mock;
     use crate::upload::upload_object;
     use crate::{AppKey, Host, ShardProgress, UploadOptions};
 
@@ -825,7 +826,7 @@ mod test {
         let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
         let transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -887,7 +888,7 @@ mod test {
         let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
         let transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -973,7 +974,7 @@ mod test {
         let total_shards = data_shards + parity_shards;
 
         let transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(transport.clone()));
         let host_keys: Vec<_> = (0..total_shards)
             .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
             .collect();
@@ -1089,7 +1090,7 @@ mod test {
         let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
         let transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -1192,7 +1193,7 @@ mod test {
         let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
         let transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(transport.clone()));
         let all_hosts: Vec<Host> = (0..60)
             .map(|_| Host {
                 public_key: PrivateKey::from_seed(&rand::random()).public_key(),
@@ -1283,7 +1284,7 @@ mod test {
         let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
         let transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -1343,7 +1344,7 @@ mod test {
         let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
         let transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -1450,7 +1451,7 @@ mod test {
         let num_slabs = 3;
 
         let transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -1553,7 +1554,7 @@ mod test {
         let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
         let transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(transport.clone()));
         hosts.update(
             (0..60)
                 .map(|_| Host {
@@ -1767,7 +1768,7 @@ mod test {
         let optimal_data_size = upload_options.data_shards as usize * SECTOR_SIZE;
 
         let transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(transport.clone()));
         let host_keys: Vec<_> = (0..60)
             .map(|_| PrivateKey::from_seed(&rand::random()).public_key())
             .collect();

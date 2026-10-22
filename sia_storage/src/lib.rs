@@ -52,6 +52,7 @@ use sia_core::signing::PrivateKey;
 
 mod app_client;
 mod builder;
+mod client;
 mod congestion;
 mod download;
 mod encryption;
@@ -598,9 +599,10 @@ pub fn validate_recovery_phrase(phrase: &str) -> Result<(), SeedError> {
 
 #[cfg(test)]
 mod test {
+    use crate::client::Client;
     use crate::download::Download;
     use crate::hosts::QueueError;
-    use crate::rhp4::{Client, mock};
+    use crate::rhp4::mock;
     use crate::upload::{PackedUpload, upload_object};
     use bytes::{Bytes, BytesMut};
     use sia_core::rhp4::SECTOR_SIZE;
@@ -1407,7 +1409,7 @@ mod test {
     async fn test_download_slow_hosts() {
         let app_key = Arc::new(AppKey::import(random_seed()));
         let mock_transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(mock_transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(mock_transport.clone()));
 
         // Create 30 hosts and track their public keys
         let host_keys: Vec<_> = (0..30)
@@ -1492,7 +1494,7 @@ mod test {
     async fn test_upload_slow_host() {
         let app_key = Arc::new(AppKey::import(random_seed()));
         let mock_transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(mock_transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(mock_transport.clone()));
 
         // Create 30 hosts and track their public keys
         let host_keys: Vec<_> = (0..30)
@@ -1540,7 +1542,7 @@ mod test {
     async fn test_upload_all_hosts_slow() {
         let app_key = Arc::new(AppKey::import(random_seed()));
         let mock_transport = mock::Client::new();
-        let hosts = Hosts::new(Client::Mock(mock_transport.clone()));
+        let hosts = Hosts::new(Client::from_mock(mock_transport.clone()));
 
         // Create 30 hosts and track their public keys
         let host_keys: Vec<_> = (0..30)

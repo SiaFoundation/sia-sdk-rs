@@ -1,27 +1,26 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, RwLock};
 
-use chrono::Utc;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnNull, serde_as};
-use sia_core::rhp4::{HostPrices, SECTOR_SIZE};
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
 use thiserror::Error;
-use tokio::sync::watch;
 
-use crate::hosts::metrics::{HostMetric, HostScore, RPCAverage, Transfer};
-use crate::rhp4::{Client, HostEndpoint, Transport};
+use crate::client::Client;
+use crate::client::metrics::HostScore;
+#[cfg(test)]
+use crate::client::metrics::{HostMetric, Transfer};
+use crate::rhp4::HostEndpoint;
+#[cfg(test)]
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Instant};
 use crate::tokens::AccountTokenSource;
 use crate::{AppKey, app_client};
-
-mod metrics;
 
 /// How long a sector RPC may go without stream progress before the
 /// transport gives up on the host.
@@ -65,157 +64,6 @@ struct HostInfo {
     inflight_downloads: Arc<AtomicUsize>,
 }
 
-#[derive(Debug)]
-struct HostList {
-    hosts: RwLock<HashMap<PublicKey, HostInfo>>,
-    metrics: RwLock<HashMap<PublicKey, HostMetric>>,
-}
-
-impl HostList {
-    fn new() -> Self {
-        Self {
-            metrics: RwLock::new(HashMap::new()),
-            hosts: RwLock::new(HashMap::new()),
-        }
-    }
-
-    fn addresses(&self, host_key: &PublicKey) -> Option<Vec<NetAddress>> {
-        let hosts = self.hosts.read().unwrap();
-        hosts.get(host_key).map(|h| h.addresses.clone())
-    }
-
-    /// Sorts a list of items by their host's download score (descending).
-    /// Score is `throughput / (inflight_downloads + 1)`, lower failure_rate
-    /// wins first, and unsampled hosts get discovery priority. Used by the
-    /// download path so concurrent slab downloads spread initial picks
-    /// across less-busy hosts.
-    ///
-    /// Hosts this SDK has no address for are dropped rather than sorted to
-    /// the back. Reading from one could only ever fail with
-    /// [`RPCError::UnknownHost`], so leaving it in hides a shortage that is
-    /// already certain behind a run of doomed attempts.
-    fn prioritize<H, F>(&self, items: &mut Vec<H>, f: F)
-    where
-        F: Fn(&H) -> &PublicKey,
-    {
-        let metrics = self.metrics.read().unwrap();
-        let host_info = self.hosts.read().unwrap();
-        items.retain(|item| host_info.contains_key(f(item)));
-        let score_for = |k: &PublicKey| -> Option<HostScore> {
-            let metric = metrics.get(k)?;
-            let inflight = host_info
-                .get(k)
-                .map(|h| h.inflight_downloads.load(Ordering::Relaxed))
-                .unwrap_or(0);
-            Some(HostScore::new(metric, inflight))
-        };
-        // Use `sort_by_cached_key` so each item's score is computed exactly
-        // once. The inflight counter is an atomic that other tasks mutate
-        // concurrently — recomputing during the sort would let the same
-        // host's score change between comparisons, violating total order
-        // and crashing the sort.
-        items.sort_by_cached_key(|b| std::cmp::Reverse(score_for(f(b))));
-    }
-
-    /// Adds new hosts to the list if they don't already exist.
-    ///
-    /// If `clear` is true, existing hosts not in the new list are removed, but
-    /// their metrics and inflight counters are retained in case they reappear later.
-    fn update(&self, new_hosts: Vec<Host>, clear: bool) {
-        let mut hosts = self.hosts.write().unwrap();
-        // Preserve inflight counters across `clear=true` updates so guards
-        // currently outstanding still decrement the right counter.
-        let old = if clear {
-            std::mem::take(&mut *hosts)
-        } else {
-            HashMap::new()
-        };
-        let mut metrics = self.metrics.write().unwrap();
-        for host in new_hosts {
-            let existing = hosts
-                .get(&host.public_key)
-                .or_else(|| old.get(&host.public_key));
-            let inflight_uploads = existing
-                .map(|h| h.inflight_uploads.clone())
-                .unwrap_or_else(|| Arc::new(AtomicUsize::new(0)));
-            let inflight_downloads = existing
-                .map(|h| h.inflight_downloads.clone())
-                .unwrap_or_else(|| Arc::new(AtomicUsize::new(0)));
-            hosts.insert(
-                host.public_key,
-                HostInfo {
-                    addresses: host.addresses,
-                    good_for_upload: host.good_for_upload,
-                    inflight_uploads,
-                    inflight_downloads,
-                },
-            );
-            metrics.entry(host.public_key).or_default();
-        }
-    }
-
-    /// Returns the number of known hosts that are good for upload.
-    fn available_for_upload(&self) -> usize {
-        self.hosts
-            .read()
-            .unwrap()
-            .iter()
-            .filter(|(_, h)| h.good_for_upload)
-            .count()
-    }
-
-    /// Snapshots the currently upload-eligible host keys. Used by
-    /// [`HostQueue::new`] to seed the per-slab pool.
-    fn upload_eligible_hosts(&self) -> Vec<PublicKey> {
-        self.hosts
-            .read()
-            .unwrap()
-            .iter()
-            .filter_map(|(k, info)| info.good_for_upload.then_some(*k))
-            .collect()
-    }
-
-    /// Begins tracking an in-flight download from the host. Returns a guard
-    /// that increments the host's `inflight_downloads` counter immediately
-    /// and decrements it on drop. Returns `None` if the host is unknown.
-    fn track_inflight_download(&self, host_key: &PublicKey) -> Option<InflightGuard> {
-        let counter = self
-            .hosts
-            .read()
-            .unwrap()
-            .get(host_key)?
-            .inflight_downloads
-            .clone();
-        Some(InflightGuard::new(counter))
-    }
-
-    /// Mutates the per-host metric in place. Used by the sample/failure
-    /// recording helpers below.
-    fn with_metric<F>(&self, host_key: &PublicKey, f: F)
-    where
-        F: FnOnce(&mut HostMetric),
-    {
-        if let Some(metric) = self.metrics.write().unwrap().get_mut(host_key) {
-            f(metric);
-        }
-    }
-
-    /// Adds a failure for the given host, updating its metrics.
-    fn add_failure(&self, host_key: PublicKey) {
-        self.with_metric(&host_key, |m| m.add_failure());
-    }
-
-    /// Adds a read sample for the given host, updating its metrics.
-    fn add_read_sample(&self, host_key: PublicKey, transfer: Transfer) {
-        self.with_metric(&host_key, |m| m.add_read_sample(transfer));
-    }
-
-    /// Adds a write sample for the given host, updating its metrics.
-    fn add_write_sample(&self, host_key: PublicKey, transfer: Transfer) {
-        self.with_metric(&host_key, |m| m.add_write_sample(transfer));
-    }
-}
-
 /// RAII guard that increments an `AtomicUsize` on construction and
 /// decrements it on drop. Used to track per-host inflight uploads so the
 /// host scorer reflects current load and is balanced even on early returns
@@ -236,115 +84,6 @@ impl InflightGuard {
 impl Drop for InflightGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
-type PriceOutcome = Result<HostPrices, crate::rhp4::Error>;
-
-/// A price RPC running on its own task. Waiters hold the `Arc`; dropping
-/// the last one aborts the task.
-struct PriceFetch {
-    outcome: watch::Receiver<Option<PriceOutcome>>,
-    _task: AbortOnDropHandle<()>,
-}
-
-enum PriceEntry {
-    Cached(HostPrices),
-    Fetching(Weak<PriceFetch>),
-}
-
-/// Caches each host's price table and serializes concurrent fetches for
-/// the same host behind a single RPC.
-#[derive(Clone)]
-struct PriceCache {
-    transport: Client,
-    hosts: Arc<HostList>,
-    entries: Arc<Mutex<HashMap<PublicKey, PriceEntry>>>,
-}
-
-impl PriceCache {
-    fn new(transport: Client, hosts: Arc<HostList>) -> Self {
-        Self {
-            transport,
-            hosts,
-            entries: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    fn start(&self, host: &HostEndpoint, idle_timeout: Duration) -> Arc<PriceFetch> {
-        let host = HostEndpoint {
-            public_key: host.public_key,
-            addresses: host.addresses.clone(),
-        };
-        let transport = self.transport.clone();
-        let hosts = self.hosts.clone();
-        let entries = self.entries.clone();
-        let (tx, outcome) = watch::channel(None);
-        let task = maybe_spawn!(async move {
-            let outcome = transport
-                .host_prices(&host, idle_timeout)
-                .await
-                .map(|(prices, _)| prices);
-            match &outcome {
-                Ok(prices) => {
-                    entries
-                        .lock()
-                        .unwrap()
-                        .insert(host.public_key, PriceEntry::Cached(prices.clone()));
-                }
-                Err(_) => hosts.add_failure(host.public_key),
-            }
-            let _ = tx.send(Some(outcome));
-        });
-        Arc::new(PriceFetch {
-            outcome,
-            _task: AbortOnDropHandle::new(task),
-        })
-    }
-
-    /// Returns the host's prices, fetching them when none are cached, the
-    /// cached ones have expired, or `refresh` is set. Concurrent calls for
-    /// the same host wait on the in-flight fetch and share its outcome,
-    /// success or failure.
-    async fn fetch(
-        &self,
-        host: &HostEndpoint,
-        idle_timeout: Duration,
-        refresh: bool,
-    ) -> Result<HostPrices, RPCError> {
-        let fetch = {
-            let mut entries = self.entries.lock().unwrap();
-            match entries.get(&host.public_key) {
-                Some(PriceEntry::Cached(prices)) if !refresh && prices.valid_until > Utc::now() => {
-                    return Ok(prices.clone());
-                }
-                // a finished fetch still held by its waiters has failed; start over
-                Some(PriceEntry::Fetching(fetch))
-                    if let Some(fetch) = fetch.upgrade()
-                        && fetch.outcome.borrow().is_none() =>
-                {
-                    fetch
-                }
-                _ => {
-                    let fetch = self.start(host, idle_timeout);
-                    entries.insert(
-                        host.public_key,
-                        PriceEntry::Fetching(Arc::downgrade(&fetch)),
-                    );
-                    fetch
-                }
-            }
-        };
-        let mut outcome = fetch.outcome.clone();
-        let outcome = outcome
-            .wait_for(Option::is_some)
-            .await
-            .map_err(|_| crate::rhp4::Error::Transport("price fetch exited".to_string()))?;
-        outcome
-            .as_ref()
-            .expect("waited for an outcome")
-            .clone()
-            .map_err(RPCError::Rhp)
     }
 }
 
@@ -378,31 +117,123 @@ pub enum RPCError {
 /// and prioritizing hosts based on their metrics.
 ///
 /// It can be safely shared across threads and cloned.
-///
-/// This is public for criterion benchmarks, but not intended for general use
 #[derive(Clone)]
 pub(crate) struct Hosts {
     transport: Client,
-    prices: PriceCache,
-    hosts: Arc<HostList>,
+    hosts: Arc<RwLock<HashMap<PublicKey, HostInfo>>>,
     refresher: Option<Arc<HostRefresher>>,
-
-    global_write_avg: Arc<RwLock<RPCAverage>>,
-    global_read_avg: Arc<RwLock<RPCAverage>>,
 }
 
 impl Hosts {
     pub fn new(transport: Client) -> Self {
-        let hosts = Arc::new(HostList::new());
         Self {
-            prices: PriceCache::new(transport.clone(), hosts.clone()),
             transport,
-            hosts,
+            hosts: Arc::default(),
             refresher: None,
-
-            global_write_avg: Arc::new(RwLock::new(RPCAverage::default())),
-            global_read_avg: Arc::new(RwLock::new(RPCAverage::default())),
         }
+    }
+
+    fn addresses(&self, host_key: &PublicKey) -> Option<Vec<NetAddress>> {
+        let hosts = self.hosts.read().unwrap();
+        hosts.get(host_key).map(|h| h.addresses.clone())
+    }
+
+    /// Sorts a list of items by their host's download score (descending).
+    /// Score is `throughput / (inflight_downloads + 1)`, lower failure_rate
+    /// wins first, and unsampled hosts get discovery priority. Used by the
+    /// download path so concurrent slab downloads spread initial picks
+    /// across less-busy hosts.
+    ///
+    /// Hosts this SDK has no address for are dropped rather than sorted to
+    /// the back. Reading from one could only ever fail with
+    /// [`RPCError::UnknownHost`], so leaving it in hides a shortage that is
+    /// already certain behind a run of doomed attempts.
+    pub fn prioritize<H, F>(&self, items: &mut Vec<H>, f: F)
+    where
+        F: Fn(&H) -> &PublicKey,
+    {
+        let host_info = self.hosts.read().unwrap();
+        items.retain(|item| host_info.contains_key(f(item)));
+        // Use `sort_by_cached_key` so each item's score is computed exactly
+        // once. The inflight counter is an atomic that other tasks mutate
+        // concurrently — recomputing during the sort would let the same
+        // host's score change between comparisons, violating total order
+        // and crashing the sort.
+        items.sort_by_cached_key(|item| {
+            let key = f(item);
+            let inflight = host_info[key].inflight_downloads.load(Ordering::Relaxed);
+            std::cmp::Reverse(self.transport.host_score(key, inflight))
+        });
+    }
+
+    /// Adds new hosts to the list if they don't already exist.
+    ///
+    /// If `clear` is true, existing hosts not in the new list are removed, but
+    /// their metrics and inflight counters are retained in case they reappear later.
+    pub fn update(&self, new_hosts: Vec<Host>, clear: bool) {
+        let mut hosts = self.hosts.write().unwrap();
+        // Preserve inflight counters across `clear=true` updates so guards
+        // currently outstanding still decrement the right counter.
+        let old = if clear {
+            std::mem::take(&mut *hosts)
+        } else {
+            HashMap::new()
+        };
+        for host in new_hosts {
+            let existing = hosts
+                .get(&host.public_key)
+                .or_else(|| old.get(&host.public_key));
+            let inflight_uploads = existing
+                .map(|h| h.inflight_uploads.clone())
+                .unwrap_or_else(|| Arc::new(AtomicUsize::new(0)));
+            let inflight_downloads = existing
+                .map(|h| h.inflight_downloads.clone())
+                .unwrap_or_else(|| Arc::new(AtomicUsize::new(0)));
+            hosts.insert(
+                host.public_key,
+                HostInfo {
+                    addresses: host.addresses,
+                    good_for_upload: host.good_for_upload,
+                    inflight_uploads,
+                    inflight_downloads,
+                },
+            );
+        }
+    }
+
+    /// Returns the number of known hosts that are good for upload.
+    pub fn available_for_upload(&self) -> usize {
+        self.hosts
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, h)| h.good_for_upload)
+            .count()
+    }
+
+    /// Snapshots the currently upload-eligible host keys. Used by
+    /// [`HostQueue::new`] to seed the per-slab pool.
+    fn upload_eligible_hosts(&self) -> Vec<PublicKey> {
+        self.hosts
+            .read()
+            .unwrap()
+            .iter()
+            .filter_map(|(k, info)| info.good_for_upload.then_some(*k))
+            .collect()
+    }
+
+    /// Begins tracking an in-flight download from the host. Returns a guard
+    /// that increments the host's `inflight_downloads` counter immediately
+    /// and decrements it on drop. Returns `None` if the host is unknown.
+    pub fn reserve_inflight_download(&self, host_key: &PublicKey) -> Option<InflightGuard> {
+        let counter = self
+            .hosts
+            .read()
+            .unwrap()
+            .get(host_key)?
+            .inflight_downloads
+            .clone();
+        Some(InflightGuard::new(counter))
     }
 
     /// A [`Hosts`] that refreshes its list from the indexer, no more often
@@ -469,7 +300,7 @@ impl Hosts {
     }
 
     fn host_endpoint(&self, host_key: PublicKey) -> Result<HostEndpoint, RPCError> {
-        let addresses = self.hosts.addresses(&host_key);
+        let addresses = self.addresses(&host_key);
         match addresses {
             Some(addresses) => Ok(HostEndpoint {
                 public_key: host_key,
@@ -479,102 +310,20 @@ impl Hosts {
         }
     }
 
-    /// Sorts a list of hosts according to their priority in the client's
-    /// preferred hosts queue. The function `f` is used to extract the
-    /// public key from each item.
-    pub fn prioritize<H, F>(&self, hosts: &mut Vec<H>, f: F)
-    where
-        F: Fn(&H) -> &PublicKey,
-    {
-        self.hosts.prioritize(hosts, f)
-    }
-
-    /// Adds new hosts to the list if they don't already exist
-    ///
-    /// If `clear` is true, existing hosts not in the new list are removed, but their metrics are retained.
-    pub fn update(&self, new_hosts: Vec<Host>, clear: bool) {
-        self.hosts.update(new_hosts, clear);
-    }
-
-    /// Returns the number of known hosts that are good for upload.
-    pub fn available_for_upload(&self) -> usize {
-        self.hosts.available_for_upload()
-    }
-
     /// Creates a per-slab [`HostQueue`] from the currently
     /// upload-eligible hosts. Each host is handed out once until retried.
     /// Pass the slab's shard count as `pending_initial` so each shard has
     /// a host reserved for its first attempt.
     pub fn upload_queue(&self, pending_initial: usize) -> HostQueue {
-        HostQueue::new(
-            self.hosts.clone(),
-            self.hosts.upload_eligible_hosts(),
-            pending_initial,
-        )
+        HostQueue::new(self.clone(), self.upload_eligible_hosts(), pending_initial)
     }
 
-    /// Reserves an inflight slot for a download from the given host. The
-    /// returned guard increments `inflight_downloads` immediately so
-    /// concurrent `prioritize` calls see the load, and decrements on drop.
-    /// Callers should create the guard before spawning the download task
-    /// and hold it for the duration of the RPC.
-    pub fn reserve_inflight_download(&self, host_key: &PublicKey) -> Option<InflightGuard> {
-        self.hosts.track_inflight_download(host_key)
-    }
-
-    /// Adds a failure for the given host, updating its metrics and priority.
-    pub fn add_failure(&self, host_key: PublicKey) {
-        self.hosts.add_failure(host_key);
-    }
-
-    /// Records a successful write for the host's metrics and the global
-    /// write throughput EMA. Zero-size or zero-duration transfers are
-    /// skipped rather than recorded as infinite throughput.
-    pub fn record_write_sample(&self, host_key: PublicKey, size: u32, elapsed: Duration) {
-        let Some(transfer) = Transfer::try_new(size, elapsed) else {
-            return;
-        };
-        self.hosts.add_write_sample(host_key, transfer);
-        self.global_write_avg
-            .write()
-            .unwrap()
-            .add_sample(transfer.rate());
-    }
-
-    /// Read equivalent of [`Self::record_write_sample`].
-    pub fn record_read_sample(&self, host_key: PublicKey, size: u32, elapsed: Duration) {
-        let Some(transfer) = Transfer::try_new(size, elapsed) else {
-            return;
-        };
-        self.hosts.add_read_sample(host_key, transfer);
-        self.global_read_avg
-            .write()
-            .unwrap()
-            .add_sample(transfer.rate());
-    }
-
-    /// Expected duration of a `bytes`-sized write on a typical host.
-    /// Falls back to a static until the first write is sampled.
     pub fn write_estimate(&self, bytes: u32) -> Duration {
-        const DEFAULT: Transfer = Transfer::new(SECTOR_SIZE as u32, Duration::from_secs(5));
-        self.global_write_avg
-            .read()
-            .unwrap()
-            .avg()
-            .map(|rate| Duration::from_secs_f64(bytes as f64 / *rate))
-            .unwrap_or_else(|| DEFAULT.estimate_duration(bytes))
+        self.transport.write_estimate(bytes)
     }
 
-    /// Expected duration of a `bytes`-sized read on a typical host.
-    /// Falls back to a static until the first read is sampled.
     pub fn read_estimate(&self, bytes: u32) -> Duration {
-        const DEFAULT: Transfer = Transfer::new(1 << 20, Duration::from_secs(1));
-        self.global_read_avg
-            .read()
-            .unwrap()
-            .avg()
-            .map(|rate| Duration::from_secs_f64(bytes as f64 / *rate))
-            .unwrap_or_else(|| DEFAULT.estimate_duration(bytes))
+        self.transport.read_estimate(bytes)
     }
 
     /// Performs an upload RPC to the given host. The caller is responsible
@@ -588,14 +337,11 @@ impl Hosts {
         idle_timeout: Duration,
     ) -> Result<Hash256, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        let prices = self.prices.fetch(&host, idle_timeout, false).await?;
-        let bytes = sector.len() as u32;
-        let (root, elapsed) = self
+        let prices = self.transport.host_prices(&host, idle_timeout).await?;
+        let root = self
             .transport
             .write_sector(&host, prices, account_key, sector, idle_timeout)
-            .await
-            .inspect_err(|_| self.hosts.add_failure(host_key))?;
-        self.record_write_sample(host_key, bytes, elapsed);
+            .await?;
         Ok(root)
     }
 
@@ -613,9 +359,8 @@ impl Hosts {
         idle_timeout: Duration,
     ) -> Result<bytes::Bytes, RPCError> {
         let host = self.host_endpoint(host_key)?;
-        let bytes = length as u32;
-        let prices = self.prices.fetch(&host, idle_timeout, false).await?;
-        let (data, elapsed) = self
+        let prices = self.transport.host_prices(&host, idle_timeout).await?;
+        let data = self
             .transport
             .read_sector(
                 &host,
@@ -628,13 +373,44 @@ impl Hosts {
             .await
             .map_err(|e| match e {
                 crate::rhp4::Error::NoToken(host) => RPCError::NoToken(host),
-                e => {
-                    self.hosts.add_failure(host_key);
-                    e.into()
-                }
+                e => e.into(),
             })?;
-        self.record_read_sample(host_key, bytes, elapsed);
         Ok(data)
+    }
+}
+
+#[cfg(test)]
+impl Hosts {
+    /// Mutates the per-host metric in place. Used by the sample/failure
+    /// recording helpers below.
+    fn with_metric<F>(&self, host_key: &PublicKey, f: F)
+    where
+        F: FnOnce(&mut HostMetric),
+    {
+        self.transport.seed_metric(*host_key, f);
+    }
+
+    /// Adds a failure for the given host, updating its metrics.
+    pub fn add_failure(&self, host_key: PublicKey) {
+        self.transport.seed_failure(host_key);
+    }
+
+    /// Adds a read sample for the given host, updating its metrics.
+    fn add_read_sample(&self, host_key: PublicKey, transfer: Transfer) {
+        self.with_metric(&host_key, |m| m.add_read_sample(transfer));
+    }
+
+    /// Adds a write sample for the given host, updating its metrics.
+    fn add_write_sample(&self, host_key: PublicKey, transfer: Transfer) {
+        self.with_metric(&host_key, |m| m.add_write_sample(transfer));
+    }
+
+    pub fn record_write_sample(&self, host_key: PublicKey, size: u32, elapsed: Duration) {
+        self.transport.seed_write_sample(host_key, size, elapsed);
+    }
+
+    pub fn record_read_sample(&self, host_key: PublicKey, size: u32, elapsed: Duration) {
+        self.transport.seed_read_sample(host_key, size, elapsed);
     }
 }
 
@@ -671,13 +447,13 @@ const MAX_HOST_ATTEMPTS: usize = 3;
 /// [`HostQueue::pick_initial`] draws from the reserve; [`HostQueue::pick`]
 /// only takes the surplus, so every shard gets a host for its first attempt.
 ///
-/// `available` is a snapshot, not a live view of [`HostList`]: hosts
+/// `available` is a snapshot, not a live view of [`Hosts`]: hosts
 /// removed via [`Hosts::update`] after construction stay in the pool but
-/// are filtered at pick time when they no longer exist in `HostList`.
+/// are filtered at pick time when they no longer exist in `Hosts`.
 /// Slabs live for seconds, so snapshot staleness doesn't materially
 /// affect placement.
 pub(crate) struct HostQueue {
-    hosts: Arc<HostList>,
+    hosts: Hosts,
     available: Vec<PublicKey>,
     /// Failed attempts per host.
     attempts: HashMap<PublicKey, usize>,
@@ -687,7 +463,7 @@ pub(crate) struct HostQueue {
 }
 
 impl HostQueue {
-    fn new(hosts: Arc<HostList>, available: Vec<PublicKey>, pending_initial: usize) -> Self {
+    fn new(hosts: Hosts, available: Vec<PublicKey>, pending_initial: usize) -> Self {
         Self {
             hosts,
             available,
@@ -705,28 +481,26 @@ impl HostQueue {
             return None;
         }
         let host_info = self.hosts.hosts.read().unwrap();
-        let metrics = self.hosts.metrics.read().unwrap();
-        let mut best: Option<(usize, HostScore, Arc<AtomicUsize>)> = None;
+        let mut best: Option<(usize, HostScore, &Arc<AtomicUsize>)> = None;
         for (i, hk) in self.available.iter().enumerate() {
             let Some(info) = host_info.get(hk) else {
                 continue;
             };
-            let Some(metric) = metrics.get(hk) else {
-                continue;
-            };
-            let inflight = info.inflight_uploads.load(Ordering::Relaxed);
-            let score = HostScore::new(metric, inflight);
+            let score = self
+                .hosts
+                .transport
+                .host_score(hk, info.inflight_uploads.load(Ordering::Relaxed));
             match &best {
-                None => best = Some((i, score, info.inflight_uploads.clone())),
+                None => best = Some((i, score, &info.inflight_uploads)),
                 Some((_, current, _)) if score > *current => {
-                    best = Some((i, score, info.inflight_uploads.clone()))
+                    best = Some((i, score, &info.inflight_uploads))
                 }
                 _ => {}
             }
         }
         let (i, _, counter) = best?;
+        let counter = counter.clone();
         drop(host_info);
-        drop(metrics);
         let host = self.available.swap_remove(i);
         Some((host, InflightGuard::new(counter)))
     }
@@ -766,7 +540,7 @@ impl HostQueue {
 
 #[cfg(test)]
 mod test {
-    use crate::rhp4::Client;
+    use crate::client::Client;
     use crate::time::sleep;
     use sia_core::signing::PrivateKey;
 
@@ -826,6 +600,119 @@ mod test {
         );
     }
 
+    #[sia_core_derive::cross_target_test]
+    async fn shared_client_caches_prices_across_host_lists() {
+        let transport = crate::rhp4::mock::Client::new();
+        transport.set_price_delay(Duration::from_millis(100));
+        let client = Client::from_mock(transport.clone());
+        let first = Hosts::new(client.clone());
+        let second = Hosts::new(client);
+        let mut host = upload_host();
+        host.addresses.push(NetAddress {
+            protocol: sia_core::types::v2::Protocol::SiaMux,
+            address: "localhost:9984".into(),
+        });
+        let key = host.public_key;
+        first.update(vec![host.clone()], true);
+        second.update(vec![host.clone()], true);
+        let account = PrivateKey::from_seed(&[7; 32]);
+        let data = bytes::Bytes::from(vec![1; sia_core::rhp4::SECTOR_SIZE]);
+        let (a, b) = tokio::join!(
+            first.write_sector(key, &account, data.clone(), RPC_IDLE_TIMEOUT),
+            second.write_sector(key, &account, data.clone(), RPC_IDLE_TIMEOUT),
+        );
+        assert_eq!(a.unwrap(), b.unwrap());
+        assert_eq!(transport.price_requests(), 1);
+
+        first.update(vec![], true);
+        drop(first);
+        second.update(vec![], true);
+        second.update(vec![host], true);
+        second
+            .write_sector(key, &account, data, RPC_IDLE_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(transport.price_requests(), 1);
+
+        let independent = Client::from_mock(transport.clone());
+        independent
+            .host_prices(&second.host_endpoint(key).unwrap(), RPC_IDLE_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(transport.price_requests(), 2);
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn shared_client_tracks_rpcs_across_host_lists() {
+        let client = Client::mock();
+        let first = Hosts::new(client.clone());
+        let second = Hosts::new(client.clone());
+        let mut host = upload_host();
+        host.addresses.push(NetAddress {
+            protocol: sia_core::types::v2::Protocol::SiaMux,
+            address: "localhost:9984".into(),
+        });
+        let key = host.public_key;
+        first.update(vec![host.clone()], true);
+        second.update(vec![host.clone()], true);
+        first.add_failure(key);
+        let rate = || client.failure_rate(key);
+        assert_eq!(rate(), 100);
+
+        let account = PrivateKey::from_seed(&[7; 32]);
+        let data = bytes::Bytes::from(vec![1; sia_core::rhp4::SECTOR_SIZE]);
+        let root = first
+            .write_sector(key, &account, data.clone(), RPC_IDLE_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(
+            rate(),
+            64,
+            "settings and write RPCs each record one success"
+        );
+        assert_eq!(first.write_estimate(1024), second.write_estimate(1024));
+        let tokens = AccountTokenSource::from(Arc::new(AppKey::import([7; 32])));
+        assert_eq!(
+            second
+                .read_sector(key, &tokens, root, 0, data.len(), RPC_IDLE_TIMEOUT)
+                .await
+                .unwrap(),
+            data
+        );
+        assert_eq!(rate(), 51);
+        assert_eq!(first.read_estimate(1024), second.read_estimate(1024));
+
+        let write_estimate = first.write_estimate(1024);
+        let read_estimate = first.read_estimate(1024);
+        first.update(vec![], true);
+        assert!(first.host_endpoint(key).is_err());
+        assert!(second.host_endpoint(key).is_ok());
+        second.update(vec![], true);
+        drop(first);
+        drop(second);
+        let third = Hosts::new(client);
+        third.update(vec![host], true);
+        assert_eq!(third.transport.failure_rate(key), 51);
+        assert_eq!(third.write_estimate(1024), write_estimate);
+        assert_eq!(third.read_estimate(1024), read_estimate);
+    }
+
+    #[test]
+    fn shared_client_failures_affect_other_host_lists() {
+        let client = Client::mock();
+        let first = Hosts::new(client.clone());
+        let second = Hosts::new(client);
+        let bad = upload_host();
+        let good = upload_host();
+        first.update(vec![bad.clone()], true);
+        second.update(vec![bad.clone(), good.clone()], true);
+        first.add_failure(bad.public_key);
+        let mut keys = vec![bad.public_key, good.public_key];
+        second.prioritize(&mut keys, |key| key);
+        assert_eq!(keys, vec![good.public_key, bad.public_key]);
+        assert!(first.host_endpoint(good.public_key).is_err());
+    }
+
     /// A timing out sector RPC must cost the host a failure sample.
     ///
     /// Without one its rate stays 0, and `HostScore` ranks an unsampled host
@@ -854,19 +741,10 @@ mod test {
             longitude: 0.0,
             good_for_upload: true,
         };
-        let hosts = Hosts::new(Client::Mock(transport));
+        let hosts = Hosts::new(Client::from_mock(transport));
         hosts.update(vec![entry(write_host), entry(read_host)], true);
 
-        let rate = |hk| {
-            hosts
-                .hosts
-                .metrics
-                .read()
-                .unwrap()
-                .get(&hk)
-                .expect("host has metrics")
-                .failure_rate()
-        };
+        let rate = |hk| hosts.transport.failure_rate(hk);
         assert_eq!(rate(write_host), 0, "an unsampled host starts at zero");
         assert_eq!(rate(read_host), 0, "an unsampled host starts at zero");
 
@@ -911,8 +789,7 @@ mod test {
     }
 
     /// Concurrent price lookups for one host share a single RPC, success or
-    /// failure, and a `refresh` issued while that RPC is in flight is
-    /// satisfied by it. A shared failure is sampled once, not per caller.
+    /// failure. A shared failure is sampled once, not per caller.
     #[sia_core_derive::cross_target_test]
     async fn test_price_fetches_serialize_behind_one_rpc() {
         let host_key = random_pubkey();
@@ -926,29 +803,21 @@ mod test {
             longitude: 0.0,
             good_for_upload: true,
         };
-        let hosts = Arc::new(HostList::new());
+        let hosts = Hosts::new(Client::from_mock(transport.clone()));
         hosts.update(vec![entry()], true);
-        let cache = PriceCache::new(Client::Mock(transport.clone()), hosts.clone());
+        let cache = hosts.transport.clone();
         let host = || HostEndpoint {
             public_key: host_key,
             addresses: vec![],
         };
-        let rate = |hosts: &HostList| {
-            hosts
-                .metrics
-                .read()
-                .unwrap()
-                .get(&host_key)
-                .expect("host has metrics")
-                .failure_rate()
-        };
+        let rate = |hosts: &Hosts| hosts.transport.failure_rate(host_key);
 
         let mut set = tokio::task::JoinSet::new();
-        for i in 0..8 {
+        for _ in 0..8 {
             let cache = cache.clone();
             let host = host();
             join_set_spawn!(set, async move {
-                cache.fetch(&host, Duration::from_secs(5), i % 2 == 0).await
+                cache.host_prices(&host, Duration::from_secs(5)).await
             });
         }
         while let Some(result) = set.join_next().await {
@@ -957,19 +826,20 @@ mod test {
         assert_eq!(transport.price_requests(), 1);
 
         cache
-            .fetch(&host(), Duration::from_secs(5), false)
+            .host_prices(&host(), Duration::from_secs(5))
             .await
             .expect("price fetch failed");
         assert_eq!(transport.price_requests(), 1, "a valid table is reused");
 
+        cache.expire_host_prices(host_key);
         cache
-            .fetch(&host(), Duration::from_secs(5), true)
+            .host_prices(&host(), Duration::from_secs(5))
             .await
             .expect("price fetch failed");
         assert_eq!(
             transport.price_requests(),
             2,
-            "a refresh after the fetch completed must hit the host"
+            "an expired table must be fetched again"
         );
 
         // A failed in-flight fetch is shared with everyone queued behind it
@@ -978,12 +848,13 @@ mod test {
         let sample = Transfer::new(1 << 20, Duration::from_secs(1));
         hosts.add_write_sample(host_key, sample);
         transport.set_price_failures(1);
+        cache.expire_host_prices(host_key);
         let mut set = tokio::task::JoinSet::new();
         for _ in 0..8 {
             let cache = cache.clone();
             let host = host();
             join_set_spawn!(set, async move {
-                cache.fetch(&host, Duration::from_secs(5), true).await
+                cache.host_prices(&host, Duration::from_secs(5)).await
             });
         }
         while let Some(result) = set.join_next().await {
@@ -995,7 +866,7 @@ mod test {
 
         // Eight callers, one RPC, one failure sample: the rate must match a
         // host that was told about exactly one failure.
-        let reference = HostList::new();
+        let reference = Hosts::new(Client::mock());
         reference.update(vec![entry()], true);
         reference.add_write_sample(host_key, sample);
         reference.add_failure(host_key);
@@ -1003,7 +874,7 @@ mod test {
         assert!(rate(&hosts) > 0, "the failed RPC must be sampled");
 
         cache
-            .fetch(&host(), Duration::from_secs(5), false)
+            .host_prices(&host(), Duration::from_secs(5))
             .await
             .expect("a call after the failure must retry");
         assert_eq!(transport.price_requests(), 4);
@@ -1016,7 +887,7 @@ mod test {
         let host_key = random_pubkey();
         let transport = crate::rhp4::mock::Client::new();
         transport.set_price_delay(Duration::from_millis(200));
-        let hosts = Arc::new(HostList::new());
+        let hosts = Hosts::new(Client::from_mock(transport.clone()));
         hosts.update(
             vec![Host {
                 public_key: host_key,
@@ -1028,23 +899,23 @@ mod test {
             }],
             true,
         );
-        let cache = PriceCache::new(Client::Mock(transport.clone()), hosts);
+        let cache = hosts.transport.clone();
         let host = || HostEndpoint {
             public_key: host_key,
             addresses: vec![],
         };
-        let spawn_fetch = |refresh: bool| {
+        let spawn_fetch = || {
             let cache = cache.clone();
             let host = host();
             AbortOnDropHandle::new(maybe_spawn!(async move {
-                cache.fetch(&host, Duration::from_secs(5), refresh).await
+                cache.host_prices(&host, Duration::from_secs(5)).await
             }))
         };
 
         // the starter is cancelled; the waiter still gets the result of the
         // same RPC
-        let starter = spawn_fetch(false);
-        let waiter = spawn_fetch(false);
+        let starter = spawn_fetch();
+        let waiter = spawn_fetch();
         sleep(Duration::from_millis(20)).await;
         drop(starter);
         waiter
@@ -1055,12 +926,13 @@ mod test {
 
         // with every waiter gone the RPC is abandoned, so nothing is cached
         // from it and the next call fetches again
-        let abandoned = spawn_fetch(true);
+        cache.expire_host_prices(host_key);
+        let abandoned = spawn_fetch();
         sleep(Duration::from_millis(20)).await;
         drop(abandoned);
         sleep(Duration::from_millis(300)).await;
         cache
-            .fetch(&host(), Duration::from_secs(5), false)
+            .host_prices(&host(), Duration::from_secs(5))
             .await
             .expect("price fetch failed");
         assert_eq!(
@@ -1305,17 +1177,13 @@ mod test {
         );
         // Sample both with the same throughput so the inflight counter is
         // the only differentiator.
-        hosts_manager
-            .hosts
-            .add_read_sample(hk1, Transfer::new(1_000_000, Duration::from_secs(1)));
-        hosts_manager
-            .hosts
-            .add_read_sample(hk2, Transfer::new(1_000_000, Duration::from_secs(1)));
+        hosts_manager.add_read_sample(hk1, Transfer::new(1_000_000, Duration::from_secs(1)));
+        hosts_manager.add_read_sample(hk2, Transfer::new(1_000_000, Duration::from_secs(1)));
 
         // With both idle, sort order is arbitrary among ties — assert the
         // ranking switches when we add inflight to one of them.
         let mut items = vec![hk1, hk2];
-        hosts_manager.hosts.prioritize(&mut items, |k| k);
+        hosts_manager.prioritize(&mut items, |k| k);
         let initial_first = items[0];
         let initial_second = items[1];
 
@@ -1324,14 +1192,13 @@ mod test {
         let _guards: Vec<_> = (0..3)
             .map(|_| {
                 hosts_manager
-                    .hosts
-                    .track_inflight_download(&initial_first)
+                    .reserve_inflight_download(&initial_first)
                     .unwrap()
             })
             .collect();
 
         let mut items = vec![hk1, hk2];
-        hosts_manager.hosts.prioritize(&mut items, |k| k);
+        hosts_manager.prioritize(&mut items, |k| k);
         assert_eq!(
             items[0], initial_second,
             "host with higher download inflight should sort second",

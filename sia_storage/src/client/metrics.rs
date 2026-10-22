@@ -9,7 +9,7 @@ pub(crate) struct RPCAverage(Option<TransferRate>); // exponential moving averag
 impl RPCAverage {
     const ALPHA: f64 = 0.2;
 
-    pub(super) fn add_sample(&mut self, rate: TransferRate) {
+    pub(crate) fn add_sample(&mut self, rate: TransferRate) {
         match self.0 {
             Some(avg) => {
                 self.0 = Some(Self::ALPHA * rate + (1.0 - Self::ALPHA) * avg);
@@ -157,31 +157,45 @@ impl Ord for FailureRate {
 }
 
 #[derive(Debug, Default, Clone)]
-pub(super) struct HostMetric {
+pub(crate) struct HostMetric {
     rpc_write_avg: RPCAverage,
     rpc_read_avg: RPCAverage,
     failure_rate: FailureRate,
 }
 
 impl HostMetric {
-    pub(super) fn add_write_sample(&mut self, transfer: Transfer) {
-        self.rpc_write_avg.add_sample(transfer.rate());
+    #[cfg(test)]
+    pub(crate) fn add_write_sample(&mut self, transfer: Transfer) {
+        self.add_write_throughput(transfer.rate());
         self.failure_rate.add_sample(true);
     }
 
-    pub(super) fn add_read_sample(&mut self, transfer: Transfer) {
-        self.rpc_read_avg.add_sample(transfer.rate());
+    pub(crate) fn add_write_throughput(&mut self, rate: TransferRate) {
+        self.rpc_write_avg.add_sample(rate);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn add_read_sample(&mut self, transfer: Transfer) {
+        self.add_read_throughput(transfer.rate());
         self.failure_rate.add_sample(true);
     }
 
-    pub(super) fn add_failure(&mut self) {
+    pub(crate) fn add_read_throughput(&mut self, rate: TransferRate) {
+        self.rpc_read_avg.add_sample(rate);
+    }
+
+    pub(crate) fn add_success(&mut self) {
+        self.failure_rate.add_sample(true);
+    }
+
+    pub(crate) fn add_failure(&mut self) {
         self.failure_rate.add_sample(false);
     }
 
     /// The failure rate as an integer percentage. Zero for an unsampled host,
     /// which [`HostScore`] deliberately treats as good.
     #[cfg(test)]
-    pub(super) fn failure_rate(&self) -> i64 {
+    pub(crate) fn failure_rate(&self) -> i64 {
         self.failure_rate.rate()
     }
 
@@ -217,7 +231,7 @@ pub(crate) struct HostScore {
 }
 
 impl HostScore {
-    pub(super) fn new(metric: &HostMetric, inflight: usize) -> Self {
+    pub(crate) fn new(metric: &HostMetric, inflight: usize) -> Self {
         Self {
             failure_rate: metric.failure_rate.rate(),
             throughput: metric.combined_throughput(),
@@ -284,6 +298,7 @@ impl Transfer {
     }
 
     /// Returns the rate of the transfer in bytes per second.
+    #[cfg(test)]
     pub const fn rate(&self) -> TransferRate {
         TransferRate(self.size as f64 / self.elapsed.as_secs_f64())
     }
@@ -297,6 +312,16 @@ impl Transfer {
     /// `size` bytes.
     pub fn estimate_duration(&self, size: u32) -> Duration {
         self.pace().estimate_duration(size)
+    }
+}
+
+impl TransferRate {
+    pub(crate) fn try_new(bytes: u64, elapsed: Duration) -> Option<Self> {
+        (!elapsed.is_zero()).then(|| Self(bytes as f64 / elapsed.as_secs_f64()))
+    }
+
+    pub fn pace(self) -> Option<TransferPace> {
+        (self.0 > 0.0).then(|| TransferPace(1.0 / self.0))
     }
 }
 

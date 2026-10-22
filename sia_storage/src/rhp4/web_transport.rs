@@ -1,6 +1,6 @@
 //! WebTransport-based RHP4 client for WASM targets.
 //!
-//! Provides a [`Client`] that implements [`super::Transport`] using the
+//! Provides a [`Client`] that performs RHP4 RPCs using the
 //! browser's WebTransport API, mirroring the siamux client on native.
 //! Connections are pooled per host — one WebTransport session per host,
 //! with multiple bidirectional streams for concurrent RPCs.
@@ -15,6 +15,7 @@ use std::future::{Future, poll_fn};
 use std::ops::Range;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -30,10 +31,12 @@ use tokio::sync::{Semaphore, watch};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::client::Metrics;
+use crate::client::metrics::TransferRate;
 use crate::time::{Duration, Instant, sleep, timeout};
 
 use super::dial_failures::DialFailures;
-use super::{Error, HostEndpoint, Transport};
+use super::{Error, HostEndpoint};
 use crate::tokens::AccountTokenSource;
 
 #[wasm_bindgen]
@@ -523,44 +526,51 @@ impl Client {
 // returns large chunks from the network buffer, which Stream keeps a view of
 // in self.leftover and serves to subsequent poll_read calls without further
 // JS calls.
-impl Transport for Client {
-    async fn host_prices(
+impl Client {
+    pub(crate) async fn host_prices(
         &self,
         host: &HostEndpoint,
         idle_timeout: Duration,
-    ) -> Result<(HostPrices, Duration), Error> {
+    ) -> Result<HostPrices, Error> {
         let conn = self.connection(host).await?;
         let mut stream = conn.open_stream().await?;
         stream.set_idle_timeout(Some(idle_timeout));
         let mut buf = Vec::new();
         let req = RPCSettings::send_request(&mut buf).await?;
-        let start = Instant::now();
         stream.write_chunks(&buf).await?;
         let resp = req.complete(&mut stream).await?;
-        Ok((resp.settings.prices, start.elapsed()))
+        Ok(resp.settings.prices)
     }
 
-    async fn write_sector(
+    pub(crate) async fn write_sector(
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
         account_key: &PrivateKey,
         data: Bytes,
         idle_timeout: Duration,
-    ) -> Result<(Hash256, Duration), Error> {
+        metrics: Arc<Metrics>,
+    ) -> Result<Hash256, Error> {
         let token = AccountToken::new(account_key, host.public_key);
         let conn = self.connection(host).await?;
         let mut stream = conn.open_stream().await?;
         stream.set_idle_timeout(Some(idle_timeout));
         let mut buf = Vec::new();
+        let bytes = data.len() as u64;
         let req = RPCWriteSector::send_request(&mut buf, prices, token, data.clone()).await?;
         let start = Instant::now();
         stream.write_chunks(&buf).await?;
         let resp = req.complete(&mut stream).await?;
-        Ok((resp.root, start.elapsed()))
+        metrics.record_transfer(
+            host.public_key,
+            None,
+            TransferRate::try_new(bytes, start.elapsed()),
+        );
+        Ok(resp.root)
     }
 
-    async fn read_sector(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn read_sector(
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
@@ -568,7 +578,8 @@ impl Transport for Client {
         root: Hash256,
         range: Range<usize>,
         idle_timeout: Duration,
-    ) -> Result<(Bytes, Duration), Error> {
+        metrics: Arc<Metrics>,
+    ) -> Result<Bytes, Error> {
         let conn = self.connection(host).await?;
         let mut stream = conn.open_stream().await?;
         let token = tokens
@@ -582,7 +593,12 @@ impl Transport for Client {
         let start = Instant::now();
         stream.write_chunks(&buf).await?;
         let resp = req.complete(&mut stream).await?;
-        Ok((resp.data, start.elapsed()))
+        metrics.record_transfer(
+            host.public_key,
+            TransferRate::try_new(resp.data.len() as u64, start.elapsed()),
+            None,
+        );
+        Ok(resp.data)
     }
 }
 
