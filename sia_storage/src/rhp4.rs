@@ -14,6 +14,21 @@ use crate::client::Metrics;
 use crate::time::Duration;
 use crate::tokens::AccountTokenSource;
 
+/// How long an RPC may go without stream progress before the
+/// transport gives up on the host.
+const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(6);
+
+struct RecordTransfer<'a, S, F: Fn(&S)> {
+    stream: &'a mut S,
+    record: F,
+}
+
+impl<S, F: Fn(&S)> Drop for RecordTransfer<'_, S, F> {
+    fn drop(&mut self) {
+        (self.record)(self.stream);
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod siamux;
 
@@ -67,10 +82,10 @@ impl Client {
 
 /// Operations that can be performed on a host.
 ///
-/// Read and write RPCs record successful transfer rates in shared metrics.
-/// Timing excludes connection setup and stream opening.
+/// Sector RPCs record transfer rates in their data direction, including partial
+/// transfers. Control traffic does not contribute to throughput averages.
 ///
-/// Each RPC takes an `idle_timeout`: the longest its stream may go without
+/// Each RPC uses [`RPC_IDLE_TIMEOUT`]: the longest its stream may go without
 /// making progress in either direction before the RPC fails with an I/O
 /// error of kind [`std::io::ErrorKind::TimedOut`] (see [`Error::is_timeout`]).
 /// There is no bound on the total RPC duration, so a slow transfer that keeps
@@ -79,15 +94,15 @@ impl Client {
     pub(crate) async fn host_prices(
         &self,
         host: &HostEndpoint,
-        idle_timeout: Duration,
+        metrics: Arc<Metrics>,
     ) -> Result<HostPrices, Error> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
-            Self::SiaMux(c) => c.host_prices(host, idle_timeout).await,
+            Self::SiaMux(c) => c.host_prices(host, metrics).await,
             #[cfg(target_arch = "wasm32")]
-            Self::WebTransport(c) => c.host_prices(host, idle_timeout).await,
+            Self::WebTransport(c) => c.host_prices(host, metrics).await,
             #[cfg(any(test, feature = "mock"))]
-            Self::Mock(c) => c.host_prices(host, idle_timeout).await,
+            Self::Mock(c) => c.host_prices(host, metrics).await,
         }
     }
 
@@ -97,29 +112,27 @@ impl Client {
         prices: HostPrices,
         account_key: &PrivateKey,
         sector: Bytes,
-        idle_timeout: Duration,
         metrics: Arc<Metrics>,
     ) -> Result<Hash256, Error> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
             Self::SiaMux(c) => {
-                c.write_sector(host, prices, account_key, sector, idle_timeout, metrics)
+                c.write_sector(host, prices, account_key, sector, metrics)
                     .await
             }
             #[cfg(target_arch = "wasm32")]
             Self::WebTransport(c) => {
-                c.write_sector(host, prices, account_key, sector, idle_timeout, metrics)
+                c.write_sector(host, prices, account_key, sector, metrics)
                     .await
             }
             #[cfg(any(test, feature = "mock"))]
             Self::Mock(c) => {
-                c.write_sector(host, prices, account_key, sector, idle_timeout, metrics)
+                c.write_sector(host, prices, account_key, sector, metrics)
                     .await
             }
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn read_sector(
         &self,
         host: &HostEndpoint,
@@ -127,23 +140,22 @@ impl Client {
         tokens: &AccountTokenSource,
         root: Hash256,
         range: Range<usize>,
-        idle_timeout: Duration,
         metrics: Arc<Metrics>,
     ) -> Result<Bytes, Error> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
             Self::SiaMux(c) => {
-                c.read_sector(host, prices, tokens, root, range, idle_timeout, metrics)
+                c.read_sector(host, prices, tokens, root, range, metrics)
                     .await
             }
             #[cfg(target_arch = "wasm32")]
             Self::WebTransport(c) => {
-                c.read_sector(host, prices, tokens, root, range, idle_timeout, metrics)
+                c.read_sector(host, prices, tokens, root, range, metrics)
                     .await
             }
             #[cfg(any(test, feature = "mock"))]
             Self::Mock(c) => {
-                c.read_sector(host, prices, tokens, root, range, idle_timeout, metrics)
+                c.read_sector(host, prices, tokens, root, range, metrics)
                     .await
             }
         }
