@@ -11,7 +11,6 @@ use wasm_bindgen_futures::JsFuture;
 
 use super::js_err_message;
 use crate::client::Metrics;
-use crate::client::metrics::TransferRate;
 use crate::rhp4::Error;
 use crate::time::{Duration, Instant, sleep, timeout};
 
@@ -149,12 +148,12 @@ impl Stream {
     }
 
     /// Received payload bytes and accumulated time waiting for chunks.
-    fn read_metric(&self) -> (u64, Duration) {
+    pub(super) fn read_metric(&self) -> (u64, Duration) {
         self.read_metric.sample()
     }
 
     /// Browser-accepted payload bytes and accumulated time awaiting writes.
-    fn write_metric(&self) -> (u64, Duration) {
+    pub(super) fn write_metric(&self) -> (u64, Duration) {
         self.write_metric.sample()
     }
 
@@ -246,13 +245,6 @@ impl Stream {
 /// alive until the JS stream wrappers are garbage-collected
 impl Drop for Stream {
     fn drop(&mut self) {
-        let (read_bytes, read_elapsed) = self.read_metric();
-        let (write_bytes, write_elapsed) = self.write_metric();
-        self.metrics.record_transfer(
-            self.host,
-            TransferRate::try_new(read_bytes, read_elapsed),
-            TransferRate::try_new(write_bytes, write_elapsed),
-        );
         let reader = self.reader.clone();
         let writer = self.writer.clone();
         let timed_out = self.timed_out;
@@ -342,6 +334,8 @@ impl AsyncRead for Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::metrics::TransferRate;
+    use crate::rhp4::RecordTransfer;
     use crate::time::Instant;
     use js_sys::Uint8Array;
     use tokio::io::AsyncReadExt;
@@ -396,6 +390,54 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn control_traffic_does_not_change_transfer_averages() {
+        let host = PublicKey::new([1; 32]);
+        let rate = TransferRate::try_new(4 * 1024 * 1024, Duration::from_secs(1));
+        for (read, write) in [(false, false), (true, false), (false, true)] {
+            let metrics = Arc::new(Metrics::default());
+            metrics.record_transfer(host, rate, rate);
+            for _ in 0..20 {
+                let (mut stream, feeder, out_reader) = test_stream(IDLE_TIMEOUT);
+                stream.metrics = metrics.clone();
+                let rpc = stream.run(async |stream| {
+                    let tracked = RecordTransfer {
+                        stream,
+                        record: |stream: &Stream| {
+                            let (read_bytes, read_elapsed) = stream.read_metric();
+                            let (write_bytes, write_elapsed) = stream.write_metric();
+                            metrics.record_transfer(
+                                host,
+                                TransferRate::try_new(read_bytes, read_elapsed).filter(|_| read),
+                                TransferRate::try_new(write_bytes, write_elapsed).filter(|_| write),
+                            );
+                        },
+                    };
+                    let stream = &mut *tracked.stream;
+                    stream.write_chunks(b"request").await?;
+                    stream.read_exact(&mut [0; 3]).await?;
+                    assert_eq!(stream.read_metric().0, 3);
+                    assert_eq!(stream.write_metric().0, 7);
+                    assert!(!stream.read_metric().1.is_zero());
+                    assert!(!stream.write_metric().1.is_zero());
+                    Ok(())
+                });
+                let peer = async {
+                    sleep(Duration::from_millis(10)).await;
+                    JsFuture::from(out_reader.read()).await.unwrap();
+                    sleep(Duration::from_millis(10)).await;
+                    let ack = Uint8Array::from(b"ack".as_slice());
+                    JsFuture::from(feeder.write_with_chunk(&ack)).await.unwrap();
+                };
+                let (result, ()) = tokio::join!(rpc, peer);
+                result.unwrap();
+            }
+            let rates = metrics.transfer_rates();
+            assert_eq!(rates.read != rate, read);
+            assert_eq!(rates.write != rate, write);
+        }
+    }
+
+    #[wasm_bindgen_test]
     async fn partial_read_metrics_survive_cancellation() {
         let (stream, feeder, _out_reader) = test_stream(IDLE_TIMEOUT);
         let metrics = stream.metrics.clone();
@@ -406,6 +448,14 @@ mod tests {
         let host = stream.host;
         metrics.record_result(host, Ok(())).unwrap();
         let read = stream.run(async |stream| {
+            let tracked = RecordTransfer {
+                stream,
+                record: |stream: &Stream| {
+                    let (bytes, elapsed) = stream.read_metric();
+                    metrics.record_transfer(host, TransferRate::try_new(bytes, elapsed), None);
+                },
+            };
+            let stream = &mut *tracked.stream;
             stream.read_exact(&mut [0; 2]).await?;
             Ok(())
         });

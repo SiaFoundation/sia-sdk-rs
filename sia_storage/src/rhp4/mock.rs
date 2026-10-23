@@ -169,11 +169,6 @@ impl Client {
                 signature: Signature::default(),
                 valid_until: Utc::now() + chrono::Duration::days(1),
             };
-            metrics.record_transfer(
-                host.public_key,
-                TransferRate::try_new(128, Duration::from_nanos(102)),
-                TransferRate::try_new(16, Duration::from_nanos(12)),
-            );
             Ok(prices)
         }
         .await;
@@ -206,7 +201,7 @@ impl Client {
             }
             metrics.record_transfer(
                 host.public_key,
-                TransferRate::try_new(32, Duration::from_nanos(25)),
+                None,
                 TransferRate::try_new(bytes, start.elapsed()),
             );
             Ok(sector_root)
@@ -274,7 +269,7 @@ impl Client {
             metrics.record_transfer(
                 host.public_key,
                 TransferRate::try_new(sector.len() as u64, start.elapsed()),
-                TransferRate::try_new(32, Duration::from_nanos(25)),
+                None,
             );
             Ok(sector)
         }

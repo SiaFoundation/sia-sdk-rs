@@ -10,6 +10,7 @@
 //! returns large chunks which are buffered internally.
 
 use crate::client::Metrics;
+use crate::client::metrics::TransferRate;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -30,7 +31,7 @@ use wasm_bindgen_futures::JsFuture;
 use crate::time::{Duration, Instant, timeout};
 
 use super::dial_failures::DialFailures;
-use super::{Error, HostEndpoint};
+use super::{Error, HostEndpoint, RecordTransfer};
 use crate::tokens::AccountTokenSource;
 
 mod stream;
@@ -328,9 +329,21 @@ impl Client {
         metrics: Arc<Metrics>,
     ) -> Result<Hash256, Error> {
         let token = AccountToken::new(account_key, host.public_key);
-        self.host_stream(host, metrics)
+        self.host_stream(host, metrics.clone())
             .await?
             .run(async |stream| {
+                let tracked = RecordTransfer {
+                    stream,
+                    record: |stream: &Stream| {
+                        let (bytes, elapsed) = stream.write_metric();
+                        metrics.record_transfer(
+                            host.public_key,
+                            None,
+                            TransferRate::try_new(bytes, elapsed),
+                        );
+                    },
+                };
+                let stream = &mut *tracked.stream;
                 let mut buf = Vec::new();
                 let req = RPCWriteSector::send_request(&mut buf, prices, token, data).await?;
                 stream.write_chunks(&buf).await?;
@@ -349,9 +362,21 @@ impl Client {
         range: Range<usize>,
         metrics: Arc<Metrics>,
     ) -> Result<Bytes, Error> {
-        self.host_stream(host, metrics)
+        self.host_stream(host, metrics.clone())
             .await?
             .run(async |stream| {
+                let tracked = RecordTransfer {
+                    stream,
+                    record: |stream: &Stream| {
+                        let (bytes, elapsed) = stream.read_metric();
+                        metrics.record_transfer(
+                            host.public_key,
+                            TransferRate::try_new(bytes, elapsed),
+                            None,
+                        );
+                    },
+                };
+                let stream = &mut *tracked.stream;
                 let token = tokens
                     .token(host.public_key)
                     .map_err(|_| Error::NoToken(host.public_key))?;

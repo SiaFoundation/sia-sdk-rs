@@ -18,6 +18,17 @@ use crate::tokens::AccountTokenSource;
 /// transport gives up on the host.
 const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(6);
 
+struct RecordTransfer<'a, S, F: Fn(&S)> {
+    stream: &'a mut S,
+    record: F,
+}
+
+impl<S, F: Fn(&S)> Drop for RecordTransfer<'_, S, F> {
+    fn drop(&mut self) {
+        (self.record)(self.stream);
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod siamux;
 
@@ -71,7 +82,8 @@ impl Client {
 
 /// Operations that can be performed on a host.
 ///
-/// RPCs record read and write transfer rates, including partial transfers.
+/// Sector RPCs record transfer rates in their data direction, including partial
+/// transfers. Control traffic does not contribute to throughput averages.
 ///
 /// Each RPC uses [`RPC_IDLE_TIMEOUT`]: the longest its stream may go without
 /// making progress in either direction before the RPC fails with an I/O

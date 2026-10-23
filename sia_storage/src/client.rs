@@ -531,7 +531,30 @@ mod tests {
     }
 
     #[sia_core_derive::cross_target_test]
-    async fn every_rpc_samples_both_directions() {
+    async fn settings_preserve_bulk_estimates() {
+        let client = Client::mock();
+        let host = HostEndpoint {
+            public_key: PublicKey::new([1; 32]),
+            addresses: vec![],
+        };
+        let size = SECTOR_SIZE as u32;
+        client.seed_read_sample(host.public_key, size, Duration::from_secs(1));
+        client.seed_write_sample(host.public_key, size, Duration::from_secs(2));
+        let throughput = client.host_score(&host.public_key, 0).weighted_throughput();
+        for _ in 0..20 {
+            client.expire_host_prices(host.public_key);
+            client.host_prices(&host).await.unwrap();
+        }
+        assert_eq!(client.read_estimate(size), Duration::from_secs(1));
+        assert_eq!(client.write_estimate(size), Duration::from_secs(2));
+        assert_eq!(
+            client.host_score(&host.public_key, 0).weighted_throughput(),
+            throughput
+        );
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn only_sector_data_directions_are_sampled() {
         let client = Client::mock();
         let host = HostEndpoint {
             public_key: PublicKey::new([1; 32]),
@@ -540,37 +563,45 @@ mod tests {
                 address: "localhost:9984".into(),
             }],
         };
-        let assert_and_reset = || {
-            assert!(
+        let assert_and_reset = |read, write| {
+            assert_eq!(
                 client
                     .metrics
                     .global_read_avg
                     .read()
                     .unwrap()
                     .avg()
-                    .is_some()
+                    .is_some(),
+                read
             );
-            assert!(
+            assert_eq!(
                 client
                     .metrics
                     .global_write_avg
                     .read()
                     .unwrap()
                     .avg()
-                    .is_some()
+                    .is_some(),
+                write
             );
             *client.metrics.global_read_avg.write().unwrap() = RPCAverage::default();
             *client.metrics.global_write_avg.write().unwrap() = RPCAverage::default();
         };
         let prices = client.host_prices(&host).await.unwrap();
-        assert_and_reset();
+        assert_and_reset(false, false);
+        assert!(
+            client
+                .host_score(&host.public_key, 0)
+                .weighted_throughput()
+                .is_none()
+        );
         let account = PrivateKey::from_seed(&[7; 32]);
         let data = Bytes::from(vec![1; SECTOR_SIZE]);
         let root = client
             .write_sector(&host, prices.clone(), &account, data.clone())
             .await
             .unwrap();
-        assert_and_reset();
+        assert_and_reset(false, true);
         let tokens = AccountTokenSource::from(Arc::new(crate::AppKey::import([7; 32])));
         assert_eq!(
             client
@@ -579,6 +610,6 @@ mod tests {
                 .unwrap(),
             data
         );
-        assert_and_reset();
+        assert_and_reset(true, false);
     }
 }
