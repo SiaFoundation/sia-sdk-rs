@@ -22,7 +22,7 @@ use log::debug;
 use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::PublicKey;
 use thiserror::Error;
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinSet;
 
@@ -1006,7 +1006,7 @@ pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
     api_client: app_client::Client,
     app_key: Arc<AppKey>,
     mut object: Object,
-    reader: R,
+    mut reader: R,
     options: UploadOptions,
 ) -> Result<Object, UploadError> {
     let object_size = object.size();
@@ -1030,6 +1030,16 @@ pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
         head_start -= last_slab.length as u64;
     }
     let mut upload = Upload::new(hosts, api_client, app_key, options)?;
+    let mut first_byte = [0u8; 1];
+    let prefix = if start_offset == object_size {
+        if reader.read(&mut first_byte).await? == 0 {
+            return Ok(object);
+        }
+        &first_byte[..]
+    } else {
+        &[]
+    };
+    let reader = prefix.chain(reader);
     upload
         .feed_range(&object, &data_key, head_start, start_offset - head_start)
         .await?;
@@ -1521,15 +1531,17 @@ mod tests {
             (optimal + MIB, MIB, false),
             (optimal + MIB, optimal - MIB, false),
             (optimal + MIB, optimal, false),
+            (MIB, 1, false),
             (optimal, MIB, false),
             (0, MIB, false),
             (optimal, 0, false),
             (0, 0, false),
             (optimal + MIB, 0, false),
+            (MIB, 0, true),
             (optimal + MIB, MIB, true),
         ] {
             let transport = mock::Client::new();
-            let hosts = Hosts::new(Client::Mock(transport.clone()));
+            let hosts = Hosts::new(Client::from_mock(transport.clone()));
             hosts.update(
                 (0..60)
                     .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
@@ -1552,6 +1564,9 @@ mod tests {
             .await
             .unwrap();
             let pinned_before = api.pinned_slabs();
+            if append_len == 0 {
+                transport.clear();
+            }
             let new = upload_object(
                 hosts.clone(),
                 api_client,
@@ -1574,14 +1589,21 @@ mod tests {
             );
             let full_slabs = initial_len / optimal;
             assert_eq!(&new.slabs()[..full_slabs], &base.slabs()[..full_slabs]);
-            if initial_len.is_multiple_of(optimal) {
+            if append_len == 0 {
+                assert_eq!(
+                    transport.read_requests(),
+                    0,
+                    "empty appends need no download"
+                );
+            } else if initial_len.is_multiple_of(optimal) {
                 assert_eq!(transport.read_requests(), 0, "full slabs need no download");
             } else {
                 assert!(transport.read_requests() > 0, "partial slab is downloaded");
             }
             if append_len == 0 {
-                assert_eq!(new.slabs(), base.slabs());
+                assert_eq!(new, base);
                 assert_eq!(api.pinned_slabs(), pinned_before);
+                continue;
             } else {
                 assert_eq!(
                     api.pinned_slabs() - pinned_before,
@@ -1611,7 +1633,7 @@ mod tests {
 
     #[sia_core_derive::cross_target_test]
     async fn test_append_packed_object() {
-        let hosts = Hosts::new(Client::Mock(mock::Client::new()));
+        let hosts = Hosts::new(Client::from_mock(mock::Client::new()));
         hosts.update(
             (0..60)
                 .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
