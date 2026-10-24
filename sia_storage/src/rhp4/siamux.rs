@@ -1,3 +1,5 @@
+use crate::client::Metrics;
+use crate::client::metrics::TransferRate;
 use crate::time::{Elapsed, Instant, timeout};
 
 use bytes::Bytes;
@@ -15,7 +17,7 @@ use crate::rhp4::HostEndpoint;
 use crate::task::AbortOnDropHandle;
 use crate::time::Duration;
 
-use super::{Error as TransportError, Transport};
+use super::Error as TransportError;
 use sia_core::rhp4::protocol::{RPCReadSector, RPCSettings, RPCWriteSector};
 use sia_core::rhp4::{AccountToken, HostPrices};
 
@@ -190,42 +192,49 @@ impl Client {
     }
 }
 
-impl Transport for Client {
-    async fn host_prices(
+impl Client {
+    pub(crate) async fn host_prices(
         &self,
         host: &HostEndpoint,
         idle_timeout: Duration,
-    ) -> Result<(HostPrices, Duration), TransportError> {
+    ) -> Result<HostPrices, TransportError> {
         let mut stream = self.host_stream(host).await?;
         stream.set_idle_timeout(Some(idle_timeout));
-        let start = Instant::now();
         let resp = RPCSettings::send_request(&mut stream)
             .await?
             .complete(&mut stream)
             .await?;
-        Ok((resp.settings.prices, start.elapsed()))
+        Ok(resp.settings.prices)
     }
 
-    async fn write_sector(
+    pub(crate) async fn write_sector(
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
         account_key: &PrivateKey,
         data: Bytes,
         idle_timeout: Duration,
-    ) -> Result<(Hash256, Duration), TransportError> {
+        metrics: Arc<Metrics>,
+    ) -> Result<Hash256, TransportError> {
         let token = AccountToken::new(account_key, host.public_key);
         let mut stream = self.host_stream(host).await?;
         stream.set_idle_timeout(Some(idle_timeout));
         let start = Instant::now();
+        let bytes = data.len() as u64;
         let resp = RPCWriteSector::send_request(&mut stream, prices, token, data)
             .await?
             .complete(&mut stream)
             .await?;
-        Ok((resp.root, start.elapsed()))
+        metrics.record_transfer(
+            host.public_key,
+            None,
+            TransferRate::try_new(bytes, start.elapsed()),
+        );
+        Ok(resp.root)
     }
 
-    async fn read_sector(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn read_sector(
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
@@ -233,7 +242,8 @@ impl Transport for Client {
         root: Hash256,
         range: Range<usize>,
         idle_timeout: Duration,
-    ) -> Result<(Bytes, Duration), TransportError> {
+        metrics: Arc<Metrics>,
+    ) -> Result<Bytes, TransportError> {
         let mut stream = self.host_stream(host).await?;
         let token = tokens
             .token(host.public_key)
@@ -245,7 +255,12 @@ impl Transport for Client {
                 .await?
                 .complete(&mut stream)
                 .await?;
-        Ok((resp.data, start.elapsed()))
+        metrics.record_transfer(
+            host.public_key,
+            TransferRate::try_new(resp.data.len() as u64, start.elapsed()),
+            None,
+        );
+        Ok(resp.data)
     }
 }
 

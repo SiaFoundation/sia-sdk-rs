@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use sia_core::encoding;
@@ -9,6 +10,7 @@ use sia_core::types::Hash256;
 use sia_core::types::v2::NetAddress;
 use thiserror::Error;
 
+use crate::client::Metrics;
 use crate::time::Duration;
 use crate::tokens::AccountTokenSource;
 
@@ -23,8 +25,6 @@ mod dial_failures;
 #[cfg(any(test, feature = "mock"))]
 pub(crate) mod mock;
 
-mod pool;
-pub(crate) use pool::default_client;
 /// The transport used to talk to hosts. One real backend exists per
 /// target. The `mock` feature adds an in-memory backend alongside it.
 #[derive(Clone)]
@@ -65,12 +65,22 @@ impl Client {
     }
 }
 
-impl Transport for Client {
-    async fn host_prices(
+/// Operations that can be performed on a host.
+///
+/// Read and write RPCs record successful transfer rates in shared metrics.
+/// Timing excludes connection setup and stream opening.
+///
+/// Each RPC takes an `idle_timeout`: the longest its stream may go without
+/// making progress in either direction before the RPC fails with an I/O
+/// error of kind [`std::io::ErrorKind::TimedOut`] (see [`Error::is_timeout`]).
+/// There is no bound on the total RPC duration, so a slow transfer that keeps
+/// moving bytes is allowed to finish.
+impl Client {
+    pub(crate) async fn host_prices(
         &self,
         host: &HostEndpoint,
         idle_timeout: Duration,
-    ) -> Result<(HostPrices, Duration), Error> {
+    ) -> Result<HostPrices, Error> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
             Self::SiaMux(c) => c.host_prices(host, idle_timeout).await,
@@ -81,34 +91,36 @@ impl Transport for Client {
         }
     }
 
-    async fn write_sector(
+    pub(crate) async fn write_sector(
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
         account_key: &PrivateKey,
         sector: Bytes,
         idle_timeout: Duration,
-    ) -> Result<(Hash256, Duration), Error> {
+        metrics: Arc<Metrics>,
+    ) -> Result<Hash256, Error> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
             Self::SiaMux(c) => {
-                c.write_sector(host, prices, account_key, sector, idle_timeout)
+                c.write_sector(host, prices, account_key, sector, idle_timeout, metrics)
                     .await
             }
             #[cfg(target_arch = "wasm32")]
             Self::WebTransport(c) => {
-                c.write_sector(host, prices, account_key, sector, idle_timeout)
+                c.write_sector(host, prices, account_key, sector, idle_timeout, metrics)
                     .await
             }
             #[cfg(any(test, feature = "mock"))]
             Self::Mock(c) => {
-                c.write_sector(host, prices, account_key, sector, idle_timeout)
+                c.write_sector(host, prices, account_key, sector, idle_timeout, metrics)
                     .await
             }
         }
     }
 
-    async fn read_sector(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn read_sector(
         &self,
         host: &HostEndpoint,
         prices: HostPrices,
@@ -116,21 +128,22 @@ impl Transport for Client {
         root: Hash256,
         range: Range<usize>,
         idle_timeout: Duration,
-    ) -> Result<(Bytes, Duration), Error> {
+        metrics: Arc<Metrics>,
+    ) -> Result<Bytes, Error> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
             Self::SiaMux(c) => {
-                c.read_sector(host, prices, tokens, root, range, idle_timeout)
+                c.read_sector(host, prices, tokens, root, range, idle_timeout, metrics)
                     .await
             }
             #[cfg(target_arch = "wasm32")]
             Self::WebTransport(c) => {
-                c.read_sector(host, prices, tokens, root, range, idle_timeout)
+                c.read_sector(host, prices, tokens, root, range, idle_timeout, metrics)
                     .await
             }
             #[cfg(any(test, feature = "mock"))]
             Self::Mock(c) => {
-                c.read_sector(host, prices, tokens, root, range, idle_timeout)
+                c.read_sector(host, prices, tokens, root, range, idle_timeout, metrics)
                     .await
             }
         }
@@ -201,49 +214,3 @@ pub(crate) struct HostEndpoint {
     pub public_key: PublicKey,
     pub addresses: Vec<NetAddress>,
 }
-
-/// Trait defining the operations that can be performed on a host.
-///
-/// Each RPC returns the on-wire duration of the RPC alongside its result. The
-/// duration measures only the time spent exchanging request/response bytes —
-/// it excludes connection setup and stream opening. Callers can feed it into
-/// host performance tracking without contamination from pool-miss costs.
-///
-/// Each RPC takes an `idle_timeout`: the longest its stream may go without
-/// making progress in either direction before the RPC fails with an I/O
-/// error of kind [`std::io::ErrorKind::TimedOut`] (see [`Error::is_timeout`]).
-/// There is no bound on the total RPC duration, so a slow transfer that keeps
-/// moving bytes is allowed to finish.
-pub(crate) trait Transport: Clone + Unpin + MaybeSendSync + 'static {
-    fn host_prices(
-        &self,
-        host: &HostEndpoint,
-        idle_timeout: Duration,
-    ) -> impl Future<Output = Result<(HostPrices, Duration), Error>> + MaybeSendSync;
-    fn write_sector(
-        &self,
-        host: &HostEndpoint,
-        prices: HostPrices,
-        account_key: &PrivateKey,
-        sector: Bytes,
-        idle_timeout: Duration,
-    ) -> impl Future<Output = Result<(Hash256, Duration), Error>> + MaybeSendSync;
-    fn read_sector(
-        &self,
-        host: &HostEndpoint,
-        prices: HostPrices,
-        tokens: &AccountTokenSource,
-        root: Hash256,
-        range: Range<usize>,
-        idle_timeout: Duration,
-    ) -> impl Future<Output = Result<(Bytes, Duration), Error>> + MaybeSendSync;
-}
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) trait MaybeSendSync: Send + Sync {}
-#[cfg(not(target_arch = "wasm32"))]
-impl<T: Send + Sync> MaybeSendSync for T {}
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) trait MaybeSendSync {}
-#[cfg(target_arch = "wasm32")]
-impl<T> MaybeSendSync for T {}

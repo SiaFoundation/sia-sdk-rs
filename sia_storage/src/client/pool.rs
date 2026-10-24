@@ -4,7 +4,7 @@ mod imp {
     use std::future::pending;
     use std::sync::{LazyLock, Mutex};
 
-    use crate::rhp4::Client;
+    use crate::client::Client;
 
     struct Detach(tokio::runtime::Id);
 
@@ -54,7 +54,7 @@ mod imp {
         use tokio::runtime::{Builder, Id, Runtime};
 
         use super::*;
-        use crate::rhp4::{Error, HostEndpoint, Transport};
+        use crate::rhp4::{Error, HostEndpoint};
         use crate::time::{Duration, timeout};
 
         /// A siamux host that answers every RPC with an error. It runs on its
@@ -183,6 +183,31 @@ mod imp {
         }
 
         #[test]
+        fn test_metrics_share_the_connection_pool_lifetime() {
+            let first_runtime = Builder::new_current_thread().enable_all().build().unwrap();
+            let second_runtime = Builder::new_current_thread().enable_all().build().unwrap();
+            let host = PublicKey::new([1; 32]);
+            let first = first_runtime.block_on(async { default_client() });
+            first.record_write_sample(host, 1024, Duration::from_secs(1));
+            first.record_read_sample(host, 2048, Duration::from_secs(1));
+            let same_pool = first_runtime.block_on(async { default_client() });
+            assert!(Arc::ptr_eq(&first.metrics, &same_pool.metrics));
+            assert_eq!(same_pool.write_estimate(1024), Duration::from_secs(1));
+            assert_eq!(same_pool.read_estimate(2048), Duration::from_secs(1));
+            let other_pool = second_runtime.block_on(async { default_client() });
+            assert!(!Arc::ptr_eq(&first.metrics, &other_pool.metrics));
+            assert!(!other_pool.metrics.hosts.read().unwrap().contains_key(&host));
+            drop(first);
+            drop(same_pool);
+            assert_eq!(
+                first_runtime
+                    .block_on(async { default_client() })
+                    .write_estimate(1024),
+                Duration::from_secs(1)
+            );
+        }
+
+        #[test]
         fn test_multi_thread_runtime_detaches_on_shutdown() {
             let build = || Builder::new_multi_thread().enable_all().build().unwrap();
             assert_detaches_on_shutdown(build(), build());
@@ -211,7 +236,7 @@ mod imp {
 
 #[cfg(target_arch = "wasm32")]
 mod imp {
-    use crate::rhp4::Client;
+    use crate::client::Client;
 
     std::thread_local! {
         static RHP_CLIENT: Client = Client::new();
@@ -229,8 +254,9 @@ mod imp {
 
         #[wasm_bindgen_test]
         fn test_default_client_initializes() {
-            let _ = default_client();
-            let _ = default_client();
+            let first = default_client();
+            let second = default_client();
+            assert!(std::sync::Arc::ptr_eq(&first.metrics, &second.metrics));
         }
     }
 }
