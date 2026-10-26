@@ -22,7 +22,7 @@ use log::debug;
 use sia_core::rhp4::SECTOR_SIZE;
 use sia_core::signing::PublicKey;
 use thiserror::Error;
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinSet;
 
@@ -1006,17 +1006,11 @@ pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
     api_client: app_client::Client,
     app_key: Arc<AppKey>,
     mut object: Object,
-    reader: R,
+    mut reader: R,
     options: UploadOptions,
 ) -> Result<Object, UploadError> {
-    let Some(start_offset) = options.start_offset else {
-        let mut upload = Upload::new(hosts, api_client, app_key, options)?;
-        upload.read(object.data_key.clone(), reader).await?;
-        object.slabs.extend(upload.finish().await?);
-        return Ok(object);
-    };
-
     let object_size = object.size();
+    let start_offset = options.start_offset.unwrap_or(object_size);
     if start_offset > object_size {
         return Err(UploadError::OutOfRange(
             start_offset as usize,
@@ -1027,8 +1021,25 @@ pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
     // Feed the existing head bytes, then the new data, then the existing tail
     // bytes into the pipeline; it re-chunks the whole stream into fresh slabs.
     let data_key = object.data_key.clone();
-    let (head_index, head_start) = slab_at_offset(&object.slabs, start_offset);
+    let (mut head_index, mut head_start) = slab_at_offset(&object.slabs, start_offset);
+    if start_offset == object_size
+        && let Some(last_slab) = object.slabs.last()
+        && (last_slab.length as usize) < options.optimal_data_size()
+    {
+        head_index -= 1;
+        head_start -= last_slab.length as u64;
+    }
     let mut upload = Upload::new(hosts, api_client, app_key, options)?;
+    let mut first_byte = [0u8; 1];
+    let prefix = if start_offset == object_size {
+        if reader.read(&mut first_byte).await? == 0 {
+            return Ok(object);
+        }
+        &first_byte[..]
+    } else {
+        &[]
+    };
+    let reader = prefix.chain(reader);
     upload
         .feed_range(&object, &data_key, head_start, start_offset - head_start)
         .await?;
@@ -1507,6 +1518,175 @@ mod tests {
                 "{data}-of-{total}: expected ok={ok}, got {:?}",
                 result.err()
             );
+        }
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_append_object_repacks_last_slab() {
+        let options = UploadOptions::default();
+        let optimal = options.optimal_data_size();
+        const MIB: usize = 1 << 20;
+
+        for (initial_len, append_len, explicit_offset) in [
+            (optimal + MIB, MIB, false),
+            (optimal + MIB, optimal - MIB, false),
+            (optimal + MIB, optimal, false),
+            (MIB, 1, false),
+            (optimal, MIB, false),
+            (0, MIB, false),
+            (optimal, 0, false),
+            (0, 0, false),
+            (optimal + MIB, 0, false),
+            (MIB, 0, true),
+            (optimal + MIB, MIB, true),
+        ] {
+            let transport = mock::Client::new();
+            let hosts = Hosts::new(Client::from_mock(transport.clone()));
+            hosts.update(
+                (0..60)
+                    .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
+                    .collect(),
+                true,
+            );
+            let app_key = Arc::new(AppKey::import(rand::random()));
+            let api = app_client::mock::Client::new();
+            let api_client = app_client::Client::Mock(api.clone());
+            let mut expected = vec![0u8; initial_len];
+            rand::rng().fill_bytes(&mut expected);
+            let base = upload_object(
+                hosts.clone(),
+                api_client.clone(),
+                app_key.clone(),
+                Object::default(),
+                Cursor::new(&expected),
+                options.clone(),
+            )
+            .await
+            .unwrap();
+            let pinned_before = api.pinned_slabs();
+            if append_len == 0 {
+                transport.clear();
+            }
+            let new = upload_object(
+                hosts.clone(),
+                api_client,
+                app_key.clone(),
+                base.clone(),
+                Cursor::new(vec![0xA5; append_len]),
+                UploadOptions {
+                    start_offset: explicit_offset.then_some(initial_len as u64),
+                    ..options.clone()
+                },
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(new.data_key, base.data_key);
+            assert_eq!(new.size(), (initial_len + append_len) as u64);
+            assert_eq!(
+                new.slabs().len(),
+                (initial_len + append_len).div_ceil(optimal)
+            );
+            let full_slabs = initial_len / optimal;
+            assert_eq!(&new.slabs()[..full_slabs], &base.slabs()[..full_slabs]);
+            if append_len == 0 {
+                assert_eq!(
+                    transport.read_requests(),
+                    0,
+                    "empty appends need no download"
+                );
+            } else if initial_len.is_multiple_of(optimal) {
+                assert_eq!(transport.read_requests(), 0, "full slabs need no download");
+            } else {
+                assert!(transport.read_requests() > 0, "partial slab is downloaded");
+            }
+            if append_len == 0 {
+                assert_eq!(new, base);
+                assert_eq!(api.pinned_slabs(), pinned_before);
+                continue;
+            } else {
+                assert_eq!(
+                    api.pinned_slabs() - pinned_before,
+                    new.slabs().len() - full_slabs
+                );
+                if !initial_len.is_multiple_of(optimal) {
+                    assert_ne!(
+                        new.slabs()[full_slabs].encryption_key,
+                        base.slabs()[full_slabs].encryption_key
+                    );
+                }
+                for slab in &new.slabs()[..new.slabs().len() - 1] {
+                    assert_eq!(slab.length as usize, optimal);
+                }
+            }
+
+            expected.resize(initial_len + append_len, 0xA5);
+            let mut recovered = Vec::with_capacity(expected.len());
+            let mut download =
+                Download::new(&new, hosts, app_key, DownloadOptions::default()).unwrap();
+            tokio::io::copy(&mut download, &mut recovered)
+                .await
+                .unwrap();
+            assert_eq!(recovered, expected);
+        }
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_append_packed_object() {
+        let hosts = Hosts::new(Client::from_mock(mock::Client::new()));
+        hosts.update(
+            (0..60)
+                .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
+                .collect(),
+            true,
+        );
+        let app_key = Arc::new(AppKey::import(rand::random()));
+        let api_client = app_client::Client::mock();
+        let mut packed = PackedUpload::new(
+            hosts.clone(),
+            api_client.clone(),
+            app_key.clone(),
+            PackedUploadOptions::default(),
+        )
+        .unwrap();
+        let inputs = [vec![1; 111], vec![2; 1234], vec![3; 333]];
+        for input in &inputs {
+            packed.add(Cursor::new(input)).await.unwrap();
+        }
+        let objects = packed.finalize().await.unwrap();
+        assert_eq!(objects[1].slabs()[0].offset, inputs[0].len() as u32);
+        let new = upload_object(
+            hosts.clone(),
+            api_client,
+            app_key.clone(),
+            objects[1].clone(),
+            Cursor::new(vec![4; 4321]),
+            UploadOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(new.slabs().len(), 1);
+        assert_eq!(new.slabs()[0].offset, 0);
+        assert_ne!(
+            new.slabs()[0].encryption_key,
+            objects[1].slabs()[0].encryption_key
+        );
+
+        let mut expected = inputs[1].clone();
+        expected.extend(vec![4; 4321]);
+        for (object, data) in objects.iter().zip(inputs.iter()).chain([(&new, &expected)]) {
+            let mut recovered = Vec::new();
+            let mut download = Download::new(
+                object,
+                hosts.clone(),
+                app_key.clone(),
+                DownloadOptions::default(),
+            )
+            .unwrap();
+            tokio::io::copy(&mut download, &mut recovered)
+                .await
+                .unwrap();
+            assert_eq!(&recovered, data);
         }
     }
 

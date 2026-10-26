@@ -1290,6 +1290,7 @@ mod test {
         .await
         .expect("second upload to complete");
         assert_eq!(object.size(), expected.len() as u64);
+        assert_eq!(object.slabs().len(), 1);
 
         // download the full object and verify concatenation
         let mut output = BytesMut::zeroed(expected.len());
