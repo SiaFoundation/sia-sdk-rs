@@ -625,7 +625,7 @@ fn http_client() -> reqwest::Client {
         let roots =
             rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let mut tls = rustls::ClientConfig::builder_with_provider(
-            rustls::crypto::aws_lc_rs::default_provider().into(),
+            rustls::crypto::ring::default_provider().into(),
         )
         .with_safe_default_protocol_versions()
         .expect("TLS protocol versions are valid")
