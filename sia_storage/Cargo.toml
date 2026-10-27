@@ -40,13 +40,20 @@ sia_reed_solomon = "0.3.0"
 
 # --- Native-only dependencies ---
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-reqwest = { version = "0.13.5", default-features = false, features = ["charset", "gzip", "http2", "json", "query", "rustls", "zstd"] }
 tokio = { version = "1.53.1", features = ["sync", "io-util", "macros", "rt", "time"] }
 sia_mux = { version = "0.1.1", path = "../sia_mux" }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+reqwest = { version = "0.13.5", default-features = false, features = ["charset", "gzip", "http2", "json", "query", "rustls", "zstd"] }
+
+# Android uses ring, not aws-lc. aws-lc's OPENSSL_free calls any symbol named
+# sdallocx it finds at runtime, and React Native's libjsi.so and
+# libreactnative.so export a null function pointer by that name, so an app
+# that loads React Native crashes on its first TLS connection.
 [target.'cfg(target_os = "android")'.dependencies]
-rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["charset", "gzip", "http2", "json", "query", "rustls-no-provider", "zstd"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1.0.10"
 
 # --- WASM-only dependencies ---
