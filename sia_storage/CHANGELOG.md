@@ -1,3 +1,14 @@
+## 0.13.4 (2026-10-27)
+
+### Features
+
+- Host performance metrics and the price cache are now shared across all SDK instances.
+
+### Fixes
+
+- Appending data now efficiently repacks the last slab when it is not full.
+- Fixed an Android crash on the first HTTPS request in apps that load React Native.
+
 ## 0.13.3 (2026-10-22)
 
 ### Fixes
