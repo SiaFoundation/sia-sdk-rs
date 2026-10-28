@@ -177,6 +177,10 @@ safe-outputs:
     title-prefix: "chore: "
     labels: [dependencies]
     draft: false
+    protected-files:
+      policy: request_review
+      exclude:
+        - .changeset/
     allowed-files:
       - "ubrn.config.yaml"
       - ".changeset/**"
