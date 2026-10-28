@@ -4,6 +4,7 @@ use crate::download::*;
 use crate::hosts::*;
 use crate::mock::*;
 use crate::object::*;
+use crate::preauthorized_keys::*;
 use crate::sdk::*;
 use crate::shared_sdk::*;
 use crate::sharing::*;
@@ -3560,15 +3561,14 @@ fn connect_pre_authorized_checks_the_phrase_first() {
     let b = Box::into_raw(Box::new(FfiBuilder(std::sync::Mutex::new(
         BuilderState::Disconnected(builder),
     ))));
-    let key = [7u8; 32];
-
     unsafe {
+        let key = sia_pre_authorized_key_import([7u8; 32].as_ptr());
         let phrase = std::ffi::CString::new("not a recovery phrase").unwrap();
         let mut sdk = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
         let code = sia_builder_connect_pre_authorized(
             b,
-            key.as_ptr(),
+            key,
             phrase.as_ptr(),
             std::ptr::null_mut(),
             &raw mut sdk,
@@ -3588,7 +3588,7 @@ fn connect_pre_authorized_checks_the_phrase_first() {
         assert_eq!(
             sia_builder_connect_pre_authorized(
                 b,
-                key.as_ptr(),
+                key,
                 phrase.as_ptr(),
                 std::ptr::null_mut(),
                 &raw mut sdk,
@@ -3599,6 +3599,7 @@ fn connect_pre_authorized_checks_the_phrase_first() {
         );
         let _ = take_err(err);
 
+        sia_pre_authorized_key_free(key);
         sia_builder_free(b);
     }
 }
@@ -3608,14 +3609,14 @@ fn connect_pre_authorized_checks_the_phrase_first() {
 fn connect_pre_authorized_rejects_absent_arguments() {
     unsafe {
         let phrase = std::ffi::CString::new("anything").unwrap();
-        let key = [1u8; 32];
+        let key = sia_pre_authorized_key_import([1u8; 32].as_ptr());
 
         let mut sdk = std::ptr::null_mut();
         let mut err = std::ptr::null_mut();
         assert_eq!(
             sia_builder_connect_pre_authorized(
                 std::ptr::null_mut(),
-                key.as_ptr(),
+                key,
                 phrase.as_ptr(),
                 std::ptr::null_mut(),
                 &raw mut sdk,
@@ -3649,11 +3650,12 @@ fn connect_pre_authorized_rejects_absent_arguments() {
                 &raw mut sdk,
                 &raw mut err,
             ),
-            SIA_ERR,
+            SIA_ERR_INVALID_HANDLE,
             "a null key must be refused rather than read"
         );
-        assert!(take_err(err).contains("pre-authorized key"));
+        assert!(err.is_null(), "an absent handle sets no message");
 
+        sia_pre_authorized_key_free(key);
         sia_builder_free(b);
     }
 }

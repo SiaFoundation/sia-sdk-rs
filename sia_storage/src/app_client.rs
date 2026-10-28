@@ -3,6 +3,7 @@ use base64::prelude::*;
 
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
+use crate::preauthorized_keys::PreAuthorizedKey;
 use blake2b_simd::Params;
 use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode};
@@ -470,7 +471,7 @@ impl Client {
         &self,
         ephemeral_key: &PrivateKey,
         opts: &AppMetadata,
-        pre_authorized_key: &PrivateKey,
+        pre_authorized_key: &PreAuthorizedKey,
     ) -> Result<RegisterAppResponse, Error> {
         match self {
             Self::Http(c) => {

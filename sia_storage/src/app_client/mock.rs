@@ -16,6 +16,7 @@ use super::{
 };
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
+use crate::preauthorized_keys::PreAuthorizedKey;
 use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
 use crate::slabs::{SealedObjectSummary, Slab};
 use crate::time::Duration;
@@ -159,7 +160,7 @@ impl Client {
         &self,
         ephemeral_key: &PrivateKey,
         opts: &AppMetadata,
-        _: &PrivateKey,
+        _: &PreAuthorizedKey,
     ) -> Result<RegisterAppResponse, Error> {
         self.request_app_connection(ephemeral_key, opts).await
     }

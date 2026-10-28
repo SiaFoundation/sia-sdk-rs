@@ -25,6 +25,7 @@ const _: () = {
     moves_between_threads::<sia_storage::SharedSdk>();
     moves_between_threads::<sia_storage::Object>();
     moves_between_threads::<sia_storage::SharingKey>();
+    moves_between_threads::<sia_storage::preauthorized_keys::PreAuthorizedKey>();
     moves_between_threads::<upload::FfiUpload>();
     moves_between_threads::<download::FfiDownload>();
     moves_between_threads::<builder::FfiBuilder>();
@@ -39,6 +40,7 @@ const _: () = {
     shared_across_threads::<sia_storage::SharedSdk>();
     shared_across_threads::<sia_storage::Object>();
     shared_across_threads::<sia_storage::SharingKey>();
+    shared_across_threads::<sia_storage::preauthorized_keys::PreAuthorizedKey>();
     shared_across_threads::<upload::FfiPacked>();
     shared_across_threads::<tokio_util::sync::CancellationToken>();
     shared_across_threads::<sharing::FfiKeyRecords>();
@@ -57,6 +59,7 @@ mod hosts;
 #[cfg(feature = "mock")]
 mod mock;
 mod object;
+mod preauthorized_keys;
 mod sdk;
 mod shared_sdk;
 mod sharing;

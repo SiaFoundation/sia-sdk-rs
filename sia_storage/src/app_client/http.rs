@@ -19,6 +19,7 @@ use super::{
 use crate::app_client::{ERROR_OBJECT_UNPINNED_SLAB, PinObjectError};
 use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
+use crate::preauthorized_keys::PreAuthorizedKey;
 use crate::sharing::{KeyRequest, SharedObjectRequest};
 use crate::time::Duration;
 use crate::{Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject};
@@ -97,7 +98,7 @@ impl Client {
         &self,
         ephemeral_key: &PrivateKey,
         opts: &AppMetadata,
-        pre_authorized_key: &PrivateKey,
+        pre_authorized_key: &PreAuthorizedKey,
     ) -> Result<RegisterAppResponse, Error> {
         let public_key = pre_authorized_key.public_key();
         let sig_hash = pre_authorization_sig_hash(&ephemeral_key.public_key(), opts, &public_key);
@@ -2257,7 +2258,7 @@ mod native_tests {
     async fn test_pre_authorized_connect_flow() {
         let ephemeral_key = PrivateKey::from_seed(&rand::random());
         let ephemeral_pk = ephemeral_key.public_key();
-        let pre_auth_key = PrivateKey::from_seed(&rand::random());
+        let pre_auth_key = PreAuthorizedKey::new();
         let pre_auth_pk = pre_auth_key.public_key();
         let app_key = PrivateKey::from_seed(&rand::random());
         let app_pk = app_key.public_key();

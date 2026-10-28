@@ -1,3 +1,4 @@
+use crate::preauthorized_keys::PreAuthorizedKey;
 use crate::time::sleep;
 use std::sync::Arc;
 
@@ -135,7 +136,7 @@ impl Builder<DisconnectedState> {
     /// * `mnemonic` - The user's mnemonic phrase used to derive the application key.
     pub async fn connect_pre_authorized(
         self,
-        pre_authorized_key: &PrivateKey,
+        pre_authorized_key: &PreAuthorizedKey,
         mnemonic: &str,
     ) -> Result<Sdk, BuilderError> {
         // fail before the request consumes a use of the pre-authorized key
@@ -460,7 +461,7 @@ mod native_tests {
         expect_registration(&server);
 
         let builder = Builder::new(server.url("/").to_string(), APP_META).unwrap();
-        let pre_authorized_key = PrivateKey::from_seed(&random::<[u8; 32]>());
+        let pre_authorized_key = PreAuthorizedKey::new();
         let sdk = builder
             .connect_pre_authorized(&pre_authorized_key, OTHER_MNEMONIC)
             .await
