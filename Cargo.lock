@@ -2768,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage"
-version = "0.13.4"
+version = "0.13.5"
 dependencies = [
  "base64 0.23.1",
  "blake2b_simd",
@@ -2816,7 +2816,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_cabi"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "cbindgen",
  "log",
@@ -2830,7 +2830,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_ffi"
-version = "0.13.3"
+version = "0.13.4"
 dependencies = [
  "async-trait",
  "log",
@@ -2847,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_napi"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "bytes",
  "chrono",
@@ -2866,7 +2866,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage_wasm"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "chrono",
  "console_error_panic_hook",

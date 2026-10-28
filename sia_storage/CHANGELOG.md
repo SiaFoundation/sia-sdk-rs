@@ -1,3 +1,9 @@
+## 0.13.5 (2026-10-28)
+
+### Features
+
+- Added `PreAuthorizedKey` helpers for random key generation, seed import/export, and signing indexer creation requests.
+
 ## 0.13.4 (2026-10-27)
 
 ### Features
