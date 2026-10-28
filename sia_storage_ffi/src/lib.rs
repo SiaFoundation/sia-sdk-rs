@@ -21,6 +21,9 @@ pub use sharing::*;
 mod builder;
 pub use builder::*;
 
+mod preauthorized_keys;
+pub use preauthorized_keys::*;
+
 mod io;
 pub use io::*;
 

@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 
-use sia_core::signing::PrivateKey;
 use sia_storage::{
     ApprovedState, Builder as StorageBuilder, DisconnectedState, RequestingApprovalState,
 };
@@ -8,6 +7,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
 use crate::helpers::{make_app_metadata, to_js_err};
+use crate::preauthorized_keys::PreAuthorizedKey;
 use crate::run_local;
 use crate::sdk::Sdk;
 
@@ -61,20 +61,14 @@ impl Builder {
     }
 
     /// Connects using a pre-authorized key, bypassing the interactive approval
-    /// flow, and returns a Sdk. `preAuthorizedKeySeed` is the 32-byte
-    /// pre-authorized private key (Uint8Array); `mnemonic` derives the app key.
+    /// flow, and returns a Sdk. `mnemonic` derives the app key.
     #[wasm_bindgen(js_name = "connectPreAuthorized")]
     pub async fn connect_pre_authorized(
         &self,
-        pre_authorized_key_seed: &[u8],
+        pre_authorized_key: &PreAuthorizedKey,
         mnemonic: &str,
     ) -> Result<Sdk, JsError> {
-        if pre_authorized_key_seed.len() != 32 {
-            return Err(JsError::new("pre-authorized key seed must be 32 bytes"));
-        }
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(pre_authorized_key_seed);
-        let pre_authorized_key = PrivateKey::from_seed(&seed);
+        let pre_authorized_key = pre_authorized_key.0.clone();
         let mnemonic = mnemonic.to_string();
 
         let state = self.state.borrow_mut().take();

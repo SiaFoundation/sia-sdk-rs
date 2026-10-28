@@ -4,6 +4,7 @@ mod helpers;
 mod logging;
 mod object;
 mod packed;
+mod preauthorized_keys;
 mod sdk;
 mod sealed;
 mod sharing;

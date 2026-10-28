@@ -44,6 +44,7 @@ typedef struct sia_shared_sdk sia_shared_sdk_t;
 typedef struct sia_object sia_object_t;
 typedef struct sia_cancel sia_cancel_t;
 typedef struct sia_sharing_key sia_sharing_key_t;
+typedef struct sia_pre_authorized_key sia_pre_authorized_key_t;
 
 
 #define SIA_OK 0
@@ -134,6 +135,15 @@ typedef struct {
     // ISO 3166-1 alpha-2, or null for no country filter.
     const char *country;
 } sia_host_query_t;
+
+typedef struct {
+    const char *connect_key;
+    // Microseconds since the Unix epoch.
+    int64_t expiration_unix_us;
+    uint32_t total_uses;
+    // Null for any application, otherwise a pointer to the 32-byte app ID.
+    const uint8_t *allowed_app_id;
+} sia_pre_authorized_key_request_t;
 
 // The fixed part of a summary. Metadata is variable length, so it is read
 // separately with `sia_object_summaries_metadata`.
@@ -330,7 +340,8 @@ int32_t sia_builder_wait_for_approval(sia_builder_t *b, sia_cancel_t *cancel, ch
 // # Safety
 // - `b` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 //   from `sia_builder_new` that has not been freed.
-// - `pre_authorized_key` must be readable for 32 bytes.
+// - `pre_authorized_key` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must
+//   be a live handle from `sia_pre_authorized_key_new` or `sia_pre_authorized_key_import`.
 // - `mnemonic` must be non null and NUL terminated.
 // - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
 //   from `sia_cancel_new`.
@@ -339,7 +350,7 @@ int32_t sia_builder_wait_for_approval(sia_builder_t *b, sia_cancel_t *cancel, ch
 // - `err` may be null. Otherwise it receives an owned message on failure that must be released
 //   with `sia_string_free`.
 int32_t sia_builder_connect_pre_authorized(sia_builder_t *b,
-                                           const uint8_t *pre_authorized_key,
+                                           const sia_pre_authorized_key_t *pre_authorized_key,
                                            const char *mnemonic,
                                            sia_cancel_t *cancel,
                                            sia_sdk_t **out,
@@ -771,6 +782,80 @@ int32_t sia_object_from_sealed_json_with_key(const uint8_t *app_key,
                                              const char *json,
                                              sia_object_t **out,
                                              char **err);
+
+// Creates a random pre-authorized key.
+//
+// # Safety
+// - Free the returned handle with `sia_pre_authorized_key_free`.
+sia_pre_authorized_key_t *sia_pre_authorized_key_new(void);
+
+// Imports a pre-authorized key from its 32-byte seed.
+//
+// # Safety
+// - `seed` may be null, which returns null. Otherwise it must be readable for 32 bytes.
+// - Free the returned handle with `sia_pre_authorized_key_free`.
+sia_pre_authorized_key_t *sia_pre_authorized_key_import(const uint8_t *seed);
+
+// Frees a pre-authorized key handle.
+//
+// # Safety
+// - `key` may be null. Otherwise it must be a live pre-authorized key handle and must not be
+//   used again after this returns.
+void sia_pre_authorized_key_free(sia_pre_authorized_key_t *key);
+
+// Writes the pre-authorized key's 32-byte secret seed.
+//
+// # Safety
+// - `key` may be null, which does nothing. Otherwise it must be a live pre-authorized key handle.
+// - `out` must be writable for the 32-byte secret seed.
+void sia_pre_authorized_key_export(const sia_pre_authorized_key_t *key, uint8_t *out);
+
+// Writes the pre-authorized key's 32-byte public key.
+//
+// # Safety
+// - `key` may be null, which does nothing. Otherwise it must be a live pre-authorized key handle.
+// - `out` must be writable for the 32-byte public key.
+void sia_pre_authorized_key_public_key(const sia_pre_authorized_key_t *key, uint8_t *out);
+
+// Signs a message and writes its 64-byte signature.
+//
+// # Safety
+// - `key` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live
+//   pre-authorized key handle.
+// - `message` must be readable for `message_len` bytes; it may be null when the length is zero.
+// - `out` must be writable for the 64-byte signature.
+// - `err` may be null. Otherwise, free its value on failure with `sia_string_free`.
+int32_t sia_pre_authorized_key_sign(const sia_pre_authorized_key_t *key,
+                                    const uint8_t *message,
+                                    uintptr_t message_len,
+                                    uint8_t *out,
+                                    char **err);
+
+// Verifies a 64-byte signature against a message and the pre-authorized key.
+//
+// # Safety
+// - `key` may be null, which returns false. Otherwise it must be a live pre-authorized key handle.
+// - `message` must be readable for `message_len` bytes; it may be null when the length is zero.
+// - `signature` must be readable for 64 bytes when non null.
+bool sia_pre_authorized_key_verify_signature(const sia_pre_authorized_key_t *key,
+                                             const uint8_t *message,
+                                             uintptr_t message_len,
+                                             const uint8_t *signature);
+
+// Returns the signed pre-authorized key registration request as JSON.
+//
+// # Safety
+// - `key` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live
+//   pre-authorized key handle.
+// - `request` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must point to
+//   an initialized struct whose `connect_key` is NUL terminated when non null and whose
+//   `allowed_app_id` is null or readable for 32 bytes.
+// - `out_json` must be non null and writable. On success, free its value with `sia_string_free`.
+// - `err` may be null. Otherwise, free its value on failure with `sia_string_free`.
+int32_t sia_pre_authorized_key_sign_request_json(const sia_pre_authorized_key_t *key,
+                                                 const sia_pre_authorized_key_request_t *request,
+                                                 char **out_json,
+                                                 char **err);
 
 // # Safety
 // - `sdk` may be null. Otherwise it must come from `sia_builder_connect`, `sia_builder_register`

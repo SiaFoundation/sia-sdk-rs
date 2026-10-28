@@ -55,6 +55,7 @@ typedef struct sia_shared_sdk sia_shared_sdk_t;
 typedef struct sia_object sia_object_t;
 typedef struct sia_cancel sia_cancel_t;
 typedef struct sia_sharing_key sia_sharing_key_t;
+typedef struct sia_pre_authorized_key sia_pre_authorized_key_t;
 """
 
 [parse]
@@ -66,6 +67,7 @@ parse_deps = false
 "Sdk" = "sia_sdk_t"
 "SharedSdk" = "sia_shared_sdk_t"
 "SharingKey" = "sia_sharing_key_t"
+"PreAuthorizedKey" = "sia_pre_authorized_key_t"
 "CancellationToken" = "sia_cancel_t"
 # Handles this crate owns.
 "FfiBuilder" = "sia_builder_t"
@@ -84,6 +86,7 @@ parse_deps = false
 "PackedUploadOptionsC" = "sia_packed_upload_options_t"
 "DownloadOptionsC" = "sia_download_options_t"
 "HostQueryC" = "sia_host_query_t"
+"PreAuthorizedKeyRequestC" = "sia_pre_authorized_key_request_t"
 
 [defines]
 "feature = mock" = "SIA_STORAGE_MOCK"

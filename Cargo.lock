@@ -2835,6 +2835,7 @@ dependencies = [
  "async-trait",
  "log",
  "rand",
+ "serde_json",
  "sia_core",
  "sia_storage",
  "thiserror",

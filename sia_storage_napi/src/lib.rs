@@ -13,11 +13,13 @@ use tokio_util::sync::CancellationToken;
 mod builder;
 mod io;
 mod logging;
+mod preauthorized_keys;
 mod sharing;
 
 pub use builder::*;
 pub use io::SendableReader;
 pub use logging::*;
+pub use preauthorized_keys::*;
 pub use sharing::*;
 
 /// Metadata about an application connecting to the indexer.

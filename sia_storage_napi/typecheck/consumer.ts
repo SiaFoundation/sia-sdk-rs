@@ -10,14 +10,16 @@
 //
 // `skipLibCheck` is false in the tsconfig on purpose, so the declarations
 // themselves are checked rather than only the code below.
-import { Builder, SharedSdk } from '../examples/index.js'
+import { Builder, PreAuthorizedKey, SharedSdk } from '../examples/index.js'
 import type {
   AppKey,
   ObjectEventSummary,
   ObjectSummary,
   PinnedObject,
+  PreAuthorizedKeyRequest,
   Sdk,
   SharingKey,
+  SignedPreAuthorizedKeyRequest,
   Slab,
 } from '../examples/index.js'
 
@@ -35,6 +37,51 @@ export async function check(
   indexerUrl: string,
   seed: Buffer,
 ): Promise<void> {
+  const generatedKey = new PreAuthorizedKey()
+  const keySeed: Buffer = generatedKey.export()
+  const preAuthorizedKey = PreAuthorizedKey.import(keySeed)
+  const publicKey: string = preAuthorizedKey.publicKey()
+  const message = Buffer.from('message')
+  const signature: Buffer = preAuthorizedKey.sign(message)
+  const valid: boolean = preAuthorizedKey.verifySignature(message, signature)
+  const requestOptions: PreAuthorizedKeyRequest = {
+    connectKey: 'connect-key',
+    expiration: new Date(),
+    totalUses: 1,
+    allowedAppID: '03'.repeat(32),
+  }
+  const request: SignedPreAuthorizedKeyRequest = preAuthorizedKey.signRequest(requestOptions)
+  const requestStrings: string[] = [
+    request.publicKey, request.signature, request.connectKey, request.expiration,
+  ]
+  const requestTotalUses: number = request.totalUses
+  const requestAppID: string | undefined = request.allowedAppID
+  const unrestrictedRequest: SignedPreAuthorizedKeyRequest = preAuthorizedKey.signRequest({
+    connectKey: 'connect-key',
+    expiration: new Date(),
+    totalUses: 1,
+  })
+  const nullAppID: SignedPreAuthorizedKeyRequest = preAuthorizedKey.signRequest({
+    ...requestOptions, allowedAppID: null,
+  })
+  // @ts-expect-error The signed request is an object, not JSON text.
+  const requestText: string = preAuthorizedKey.signRequest(requestOptions)
+  // @ts-expect-error Expiration must be a Date.
+  preAuthorizedKey.signRequest({ ...requestOptions, expiration: Date.now() })
+  // @ts-expect-error A request must include totalUses.
+  preAuthorizedKey.signRequest({ connectKey: 'connect-key', expiration: new Date() })
+  // @ts-expect-error The application restriction uses allowedAppID.
+  preAuthorizedKey.signRequest({ ...requestOptions, allowedAppId: '03'.repeat(32) })
+  // @ts-expect-error Signing accepts one request object.
+  preAuthorizedKey.signRequest('connect-key', new Date(), 1)
+  const preAuthorizedSdk: Promise<Sdk> = builder.connectPreAuthorized(preAuthorizedKey, 'mnemonic')
+  // @ts-expect-error Connecting requires a PreAuthorizedKey object, not its seed.
+  builder.connectPreAuthorized(keySeed, 'mnemonic')
+  // @ts-expect-error Registration requires the user's mnemonic.
+  builder.connectPreAuthorized(preAuthorizedKey)
+  void [publicKey, valid, request, unrestrictedRequest, nullAppID, preAuthorizedSdk]
+  void [requestStrings, requestTotalUses, requestAppID, requestText]
+
   // A value from the SDK must satisfy the type the SDK exports for it.
   const sdk = await builder.connected(appKey)
   if (sdk) {
