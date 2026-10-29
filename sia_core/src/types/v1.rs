@@ -3,7 +3,6 @@ use std::ops::Deref;
 
 use blake2b_simd::Params;
 use num_bigint::BigInt;
-use num_rational::Ratio;
 use num_traits::{FromPrimitive, ToPrimitive};
 use serde::de::Error;
 use serde::{Deserialize, Serialize};
@@ -204,8 +203,8 @@ impl FileContract {
     pub fn tax(&self, cs: &ChainState) -> Currency {
         let payout = BigInt::from_u128(*self.payout.deref()).unwrap();
         let tax = if cs.child_height() < cs.network.hardfork_tax.height {
-            let tax = Ratio::from(payout) * Ratio::from_float(0.039).unwrap();
-            tax.numer() / tax.denom()
+            // 0.039f64 equals 5620492334958379 / 2^57
+            (payout * 5620492334958379u64) >> 57u32
         } else {
             payout * 39 / 1000
         };
