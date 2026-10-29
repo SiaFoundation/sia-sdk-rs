@@ -8,7 +8,7 @@ use std::task::{Poll, ready};
 use crate::congestion::{InflightController, SamplePermit};
 use crate::encryption::{Chacha20Cipher, EncryptionKey, encrypt_recovered_shards};
 use crate::erasure_coding::{self, ErasureCoder};
-use crate::hosts::{Hosts, InflightGuard, RPC_IDLE_TIMEOUT, RPCError};
+use crate::hosts::{Hosts, InflightGuard, RPCError};
 use crate::slabs::SlabVersion::{V0, V1};
 use crate::time::{Duration, Instant, sleep};
 use crate::tokens::AccountTokenSource;
@@ -262,7 +262,6 @@ impl SlabRecovery<AwaitingRecovery> {
                     task.sector.root,
                     sector_offset,
                     sector_length,
-                    RPC_IDLE_TIMEOUT,
                 )
                 .await;
             let elapsed = start.elapsed();
@@ -1022,12 +1021,7 @@ mod test {
         for (i, mut shard) in shards.into_iter().enumerate() {
             crate::encryption::encrypt_shard(&slab_key, i as u8, 0, &mut shard);
             let root = hosts
-                .write_sector(
-                    host_keys[i],
-                    &app_key.0,
-                    Bytes::from(shard),
-                    Duration::from_secs(5),
-                )
+                .write_sector(host_keys[i], &app_key.0, Bytes::from(shard))
                 .await
                 .unwrap();
             sectors.push(Sector {
