@@ -1533,107 +1533,107 @@ mod tests {
             },
             TestCase {
                 payout: Currency::new(340282366920938463463374607431768211455),
-                prefork: Currency::new(13271012309916600075071609689838960000),
+                prefork: Currency::new(13271012309916600056182143758360370000),
                 postfork: Currency::new(13271012309916600075071609689838960000),
             },
             TestCase {
                 payout: Currency::new(595540520000000000000000000000000),
-                prefork: Currency::new(23226080280000000000000000000000),
+                prefork: Currency::new(23226080279999999966940860120000),
                 postfork: Currency::new(23226080280000000000000000000000),
             },
             TestCase {
                 payout: Currency::new(103983762872653413852682180916164570605),
-                prefork: Currency::new(4055366752033483140254605055730410000),
+                prefork: Currency::new(4055366752033483134482346669311300000),
                 postfork: Currency::new(4055366752033483140254605055730410000),
             },
             TestCase {
                 payout: Currency::new(3827764528000000000000000000000000),
-                prefork: Currency::new(149282816592000000000000000000000),
+                prefork: Currency::new(149282816591999999787516384400000),
                 postfork: Currency::new(149282816592000000000000000000000),
             },
             TestCase {
                 payout: Currency::new(216196544861605368913933682930139323360),
-                prefork: Currency::new(8431665249602609387643413634275430000),
+                prefork: Currency::new(8431665249602609375642094536787440000),
                 postfork: Currency::new(8431665249602609387643413634275430000),
             },
             TestCase {
                 payout: Currency::new(2630651610000000000000000000000000),
-                prefork: Currency::new(102595412790000000000000000000000),
+                prefork: Currency::new(102595412789999999853969500640000),
                 postfork: Currency::new(102595412790000000000000000000000),
             },
             TestCase {
                 payout: Currency::new(242035606817835258338180817515298863866),
-                prefork: Currency::new(9439388665895575075189051883096650000),
+                prefork: Currency::new(9439388665895575061753376709682540000),
                 postfork: Currency::new(9439388665895575075189051883096650000),
             },
             TestCase {
                 payout: Currency::new(3830155529000000000000000000000000),
-                prefork: Currency::new(149376065631000000000000000000000),
+                prefork: Currency::new(149376065630999999787383657190000),
                 postfork: Currency::new(149376065631000000000000000000000),
             },
             TestCase {
                 payout: Currency::new(126852058180828682198189558142776852406),
-                prefork: Currency::new(4947230269052318605729392767568290000),
+                prefork: Currency::new(4947230269052318598687688981895990000),
                 postfork: Currency::new(4947230269052318605729392767568290000),
             },
             TestCase {
                 payout: Currency::new(3497644816000000000000000000000000),
-                prefork: Currency::new(136408147824000000000000000000000),
+                prefork: Currency::new(136408147823999999805841709660000),
                 postfork: Currency::new(136408147824000000000000000000000),
             },
             TestCase {
                 payout: Currency::new(202288428857506739014982837533616200189),
-                prefork: Currency::new(7889248725442762821584330663811030000),
+                prefork: Currency::new(7889248725442762810355067097168430000),
                 postfork: Currency::new(7889248725442762821584330663811030000),
             },
             TestCase {
                 payout: Currency::new(3717108920000000000000000000000000),
-                prefork: Currency::new(144967247880000000000000000000000),
+                prefork: Currency::new(144967247879999999793659004590000),
                 postfork: Currency::new(144967247880000000000000000000000),
             },
             TestCase {
                 payout: Currency::new(319915558118289110319073160920214552278),
-                prefork: Currency::new(12476706766613275302443853275888360000),
+                prefork: Currency::new(12476706766613275284684972347951760000),
                 postfork: Currency::new(12476706766613275302443853275888360000),
             },
             TestCase {
                 payout: Currency::new(2205536583000000000000000000000000),
-                prefork: Currency::new(86015926737000000000000000000000),
+                prefork: Currency::new(86015926736999999877568125190000),
                 postfork: Currency::new(86015926737000000000000000000000),
             },
             TestCase {
                 payout: Currency::new(138040906509763116024244911687441931808),
-                prefork: Currency::new(5383595353880761524945551555810230000),
+                prefork: Currency::new(5383595353880761517282741918446850000),
                 postfork: Currency::new(5383595353880761524945551555810230000),
             },
             TestCase {
                 payout: Currency::new(1110927021000000000000000000000000),
-                prefork: Currency::new(43326153819000000000000000000000),
+                prefork: Currency::new(43326153818999999938331162130000),
                 postfork: Currency::new(43326153819000000000000000000000),
             },
             TestCase {
                 payout: Currency::new(215175656237682186102553629801543673418),
-                prefork: Currency::new(8391850593269605257999591562260200000),
+                prefork: Currency::new(8391850593269605246054943167565080000),
                 postfork: Currency::new(8391850593269605257999591562260200000),
             },
             TestCase {
                 payout: Currency::new(646634091000000000000000000000000),
-                prefork: Currency::new(25218729549000000000000000000000),
+                prefork: Currency::new(25218729548999999964104597180000),
                 postfork: Currency::new(25218729549000000000000000000000),
             },
             TestCase {
                 payout: Currency::new(128469923315667767051668090462322677166),
-                prefork: Currency::new(5010327009311042915015055528030580000),
+                prefork: Currency::new(5010327009311042907883542186186450000),
                 postfork: Currency::new(5010327009311042915015055528030580000),
             },
             TestCase {
                 payout: Currency::new(2889549915000000000000000000000000),
-                prefork: Currency::new(112692446685000000000000000000000),
+                prefork: Currency::new(112692446684999999839597757670000),
                 postfork: Currency::new(112692446685000000000000000000000),
             },
             TestCase {
                 payout: Currency::new(269364173205837265395254441592734706401),
-                prefork: Currency::new(10505202755027653350414923222116650000),
+                prefork: Currency::new(10505202755027653335462207867004690000),
                 postfork: Currency::new(10505202755027653350414923222116650000),
             },
         ];
@@ -1695,6 +1695,7 @@ mod tests {
         };
 
         for tc in test_cases.iter() {
+            cs.state.index.height = 1; // reset
             let fc = FileContract {
                 payout: tc.payout,
                 file_size: 0,
