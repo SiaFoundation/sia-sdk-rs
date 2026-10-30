@@ -17,7 +17,7 @@ log = "0.4.33"
 chrono = { version = "0.4", features = ["serde"] }
 napi = { version = "3.11.0", features = ["async", "napi8", "chrono_date", "web_stream"] }
 napi-derive = { version = "3.6.0", features = ["type-def"] }
-sia_core = { version = "0.6.0", path = "../sia_core" }
+sia_core = { version = "0.6.1", path = "../sia_core" }
 sia_storage = { version = "0.13.5", path = "../sia_storage", features = ["fs"] }
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync"] }
