@@ -41,7 +41,7 @@ sia_reed_solomon = "0.3.0"
 # --- Native-only dependencies ---
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1.53.1", features = ["sync", "io-util", "macros", "rt", "time"] }
-sia_mux = { version = "0.1.4", path = "../sia_mux" }
+sia_mux = { version = "0.1.5", path = "../sia_mux" }
 sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]

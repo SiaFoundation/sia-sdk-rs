@@ -2,4 +2,4 @@
 sia_storage: patch
 ---
 
-# Require sia_mux 0.1.4.
+# Require sia_mux 0.1.5.
