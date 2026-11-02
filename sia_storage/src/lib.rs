@@ -563,7 +563,10 @@ impl From<PackedUploadOptions> for UploadOptions {
 /// is lower.
 #[cfg(not(target_arch = "wasm32"))]
 fn default_memory_budget() -> u64 {
-    let mut sys = sysinfo::System::new();
+    const MAX_BUDGET: u64 = 10u64.pow(9);
+    let Ok(mut sys) = sysinfo::System::new() else {
+        return MAX_BUDGET;
+    };
     sys.refresh_memory();
     // Cap at a cgroup memory limit when present (e.g. a container quota
     // below physical RAM); otherwise use physical RAM. Both are in bytes.
@@ -571,7 +574,7 @@ fn default_memory_budget() -> u64 {
         Some(limits) => sys.total_memory().min(limits.total_memory),
         None => sys.total_memory(),
     };
-    (total / 10).min(10u64.pow(9))
+    (total / 10).min(MAX_BUDGET)
 }
 
 /// Estimates the on-network encoded size of data after erasure coding.
