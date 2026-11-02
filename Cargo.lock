@@ -2712,7 +2712,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sia_core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64",
  "bip39",
@@ -2775,7 +2775,7 @@ dependencies = [
 
 [[package]]
 name = "sia_storage"
-version = "0.13.5"
+version = "0.13.6"
 dependencies = [
  "base64",
  "blake2b_simd",
