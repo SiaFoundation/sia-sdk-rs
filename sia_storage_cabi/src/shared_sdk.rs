@@ -64,6 +64,29 @@ pub(crate) struct ObjectSummaryC {
     pub(crate) updated_at_unix_us: i64,
 }
 
+impl From<&ObjectSummary> for ObjectSummaryC {
+    fn from(summary: &ObjectSummary) -> Self {
+        ObjectSummaryC {
+            id: summary.id.into(),
+            size: summary.size,
+            created_at_unix_us: summary.created_at.timestamp_micros(),
+            updated_at_unix_us: summary.updated_at.timestamp_micros(),
+        }
+    }
+}
+
+/// Copies `meta` into `buf` when `cap` covers all of it, and returns its
+/// length either way so a caller can measure with a null `buf`.
+///
+/// # Safety
+/// - `buf` may be null. Otherwise it must be writable for `cap` bytes.
+pub(crate) unsafe fn copy_metadata(meta: &[u8], buf: *mut u8, cap: usize) -> usize {
+    if !buf.is_null() && cap >= meta.len() && !meta.is_empty() {
+        unsafe { std::slice::from_raw_parts_mut(buf, meta.len()) }.copy_from_slice(meta);
+    }
+    meta.len()
+}
+
 /// Lists a page of the objects the sharing key grants access to, without their
 /// slabs. A summary is enough to show an object but not to download it, and is
 /// a small fraction of the size, so a listing that only needs names and sizes
@@ -137,14 +160,7 @@ pub unsafe extern "C" fn sia_object_summaries_at(
     let Some(summary) = s.0.get(i) else {
         return false;
     };
-    unsafe {
-        *out = ObjectSummaryC {
-            id: summary.id.into(),
-            size: summary.size,
-            created_at_unix_us: summary.created_at.timestamp_micros(),
-            updated_at_unix_us: summary.updated_at.timestamp_micros(),
-        }
-    }
+    unsafe { *out = summary.into() }
     true
 }
 
@@ -170,11 +186,7 @@ pub unsafe extern "C" fn sia_object_summaries_metadata(
     let Some(summary) = s.0.get(i) else {
         return 0;
     };
-    let meta = &summary.metadata;
-    if !buf.is_null() && cap >= meta.len() && !meta.is_empty() {
-        unsafe { std::slice::from_raw_parts_mut(buf, meta.len()) }.copy_from_slice(meta);
-    }
-    meta.len()
+    unsafe { copy_metadata(&summary.metadata, buf, cap) }
 }
 
 /// # Safety

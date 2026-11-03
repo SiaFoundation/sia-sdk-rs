@@ -85,6 +85,9 @@ typedef struct sia_builder_t sia_builder_t;
 
 typedef struct sia_download_t sia_download_t;
 
+// A page of object events without their slabs, owning every summary in it.
+typedef struct sia_event_summaries_t sia_event_summaries_t;
+
 typedef struct sia_events_t sia_events_t;
 
 typedef struct sia_key_records_t sia_key_records_t;
@@ -136,15 +139,6 @@ typedef struct {
     const char *country;
 } sia_host_query_t;
 
-typedef struct {
-    const char *connect_key;
-    // Microseconds since the Unix epoch.
-    int64_t expiration_unix_us;
-    uint32_t total_uses;
-    // Null for any application, otherwise a pointer to the 32-byte app ID.
-    const uint8_t *allowed_app_id;
-} sia_pre_authorized_key_request_t;
-
 // The fixed part of a summary. Metadata is variable length, so it is read
 // separately with `sia_object_summaries_metadata`.
 typedef struct {
@@ -153,6 +147,15 @@ typedef struct {
     int64_t created_at_unix_us;
     int64_t updated_at_unix_us;
 } sia_object_summary_t;
+
+typedef struct {
+    const char *connect_key;
+    // Microseconds since the Unix epoch.
+    int64_t expiration_unix_us;
+    uint32_t total_uses;
+    // Null for any application, otherwise a pointer to the 32-byte app ID.
+    const uint8_t *allowed_app_id;
+} sia_pre_authorized_key_request_t;
 
 // The indexer's snapshot of what a sharing key grants access to. Every field
 // is fixed width so the whole record crosses in one read rather than one call
@@ -708,6 +711,50 @@ bool sia_events_at(sia_events_t *evs,
 void sia_events_free(sia_events_t *evs);
 
 // # Safety
+// - `evs` may be null, which returns 0. Otherwise it must be a live handle from
+//   `sia_sdk_object_event_summaries` that has not been freed.
+uintptr_t sia_event_summaries_len(const sia_event_summaries_t *evs);
+
+// Copies the event at `i`. A deletion sets `has_object` to false and leaves
+// `object` untouched. Returns false when `i` is out of range, leaving every out
+// parameter untouched.
+//
+// Nothing is transferred out, so unlike `sia_events_at` an index may be read
+// any number of times.
+//
+// # Safety
+// - `evs` may be null, which returns false. Otherwise it must be a live handle from
+//   `sia_sdk_object_event_summaries` that has not been freed.
+// - `id_out` must be writable for 32 bytes.
+// - `deleted`, `updated_at_unix_us`, `has_object` and `object` must be non null and writable.
+bool sia_event_summaries_at(const sia_event_summaries_t *evs,
+                            uintptr_t i,
+                            uint8_t *id_out,
+                            bool *deleted,
+                            int64_t *updated_at_unix_us,
+                            bool *has_object,
+                            sia_object_summary_t *object);
+
+// Returns the metadata length of the summary in the event at `i`, whether or
+// not it was written, so a caller can size its buffer with a null `buf` and
+// call again. A deletion, or an `i` out of range, reports 0.
+//
+// # Safety
+// - `evs` may be null, which returns 0. Otherwise it must be a live handle from
+//   `sia_sdk_object_event_summaries` that has not been freed.
+// - `buf` may be null, which measures without writing. Otherwise it must be writable for `cap`
+//   bytes, and nothing is written unless `cap` covers the whole metadata.
+uintptr_t sia_event_summaries_metadata(const sia_event_summaries_t *evs,
+                                       uintptr_t i,
+                                       uint8_t *buf,
+                                       uintptr_t cap);
+
+// # Safety
+// - `evs` may be null. Otherwise it must come from `sia_sdk_object_event_summaries` and must not
+//   be used again after this returns.
+void sia_event_summaries_free(sia_event_summaries_t *evs);
+
+// # Safety
 // - `objs` may be null. Otherwise it must be an array of `len` objects from a call that produced
 //   one, and must not be used again.
 void sia_object_array_free(sia_object_t **objs, uintptr_t len);
@@ -915,6 +962,30 @@ int32_t sia_sdk_object_events(const sia_sdk_t *sdk,
                               sia_cancel_t *cancel,
                               sia_events_t **out,
                               char **err);
+
+// Lists the same events as `sia_sdk_object_events` without the objects'
+// slabs, which makes the response a small fraction of the size. A summary is
+// enough to show an object but not to download it; fetch the full object with
+// `sia_sdk_object` for that. Pages with the same cursor.
+//
+// # Safety
+// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+//   from `sia_builder_connect`, `sia_builder_register` or `sia_mock_sdk` that has not been freed.
+// - `after_id` must be readable for 32 bytes.
+// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
+//   from `sia_cancel_new`.
+// - `out` must be non null and writable. On success it receives an owned handle that must be
+//   released with `sia_event_summaries_free`.
+// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+//   with `sia_string_free`.
+int32_t sia_sdk_object_event_summaries(const sia_sdk_t *sdk,
+                                       bool has_cursor,
+                                       int64_t after_unix_us,
+                                       const uint8_t *after_id,
+                                       uint64_t limit,
+                                       sia_cancel_t *cancel,
+                                       sia_event_summaries_t **out,
+                                       char **err);
 
 // # Safety
 // - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
