@@ -425,6 +425,9 @@ pub struct StateElement {
 }
 
 #[cfg(test)]
+mod golden;
+
+#[cfg(test)]
 mod tests {
     use crate::{
         address, block_id, contract_id, public_key, siacoin_id, siafund_id, transaction_id,
@@ -527,43 +530,6 @@ mod tests {
         assert_eq!(serialized, JSON_STR);
         let deserialized: Block = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized, b);
-    }
-
-    #[test]
-    fn test_transaction_derive() {
-        const TXN_JSON: &str = r#"{"siacoinInputs":[{"parentID":"750d22eff727689d1d8d1c83e513a30bb68ee7f9125a4dafc882459e34c2069d","unlockConditions":{"timelock":0,"publicKeys":["ed25519:800ed6c2760e3e4ba1ff00128585c8cf8fed2e3dc1e3da1eb92d49f405bd6360"],"signaturesRequired":6312611591377486220}}],"siacoinOutputs":[{"value":"890415399000000000000000000000000","address":"480a064b5fca13002a7fe575845154bbf0b3af4cc4f147cbed387d43cce3568ae2497366eaa7"}],"fileContracts":[{"filesize":0,"fileMerkleRoot":"0000000000000000000000000000000000000000000000000000000000000000","windowStart":10536451586783908586,"windowEnd":9324702155635244357,"payout":"0","validProofOutputs":[{"value":"1933513214000000000000000000000000","address":"944524fff2c49c401e748db37cfda7569fa6df35b704fe716394f2ac3f40ce87b4506e9906f0"}],"missedProofOutputs":[{"value":"2469287901000000000000000000000000","address":"1df67838262d7109ffcd9018f183b1eb33f05659a274b89ea6b52ff3617d34a770e9dd071d2e"}],"unlockHash":"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69","revisionNumber":9657412421282982780}],"fileContractRevisions":[{"parentID":"e4e26d93771d3bbb3d9dd306105d77cfb3a6254d1cc3495903af6e013442c63c","unlockConditions":{"timelock":0,"publicKeys":["ed25519:e6b9cde4eb058f8ecbb083d99779cb0f6d518d5386f019af6ead09fa52de8567"],"signaturesRequired":206644730660526450},"revisionNumber":10595710523108536025,"filesize":0,"fileMerkleRoot":"0000000000000000000000000000000000000000000000000000000000000000","windowStart":4348934140507359445,"windowEnd":14012366839994454386,"validProofOutputs":[{"value":"2435858510000000000000000000000000","address":"543bc0eda69f728d0a0fbce08e5bfc5ed7b961300e0af226949e135f7d12e32f0544e5262d6f"}],"missedProofOutputs":[{"value":"880343701000000000000000000000000","address":"7b7f9aee981fe0d93bb3f49c6233cf847ebdd39d7dc5253f7fc330df2167073b35f035703237"}],"unlockHash":"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69"}],"storageProofs":[{"parentID":"c0b9e98c9e03a2740c75d673871c1ee91f36d1bb329ff3ddbf1dfa8c6e1a64eb","leaf":"b78fa521dc62d9ced82bc3b61e0aa5a5c221d6cca5db63d94c9879543fb98c0a971094a89cd4408487ae32902248d321b545f9a051729aa0bb1725b848e3d453","proof":["fe08c0a061475e7e5dec19e717cf98792fa7b555d0b5d3540a05db09f59ab8de"]}],"minerFees":["241119475000000000000000000000000"],"arbitraryData":["2shzIHEUJYwuNHz6c/gPz+aTEWZRTpDTmemX9yYAKlY="],"signatures":[{"parentID":"06d1fca03c5ddd9b09116db1b97c5451f7dc792b05362969f83e3e8dc1007f46","publicKeyIndex":6088345341283457116,"timelock":2014247885072555224,"coveredFields":{"wholeTransaction":true},"signature":"2XNEKGZrl9RhMa2JmGsvcmqQWAIX/uxtMwLnPI6VJPcXqub6qYIuoAThYp9NAwadk+1GG6CXC66g4rOjFYuNSA=="}]}"#;
-
-        const EXPECTED_TRANSACTION_ID: TransactionID =
-            transaction_id!("71a10d363f4af09c3fbce499b725067b0b19afe2bc9a8236704e85256f3244a6");
-        const EXPECTED_SIACOIN_OUTPUT_ID: SiacoinOutputID =
-            siacoin_id!("ea315efdd5914c54e8082d0de90b5afa9d4b92103d60661ec86b2a095413d836");
-        const EXPECTED_SIAFUND_OUTPUT_ID: SiafundOutputID =
-            siafund_id!("a8190ea7b4d41e08f45f27653b882faf8ff9fd57bb098d7022f105ef142279ec");
-        const EXPECTED_FILE_CONTRACT_ID: FileContractID =
-            contract_id!("ff7102bb111a64c7ff8a3cd68dbc962a03a8943065c3852a359662c8935fa979");
-
-        let txn: v1::Transaction =
-            serde_json::from_str(TXN_JSON).expect("transaction to deserialize");
-
-        assert_eq!(txn.id(), EXPECTED_TRANSACTION_ID, "transaction id");
-
-        assert_eq!(
-            txn.siacoin_output_id(678569214627704587),
-            EXPECTED_SIACOIN_OUTPUT_ID,
-            "siacoin output id"
-        );
-
-        assert_eq!(
-            txn.siafund_output_id(8940170890223196046),
-            EXPECTED_SIAFUND_OUTPUT_ID,
-            "siafund output id"
-        );
-
-        assert_eq!(
-            txn.file_contract_id(3470616158951613631),
-            EXPECTED_FILE_CONTRACT_ID,
-            "file contract id"
-        );
     }
 
     #[test]

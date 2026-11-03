@@ -84,14 +84,7 @@ impl SiaEncodable for Duration {
 
 impl SiaDecodable for Duration {
     fn decode<R: Read>(r: &mut R) -> Result<Self> {
-        let ns = u64::decode(r)?;
-        if ns > i64::MAX as u64 {
-            return Err(Error::InvalidValue(format!(
-                "duration {ns} must be less than {}",
-                i64::MAX
-            )));
-        }
-        Ok(Duration::nanoseconds(ns as i64))
+        Ok(Duration::nanoseconds(i64::decode(r)?))
     }
 }
 
