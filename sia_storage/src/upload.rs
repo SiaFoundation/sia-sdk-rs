@@ -1708,6 +1708,115 @@ mod tests {
         }
     }
 
+    #[sia_core_derive::cross_target_test]
+    async fn test_compose_object_from_existing_slabs() {
+        let options = UploadOptions::default();
+        let optimal = options.optimal_data_size();
+        const MIB: usize = 1 << 20;
+        let tail = 3 * MIB;
+        let small = MIB;
+
+        let transport = mock::Client::new();
+        let hosts = Hosts::new(Client::from_mock(transport));
+        hosts.update(
+            (0..60)
+                .map(|_| test_host(PrivateKey::from_seed(&rand::random()).public_key()))
+                .collect(),
+            true,
+        );
+        let app_key = Arc::new(AppKey::import(rand::random()));
+        let api = app_client::mock::Client::new();
+        let api_client = app_client::Client::Mock(api.clone());
+
+        let mut initial = vec![0u8; optimal + tail];
+        rand::rng().fill_bytes(&mut initial);
+        let base = upload_object(
+            hosts.clone(),
+            api_client.clone(),
+            app_key.clone(),
+            Object::default(),
+            Cursor::new(&initial),
+            options.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(base.slabs().len(), 2);
+
+        let pinned_before = api.pinned_slabs();
+        let small_bytes = vec![0xA5u8; small];
+        let extended = upload_object(
+            hosts.clone(),
+            api_client,
+            app_key.clone(),
+            base.clone(),
+            Cursor::new(&small_bytes),
+            options.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Only the tail slab was repacked and pinned. The head slab is reused.
+        assert_eq!(api.pinned_slabs() - pinned_before, 1);
+        assert_eq!(extended.slabs().len(), 2);
+        assert_eq!(extended.slabs()[0], base.slabs()[0]);
+        assert_ne!(
+            extended.slabs()[1].encryption_key,
+            base.slabs()[1].encryption_key
+        );
+        assert_eq!(extended.size(), (optimal + tail + small) as u64);
+
+        let large = extended.truncate((optimal + tail) as u64);
+        assert_eq!(large.size(), (optimal + tail) as u64);
+        assert_eq!(large.slabs()[0], base.slabs()[0]);
+        assert_eq!(large.slabs()[1].length, tail as u32);
+        assert_ne!(large.id(), base.id());
+
+        // The small file shares the new tail slab at the offset after the large
+        // file's tail. The slab and data key are the same, so no bytes move.
+        let mut small_slab = large.slabs()[1].clone();
+        small_slab.offset = tail as u32;
+        small_slab.length = small as u32;
+        let mut small_object = large.with_slabs(vec![small_slab]);
+        small_object.metadata = b"small".to_vec();
+        assert_eq!(small_object.size(), small as u64);
+        assert_ne!(small_object.id(), large.id());
+        assert_ne!(small_object.id(), base.id());
+        let _sealed = small_object.seal(&app_key);
+
+        // Replace-slab builds the same large object from the old head and the
+        // new tail.
+        let replaced = base.replace_slab(1, large.slabs()[1].clone()).unwrap();
+        assert_eq!(replaced.slabs(), large.slabs());
+        assert_eq!(replaced.id(), large.id());
+        assert!(base.replace_slab(2, large.slabs()[1].clone()).is_none());
+
+        // The large file reads back its original bytes.
+        let mut recovered = Vec::new();
+        let mut download = Download::new(
+            &large,
+            hosts.clone(),
+            app_key.clone(),
+            DownloadOptions::default(),
+        )
+        .unwrap();
+        tokio::io::copy(&mut download, &mut recovered).await.unwrap();
+        assert_eq!(recovered, initial);
+
+        // The small file reads back only its bytes from the shared slab.
+        let mut recovered_small = Vec::new();
+        let mut download = Download::new(
+            &small_object,
+            hosts,
+            app_key,
+            DownloadOptions::default(),
+        )
+        .unwrap();
+        tokio::io::copy(&mut download, &mut recovered_small)
+            .await
+            .unwrap();
+        assert_eq!(recovered_small, small_bytes);
+    }
+
     /// Uploads `data`, overwrites `patch_len` bytes of value `patch_byte` at
     /// `offset`, then verifies the result downloads back to the expected bytes.
     /// Returns the (original, overwritten) objects for key assertions. Uses a

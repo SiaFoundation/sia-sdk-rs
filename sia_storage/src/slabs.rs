@@ -548,6 +548,37 @@ impl Object {
         }
     }
 
+    /// Returns a new object that reuses this object's data key with the given slabs.
+    ///
+    /// This is a compose operation: no bytes are read or written. The slabs must
+    /// already be encrypted with this object's data key, and their offsets and
+    /// lengths must describe the ranges they cover. The object ID changes because
+    /// it is a hash of the slab layout.
+    pub fn with_slabs(&self, slabs: Vec<Slab>) -> Self {
+        Self {
+            data_key: self.data_key.clone(),
+            slabs,
+            metadata: self.metadata.clone(),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+
+    /// Returns a new object with the slab at `index` replaced.
+    ///
+    /// Returns `None` when the index is out of range. The replacement must have
+    /// been encrypted with this object's data key, and its offset and length must
+    /// describe the range it covers. The object ID changes because it is a hash of
+    /// the slab layout.
+    pub fn replace_slab(&self, index: usize, slab: Slab) -> Option<Self> {
+        if index >= self.slabs.len() {
+            return None;
+        }
+        let mut slabs = self.slabs.clone();
+        slabs[index] = slab;
+        Some(self.with_slabs(slabs))
+    }
+
     /// Returns the total encoded size of the object after erasure coding
     /// by summing the sizes of its slabs.
     pub fn encoded_size(&self) -> u64 {
