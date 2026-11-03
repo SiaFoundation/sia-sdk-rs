@@ -135,6 +135,7 @@ export interface UploadOptions {
     maxBufferedSlabs?: number;
     startOffset?: bigint;
     onShardUploaded?: (progress: ShardProgress) => void;
+    onShardAttempted?: (attempt: ShardAttemptInfo) => void;
 }
 
 export interface PackedUploadOptions {
@@ -142,6 +143,7 @@ export interface PackedUploadOptions {
     parityShards?: number;
     maxBufferedSlabs?: number;
     onShardUploaded?: (progress: ShardProgress) => void;
+    onShardAttempted?: (attempt: ShardAttemptInfo) => void;
 }
 "#;
 
