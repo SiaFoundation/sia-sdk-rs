@@ -150,8 +150,6 @@ impl SpendPolicy {
         #[allow(deprecated)]
         if let SpendPolicy::UnlockConditions(uc) = self {
             return uc.address();
-        } else if let SpendPolicy::Opaque(addr) = self {
-            return addr.clone();
         }
 
         let mut state = Params::new().hash_length(32).to_state();
@@ -160,7 +158,10 @@ impl SpendPolicy {
         if let SpendPolicy::Threshold(n, of) = self {
             let mut opaque = Vec::with_capacity(of.len());
             for policy in of {
-                opaque.push(SpendPolicy::Opaque(policy.address()))
+                opaque.push(match policy {
+                    SpendPolicy::Opaque(_) => policy.clone(),
+                    _ => SpendPolicy::Opaque(policy.address()),
+                })
             }
             SpendPolicy::Threshold(*n, opaque)
                 .encode(&mut state)
@@ -217,9 +218,9 @@ impl<'de> Deserialize<'de> for SpendPolicy {
                         Ok(SpendPolicy::Above(height))
                     }
                     POLICY_AFTER_STR => {
-                        let unix_seconds: u64 =
+                        let unix_seconds: i64 =
                             serde_json::from_value(policy_value).map_err(de::Error::custom)?;
-                        let timestamp = DateTime::from_timestamp_secs(unix_seconds as i64)
+                        let timestamp = DateTime::from_timestamp_secs(unix_seconds)
                             .ok_or(de::Error::custom("invalid timestamp"))?;
                         Ok(SpendPolicy::After(timestamp))
                     }
@@ -237,11 +238,14 @@ impl<'de> Deserialize<'de> for SpendPolicy {
                         #[derive(Deserialize)]
                         struct ThreshPolicy {
                             n: u8,
-                            of: Vec<SpendPolicy>,
+                            of: Option<Vec<SpendPolicy>>,
                         }
                         let thresh: ThreshPolicy =
                             serde_json::from_value(policy_value).map_err(de::Error::custom)?;
-                        Ok(SpendPolicy::Threshold(thresh.n, thresh.of))
+                        Ok(SpendPolicy::Threshold(
+                            thresh.n,
+                            thresh.of.unwrap_or_default(),
+                        ))
                     }
                     POLICY_OPAQUE_STR => {
                         let addr: Address =
@@ -286,7 +290,7 @@ impl Serialize for SpendPolicy {
                 state.serialize_field("policy", height)?;
             }
             SpendPolicy::After(time) => {
-                let unix_seconds = time.timestamp() as u64;
+                let unix_seconds = time.timestamp();
                 state.serialize_field("policy", &unix_seconds)?;
             }
             SpendPolicy::PublicKey(pk) => {
@@ -470,64 +474,11 @@ pub struct SatisfiedPolicy {
 }
 
 #[cfg(test)]
+mod golden;
+
+#[cfg(test)]
 mod tests {
-    use crate::{hash_256, public_key};
-
     use super::*;
-
-    #[test]
-    fn test_address() {
-        let test_cases = vec![
-            (
-                SpendPolicy::PublicKey(PublicKey::new([
-                    1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0,
-                ])),
-                "55a7793237722c6df8222fd512063cb74228085ef1805c5184713648c159b919ac792fbad0e1",
-            ),
-            (
-                SpendPolicy::Above(100),
-                "c2fba9b9607c800e80d9284ed0fb9a55737ba1bbd67311d0d9242dd6376bed0c6ee355e814fa",
-            ),
-            (
-                SpendPolicy::After(DateTime::from_timestamp_secs(1433600000).unwrap()),
-                "5bdb96e33ffdf72619ad38bee57ad4db9eb242aeb2ee32020ba16179af5d46d501bd2011806b",
-            ),
-            (
-                SpendPolicy::Hash(Hash256::from([
-                    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0,
-                ])),
-                "1cc0fc4cde659333cf7e61971cc5025c5a6b4759c9d1c1d438227c3eb57d841512d4cd4ce620",
-            ),
-            (
-                SpendPolicy::Threshold(
-                    2,
-                    vec![
-                        SpendPolicy::PublicKey(PublicKey::new([
-                            1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                            0, 0, 0, 0, 0, 0, 0, 0,
-                        ])),
-                        SpendPolicy::Above(100),
-                        SpendPolicy::Threshold(
-                            2,
-                            vec![
-                                SpendPolicy::PublicKey(PublicKey::new([0; 32])),
-                                SpendPolicy::After(
-                                    DateTime::from_timestamp_secs(1433600000).unwrap(),
-                                ),
-                            ],
-                        ),
-                    ],
-                ),
-                "30f516630280059c25ae92f3bf3c451be258ecd3249c43906e3d9dd9e86f2dc00ef5eeffc2c4",
-            ),
-        ];
-
-        for (policy, expected) in test_cases {
-            assert_eq!(policy.address().to_string(), expected);
-        }
-    }
 
     #[test]
     fn test_opaque_policy() {
@@ -565,7 +516,7 @@ mod tests {
             let address = policy.address();
             let expected_address = address.to_string();
             let opaque = SpendPolicy::Opaque(address);
-            assert_eq!(
+            assert_ne!(
                 opaque.address().to_string(),
                 expected_address,
                 "test case {i}"
@@ -590,171 +541,14 @@ mod tests {
     }
 
     #[test]
-    fn test_policy_encoding() {
-        let test_cases = [
-            (
-                SpendPolicy::above(100),
-                "{\"type\":\"above\",\"policy\":100}",
-                "01016400000000000000",
-            ),
-            (
-                SpendPolicy::after(DateTime::from_timestamp_secs(100).unwrap()),
-                "{\"type\":\"after\",\"policy\":100}",
-                "01026400000000000000",
-            ),
-            (
-                SpendPolicy::public_key(PublicKey::new([1; 32])),
-                "{\"type\":\"pk\",\"policy\":\"ed25519:0101010101010101010101010101010101010101010101010101010101010101\"}",
-                "01030101010101010101010101010101010101010101010101010101010101010101",
-            ),
-            (
-                SpendPolicy::hash(Hash256::from([0; 32])),
-                "{\"type\":\"h\",\"policy\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",
-                "01040000000000000000000000000000000000000000000000000000000000000000",
-            ),
-            (
-                SpendPolicy::threshold(
-                    2,
-                    vec![
-                        SpendPolicy::public_key(PublicKey::new([0; 32])),
-                        SpendPolicy::above(100),
-                    ],
-                ),
-                "{\"type\":\"thresh\",\"policy\":{\"n\":2,\"of\":[{\"policy\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"type\":\"pk\"},{\"policy\":100,\"type\":\"above\"}]}}",
-                "01050202030000000000000000000000000000000000000000000000000000000000000000016400000000000000",
-            ),
-            (
-                SpendPolicy::threshold(
-                    2,
-                    vec![
-                        SpendPolicy::public_key(PublicKey::new([0; 32])),
-                        SpendPolicy::above(100),
-                        SpendPolicy::threshold(
-                            2,
-                            vec![
-                                SpendPolicy::public_key(PublicKey::new([0; 32])),
-                                SpendPolicy::after(DateTime::from_timestamp_secs(100).unwrap()),
-                            ],
-                        ),
-                        SpendPolicy::PublicKey(PublicKey::new([0; 32])),
-                    ],
-                ),
-                "{\"type\":\"thresh\",\"policy\":{\"n\":2,\"of\":[{\"policy\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"type\":\"pk\"},{\"policy\":100,\"type\":\"above\"},{\"policy\":{\"n\":2,\"of\":[{\"policy\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"type\":\"pk\"},{\"policy\":100,\"type\":\"after\"}]},\"type\":\"thresh\"},{\"policy\":\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"type\":\"pk\"}]}}",
-                "01050204030000000000000000000000000000000000000000000000000000000000000000016400000000000000050202030000000000000000000000000000000000000000000000000000000000000000026400000000000000030000000000000000000000000000000000000000000000000000000000000000",
-            ),
-            (
-                #[allow(deprecated)]
-                SpendPolicy::UnlockConditions(UnlockConditions {
-                    timelock: 100,
-                    signatures_required: 2,
-                    public_keys: vec![
-                        PublicKey::new([0; 32]).into(),
-                        PublicKey::new([1; 32]).into(),
-                    ],
-                }),
-                "{\"type\":\"uc\",\"policy\":{\"timelock\":100,\"publicKeys\":[\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\",\"ed25519:0101010101010101010101010101010101010101010101010101010101010101\"],\"signaturesRequired\":2}}",
-                "010764000000000000000200000000000000656432353531390000000000000000002000000000000000000000000000000000000000000000000000000000000000000000000000000065643235353139000000000000000000200000000000000001010101010101010101010101010101010101010101010101010101010101010200000000000000",
-            ),
-        ];
-
-        for (i, (policy, json, binary)) in test_cases.iter().enumerate() {
-            let serialized_json = serde_json::to_string(&policy)
-                .unwrap_or_else(|e| panic!("failed to serialize json in test case {i}: {e}"));
-            assert_eq!(serialized_json, *json, "test case {i}");
-            let deserialized_json: SpendPolicy = serde_json::from_str(json)
-                .unwrap_or_else(|e| panic!("failed to deserialize json in test case {i}: {e}"));
-            assert_eq!(deserialized_json, *policy, "test case {i}");
-
-            let mut serialized_binary = Vec::new();
-            policy
-                .encode(&mut serialized_binary)
-                .unwrap_or_else(|e| panic!("failed to serialize binary in test case {i}: {e}"));
-            assert_eq!(
-                hex::encode(serialized_binary.clone()),
-                *binary,
-                "test case {i}"
-            );
-
-            let deserialized_binary = SpendPolicy::decode(&mut &serialized_binary[..])
-                .unwrap_or_else(|e| panic!("failed to deserialize binary in test case {i}: {e}"));
-            assert_eq!(deserialized_binary, *policy, "test case {i}");
-        }
-    }
-
-    #[test]
-    fn test_satisfied_policy_encoding() {
-        struct TestCase {
-            policy: SatisfiedPolicy,
-            json: &'static str,
-            binary: &'static str,
-        }
-        let test_cases = vec![
-        TestCase{
-            policy: SatisfiedPolicy{
-                policy: SpendPolicy::public_key(public_key!("ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29")),
-                signatures: vec!["867c405977a52caf455221d49ea6242584221ab7f6b1a3e5a7e515d1f4027852e641330366fbd93950e5d15d7153c288a7d96462db912235129725bf13b2a30c".parse().unwrap()],
-                preimages: vec![],
-            },
-            json: "{\"policy\":{\"type\":\"pk\",\"policy\":\"ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\"},\"signatures\":[\"867c405977a52caf455221d49ea6242584221ab7f6b1a3e5a7e515d1f4027852e641330366fbd93950e5d15d7153c288a7d96462db912235129725bf13b2a30c\"]}",
-            binary: "01033b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da290100000000000000867c405977a52caf455221d49ea6242584221ab7f6b1a3e5a7e515d1f4027852e641330366fbd93950e5d15d7153c288a7d96462db912235129725bf13b2a30c0000000000000000",
-        },
-        TestCase{
-            policy: SatisfiedPolicy{
-                policy: SpendPolicy::threshold(1, vec![
-                    SpendPolicy::public_key(public_key!("ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29")),
-                    SpendPolicy::hash(hash_256!("0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8")),
-                ]),
-                signatures: vec!["867c405977a52caf455221d49ea6242584221ab7f6b1a3e5a7e515d1f4027852e641330366fbd93950e5d15d7153c288a7d96462db912235129725bf13b2a30c".parse().unwrap()],
-                preimages: vec![hash_256!("0102030000000000000000000000000000000000000000000000000000000000")],
-            },
-            json: "{\"policy\":{\"type\":\"thresh\",\"policy\":{\"n\":1,\"of\":[{\"policy\":\"ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\",\"type\":\"pk\"},{\"policy\":\"0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8\",\"type\":\"h\"}]}},\"signatures\":[\"867c405977a52caf455221d49ea6242584221ab7f6b1a3e5a7e515d1f4027852e641330366fbd93950e5d15d7153c288a7d96462db912235129725bf13b2a30c\"],\"preimages\":[\"0102030000000000000000000000000000000000000000000000000000000000\"]}",
-            binary: "01050102033b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29040e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a80100000000000000867c405977a52caf455221d49ea6242584221ab7f6b1a3e5a7e515d1f4027852e641330366fbd93950e5d15d7153c288a7d96462db912235129725bf13b2a30c01000000000000000102030000000000000000000000000000000000000000000000000000000000",
-        },
-        TestCase{
-            policy: SatisfiedPolicy{
-                policy: SpendPolicy::hash(hash_256!("0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8")),
-                signatures: vec![],
-                preimages: vec![hash_256!("0405060000000000000000000000000000000000000000000000000000000000")],
-            },
-            json: "{\"policy\":{\"type\":\"h\",\"policy\":\"0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8\"},\"preimages\":[\"0405060000000000000000000000000000000000000000000000000000000000\"]}",
-            binary: "01040e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8000000000000000001000000000000000405060000000000000000000000000000000000000000000000000000000000",
-        },
-        TestCase{
-            policy: SatisfiedPolicy{
-                policy: SpendPolicy::public_key(public_key!("ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29")),
-                signatures: vec![],
-                preimages: vec![],
-            },
-            json: "{\"policy\":{\"type\":\"pk\",\"policy\":\"ed25519:3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\"}}",
-            binary: "01033b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da2900000000000000000000000000000000",
-        },
-        TestCase{
-            policy: SatisfiedPolicy{
-                policy: SpendPolicy::hash(hash_256!("0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8")),
-                signatures: vec![],
-                preimages: vec![],
-            },
-            json: "{\"policy\":{\"type\":\"h\",\"policy\":\"0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8\"}}",
-            binary: "01040e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a800000000000000000000000000000000",
-        }
-        ];
-
-        for tc in test_cases {
-            let mut serialized = Vec::new();
-            tc.policy.encode(&mut serialized).unwrap();
-            assert_eq!(
-                hex::encode(serialized.clone()),
-                tc.binary,
-                "binary serialization failed"
-            );
-            let deserialized = SatisfiedPolicy::decode(&mut &serialized[..]).unwrap();
-            assert_eq!(deserialized, tc.policy, "binary deserialization failed");
-
-            // json
-            let serialized = serde_json::to_string(&tc.policy).unwrap();
-            assert_eq!(serialized, tc.json, "json serialization failed");
-            let deserialized: SatisfiedPolicy = serde_json::from_str(tc.json).unwrap();
-            assert_eq!(deserialized, tc.policy, "json deserialization failed");
+    fn test_empty_threshold_json() {
+        for json in [
+            r#"{"type":"thresh","policy":{"n":0,"of":null}}"#,
+            r#"{"type":"thresh","policy":{"n":0,"of":[]}}"#,
+            r#"{"type":"thresh","policy":{"n":0}}"#,
+        ] {
+            let policy: SpendPolicy = serde_json::from_str(json).unwrap();
+            assert_eq!(policy, SpendPolicy::threshold(0, vec![]));
         }
     }
 }

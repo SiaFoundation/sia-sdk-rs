@@ -24,6 +24,9 @@ use crate::signing::{PublicKey, Signature};
 use crate::types::v2::{FileContract, SatisfiedPolicy, SiacoinElement, SiacoinInput, Transaction};
 use crate::types::{Address, ChainIndex, Currency, FileContractID, Hash256, Leaf, SiacoinOutput};
 
+#[cfg(test)]
+mod golden;
+
 async fn write_empty_request<W: AsyncWrite + Unpin>(
     w: &mut W,
     specifier: Specifier,
@@ -48,7 +51,8 @@ async fn write_response<W: AsyncWrite + Unpin>(
     w: &mut W,
     response: &impl SiaEncodable,
 ) -> Result<(), Error> {
-    let mut buf = Vec::with_capacity(response.encoded_length());
+    let mut buf = Vec::with_capacity(1 + response.encoded_length());
+    false.encode(&mut buf)?;
     response.encode(&mut buf)?;
     w.write_all(&buf).await?;
     Ok(())
@@ -895,8 +899,8 @@ struct FormContractParams {
 struct RPCFormContractRequest {
     pub prices: HostPrices,
     pub contract: FormContractParams,
-    pub miner_fee: Currency,
     pub basis: ChainIndex,
+    pub miner_fee: Currency,
     pub renter_inputs: Vec<SiacoinElement>,
     pub renter_parents: Vec<Transaction>,
 }
@@ -1188,45 +1192,6 @@ mod test {
         let mut buf = vec![1u8]; // is_error = true
         err.encode(&mut buf).unwrap();
         buf
-    }
-
-    #[cross_target_test]
-    async fn test_write_request() {
-        const EXPECTED_HEX: &str = "52656164536563746f72000000000000000000a1edccce1bc2d300000000000000000042db999d3784a7010000000000000000e3c8666c53467b02000000000000000084b6333b6f084f03000000000000000025a4000a8bca22040000000000000000c691cdd8a68cf604000000000007000000000000000800000000000000090000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000b000000000000000000000000000000000000000000000000000000000000000c000000000000000d0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000f000000000000001000000000000000";
-
-        let mut prices = TEST_PRICES;
-        prices.valid_until = DateTime::from_timestamp_secs(8).unwrap();
-        prices.signature = Signature::new({
-            let mut bytes = [0u8; 64];
-            bytes[0] = 9;
-            bytes
-        });
-
-        let mut token = TEST_ACCOUNT_TOKEN;
-        token.valid_until = DateTime::from_timestamp_secs(12).unwrap();
-        token.signature = Signature::new({
-            let mut bytes = [0u8; 64];
-            bytes[0] = 13;
-            bytes
-        });
-
-        let req = RPCReadSectorRequest {
-            prices,
-            token,
-            root: Hash256::new({
-                let mut bytes = [0u8; 32];
-                bytes[0] = 14;
-                bytes
-            }),
-            offset: 15,
-            length: 16,
-        };
-
-        let mut buf = Vec::new();
-        write_request(&mut buf, specifier!("ReadSector"), &req)
-            .await
-            .unwrap();
-        assert_eq!(buf, hex::decode(EXPECTED_HEX).unwrap());
     }
 
     #[cross_target_test]

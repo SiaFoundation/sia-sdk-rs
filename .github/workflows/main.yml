@@ -15,6 +15,15 @@ jobs:
     runs-on: tenki-standard-medium-4c-8g
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.27'
+      - name: Verify consensus goldens are current
+        run: |
+          cd sia_core/testutil/consensus-goldens
+          go run . -output "$RUNNER_TEMP/consensus.json.gz"
+          cmp <(gzip -dc ../../testdata/consensus.json.gz) <(gzip -dc "$RUNNER_TEMP/consensus.json.gz")
       - name: Setup Environment
         run: |
           rustup update stable
@@ -40,7 +49,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: 'stable'
+          go-version: '1.27'
       - name: Build Go interop helper
         run: cd sia_mux/testutil/go-interop && go build -o interop .
       - name: Setup Rust

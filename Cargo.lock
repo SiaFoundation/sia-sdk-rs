@@ -2933,6 +2933,7 @@ dependencies = [
  "chrono",
  "criterion",
  "ed25519-dalek",
+ "flate2",
  "getrandom 0.4.3",
  "hex",
  "num-bigint 0.5.1",
