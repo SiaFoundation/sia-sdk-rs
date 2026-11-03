@@ -8,7 +8,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
 use crate::helpers::to_js_err;
-use crate::object::PinnedObject;
+use crate::object::{ObjectSummary, PinnedObject};
 use crate::packed::PackedUpload;
 use crate::run_local;
 use crate::sharing::{KeyRecord, SharingKey};
@@ -99,6 +99,25 @@ impl Sdk {
             .await
             .map_err(to_js_err)?;
         Ok(objects.into_iter().map(PinnedObject).collect())
+    }
+
+    /// Lists a page of the objects a sharing key grants access to without
+    /// their slabs, which is much smaller and faster than `sharedObjects`.
+    /// Each summary has the object's id, size, decrypted metadata and
+    /// timestamps.
+    #[wasm_bindgen(js_name = "sharedObjectSummaries")]
+    pub async fn shared_object_summaries(
+        &self,
+        key: &SharingKey,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<ObjectSummary>, JsError> {
+        let summaries = self
+            .inner
+            .shared_object_summaries(key.key(), Some(offset as u64), Some(limit as u64))
+            .await
+            .map_err(to_js_err)?;
+        Ok(summaries.into_iter().map(ObjectSummary).collect())
     }
 
     /// Detaches an object from a sharing key, leaving the key and its other

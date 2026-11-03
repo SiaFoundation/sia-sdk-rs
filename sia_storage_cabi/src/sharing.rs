@@ -1,5 +1,6 @@
 use crate::abi::*;
 use crate::object::write_object_array;
+use crate::shared_sdk::FfiObjectSummaries;
 use sia_storage::{KeyRecord, KeyStats, Object, Sdk, SharingError, SharingKey, SharingKeyOptions};
 use std::ffi::c_char;
 use tokio_util::sync::CancellationToken;
@@ -370,6 +371,50 @@ pub unsafe extern "C" fn sia_sdk_shared_objects(
             None => set_cancelled(err),
             Some(Ok(objects)) => {
                 unsafe { write_object_array(objects, out_objs, out_len) };
+                SIA_OK
+            }
+            Some(Err(e)) => sharing_error(err, e),
+        }
+    })
+}
+
+/// Lists the objects attached to a key without their slabs, read the same way
+/// as `sia_shared_sdk_object_summaries`. A listing that only needs names and
+/// sizes should use this rather than `sia_sdk_shared_objects`. Pass 0 for
+/// offset or limit to use the indexer's default paging.
+///
+/// # Safety
+/// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_builder_connect`, `sia_builder_register` or `sia_mock_sdk` that has not been freed.
+/// - `key` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_sharing_key_import` or `sia_sdk_create_sharing_key` that has not been freed.
+/// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
+///   from `sia_cancel_new`.
+/// - `out` must be non null and writable. On success it receives an owned collection that must be
+///   released with `sia_object_summaries_free`.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_sdk_shared_object_summaries(
+    sdk: *const Sdk,
+    key: *const SharingKey,
+    offset: u64,
+    limit: u64,
+    cancel: *mut CancellationToken,
+    out: *mut *mut FfiObjectSummaries,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
+    guarded(err, || {
+        let (Some(sdk), Some(key)) = (unsafe { (sdk.as_ref(), key.as_ref()) }) else {
+            return SIA_ERR_INVALID_HANDLE;
+        };
+        let (offset, limit) = paging(offset, limit);
+        match block_on(cancel, sdk.shared_object_summaries(key, offset, limit)) {
+            None => set_cancelled(err),
+            Some(Ok(summaries)) => {
+                unsafe { *out = Box::into_raw(Box::new(FfiObjectSummaries(summaries))) }
                 SIA_OK
             }
             Some(Err(e)) => sharing_error(err, e),

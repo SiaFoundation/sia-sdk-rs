@@ -601,6 +601,25 @@ impl Client {
         .await
     }
 
+    /// Lists the objects attached to one of the account's sharing keys
+    /// without their slabs.
+    pub(crate) async fn sharing_key_object_summaries(
+        &self,
+        app_key: &PrivateKey,
+        sharing_key: &PublicKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<SealedSharedObjectSummary>, Error> {
+        let mut query = Self::pagination_query(offset, limit);
+        query.push(("includeslabs", "false".to_string()));
+        self.get_list(
+            &format!("sharing/{sharing_key}/objects"),
+            app_key,
+            Some(&query),
+        )
+        .await
+    }
+
     /// Detaches an object from one of the account's sharing keys.
     pub(crate) async fn delete_shared_object(
         &self,
@@ -2584,6 +2603,46 @@ mod native_tests {
             assert_eq!(summary.created_at, object.created_at);
             assert_eq!(summary.updated_at, object.updated_at);
         }
+    }
+
+    /// The owner's summary listing is signed by the app key and asks
+    /// `GET /sharing/:key/objects` to leave the slabs out.
+    #[tokio::test]
+    async fn test_sharing_key_object_summaries_wire_format() {
+        let app_key = PrivateKey::from_seed(&rand::random());
+        let sharing_key = PrivateKey::from_seed(&rand::random());
+        let sharing_pub = sharing_key.public_key();
+        let object = Object {
+            metadata: b"a movie".to_vec(),
+            ..Default::default()
+        };
+        let sealed = object.seal_with(&sharing_key);
+        let id = object.id();
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                signed_get(
+                    format!("/sharing/{sharing_pub}/objects"),
+                    app_key.public_key()
+                ),
+                request::query(url_decoded(contains(("includeslabs", "false")))),
+                request::query(url_decoded(contains(("offset", "5")))),
+                request::query(url_decoded(contains(("limit", "10")))),
+            ])
+            .respond_with(ok_typed(
+                "application/json",
+                summary_body(false, &sealed, id, 256),
+            )),
+        );
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        let summaries = client
+            .sharing_key_object_summaries(&app_key, &sharing_pub, Some(5), Some(10))
+            .await
+            .expect("list failed");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].object_id, id);
+        assert_eq!(summaries[0].object.size, 256);
     }
 
     /// Object events decode from both response encodings and are requested

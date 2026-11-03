@@ -41,9 +41,10 @@ impl From<sia_storage::KeyStats> for KeyStats {
     }
 }
 
-/// An object listed without its slabs, as `Sdk::object_event_summaries` and
-/// `SharedSdk::object_summaries` return it. It cannot be downloaded. Fetch the
-/// full object with `Sdk::object` or `SharedSdk::object` to download it.
+/// An object listed without its slabs, as `Sdk::object_event_summaries`,
+/// `Sdk::shared_object_summaries` and `SharedSdk::object_summaries` return it.
+/// It cannot be downloaded. Fetch the full object with `Sdk::object` or
+/// `SharedSdk::object` to download it.
 #[derive(uniffi::Record)]
 pub struct ObjectSummary {
     pub id: String,
@@ -214,6 +215,26 @@ impl Sdk {
                     })
                 })
                 .collect())
+        })
+        .await?
+    }
+
+    /// Lists the objects attached to a sharing key without their slabs, which
+    /// is much smaller and faster than `shared_objects`.
+    pub async fn shared_object_summaries(
+        &self,
+        key: Arc<SharingKey>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<ObjectSummary>, Error> {
+        let sdk = self.inner.clone();
+        let k = key.inner.clone();
+        spawn(async move {
+            let summaries = sdk
+                .shared_object_summaries(&k, Some(offset as u64), Some(limit as u64))
+                .await
+                .map_err(|e| Error::Custom(e.to_string()))?;
+            Ok(summaries.into_iter().map(ObjectSummary::from).collect())
         })
         .await?
     }

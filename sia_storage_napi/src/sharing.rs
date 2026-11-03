@@ -41,9 +41,10 @@ impl From<sia_storage::KeyStats> for KeyStats {
     }
 }
 
-/// An object listed without its slabs, as `Sdk.objectEventSummaries` and
-/// `SharedSdk.objectSummaries` return it. It cannot be downloaded. Fetch the
-/// full object with `Sdk.object(id)` or `SharedSdk.object(id)` to download it.
+/// An object listed without its slabs, as `Sdk.objectEventSummaries`,
+/// `Sdk.sharedObjectSummaries` and `SharedSdk.objectSummaries` return it. It
+/// cannot be downloaded. Fetch the full object with `Sdk.object(id)` or
+/// `SharedSdk.object(id)` to download it.
 #[napi(object)]
 pub struct ObjectSummary {
     pub id: String,
@@ -210,6 +211,23 @@ impl Sdk {
                 inner: Mutex::new(o),
             })
             .collect())
+    }
+
+    /// Lists the objects attached to a sharing key without their slabs, which
+    /// is much smaller and faster than `sharedObjects`.
+    #[napi]
+    pub async fn shared_object_summaries(
+        &self,
+        key: &SharingKey,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<ObjectSummary>> {
+        let summaries = self
+            .inner
+            .shared_object_summaries(key.key(), Some(offset as u64), Some(limit as u64))
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(summaries.into_iter().map(ObjectSummary::from).collect())
     }
 
     /// Detaches an object from a sharing key.

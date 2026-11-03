@@ -132,7 +132,8 @@ pub unsafe extern "C" fn sia_shared_sdk_object_summaries(
 
 /// # Safety
 /// - `s` may be null, which returns 0. Otherwise it must be a live collection from
-///   `sia_shared_sdk_object_summaries` that has not been freed.
+///   `sia_shared_sdk_object_summaries` or `sia_sdk_shared_object_summaries` that has not been
+///   freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_summaries_len(s: *const FfiObjectSummaries) -> usize {
     match unsafe { s.as_ref() } {
@@ -146,7 +147,8 @@ pub unsafe extern "C" fn sia_object_summaries_len(s: *const FfiObjectSummaries) 
 ///
 /// # Safety
 /// - `s` may be null, which returns false. Otherwise it must be a live collection from
-///   `sia_shared_sdk_object_summaries` that has not been freed.
+///   `sia_shared_sdk_object_summaries` or `sia_sdk_shared_object_summaries` that has not been
+///   freed.
 /// - `out` must be non null and writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_summaries_at(
@@ -170,7 +172,8 @@ pub unsafe extern "C" fn sia_object_summaries_at(
 ///
 /// # Safety
 /// - `s` may be null, which returns 0. Otherwise it must be a live collection from
-///   `sia_shared_sdk_object_summaries` that has not been freed.
+///   `sia_shared_sdk_object_summaries` or `sia_sdk_shared_object_summaries` that has not been
+///   freed.
 /// - `buf` may be null, which measures without writing. Otherwise it must be writable for `cap`
 ///   bytes, and nothing is written unless `cap` covers the whole metadata.
 #[unsafe(no_mangle)]
@@ -190,8 +193,8 @@ pub unsafe extern "C" fn sia_object_summaries_metadata(
 }
 
 /// # Safety
-/// - `s` may be null. Otherwise it must come from `sia_shared_sdk_object_summaries` and must not
-///   be used again after this returns.
+/// - `s` may be null. Otherwise it must come from `sia_shared_sdk_object_summaries` or
+///   `sia_sdk_shared_object_summaries` and must not be used again after this returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_summaries_free(s: *mut FfiObjectSummaries) {
     if !s.is_null() {

@@ -88,6 +88,10 @@ export async function check(
     useSdk(sdk)
     const key = await sdk.createSharingKey('photos', null)
     useKey(key)
+    const attached = await sdk.sharedObjectSummaries(key, 0, 1)
+    if (attached[0]) {
+      useSummary(attached[0])
+    }
     const events = await sdk.objectEventSummaries(null, 1)
     if (events[0]) {
       useEventSummary(events[0])
