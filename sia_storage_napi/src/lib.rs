@@ -386,6 +386,17 @@ pub struct ShardProgress {
     pub elapsed_ms: f64,
 }
 
+/// One shard write attempt, successful or not. `error` is `None` on success.
+#[napi(object)]
+pub struct ShardAttemptInfo {
+    pub host_key: String,
+    pub shard_index: u32,
+    pub slab_index: u32,
+    pub ok: bool,
+    pub elapsed_ms: f64,
+    pub error: Option<String>,
+}
+
 /// A Send-safe wrapper around a JS callback that converts it into a
 /// `ThreadsafeFunction` during napi parameter extraction.
 pub struct SendableCallback<T: ToNapiValue + 'static> {
@@ -424,6 +435,24 @@ impl SendableCallback<ShardProgress> {
     }
 }
 
+impl SendableCallback<ShardAttemptInfo> {
+    fn into_attempt_callback(self) -> sia_storage::ShardAttemptCallback {
+        Arc::new(move |a: sia_storage::ShardAttemptInfo| {
+            self.inner.call(
+                ShardAttemptInfo {
+                    host_key: a.host_key.to_string(),
+                    shard_index: a.shard_index as u32,
+                    slab_index: a.slab_index as u32,
+                    ok: a.ok,
+                    elapsed_ms: a.elapsed.as_millis() as f64,
+                    error: a.error,
+                },
+                ThreadsafeFunctionCallMode::NonBlocking,
+            );
+        })
+    }
+}
+
 /// Upload options.
 #[napi(object, object_to_js = false)]
 #[derive(Default)]
@@ -434,6 +463,8 @@ pub struct UploadOptions {
     pub start_offset: Option<BigInt>,
     #[napi(ts_type = "(progress: ShardProgress) => void")]
     pub on_shard_uploaded: Option<SendableCallback<ShardProgress>>,
+    #[napi(ts_type = "(attempt: ShardAttemptInfo) => void")]
+    pub on_shard_attempted: Option<SendableCallback<ShardAttemptInfo>>,
 }
 
 impl TryFrom<UploadOptions> for sia_storage::UploadOptions {
@@ -445,6 +476,7 @@ impl TryFrom<UploadOptions> for sia_storage::UploadOptions {
         options.parity_shards = val.parity_shards.unwrap_or(options.parity_shards);
         options.max_buffered_slabs = val.max_buffered_slabs.map(|v| v as usize);
         options.shard_uploaded = val.on_shard_uploaded.map(|cb| cb.into_shard_callback());
+        options.shard_attempt = val.on_shard_attempted.map(|cb| cb.into_attempt_callback());
         if let Some(start_offset) = val.start_offset {
             let (signed, value, lossless) = start_offset.get_u64();
             if signed {
@@ -481,6 +513,8 @@ pub struct PackedUploadOptions {
     pub parity_shards: Option<u8>,
     #[napi(ts_type = "(progress: ShardProgress) => void")]
     pub on_shard_uploaded: Option<SendableCallback<ShardProgress>>,
+    #[napi(ts_type = "(attempt: ShardAttemptInfo) => void")]
+    pub on_shard_attempted: Option<SendableCallback<ShardAttemptInfo>>,
 }
 
 impl From<PackedUploadOptions> for sia_storage::PackedUploadOptions {
@@ -490,6 +524,7 @@ impl From<PackedUploadOptions> for sia_storage::PackedUploadOptions {
         options.parity_shards = val.parity_shards.unwrap_or(options.parity_shards);
         options.max_buffered_slabs = val.max_buffered_slabs.map(|v| v as usize);
         options.shard_uploaded = val.on_shard_uploaded.map(|cb| cb.into_shard_callback());
+        options.shard_attempt = val.on_shard_attempted.map(|cb| cb.into_attempt_callback());
         options
     }
 }

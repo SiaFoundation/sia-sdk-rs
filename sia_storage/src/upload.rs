@@ -13,8 +13,8 @@ use crate::slabs::SlabVersion;
 use crate::task::AbortOnDropHandle;
 use crate::time::{Duration, Instant, sleep};
 use crate::{
-    AppKey, Download, DownloadOptions, Hosts, Object, PackedUploadOptions, Sector, ShardProgress,
-    ShardProgressCallback, Slab, UploadOptions,
+    AppKey, Download, DownloadOptions, Hosts, Object, PackedUploadOptions, Sector, ShardAttemptCallback,
+    ShardAttemptInfo, ShardProgress, ShardProgressCallback, Slab, UploadOptions,
 };
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -66,6 +66,7 @@ struct ShardUpload {
     slab_index: usize,
     shard_index: usize,
     waiting: watch::Sender<usize>,
+    attempt_callback: Option<ShardAttemptCallback>,
 }
 
 struct SectorUploadResult {
@@ -321,6 +322,7 @@ impl ShardUpload {
         let data = self.data.clone();
         let slab_index = self.slab_index;
         let shard_index = self.shard_index;
+        let attempt_callback = self.attempt_callback.clone();
         join_set_spawn!(tasks, async move {
             // Drop `host` before the permit so a cancelled write requeues
             // the host before waking the next shard.
@@ -334,6 +336,16 @@ impl ShardUpload {
                 .write_sector(host_key, &account_key.0, data, idle_timeout)
                 .await;
             let elapsed = start.elapsed();
+            if let Some(callback) = &attempt_callback {
+                callback(ShardAttemptInfo {
+                    host_key,
+                    shard_index,
+                    slab_index,
+                    ok: result.is_ok(),
+                    elapsed,
+                    error: result.as_ref().err().map(|e| e.to_string()),
+                });
+            }
             // one failed completion, which a window sized to the limit
             // dilutes; enough hosts stalling at once is the pipeline
             if matches!(&result, Err(RPCError::Rhp(e)) if e.is_timeout()) {
@@ -585,6 +597,7 @@ pub(crate) struct Upload {
     waiting: watch::Sender<usize>,
     slab_tasks: VecDeque<AbortOnDropHandle<Result<Slab, UploadError>>>,
     shard_uploaded: Option<ShardProgressCallback>,
+    shard_attempt: Option<ShardAttemptCallback>,
 }
 
 impl Upload {
@@ -623,6 +636,7 @@ impl Upload {
             waiting: watch::channel(0).0,
             slab_tasks: VecDeque::new(),
             shard_uploaded: options.shard_uploaded,
+            shard_attempt: options.shard_attempt,
         })
     }
 
@@ -642,6 +656,7 @@ impl Upload {
         let app_key = self.app_key.clone();
         let min_shards = self.erasure_coder.data_shards() as u8;
         let progress_callback = self.shard_uploaded.clone();
+        let attempt_callback = self.shard_attempt.clone();
         let slab_index = self.slab_tasks.len();
         let shard_permits = limiter.reserve(slab.shards.len()).await;
         // Count this slab's shards as waiting before the task spawns so the
@@ -712,6 +727,7 @@ impl Upload {
                     let limiter = limiter.clone();
                     let hosts = hosts.clone();
                     let waiting = waiting.clone();
+                    let attempt_callback = attempt_callback.clone();
                     join_set_spawn!(shard_tasks, async move {
                         let shard_upload = ShardUpload {
                             limiter,
@@ -722,6 +738,7 @@ impl Upload {
                             shard_index,
                             hosts,
                             waiting,
+                            attempt_callback: attempt_callback.clone(),
                         };
                         shard_upload.upload_shard(waiting_guard).await
                     });
@@ -1171,6 +1188,7 @@ mod tests {
             slab_index: 0,
             shard_index: 0,
             waiting: waiting.clone(),
+            attempt_callback: None,
         }
     }
 

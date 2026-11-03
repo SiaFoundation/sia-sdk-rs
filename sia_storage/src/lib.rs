@@ -322,6 +322,27 @@ pub struct ShardProgress {
     pub elapsed: Duration,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub type ShardAttemptCallback = Arc<dyn Fn(ShardAttemptInfo) + Send + Sync + 'static>;
+
+#[cfg(target_arch = "wasm32")]
+pub type ShardAttemptCallback = Arc<dyn Fn(ShardAttemptInfo) + 'static>;
+
+/// One attempt to write a shard to a host, successful or not.
+///
+/// `shard_uploaded` reports only successes, which leaves a caller unable to say
+/// which host is holding a slab up. This reports every attempt, so the failing
+/// host and its reason are visible instead of inferred from silence.
+pub struct ShardAttemptInfo {
+    pub host_key: PublicKey,
+    pub shard_index: usize,
+    pub slab_index: usize,
+    pub ok: bool,
+    pub elapsed: Duration,
+    /// The failure reason, when `ok` is false.
+    pub error: Option<String>,
+}
+
 /// Options for configuring a download.
 #[derive(Clone, Default)]
 pub struct DownloadOptions {
@@ -381,6 +402,11 @@ pub struct UploadOptions {
     /// A shard may be reported more than once if its slab outlives the hosts'
     /// temporary storage and is uploaded again.
     pub shard_uploaded: Option<ShardProgressCallback>,
+
+    /// Optional callback for every shard write attempt, failures included, so a
+    /// caller can name the host that is not answering instead of inferring a
+    /// stall from silence.
+    pub shard_attempt: Option<ShardAttemptCallback>,
 
     /// When set, the reader's data overwrites the object starting at this byte
     /// offset instead of being appended. Only the slabs covering the
@@ -497,6 +523,7 @@ impl Default for UploadOptions {
             parity_shards: 20,
             max_buffered_slabs: None,
             shard_uploaded: None,
+            shard_attempt: None,
             start_offset: None,
         }
     }
@@ -521,6 +548,9 @@ pub struct PackedUploadOptions {
     /// A shard may be reported more than once if its slab outlives the hosts'
     /// temporary storage and is uploaded again.
     pub shard_uploaded: Option<ShardProgressCallback>,
+
+    /// Optional callback for every shard write attempt, failures included.
+    pub shard_attempt: Option<ShardAttemptCallback>,
 }
 
 impl Default for PackedUploadOptions {
@@ -530,6 +560,7 @@ impl Default for PackedUploadOptions {
             parity_shards: 20,
             max_buffered_slabs: None,
             shard_uploaded: None,
+            shard_attempt: None,
         }
     }
 }
@@ -553,6 +584,7 @@ impl From<PackedUploadOptions> for UploadOptions {
             parity_shards: options.parity_shards,
             max_buffered_slabs: options.max_buffered_slabs,
             shard_uploaded: options.shard_uploaded,
+            shard_attempt: options.shard_attempt,
             start_offset: None,
         }
     }

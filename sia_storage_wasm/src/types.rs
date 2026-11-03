@@ -33,6 +33,31 @@ impl From<sia_storage::ShardProgress> for ShardProgress {
     }
 }
 
+/// One shard write attempt, successful or not. `error` is `None` on success.
+#[derive(serde::Serialize, tsify::Tsify)]
+#[serde(rename_all = "camelCase")]
+pub struct ShardAttemptInfo {
+    pub host_key: String,
+    pub shard_index: usize,
+    pub slab_index: usize,
+    pub ok: bool,
+    pub elapsed_ms: f64,
+    pub error: Option<String>,
+}
+
+impl From<sia_storage::ShardAttemptInfo> for ShardAttemptInfo {
+    fn from(a: sia_storage::ShardAttemptInfo) -> Self {
+        Self {
+            host_key: a.host_key.to_string(),
+            shard_index: a.shard_index,
+            slab_index: a.slab_index,
+            ok: a.ok,
+            elapsed_ms: a.elapsed.as_millis() as f64,
+            error: a.error,
+        }
+    }
+}
+
 /// Application info registered with the indexer.
 #[derive(serde::Serialize, tsify::Tsify)]
 #[serde(rename_all = "camelCase")]
@@ -128,6 +153,14 @@ fn shard_progress_callback(cb: js_sys::Function) -> sia_storage::ShardProgressCa
     })
 }
 
+fn shard_attempt_callback(cb: js_sys::Function) -> sia_storage::ShardAttemptCallback {
+    std::sync::Arc::new(move |a: sia_storage::ShardAttemptInfo| {
+        let attempt: ShardAttemptInfo = a.into();
+        let js_val = serde_wasm_bindgen::to_value(&attempt).unwrap_or(JsValue::UNDEFINED);
+        let _ = cb.call1(&JsValue::NULL, &js_val);
+    })
+}
+
 fn get_f64(obj: &js_sys::Object, key: &str) -> Option<f64> {
     js_sys::Reflect::get(obj, &key.into())
         .ok()
@@ -172,6 +205,9 @@ fn packed_options_from_obj(obj: &js_sys::Object) -> sia_storage::PackedUploadOpt
     }
     if let Some(cb) = get_function(obj, "onShardUploaded") {
         options.shard_uploaded = Some(shard_progress_callback(cb));
+    }
+    if let Some(cb) = get_function(obj, "onShardAttempted") {
+        options.shard_attempt = Some(shard_attempt_callback(cb));
     }
     options
 }
