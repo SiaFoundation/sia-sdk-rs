@@ -110,7 +110,10 @@ impl Error {
     pub(crate) fn is_retryable(&self) -> bool {
         match self {
             Self::Api(
-                StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED,
+                StatusCode::BAD_REQUEST
+                | StatusCode::UNAUTHORIZED
+                | StatusCode::FORBIDDEN
+                | StatusCode::NOT_FOUND,
                 _,
             ) => false,
             Self::Api(..) | Self::Reqwest(_) | Self::Serde(_) | Self::Cbor(_) => true,
