@@ -984,6 +984,27 @@ fn events_at_rejects_out_of_range() {
     }
 }
 
+/// Same contract as `sia_events_at`: out of range is reported in the return
+/// value rather than panicking across the boundary.
+#[test]
+fn event_summaries_at_rejects_out_of_range() {
+    unsafe {
+        let evs = Box::into_raw(Box::new(FfiEventSummaries(Vec::new())));
+        assert_eq!(sia_event_summaries_len(evs), 0);
+        assert!(event_summary_at(evs, 0).is_none());
+        assert_eq!(
+            sia_event_summaries_metadata(evs, 0, std::ptr::null_mut(), 0),
+            0
+        );
+
+        assert_eq!(sia_event_summaries_len(std::ptr::null()), 0);
+        assert!(event_summary_at(std::ptr::null(), 0).is_none());
+
+        sia_event_summaries_free(evs);
+        sia_event_summaries_free(std::ptr::null_mut());
+    }
+}
+
 /// Same contract as `sia_events_at`, reported in the return value because
 /// there is no error out-param on this call either.
 #[test]
@@ -5404,6 +5425,285 @@ fn object_events_page_through_the_abi() {
             }
         }
         sia_events_free(rest);
+
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// Reads one event summary, with `has_object` preset to true so a deletion has
+/// to clear it.
+unsafe fn event_summary_at(
+    evs: *const FfiEventSummaries,
+    i: usize,
+) -> Option<([u8; 32], bool, i64, Option<ObjectSummaryC>)> {
+    let mut id = [0u8; 32];
+    let mut deleted = false;
+    let mut updated_at = 0i64;
+    let mut has_object = true;
+    let mut object = std::mem::MaybeUninit::<ObjectSummaryC>::uninit();
+    let ok = unsafe {
+        sia_event_summaries_at(
+            evs,
+            i,
+            id.as_mut_ptr(),
+            &raw mut deleted,
+            &raw mut updated_at,
+            &raw mut has_object,
+            object.as_mut_ptr(),
+        )
+    };
+    ok.then(|| {
+        let object = has_object.then(|| unsafe { object.assume_init() });
+        (id, deleted, updated_at, object)
+    })
+}
+
+/// `sia_sdk_object_event_summaries` lists the same events as
+/// `sia_sdk_object_events`, in the same order and with the same cursor, but
+/// carries a summary in place of each object.
+#[test]
+fn object_event_summaries_page_through_the_abi() {
+    unsafe {
+        let mock = sia_mock_new(40);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [109u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        // One object kept with metadata, then one pinned and deleted, so the
+        // listing holds a write followed by a deletion.
+        let payload = vec![7u8; 8192];
+        let meta = b"{\"name\":\"kept\"}";
+        let kept = with_metadata_for_test(upload_object_for_test(sdk, &payload), meta);
+        let removed = upload_object_for_test(sdk, &[9u8; 4096]);
+        for obj in [kept, removed] {
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_sdk_pin_object(sdk, obj, std::ptr::null_mut(), &raw mut err),
+                SIA_OK,
+                "sia_sdk_pin_object: {}",
+                take_err(err)
+            );
+        }
+        let mut kept_id = [0u8; 32];
+        sia_object_id(kept, kept_id.as_mut_ptr());
+        let mut removed_id = [0u8; 32];
+        sia_object_id(removed, removed_id.as_mut_ptr());
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_delete_object(sdk, removed_id.as_ptr(), std::ptr::null_mut(), &raw mut err),
+            SIA_OK,
+            "sia_sdk_delete_object: {}",
+            take_err(err)
+        );
+
+        let mut evs = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_object_event_summaries(
+                sdk,
+                false,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut evs,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_sdk_object_event_summaries: {}",
+            take_err(err)
+        );
+        assert_eq!(sia_event_summaries_len(evs), 2);
+        let events: Vec<_> = (0..2)
+            .map(|i| event_summary_at(evs, i).expect("each event must be readable"))
+            .collect();
+        // The mock's clock has microsecond resolution, so the two events can
+        // share a timestamp and order by id instead. Find each one by id.
+        let k = events.iter().position(|ev| ev.0 == kept_id).unwrap();
+        let r = events.iter().position(|ev| ev.0 == removed_id).unwrap();
+
+        let (_, deleted, updated_at, object) = &events[k];
+        assert!(!*deleted);
+        assert!(*updated_at > 0, "the timestamp must cross as microseconds");
+        let object = object.as_ref().expect("a write carries its summary");
+        assert_eq!(object.id, kept_id);
+        assert_eq!(object.size, payload.len() as u64);
+        let n = sia_event_summaries_metadata(evs, k, std::ptr::null_mut(), 0);
+        assert_eq!(n, meta.len(), "the metadata is decrypted and carried");
+        let mut buf = vec![0u8; n];
+        assert_eq!(
+            sia_event_summaries_metadata(evs, k, buf.as_mut_ptr(), buf.len()),
+            n
+        );
+        assert_eq!(buf, meta);
+        assert_eq!(
+            event_summary_at(evs, k).map(|ev| ev.0),
+            Some(kept_id),
+            "nothing is transferred out, so an index can be read again"
+        );
+
+        let (_, deleted, _, object) = &events[r];
+        assert!(*deleted);
+        assert!(object.is_none(), "a deletion has no summary");
+        assert_eq!(
+            sia_event_summaries_metadata(evs, r, std::ptr::null_mut(), 0),
+            0
+        );
+
+        // The full listing reports the same events in the same order.
+        let mut full = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_object_events(
+                sdk,
+                false,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut full,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_sdk_object_events: {}",
+            take_err(err)
+        );
+        assert_eq!(sia_events_len(full), sia_event_summaries_len(evs));
+        for i in 0..sia_events_len(full) {
+            let mut id = [0u8; 32];
+            let mut deleted = false;
+            let mut updated_at = 0i64;
+            let mut obj = std::ptr::null_mut();
+            assert!(sia_events_at(
+                full,
+                i,
+                id.as_mut_ptr(),
+                &raw mut deleted,
+                &raw mut updated_at,
+                &raw mut obj
+            ));
+            let summary = event_summary_at(evs, i).unwrap();
+            assert_eq!((id, deleted, updated_at), (summary.0, summary.1, summary.2));
+            if !obj.is_null() {
+                sia_object_free(obj);
+            }
+        }
+        sia_events_free(full);
+
+        // Resuming from the first event leaves only the second.
+        let mut rest = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_object_event_summaries(
+                sdk,
+                true,
+                events[0].2,
+                events[0].0.as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut rest,
+                &raw mut err
+            ),
+            SIA_OK,
+            "the cursored page: {}",
+            take_err(err)
+        );
+        assert_eq!(sia_event_summaries_len(rest), 1);
+        assert_eq!(event_summary_at(rest, 0).map(|ev| ev.0), Some(events[1].0));
+        sia_event_summaries_free(rest);
+
+        let mut page = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_object_event_summaries(
+                sdk,
+                false,
+                0,
+                std::ptr::null(),
+                1,
+                std::ptr::null_mut(),
+                &raw mut page,
+                &raw mut err
+            ),
+            SIA_OK,
+            "the limited page: {}",
+            take_err(err)
+        );
+        assert_eq!(sia_event_summaries_len(page), 1, "asked for one event");
+        sia_event_summaries_free(page);
+
+        sia_event_summaries_free(evs);
+        sia_object_free(kept);
+        sia_object_free(removed);
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
+/// A cursor timestamp chrono cannot represent is refused with a message
+/// rather than truncated to some other point in the listing.
+#[test]
+fn object_event_summaries_rejects_bad_arguments() {
+    unsafe {
+        let mut out = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_object_event_summaries(
+                std::ptr::null(),
+                false,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut out,
+                std::ptr::null_mut()
+            ),
+            SIA_ERR_INVALID_HANDLE
+        );
+        assert!(out.is_null());
+
+        let mock = sia_mock_new(10);
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                [113u8; 32].as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_object_event_summaries(
+                sdk,
+                true,
+                i64::MAX,
+                [0u8; 32].as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut out,
+                &raw mut err
+            ),
+            SIA_ERR
+        );
+        assert!(take_err(err).contains("invalid cursor timestamp"));
+        assert!(out.is_null());
 
         sia_sdk_free(sdk);
         sia_mock_free(mock);

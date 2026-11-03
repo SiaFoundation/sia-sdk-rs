@@ -1,5 +1,5 @@
 use crate::abi::*;
-use crate::object::{FfiEvent, FfiEvents};
+use crate::object::{FfiEvent, FfiEventSummaries, FfiEvents};
 use sia_storage::{Object, ObjectsCursor, Sdk};
 use std::ffi::c_char;
 use tokio_util::sync::CancellationToken;
@@ -128,22 +128,10 @@ pub unsafe extern "C" fn sia_sdk_object_events(
         let Some(sdk) = (unsafe { sdk.as_ref() }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        let cursor = if has_cursor {
-            let after = match sia_storage::DateTime::from_timestamp_micros(after_unix_us) {
-                Some(t) => t,
-                None => return set_err(err, SIA_ERR, "invalid cursor timestamp"),
-            };
-            Some(ObjectsCursor {
-                after,
-                id: unsafe { hash_from_ptr(after_id) },
-            })
-        } else {
-            None
-        };
-        let limit = if limit > 0 {
-            Some(limit as usize)
-        } else {
-            None
+        let Some((cursor, limit)) =
+            (unsafe { event_page(has_cursor, after_unix_us, after_id, limit) })
+        else {
+            return set_err(err, SIA_ERR, "invalid cursor timestamp");
         };
         match block_on(cancel, sdk.object_events(cursor, limit)) {
             None => set_cancelled(err),
@@ -168,6 +156,77 @@ pub unsafe extern "C" fn sia_sdk_object_events(
             Some(Err(e)) => set_typed_err(err, &e),
         }
     })
+}
+
+/// Lists the same events as `sia_sdk_object_events` without the objects'
+/// slabs, which makes the response a small fraction of the size. A summary is
+/// enough to show an object but not to download it; fetch the full object with
+/// `sia_sdk_object` for that. Pages with the same cursor.
+///
+/// # Safety
+/// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+///   from `sia_builder_connect`, `sia_builder_register` or `sia_mock_sdk` that has not been freed.
+/// - `after_id` must be readable for 32 bytes.
+/// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
+///   from `sia_cancel_new`.
+/// - `out` must be non null and writable. On success it receives an owned handle that must be
+///   released with `sia_event_summaries_free`.
+/// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+///   with `sia_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_sdk_object_event_summaries(
+    sdk: *const Sdk,
+    has_cursor: bool,
+    after_unix_us: i64,
+    after_id: *const u8,
+    limit: u64,
+    cancel: *mut CancellationToken,
+    out: *mut *mut FfiEventSummaries,
+    err: *mut *mut c_char,
+) -> i32 {
+    let err = unsafe { ErrOut::new(err) };
+    let cancel = unsafe { cancel.as_ref() };
+    guarded(err, || {
+        let Some(sdk) = (unsafe { sdk.as_ref() }) else {
+            return SIA_ERR_INVALID_HANDLE;
+        };
+        let Some((cursor, limit)) =
+            (unsafe { event_page(has_cursor, after_unix_us, after_id, limit) })
+        else {
+            return set_err(err, SIA_ERR, "invalid cursor timestamp");
+        };
+        match block_on(cancel, sdk.object_event_summaries(cursor, limit)) {
+            None => set_cancelled(err),
+            Some(Ok(events)) => {
+                unsafe { *out = Box::into_raw(Box::new(FfiEventSummaries(events))) }
+                SIA_OK
+            }
+            Some(Err(e)) => set_typed_err(err, &e),
+        }
+    })
+}
+
+/// Converts the paging arguments the event listings share. A zero `limit`
+/// takes the indexer's default. Returns None for a cursor timestamp out of
+/// range.
+///
+/// # Safety
+/// - `after_id` must be readable for 32 bytes when `has_cursor` is true.
+unsafe fn event_page(
+    has_cursor: bool,
+    after_unix_us: i64,
+    after_id: *const u8,
+    limit: u64,
+) -> Option<(Option<ObjectsCursor>, Option<usize>)> {
+    let cursor = if has_cursor {
+        Some(ObjectsCursor {
+            after: sia_storage::DateTime::from_timestamp_micros(after_unix_us)?,
+            id: unsafe { hash_from_ptr(after_id) },
+        })
+    } else {
+        None
+    };
+    Some((cursor, (limit > 0).then_some(limit as usize)))
 }
 
 /// # Safety

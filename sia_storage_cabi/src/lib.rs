@@ -32,6 +32,7 @@ const _: () = {
     moves_between_threads::<upload::FfiPacked>();
     moves_between_threads::<sharing::FfiKeyRecords>();
     moves_between_threads::<object::FfiEvents>();
+    moves_between_threads::<object::FfiEventSummaries>();
     moves_between_threads::<tokio_util::sync::CancellationToken>();
     #[cfg(feature = "mock")]
     moves_between_threads::<mock::FfiMock>();
@@ -45,6 +46,7 @@ const _: () = {
     shared_across_threads::<tokio_util::sync::CancellationToken>();
     shared_across_threads::<sharing::FfiKeyRecords>();
     shared_across_threads::<object::FfiEvents>();
+    shared_across_threads::<object::FfiEventSummaries>();
     #[cfg(feature = "mock")]
     shared_across_threads::<mock::FfiMock>();
 };

@@ -75,6 +75,7 @@ parse_deps = false
 "FfiDownload" = "sia_download_t"
 "FfiPacked" = "sia_packed_upload_t"
 "FfiEvents" = "sia_events_t"
+"FfiEventSummaries" = "sia_event_summaries_t"
 "FfiKeyRecords" = "sia_key_records_t"
 "FfiObjectSummaries" = "sia_object_summaries_t"
 "FfiMock" = "sia_mock_t"

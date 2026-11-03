@@ -1,5 +1,6 @@
 use crate::abi::*;
-use sia_storage::{Object, Sdk, SealedObject};
+use crate::shared_sdk::{ObjectSummaryC, copy_metadata};
+use sia_storage::{Object, ObjectEventSummary, Sdk, SealedObject};
 use std::ffi::c_char;
 
 pub(crate) struct FfiEvent {
@@ -12,6 +13,9 @@ pub(crate) struct FfiEvent {
 }
 
 pub(crate) struct FfiEvents(pub(crate) Vec<FfiEvent>);
+
+/// A page of object events without their slabs, owning every summary in it.
+pub(crate) struct FfiEventSummaries(pub(crate) Vec<ObjectEventSummary>);
 
 /// # Safety
 /// - This function is only callable across the C ABI and takes no pointers.
@@ -223,6 +227,92 @@ pub unsafe extern "C" fn sia_events_at(
 ///   again after this returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_events_free(evs: *mut FfiEvents) {
+    if !evs.is_null() {
+        drop(unsafe { Box::from_raw(evs) });
+    }
+}
+
+/// # Safety
+/// - `evs` may be null, which returns 0. Otherwise it must be a live handle from
+///   `sia_sdk_object_event_summaries` that has not been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_event_summaries_len(evs: *const FfiEventSummaries) -> usize {
+    match unsafe { evs.as_ref() } {
+        Some(evs) => evs.0.len(),
+        None => 0,
+    }
+}
+
+/// Copies the event at `i`. A deletion sets `has_object` to false and leaves
+/// `object` untouched. Returns false when `i` is out of range, leaving every out
+/// parameter untouched.
+///
+/// Nothing is transferred out, so unlike `sia_events_at` an index may be read
+/// any number of times.
+///
+/// # Safety
+/// - `evs` may be null, which returns false. Otherwise it must be a live handle from
+///   `sia_sdk_object_event_summaries` that has not been freed.
+/// - `id_out` must be writable for 32 bytes.
+/// - `deleted`, `updated_at_unix_us`, `has_object` and `object` must be non null and writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_event_summaries_at(
+    evs: *const FfiEventSummaries,
+    i: usize,
+    id_out: *mut u8,
+    deleted: *mut bool,
+    updated_at_unix_us: *mut i64,
+    has_object: *mut bool,
+    object: *mut ObjectSummaryC,
+) -> bool {
+    let Some(evs) = (unsafe { evs.as_ref() }) else {
+        return false;
+    };
+    let Some(ev) = evs.0.get(i) else {
+        return false;
+    };
+    unsafe {
+        std::slice::from_raw_parts_mut(id_out, 32).copy_from_slice(ev.id.as_ref());
+        *deleted = ev.deleted;
+        *updated_at_unix_us = ev.updated_at.timestamp_micros();
+        *has_object = ev.object.is_some();
+        if let Some(summary) = &ev.object {
+            *object = summary.into();
+        }
+    }
+    true
+}
+
+/// Returns the metadata length of the summary in the event at `i`, whether or
+/// not it was written, so a caller can size its buffer with a null `buf` and
+/// call again. A deletion, or an `i` out of range, reports 0.
+///
+/// # Safety
+/// - `evs` may be null, which returns 0. Otherwise it must be a live handle from
+///   `sia_sdk_object_event_summaries` that has not been freed.
+/// - `buf` may be null, which measures without writing. Otherwise it must be writable for `cap`
+///   bytes, and nothing is written unless `cap` covers the whole metadata.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_event_summaries_metadata(
+    evs: *const FfiEventSummaries,
+    i: usize,
+    buf: *mut u8,
+    cap: usize,
+) -> usize {
+    let Some(evs) = (unsafe { evs.as_ref() }) else {
+        return 0;
+    };
+    match evs.0.get(i).and_then(|ev| ev.object.as_ref()) {
+        Some(summary) => unsafe { copy_metadata(&summary.metadata, buf, cap) },
+        None => 0,
+    }
+}
+
+/// # Safety
+/// - `evs` may be null. Otherwise it must come from `sia_sdk_object_event_summaries` and must not
+///   be used again after this returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_event_summaries_free(evs: *mut FfiEventSummaries) {
     if !evs.is_null() {
         drop(unsafe { Box::from_raw(evs) });
     }
