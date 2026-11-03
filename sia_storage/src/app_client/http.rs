@@ -1405,6 +1405,7 @@ mod native_tests {
         for (path, status) in [
             ("/missing", StatusCode::NOT_FOUND),
             ("/denied", StatusCode::UNAUTHORIZED),
+            ("/forbidden", StatusCode::FORBIDDEN),
             ("/invalid", StatusCode::BAD_REQUEST),
             ("/broken", StatusCode::INTERNAL_SERVER_ERROR),
         ] {
@@ -1422,6 +1423,8 @@ mod native_tests {
         assert!(matches!(not_found, Error::Api(StatusCode::NOT_FOUND, ref m) if m == "the body"));
         let denied = client.delete("denied", &app_key).await.unwrap_err();
         assert!(matches!(denied, Error::Api(StatusCode::UNAUTHORIZED, ref m) if m == "the body"));
+        let forbidden = client.delete("forbidden", &app_key).await.unwrap_err();
+        assert!(matches!(forbidden, Error::Api(StatusCode::FORBIDDEN, ref m) if m == "the body"));
         let invalid = client.delete("invalid", &app_key).await.unwrap_err();
         assert!(matches!(invalid, Error::Api(StatusCode::BAD_REQUEST, ref m) if m == "the body"));
         let other = client.delete("broken", &app_key).await.unwrap_err();
@@ -1429,10 +1432,11 @@ mod native_tests {
             matches!(other, Error::Api(StatusCode::INTERNAL_SERVER_ERROR, ref m) if m == "the body")
         );
 
-        // 404 and 401 cannot become a success on retry. Neither can a 400
+        // 404, 401 and 403 cannot become a success on retry. Neither can a 400
         // without changing the request. Transient failures may.
         assert!(!not_found.is_retryable());
         assert!(!denied.is_retryable());
+        assert!(!forbidden.is_retryable());
         assert!(!invalid.is_retryable());
         assert!(other.is_retryable());
     }
