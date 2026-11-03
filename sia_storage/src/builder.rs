@@ -65,6 +65,10 @@ pub enum BuilderError {
     #[error("request expired")]
     RequestExpired,
 
+    /// The caller stopped waiting before the request was approved.
+    #[error("approval wait cancelled")]
+    Cancelled,
+
     /// The indexer rejected the pre-authorized connection request. The key is
     /// usually invalid, expired, exhausted, or restricted to a different
     /// application; the indexer's response is included.
@@ -220,16 +224,37 @@ impl Builder<RequestingApprovalState> {
     /// [Builder::response_url] should be displayed to the user
     /// before calling this method.
     pub async fn wait_for_approval(self) -> Result<Builder<ApprovedState>, BuilderError> {
+        self.wait_for_approval_with(Duration::from_secs(5), None)
+            .await
+    }
+
+    /// Waits for approval, with control over the rhythm and a way out.
+    ///
+    /// `interval` is the pause between status checks. `on_check` runs after every
+    /// check and returns whether to keep waiting, so a caller can cancel the wait
+    /// promptly instead of sleeping out the interval.
+    pub async fn wait_for_approval_with(
+        self,
+        interval: Duration,
+        on_check: Option<crate::ApprovalCheckCallback>,
+    ) -> Result<Builder<ApprovedState>, BuilderError> {
         loop {
             if Utc::now() >= self.state.expiration {
                 return Err(BuilderError::RequestExpired);
             }
 
-            if let Some(status) = self
+            let status = self
                 .client
                 .check_request_status(&self.ephemeral_key, self.state.status_url.clone())
-                .await?
-            {
+                .await?;
+
+            if let Some(callback) = &on_check {
+                if !callback() {
+                    return Err(BuilderError::Cancelled);
+                }
+            }
+
+            if let Some(status) = status {
                 return Ok(Builder {
                     ephemeral_key: self.ephemeral_key,
                     state: ApprovedState {
@@ -241,7 +266,7 @@ impl Builder<RequestingApprovalState> {
                     client: self.client,
                 });
             }
-            sleep(Duration::from_secs(5)).await;
+            sleep(interval).await;
         }
     }
 }

@@ -128,14 +128,39 @@ impl Builder {
     }
 
     /// Waits for the user to approve the connection request.
+    ///
+    /// `intervalMs` is the pause between status checks, defaulting to 5000.
+    /// `signal` cancels the wait, returning as soon as the current check ends.
+    /// `onCheck` runs after every check, for a caller that wants to show that a
+    /// real check happened instead of guessing at the rhythm.
     #[wasm_bindgen(js_name = "waitForApproval")]
-    pub async fn wait_for_approval(&self) -> Result<(), JsError> {
+    pub async fn wait_for_approval(
+        &self,
+        interval_ms: Option<f64>,
+        signal: Option<web_sys::AbortSignal>,
+        on_check: Option<js_sys::Function>,
+    ) -> Result<(), JsError> {
         let state = self.state.borrow_mut().take();
 
         let (next_state, result) = run_local(async move {
             match state {
                 Some(BuilderState::RequestingApproval(builder)) => {
-                    match builder.wait_for_approval().await {
+                    let interval = std::time::Duration::from_millis(
+                        interval_ms.unwrap_or(5000.0).max(0.0) as u64,
+                    );
+                    let callback: Option<sia_storage::ApprovalCheckCallback> =
+                        Some(std::sync::Arc::new(move || {
+                            if let Some(signal) = &signal {
+                                if signal.aborted() {
+                                    return false;
+                                }
+                            }
+                            if let Some(cb) = &on_check {
+                                let _ = cb.call0(&JsValue::NULL);
+                            }
+                            true
+                        }));
+                    match builder.wait_for_approval_with(interval, callback).await {
                         Ok(approved) => (Some(BuilderState::Approved(approved)), Ok(())),
                         Err(e) => (None, Err(to_js_err(e))),
                     }

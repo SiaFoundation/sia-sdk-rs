@@ -328,6 +328,12 @@ pub type ShardAttemptCallback = Arc<dyn Fn(ShardAttemptInfo) + Send + Sync + 'st
 #[cfg(target_arch = "wasm32")]
 pub type ShardAttemptCallback = Arc<dyn Fn(ShardAttemptInfo) + 'static>;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub type ApprovalCheckCallback = Arc<dyn Fn() -> bool + Send + Sync + 'static>;
+
+#[cfg(target_arch = "wasm32")]
+pub type ApprovalCheckCallback = Arc<dyn Fn() -> bool + 'static>;
+
 /// One attempt to write a shard to a host, successful or not.
 ///
 /// `shard_uploaded` reports only successes, which leaves a caller unable to say
