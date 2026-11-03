@@ -214,17 +214,18 @@ impl Sdk {
     }
 
     /// Lists the objects attached to a sharing key without their slabs, which
-    /// is much smaller and faster than `sharedObjects`.
+    /// is much smaller and faster than `sharedObjects`. Omit `offset` or
+    /// `limit` to use the indexer's default paging.
     #[napi]
     pub async fn shared_object_summaries(
         &self,
         key: &SharingKey,
-        offset: u32,
-        limit: u32,
+        offset: Option<u32>,
+        limit: Option<u32>,
     ) -> Result<Vec<ObjectSummary>> {
         let summaries = self
             .inner
-            .shared_object_summaries(key.key(), Some(offset as u64), Some(limit as u64))
+            .shared_object_summaries(key.key(), offset.map(u64::from), limit.map(u64::from))
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
         Ok(summaries.into_iter().map(ObjectSummary::from).collect())

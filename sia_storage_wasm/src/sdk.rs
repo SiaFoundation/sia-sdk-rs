@@ -104,17 +104,18 @@ impl Sdk {
     /// Lists a page of the objects a sharing key grants access to without
     /// their slabs, which is much smaller and faster than `sharedObjects`.
     /// Each summary has the object's id, size, decrypted metadata and
-    /// timestamps.
+    /// timestamps. Omit `offset` or `limit` to use the indexer's default
+    /// paging.
     #[wasm_bindgen(js_name = "sharedObjectSummaries")]
     pub async fn shared_object_summaries(
         &self,
         key: &SharingKey,
-        offset: u32,
-        limit: u32,
+        offset: Option<u32>,
+        limit: Option<u32>,
     ) -> Result<Vec<ObjectSummary>, JsError> {
         let summaries = self
             .inner
-            .shared_object_summaries(key.key(), Some(offset as u64), Some(limit as u64))
+            .shared_object_summaries(key.key(), offset.map(u64::from), limit.map(u64::from))
             .await
             .map_err(to_js_err)?;
         Ok(summaries.into_iter().map(ObjectSummary).collect())
