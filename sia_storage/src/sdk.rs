@@ -555,6 +555,15 @@ mod test {
         assert_eq!(attached.len(), 1);
         assert_eq!(attached[0].id(), object.id());
 
+        let attached = sdk
+            .shared_object_summaries(&key, Some(0), Some(10))
+            .await
+            .expect("owner summary list failed");
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].id, object.id());
+        assert_eq!(attached[0].metadata, b"metadata".to_vec());
+        assert_eq!(attached[0].size, data.len() as u64);
+
         let record = sdk.sharing_key(&key).await.expect("re-read failed");
         assert_eq!(record.stats.object_count, 1);
         assert_eq!(record.description, "photos");
@@ -660,6 +669,13 @@ mod test {
         assert!(
             other.shared_objects(&key, None, None).await.is_err(),
             "listing another account's attachments must fail"
+        );
+        assert!(
+            other
+                .shared_object_summaries(&key, None, None)
+                .await
+                .is_err(),
+            "summarizing another account's attachments must fail"
         );
         // unshare_object maps every 404 to ObjectNotAttached, so this asserts
         // only that it fails. The endpoint cannot distinguish a foreign key

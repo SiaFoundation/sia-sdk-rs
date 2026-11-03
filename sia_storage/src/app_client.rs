@@ -262,8 +262,8 @@ pub(crate) struct SharedHost {
     pub token: AccountToken,
 }
 
-/// An object summary and its id, as returned by `GET /shared/objects` with
-/// `includeslabs=false`.
+/// An object summary and its id, as returned by `GET /shared/objects` and
+/// `GET /sharing/:key/objects` with `includeslabs=false`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct SealedSharedObjectSummary {
     /// Sent alongside the object because it is a hash of the slabs, which
@@ -834,6 +834,28 @@ impl Client {
             #[cfg(any(test, feature = "mock"))]
             Self::Mock(c) => {
                 c.sharing_key_objects(app_key, sharing_key, offset, limit)
+                    .await
+            }
+        }
+    }
+
+    /// Lists the objects attached to one of the account's sharing keys
+    /// without their slabs.
+    pub(crate) async fn sharing_key_object_summaries(
+        &self,
+        app_key: &PrivateKey,
+        sharing_key: &PublicKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<SealedSharedObjectSummary>, Error> {
+        match self {
+            Self::Http(c) => {
+                c.sharing_key_object_summaries(app_key, sharing_key, offset, limit)
+                    .await
+            }
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => {
+                c.sharing_key_object_summaries(app_key, sharing_key, offset, limit)
                     .await
             }
         }

@@ -1052,7 +1052,8 @@ int32_t sia_shared_sdk_object_summaries(const sia_shared_sdk_t *sdk,
 
 // # Safety
 // - `s` may be null, which returns 0. Otherwise it must be a live collection from
-//   `sia_shared_sdk_object_summaries` that has not been freed.
+//   `sia_shared_sdk_object_summaries` or `sia_sdk_shared_object_summaries` that has not been
+//   freed.
 uintptr_t sia_object_summaries_len(const sia_object_summaries_t *s);
 
 // Copies the fixed part of the summary at `i`. Returns false when `i` is out
@@ -1060,7 +1061,8 @@ uintptr_t sia_object_summaries_len(const sia_object_summaries_t *s);
 //
 // # Safety
 // - `s` may be null, which returns false. Otherwise it must be a live collection from
-//   `sia_shared_sdk_object_summaries` that has not been freed.
+//   `sia_shared_sdk_object_summaries` or `sia_sdk_shared_object_summaries` that has not been
+//   freed.
 // - `out` must be non null and writable.
 bool sia_object_summaries_at(const sia_object_summaries_t *s,
                              uintptr_t i,
@@ -1072,7 +1074,8 @@ bool sia_object_summaries_at(const sia_object_summaries_t *s,
 //
 // # Safety
 // - `s` may be null, which returns 0. Otherwise it must be a live collection from
-//   `sia_shared_sdk_object_summaries` that has not been freed.
+//   `sia_shared_sdk_object_summaries` or `sia_sdk_shared_object_summaries` that has not been
+//   freed.
 // - `buf` may be null, which measures without writing. Otherwise it must be writable for `cap`
 //   bytes, and nothing is written unless `cap` covers the whole metadata.
 uintptr_t sia_object_summaries_metadata(const sia_object_summaries_t *s,
@@ -1081,8 +1084,8 @@ uintptr_t sia_object_summaries_metadata(const sia_object_summaries_t *s,
                                         uintptr_t cap);
 
 // # Safety
-// - `s` may be null. Otherwise it must come from `sia_shared_sdk_object_summaries` and must not
-//   be used again after this returns.
+// - `s` may be null. Otherwise it must come from `sia_shared_sdk_object_summaries` or
+//   `sia_sdk_shared_object_summaries` and must not be used again after this returns.
 void sia_object_summaries_free(sia_object_summaries_t *s);
 
 // Releases a shared SDK handle.
@@ -1337,6 +1340,30 @@ int32_t sia_sdk_shared_objects(const sia_sdk_t *sdk,
                                sia_object_t ***out_objs,
                                uintptr_t *out_len,
                                char **err);
+
+// Lists the objects attached to a key without their slabs, read the same way
+// as `sia_shared_sdk_object_summaries`. A listing that only needs names and
+// sizes should use this rather than `sia_sdk_shared_objects`. Pass 0 for
+// offset or limit to use the indexer's default paging.
+//
+// # Safety
+// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+//   from `sia_builder_connect`, `sia_builder_register` or `sia_mock_sdk` that has not been freed.
+// - `key` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
+//   from `sia_sharing_key_import` or `sia_sdk_create_sharing_key` that has not been freed.
+// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
+//   from `sia_cancel_new`.
+// - `out` must be non null and writable. On success it receives an owned collection that must be
+//   released with `sia_object_summaries_free`.
+// - `err` may be null. Otherwise it receives an owned message on failure that must be released
+//   with `sia_string_free`.
+int32_t sia_sdk_shared_object_summaries(const sia_sdk_t *sdk,
+                                        const sia_sharing_key_t *key,
+                                        uint64_t offset,
+                                        uint64_t limit,
+                                        sia_cancel_t *cancel,
+                                        sia_object_summaries_t **out,
+                                        char **err);
 
 // Detaches one object from a key. Returns `SIA_ERR_OBJECT_NOT_ATTACHED` when the
 // object was not attached to it.

@@ -88,6 +88,12 @@ export async function check(
     useSdk(sdk)
     // A member that only the generated class declares.
     sdk.appKey()
+    const key = await sdk.createSharingKey('photos', undefined)
+    const attached = await sdk.sharedObjectSummaries(key, 0, 1)
+    if (attached[0]) {
+      useSummary(attached[0])
+    }
+    key.free()
     const events = await sdk.objectEventSummaries(null, 1)
     if (events[0]) {
       useEventSummary(events[0])

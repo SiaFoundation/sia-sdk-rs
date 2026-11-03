@@ -3406,6 +3406,52 @@ fn shared_sdk_lists_object_summaries() {
             spare.as_mut_ptr()
         ));
 
+        // The owner lists the same key's attachments into the same collection.
+        let mut owned = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_shared_object_summaries(
+                sdk,
+                key,
+                0,
+                0,
+                std::ptr::null_mut(),
+                &raw mut owned,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_sdk_shared_object_summaries: {}",
+            take_err(err)
+        );
+        assert_eq!(sia_object_summaries_len(owned), 1);
+        let mut got = std::mem::MaybeUninit::<ObjectSummaryC>::uninit();
+        assert!(sia_object_summaries_at(owned, 0, got.as_mut_ptr()));
+        let got = got.assume_init();
+        assert_eq!(got.id, want_id, "the owner sees the same object");
+        assert_eq!(got.size, payload.len() as u64);
+        let mut buf = vec![0u8; meta.len()];
+        assert_eq!(
+            sia_object_summaries_metadata(owned, 0, buf.as_mut_ptr(), buf.len()),
+            meta.len()
+        );
+        assert_eq!(buf, meta, "the owner decrypts the metadata with the key");
+        sia_object_summaries_free(owned);
+
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_shared_object_summaries(
+                sdk,
+                std::ptr::null(),
+                0,
+                0,
+                std::ptr::null_mut(),
+                &raw mut owned,
+                &raw mut err
+            ),
+            SIA_ERR_INVALID_HANDLE,
+            "a missing key must be refused"
+        );
+
         sia_object_summaries_free(summaries);
         sia_shared_sdk_free(shared);
         sia_sharing_key_free(key);

@@ -595,6 +595,24 @@ impl Client {
         Ok(Self::active(&state, app_key, sharing_key)?.page(offset, limit))
     }
 
+    pub(crate) async fn sharing_key_object_summaries(
+        &self,
+        app_key: &PrivateKey,
+        sharing_key: &PublicKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<SealedSharedObjectSummary>, Error> {
+        let state = self.state.read().unwrap();
+        Ok(Self::active(&state, app_key, sharing_key)?
+            .page(offset, limit)
+            .into_iter()
+            .map(|sealed| SealedSharedObjectSummary {
+                object_id: sealed.id(),
+                object: Self::summarize(sealed),
+            })
+            .collect())
+    }
+
     /// Looks up a key the calling account owns.
     ///
     /// A key belonging to another account is reported as missing rather than

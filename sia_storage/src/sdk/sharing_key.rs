@@ -5,7 +5,7 @@ use reqwest::StatusCode;
 use sia_core::types::Hash256;
 
 use crate::sharing::{SharedObjectRequest, SharingError, SharingKey};
-use crate::{Object, Sdk, app_client};
+use crate::{Object, ObjectSummary, Sdk, app_client};
 
 impl Sdk {
     /// Attaches an object the account owns to `key`, re-sealing its encryption
@@ -36,6 +36,25 @@ impl Sdk {
         let sealed = self
             .api_client
             .sharing_key_objects(&self.app_key.0, &key.public_key(), offset, limit)
+            .await?;
+        sealed
+            .into_iter()
+            .map(|s| s.open_with(&key.0).map_err(SharingError::from))
+            .collect()
+    }
+
+    /// Lists the objects attached to `key` without their slabs, which makes
+    /// the response a small fraction of the size of [Sdk::shared_objects].
+    /// Omit `offset` or `limit` to use the indexer's default paging.
+    pub async fn shared_object_summaries(
+        &self,
+        key: &SharingKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<ObjectSummary>, SharingError> {
+        let sealed = self
+            .api_client
+            .sharing_key_object_summaries(&self.app_key.0, &key.public_key(), offset, limit)
             .await?;
         sealed
             .into_iter()
