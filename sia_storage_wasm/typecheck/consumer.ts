@@ -93,6 +93,8 @@ export async function check(
     if (attached[0]) {
       useSummary(attached[0])
     }
+    // Paging is optional, so the indexer's defaults are reachable.
+    void (await sdk.sharedObjectSummaries(key))
     key.free()
     const events = await sdk.objectEventSummaries(null, 1)
     if (events[0]) {
