@@ -14,7 +14,7 @@ use url::Url;
 use crate::app_client::{self, Client};
 use crate::object_encryption::hkdf;
 use crate::time::Duration;
-use crate::{AppID, AppKey, AppMetadata, Sdk};
+use crate::{AppID, AppKey, AppMetadata, Sdk, Timeouts};
 
 /// The initial state of the SDK builder, before connecting to the indexd service.
 pub struct DisconnectedState;
@@ -40,6 +40,7 @@ pub struct Builder<S> {
     state: S,
     client: Client,
     app_meta: AppMetadata,
+    timeouts: Timeouts,
 }
 
 /// Errors that can occur during the SDK building process.
@@ -99,13 +100,29 @@ impl Builder<DisconnectedState> {
     /// let builder = Builder::new("https://sia.storage", APP_META).expect("failed to create builder");
     /// ```
     pub fn new<U: IntoUrl>(indexer_url: U, app_meta: AppMetadata) -> Result<Self, BuilderError> {
+        Self::new_with_timeouts(indexer_url, app_meta, Timeouts::default())
+    }
+
+    /// Creates a builder with explicit connection limits. The limits apply to
+    /// every SDK this builder creates; the transport they configure is shared.
+    pub fn new_with_timeouts<U: IntoUrl>(
+        indexer_url: U,
+        app_meta: AppMetadata,
+        timeouts: Timeouts,
+    ) -> Result<Self, BuilderError> {
         let client = Client::new(indexer_url)?;
         Ok(Self {
             ephemeral_key: PrivateKey::from_seed(&random::<[u8; 32]>()),
             state: DisconnectedState,
             client,
             app_meta,
+            timeouts,
         })
+    }
+
+    /// Replaces the connection limits. Ignored once the builder has connected.
+    pub fn set_timeouts(&mut self, timeouts: Timeouts) {
+        self.timeouts = timeouts;
     }
 
     /// Attempts to connect using the provided app key.
@@ -120,7 +137,12 @@ impl Builder<DisconnectedState> {
         if !connected {
             return Ok(None);
         }
-        let sdk = Sdk::new(self.client.clone(), Arc::new(app_key.clone())).await?;
+        let sdk = Sdk::new_with_timeouts(
+            self.client.clone(),
+            Arc::new(app_key.clone()),
+            self.timeouts,
+        )
+        .await?;
         Ok(Some(sdk))
     }
 
@@ -181,7 +203,7 @@ impl Builder<DisconnectedState> {
                 Url::parse(&resp.register_url)?,
             )
             .await?;
-        Sdk::new(self.client, Arc::new(AppKey(private_key))).await
+        Sdk::new_with_timeouts(self.client, Arc::new(AppKey(private_key)), self.timeouts).await
     }
 
     /// Requests a new connection for the application.
@@ -205,6 +227,7 @@ impl Builder<DisconnectedState> {
                 expiration: resp.expiration,
             },
             client: self.client,
+            timeouts: self.timeouts,
         })
     }
 }
@@ -264,6 +287,7 @@ impl Builder<RequestingApprovalState> {
                     },
                     app_meta: self.app_meta,
                     client: self.client,
+                    timeouts: self.timeouts,
                 });
             }
             sleep(interval).await;
@@ -317,7 +341,7 @@ impl Builder<ApprovedState> {
                 self.state.register_url.clone(),
             )
             .await?;
-        Sdk::new(self.client, Arc::new(AppKey(private_key))).await
+        Sdk::new_with_timeouts(self.client, Arc::new(AppKey(private_key)), self.timeouts).await
     }
 }
 

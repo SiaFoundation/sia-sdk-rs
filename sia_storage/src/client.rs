@@ -93,8 +93,22 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
+    pub(crate) fn is_connected(&self, host_key: &PublicKey) -> bool {
+        self.transport.is_connected(host_key)
+    }
+
+    pub(crate) fn handshake_time(&self, host_key: &PublicKey) -> Option<Duration> {
+        self.transport.handshake_time(host_key)
+    }
+
     pub(crate) fn new() -> Self {
         Self::with_transport(rhp4::Client::new())
+    }
+
+    /// Applies connection limits to the transport. Shared, so the last caller
+    /// wins for every SDK using the same client.
+    pub(crate) fn set_timeouts(&self, timeouts: crate::Timeouts) {
+        self.transport.set_timeouts(timeouts);
     }
 
     fn with_transport(transport: rhp4::Client) -> Self {

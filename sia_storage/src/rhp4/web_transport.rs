@@ -9,7 +9,7 @@
 //! poll overhead. Reads use `AsyncRead` — the JS `reader.read()` already
 //! returns large chunks which are buffered internally.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::future::{Future, poll_fn};
 use std::ops::Range;
@@ -25,6 +25,7 @@ use sia_core::rhp4::protocol::{RPCReadSector, RPCSettings, RPCWriteSector};
 use sia_core::rhp4::{AccountToken, HostPrices};
 use sia_core::signing::{PrivateKey, PublicKey};
 use sia_core::types::Hash256;
+use crate::Timeouts;
 use sia_core::types::v2::Protocol;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::{Semaphore, watch};
@@ -56,9 +57,6 @@ const RHP4_PATH: &str = "/sia/rhp/v4";
 /// Maximum concurrent in-flight dials.
 const MAX_PENDING_CONNS: usize = 4;
 
-/// Timeout for establishing a WebTransport session to one address.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// Timeout for opening a bidirectional stream on an established connection.
 /// The RPC's idle clock only starts once the stream is open, so a hung
 /// `create_bidirectional_stream` needs its own bound.
@@ -83,6 +81,7 @@ fn js_err_message(e: &JsValue) -> String {
 /// bidirectional streams for sequential RPCs without reconnecting.
 struct Connection {
     transport: web_sys::WebTransport,
+    handshake: Duration,
 }
 
 impl Drop for Connection {
@@ -143,6 +142,7 @@ impl Drop for PendingStream {
 }
 
 async fn connect(addr: &str) -> Result<Connection, Error> {
+    let started = Instant::now();
     let url = if addr.starts_with("https://") {
         addr.to_string()
     } else if addr.contains('/') {
@@ -157,7 +157,10 @@ async fn connect(addr: &str) -> Result<Connection, Error> {
         Error::DialRefused(format!("WebTransport constructor: {}", js_err_message(&e)))
     })?;
 
-    let conn = Connection { transport: wt };
+    let mut conn = Connection {
+        transport: wt,
+        handshake: Duration::ZERO,
+    };
 
     // Attach a handler to `.closed` before awaiting ready — the session can
     // fail during the handshake, and if the future here is dropped (or ready
@@ -182,7 +185,8 @@ async fn connect(addr: &str) -> Result<Connection, Error> {
         .await
         .map_err(|e| Error::DialRefused(format!("WebTransport ready: {}", js_err_message(&e))))?;
 
-    debug!("[WT] connected to {url}");
+    conn.handshake = started.elapsed();
+    debug!("[WT] connected to {url} in {:?}", conn.handshake);
     Ok(conn)
 }
 
@@ -201,6 +205,10 @@ struct Stream {
     idle_timeout: Option<Duration>,
     idle_timer: Option<Pin<Box<dyn Future<Output = ()>>>>,
     timed_out: bool,
+    /// When the stream opened. The total budget runs from here, so it covers
+    /// the first response as well as the transfer itself.
+    opened: Instant,
+    total_timeout: Option<Duration>,
 }
 
 impl Stream {
@@ -217,6 +225,8 @@ impl Stream {
             idle_timeout: None,
             idle_timer: None,
             timed_out: false,
+            opened: Instant::now(),
+            total_timeout: None,
         }
     }
 
@@ -228,8 +238,37 @@ impl Stream {
         self.idle_timer = None;
     }
 
+    /// Set the RPC's total budget. Unlike the idle clock, progress does not
+    /// extend it, so a host that trickles cannot hold its slot indefinitely.
+    fn set_total_timeout(&mut self, timeout: Option<Duration>) {
+        self.total_timeout = timeout;
+    }
+
     fn idle_error() -> std::io::Error {
         std::io::Error::new(std::io::ErrorKind::TimedOut, "WebTransport stream idle")
+    }
+
+    fn total_error() -> std::io::Error {
+        // Not `TimedOut`: that kind is read as congestion and would drop the
+        // whole upload's in-flight limit. A slow host is a host problem.
+        std::io::Error::other("WebTransport stream too slow")
+    }
+
+    /// The whole RPC has one budget, not just the gaps between progress.
+    fn check_total(&mut self) -> std::io::Result<()> {
+        let Some(limit) = self.total_timeout else {
+            return Ok(());
+        };
+        let elapsed = self.opened.elapsed();
+        if elapsed < limit {
+            return Ok(());
+        }
+        debug!(
+            "[WT] stream too slow after {:?} (limit {:?})",
+            elapsed, limit
+        );
+        self.timed_out = true;
+        Err(Self::total_error())
     }
 
     fn poll_idle(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -242,6 +281,7 @@ impl Stream {
         loop {
             let elapsed = self.last_progress.elapsed();
             if elapsed >= limit {
+                debug!("[WT] stream idle after {:?} (limit {:?})", elapsed, limit);
                 self.timed_out = true;
                 return Poll::Ready(Err(Self::idle_error()));
             }
@@ -262,6 +302,7 @@ impl Stream {
             return Err(Self::idle_error());
         }
         for chunk in data.chunks(WRITE_CHUNK_SIZE) {
+            self.check_total()?;
             let array = Uint8Array::new_with_length(chunk.len() as u32);
             array.copy_from(chunk);
             let mut write = JsFuture::from(self.writer.write_with_chunk(&array));
@@ -325,6 +366,9 @@ impl AsyncRead for Stream {
         if this.timed_out {
             return Poll::Ready(Err(Self::idle_error()));
         }
+        if let Err(e) = this.check_total() {
+            return Poll::Ready(Err(e));
+        }
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
@@ -373,6 +417,7 @@ pub struct Client {
     pool: Rc<RefCell<HashMap<PublicKey, PoolEntry>>>,
     dial_sema: Rc<Semaphore>,
     failures: Rc<RefCell<DialFailures>>,
+    limits: Rc<Cell<Timeouts>>,
 }
 
 impl Default for Client {
@@ -382,12 +427,39 @@ impl Default for Client {
 }
 
 impl Client {
+    pub(crate) fn is_connected(&self, host_key: &PublicKey) -> bool {
+        let pool = self.pool.borrow();
+        let Some(rx) = pool.get(host_key) else {
+            return false;
+        };
+        matches!(rx.borrow().clone(), Some(Ok(_)))
+    }
+
+    pub(crate) fn handshake_time(&self, host_key: &PublicKey) -> Option<Duration> {
+        let pool = self.pool.borrow();
+        let rx = pool.get(host_key)?;
+        match rx.borrow().clone() {
+            Some(Ok(conn)) => Some(conn.handshake),
+            _ => None,
+        }
+    }
+
     pub fn new() -> Self {
         Client {
             pool: Rc::new(RefCell::new(HashMap::new())),
             dial_sema: Rc::new(Semaphore::new(MAX_PENDING_CONNS)),
             failures: Rc::new(RefCell::new(DialFailures::default())),
+            limits: Rc::new(Cell::new(Timeouts::default())),
         }
+    }
+
+    /// Overrides the connect and transfer caps for this client and its clones.
+    pub(crate) fn set_timeouts(&self, timeouts: Timeouts) {
+        self.limits.set(timeouts);
+    }
+
+    fn timeouts(&self) -> Timeouts {
+        self.limits.get()
     }
 
     /// Returns the pooled connection for the host, dialing it if necessary.
@@ -470,13 +542,20 @@ impl Client {
             }
             // A timeout is not recorded. Chrome can hold a healthy host back
             // for up to a minute while it is counting earlier failures.
-            let result = timeout(CONNECT_TIMEOUT, connect(addr))
+            let started = Instant::now();
+            let result = timeout(self.timeouts().connect, connect(addr))
                 .await
                 .unwrap_or_else(|_| Err(Error::Transport("WebTransport connect: timeout".into())));
             match result {
-                Ok(conn) => return Ok(Rc::new(conn)),
+                Ok(conn) => {
+                    debug!("[WT] handshake {addr} ok in {:?}", started.elapsed());
+                    return Ok(Rc::new(conn));
+                }
                 Err(e) => {
-                    debug!("[WT] connect to {addr} failed: {e}");
+                    debug!(
+                        "[WT] handshake {addr} failed in {:?}: {e}",
+                        started.elapsed()
+                    );
                     if matches!(e, Error::DialRefused(_)) {
                         self.failures.borrow_mut().record(addr, Instant::now());
                     }
@@ -535,6 +614,7 @@ impl Client {
         let conn = self.connection(host).await?;
         let mut stream = conn.open_stream().await?;
         stream.set_idle_timeout(Some(idle_timeout));
+        stream.set_total_timeout(Some(self.timeouts().transfer));
         let mut buf = Vec::new();
         let req = RPCSettings::send_request(&mut buf).await?;
         stream.write_chunks(&buf).await?;
@@ -555,6 +635,7 @@ impl Client {
         let conn = self.connection(host).await?;
         let mut stream = conn.open_stream().await?;
         stream.set_idle_timeout(Some(idle_timeout));
+        stream.set_total_timeout(Some(self.timeouts().transfer));
         let mut buf = Vec::new();
         let bytes = data.len() as u64;
         let req = RPCWriteSector::send_request(&mut buf, prices, token, data.clone()).await?;
@@ -586,6 +667,7 @@ impl Client {
             .token(host.public_key)
             .map_err(|_| Error::NoToken(host.public_key))?;
         stream.set_idle_timeout(Some(idle_timeout));
+        stream.set_total_timeout(Some(self.timeouts().transfer));
         let mut buf = Vec::new();
         let req =
             RPCReadSector::send_request(&mut buf, prices, token, root, range.start, range.len())

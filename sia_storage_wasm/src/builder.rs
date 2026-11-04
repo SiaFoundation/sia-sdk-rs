@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 
 use sia_storage::{
-    ApprovedState, Builder as StorageBuilder, DisconnectedState, RequestingApprovalState,
+    ApprovedState, Builder as StorageBuilder, DisconnectedState, RequestingApprovalState, Timeouts,
 };
 use wasm_bindgen::prelude::*;
 
@@ -36,6 +36,24 @@ impl Builder {
         Ok(Builder {
             state: RefCell::new(Some(BuilderState::Disconnected(builder))),
         })
+    }
+
+    /// Overrides the WebTransport connect and transfer caps, in milliseconds.
+    /// Must be called before connecting. The transport these configure is
+    /// shared, so the last call wins for the whole runtime.
+    #[wasm_bindgen(js_name = "setTimeouts")]
+    pub fn set_timeouts(&self, connect_ms: u32, transfer_ms: u32) -> Result<(), JsError> {
+        let mut state = self.state.borrow_mut();
+        match state.as_mut() {
+            Some(BuilderState::Disconnected(builder)) => {
+                builder.set_timeouts(Timeouts {
+                    connect: std::time::Duration::from_millis(connect_ms as u64),
+                    transfer: std::time::Duration::from_millis(transfer_ms as u64),
+                });
+                Ok(())
+            }
+            _ => Err(JsError::new("timeouts must be set before connecting")),
+        }
     }
 
     /// Attempts to connect using an existing AppKey.

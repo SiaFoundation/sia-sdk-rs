@@ -56,6 +56,16 @@ impl Client {
         }
     }
 
+    /// Applies the connection limits to the transport that supports them.
+    pub(crate) fn set_timeouts(&self, timeouts: crate::Timeouts) {
+        #[cfg(target_arch = "wasm32")]
+        if let Self::WebTransport(c) = self {
+            c.set_timeouts(timeouts);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = timeouts;
+    }
+
     /// Creates a client backed by the in-memory mock transport. Use
     /// [`Client::Mock`] directly when the test needs to keep the
     /// [`mock::Client`] handle to seed sectors or add latency.
@@ -76,6 +86,22 @@ impl Client {
 /// There is no bound on the total RPC duration, so a slow transfer that keeps
 /// moving bytes is allowed to finish.
 impl Client {
+    pub(crate) fn is_connected(&self, host_key: &PublicKey) -> bool {
+        match self {
+            #[cfg(target_arch = "wasm32")]
+            Self::WebTransport(c) => c.is_connected(host_key),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn handshake_time(&self, host_key: &PublicKey) -> Option<Duration> {
+        match self {
+            #[cfg(target_arch = "wasm32")]
+            Self::WebTransport(c) => c.handshake_time(host_key),
+            _ => None,
+        }
+    }
+
     pub(crate) async fn host_prices(
         &self,
         host: &HostEndpoint,

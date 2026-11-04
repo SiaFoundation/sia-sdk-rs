@@ -108,6 +108,28 @@ pub use upload::{PackedUpload, UploadError};
 /// A unique identifier for an indexer application. It should be constant for an application.
 pub type AppID = Hash256;
 
+/// Hard limits for one host connection.
+///
+/// The defaults are tuned for the browser's WebTransport path, where a host
+/// that is slow to open a session is usually slow to send data as well.
+/// Override them with [`Builder::set_timeouts`] before connecting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timeouts {
+    /// Opening a WebTransport session to one address.
+    pub connect: Duration,
+    /// One RPC, from stream open to the last byte.
+    pub transfer: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(15),
+            transfer: Duration::from_secs(30),
+        }
+    }
+}
+
 /// A macro to create an [AppID] from a literal hex string. The string must be 64 characters long.
 ///
 /// ```
@@ -347,6 +369,16 @@ pub struct ShardAttemptInfo {
     pub elapsed: Duration,
     /// The failure reason, when `ok` is false.
     pub error: Option<String>,
+    /// Shard writes in flight when this attempt finished.
+    pub in_flight: usize,
+    /// Slab memory reservations held when this attempt finished.
+    pub committed: usize,
+    /// Shards with no attempt in flight yet.
+    pub waiting: usize,
+    /// Shards whose last attempt failed and that are queued for another permit.
+    pub retrying: usize,
+    /// The pipeline's current in-flight target.
+    pub limit: usize,
 }
 
 /// Options for configuring a download.

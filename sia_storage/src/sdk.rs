@@ -78,7 +78,18 @@ impl Sdk {
         api_client: app_client::Client,
         app_key: Arc<AppKey>,
     ) -> Result<Self, BuilderError> {
-        Self::with_backends(api_client, default_client(), app_key).await
+        Self::new_with_timeouts(api_client, app_key, crate::Timeouts::default()).await
+    }
+
+    /// Creates a new SDK instance with the given connection limits.
+    pub(crate) async fn new_with_timeouts(
+        api_client: app_client::Client,
+        app_key: Arc<AppKey>,
+        timeouts: crate::Timeouts,
+    ) -> Result<Self, BuilderError> {
+        let transport = default_client();
+        transport.set_timeouts(timeouts);
+        Self::with_backends(api_client, transport, app_key).await
     }
 
     /// Creates a new SDK instance with the provided backends
