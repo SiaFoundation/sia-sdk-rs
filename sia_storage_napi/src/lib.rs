@@ -395,6 +395,11 @@ pub struct ShardAttemptInfo {
     pub ok: bool,
     pub elapsed_ms: f64,
     pub error: Option<String>,
+    pub in_flight: u32,
+    pub committed: u32,
+    pub waiting: u32,
+    pub retrying: u32,
+    pub limit: u32,
 }
 
 /// A Send-safe wrapper around a JS callback that converts it into a
@@ -446,6 +451,11 @@ impl SendableCallback<ShardAttemptInfo> {
                     ok: a.ok,
                     elapsed_ms: a.elapsed.as_millis() as f64,
                     error: a.error,
+                    in_flight: a.in_flight as u32,
+                    committed: a.committed as u32,
+                    waiting: a.waiting as u32,
+                    retrying: a.retrying as u32,
+                    limit: a.limit as u32,
                 },
                 ThreadsafeFunctionCallMode::NonBlocking,
             );
@@ -661,6 +671,33 @@ impl PinnedObject {
     #[napi]
     pub fn encoded_size(&self) -> BigInt {
         BigInt::from(self.inner.lock().unwrap().encoded_size())
+    }
+
+    /// Returns a new object that reuses this object's data key with the given
+    /// slabs. No bytes are uploaded or downloaded.
+    #[napi]
+    pub fn with_slabs(&self, slabs: Vec<Slab>) -> Result<PinnedObject> {
+        let slabs = slabs
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<sia_storage::Slab>>>()?;
+        Ok(PinnedObject {
+            inner: Mutex::new(self.inner.lock().unwrap().with_slabs(slabs)),
+        })
+    }
+
+    /// Returns a new object with the slab at `index` replaced.
+    #[napi]
+    pub fn replace_slab(&self, index: u32, slab: Slab) -> Result<PinnedObject> {
+        let slab: sia_storage::Slab = slab.try_into()?;
+        self.inner
+            .lock()
+            .unwrap()
+            .replace_slab(index as usize, slab)
+            .map(|object| PinnedObject {
+                inner: Mutex::new(object),
+            })
+            .ok_or_else(|| Error::from_reason("slab index out of range"))
     }
 
     /// Returns the slabs that make up the object.

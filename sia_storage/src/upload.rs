@@ -172,6 +172,10 @@ struct UploadLimiter {
     /// Shards whose memory is committed but whose slab hasn't been pinned yet.
     /// Limits slab encoding so it can't runaway with memory that will sit idle.
     committed: Mutex<usize>,
+    /// Shards whose last attempt failed and that are queued for another
+    /// permit. They are not in flight and not counted as waiting, so without
+    /// this the state after a failure is invisible.
+    retrying: Mutex<usize>,
     notify: Notify,
     /// Wakes the slab gate ([`Self::reserve`]) when the backlog drops or the
     /// limit grows.
@@ -184,6 +188,7 @@ impl UploadLimiter {
         Self {
             inflight: Mutex::new(0),
             committed: Mutex::new(0),
+            retrying: Mutex::new(0),
             notify: Notify::new(),
             capacity: Notify::new(),
             // scale 1: the limited unit (a shard upload) is also the sampled unit
@@ -237,6 +242,15 @@ impl UploadLimiter {
             }
             notified.as_mut().await;
             notified.set(self.notify.notified());
+        }
+    }
+
+    /// Marks a shard as queued for a new permit after a failed attempt. The
+    /// guard must be dropped once the shard has a permit again.
+    fn begin_retry(self: &Arc<Self>) -> RetryGuard {
+        *self.retrying.lock().unwrap() += 1;
+        RetryGuard {
+            limiter: self.clone(),
         }
     }
 
@@ -308,6 +322,17 @@ impl Drop for ShardPermit {
     }
 }
 
+/// Marker for a shard waiting on a new permit after a failed attempt.
+struct RetryGuard {
+    limiter: Arc<UploadLimiter>,
+}
+
+impl Drop for RetryGuard {
+    fn drop(&mut self) {
+        *self.limiter.retrying.lock().unwrap() -= 1;
+    }
+}
+
 impl ShardUpload {
     fn spawn_write(
         &self,
@@ -323,6 +348,7 @@ impl ShardUpload {
         let slab_index = self.slab_index;
         let shard_index = self.shard_index;
         let attempt_callback = self.attempt_callback.clone();
+        let waiting = self.waiting.clone();
         join_set_spawn!(tasks, async move {
             // Drop `host` before the permit so a cancelled write requeues
             // the host before waking the next shard.
@@ -336,6 +362,11 @@ impl ShardUpload {
                 .write_sector(host_key, &account_key.0, data, idle_timeout)
                 .await;
             let elapsed = start.elapsed();
+            let in_flight = *limiter.inflight.lock().unwrap();
+            let committed = *limiter.committed.lock().unwrap();
+            let waiting_count = *waiting.borrow();
+            let retrying_count = *limiter.retrying.lock().unwrap();
+            let limit = limiter.controller.limit();
             if let Some(callback) = &attempt_callback {
                 callback(ShardAttemptInfo {
                     host_key,
@@ -344,6 +375,11 @@ impl ShardUpload {
                     ok: result.is_ok(),
                     elapsed,
                     error: result.as_ref().err().map(|e| e.to_string()),
+                    in_flight,
+                    committed,
+                    waiting: waiting_count,
+                    retrying: retrying_count,
+                    limit,
                 });
             }
             // one failed completion, which a window sized to the limit
@@ -445,7 +481,13 @@ impl ShardUpload {
                         }
                         Err((host, _)) => {
                             if tasks.is_empty() {
-                                let (host, permit) = self.acquire_host(Some(host)).await?;
+                                // No attempt is in flight any more, so this
+                                // shard is queued for a new permit. Count it,
+                                // or a retry shows up in no state at all.
+                                let retrying = self.limiter.begin_retry();
+                                let acquired = self.acquire_host(Some(host)).await;
+                                drop(retrying);
+                                let (host, permit) = acquired?;
                                 initial = Some(host.host_key());
                                 self.spawn_write(&mut tasks, host, RPC_IDLE_TIMEOUT, permit);
                             } else {

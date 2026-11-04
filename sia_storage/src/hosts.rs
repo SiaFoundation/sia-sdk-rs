@@ -337,11 +337,31 @@ impl Hosts {
         idle_timeout: Duration,
     ) -> Result<Hash256, RPCError> {
         let host = self.host_endpoint(host_key)?;
+        let was_connected = self.transport.is_connected(&host_key);
+        let prices_started = Instant::now();
         let prices = self.transport.host_prices(&host, idle_timeout).await?;
-        let root = self
+        let prices_elapsed = prices_started.elapsed();
+        let handshake = if was_connected {
+            Duration::ZERO
+        } else {
+            self.transport.handshake_time(&host_key).unwrap_or_default()
+        };
+        let ttfb = prices_elapsed.saturating_sub(handshake);
+        let write_started = Instant::now();
+        let result = self
             .transport
             .write_sector(&host, prices, account_key, sector, idle_timeout)
-            .await?;
+            .await;
+        let transfer = write_started.elapsed();
+        match &result {
+            Ok(_) => debug!(
+                "[RHP] host {host_key} handshake {handshake:?} ttfb {ttfb:?} transfer {transfer:?}"
+            ),
+            Err(e) => debug!(
+                "[RHP] host {host_key} handshake {handshake:?} ttfb {ttfb:?} transfer {transfer:?} failed: {e}"
+            ),
+        }
+        let root = result?;
         Ok(root)
     }
 

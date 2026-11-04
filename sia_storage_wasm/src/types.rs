@@ -43,6 +43,11 @@ pub struct ShardAttemptInfo {
     pub ok: bool,
     pub elapsed_ms: f64,
     pub error: Option<String>,
+    pub in_flight: usize,
+    pub committed: usize,
+    pub waiting: usize,
+    pub retrying: usize,
+    pub limit: usize,
 }
 
 impl From<sia_storage::ShardAttemptInfo> for ShardAttemptInfo {
@@ -54,6 +59,11 @@ impl From<sia_storage::ShardAttemptInfo> for ShardAttemptInfo {
             ok: a.ok,
             elapsed_ms: a.elapsed.as_millis() as f64,
             error: a.error,
+            in_flight: a.in_flight,
+            committed: a.committed,
+            waiting: a.waiting,
+            retrying: a.retrying,
+            limit: a.limit,
         }
     }
 }
@@ -466,6 +476,11 @@ export interface Host {
 /// Serializes a value to a JsValue via serde_wasm_bindgen.
 pub(crate) fn to_js<T: serde::Serialize + ?Sized>(val: &T) -> Result<JsValue, JsError> {
     serde_wasm_bindgen::to_value(val).map_err(to_js_err)
+}
+
+/// Deserializes a JsValue via serde_wasm_bindgen.
+pub(crate) fn from_js<T: serde::de::DeserializeOwned>(val: JsValue) -> Result<T, JsError> {
+    serde_wasm_bindgen::from_value(val).map_err(to_js_err)
 }
 
 /// What a recipient can see about the sharing key they hold. The counts are a

@@ -72,6 +72,31 @@ impl PinnedObject {
         types::to_js(self.0.slabs())
     }
 
+    /// Returns a new object that reuses this object's data key with the given
+    /// slabs. No bytes are uploaded or downloaded.
+    #[wasm_bindgen(js_name = "withSlabs")]
+    pub fn with_slabs(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Slab[]")] slabs: JsValue,
+    ) -> Result<PinnedObject, JsError> {
+        let slabs: Vec<sia_storage::Slab> = types::from_js(slabs)?;
+        Ok(PinnedObject(self.0.with_slabs(slabs)))
+    }
+
+    /// Returns a new object with the slab at `index` replaced.
+    #[wasm_bindgen(js_name = "replaceSlab")]
+    pub fn replace_slab(
+        &self,
+        index: u32,
+        #[wasm_bindgen(unchecked_param_type = "Slab")] slab: JsValue,
+    ) -> Result<PinnedObject, JsError> {
+        let slab: sia_storage::Slab = types::from_js(slab)?;
+        self.0
+            .replace_slab(index as usize, slab)
+            .map(PinnedObject)
+            .ok_or_else(|| JsError::new("slab index out of range"))
+    }
+
     /// Seals the object for offline storage.
     pub fn seal(&self, app_key: &AppKey) -> Result<Ts<SealedObject>, JsError> {
         Ok(SealedObject(self.0.seal(&app_key.0)).into_ts()?)
