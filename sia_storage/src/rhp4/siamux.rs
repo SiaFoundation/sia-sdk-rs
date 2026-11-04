@@ -1,6 +1,6 @@
 use crate::client::Metrics;
 use crate::client::metrics::TransferRate;
-use crate::time::{Elapsed, Instant, timeout};
+use crate::time::{Elapsed, timeout};
 
 use bytes::Bytes;
 use core::fmt::Debug;
@@ -17,7 +17,7 @@ use crate::rhp4::HostEndpoint;
 use crate::task::AbortOnDropHandle;
 use crate::time::Duration;
 
-use super::Error as TransportError;
+use super::{Error as TransportError, RecordTransfer};
 use sia_core::rhp4::protocol::{RPCReadSector, RPCSettings, RPCWriteSector};
 use sia_core::rhp4::{AccountToken, HostPrices};
 
@@ -192,19 +192,57 @@ impl Client {
     }
 }
 
+/// Wraps a stream and records its result
+struct RpcStream {
+    stream: Stream,
+    metrics: Arc<Metrics>,
+    host: PublicKey,
+}
+
+impl RpcStream {
+    async fn run<T>(
+        mut self,
+        rpc: impl AsyncFnOnce(&mut Stream) -> Result<T, TransportError>,
+    ) -> Result<T, TransportError> {
+        let result = rpc(&mut self.stream).await;
+        self.metrics.record_result(self.host, result)
+    }
+}
+
 impl Client {
+    async fn rpc_stream(
+        &self,
+        host: &HostEndpoint,
+        metrics: Arc<Metrics>,
+    ) -> Result<RpcStream, TransportError> {
+        match self.host_stream(host).await {
+            Ok(mut stream) => {
+                stream.set_idle_timeout(Some(super::RPC_IDLE_TIMEOUT));
+                Ok(RpcStream {
+                    stream,
+                    metrics,
+                    host: host.public_key,
+                })
+            }
+            Err(err) => metrics.record_result(host.public_key, Err(err)),
+        }
+    }
+
     pub(crate) async fn host_prices(
         &self,
         host: &HostEndpoint,
-        idle_timeout: Duration,
+        metrics: Arc<Metrics>,
     ) -> Result<HostPrices, TransportError> {
-        let mut stream = self.host_stream(host).await?;
-        stream.set_idle_timeout(Some(idle_timeout));
-        let resp = RPCSettings::send_request(&mut stream)
+        self.rpc_stream(host, metrics)
             .await?
-            .complete(&mut stream)
-            .await?;
-        Ok(resp.settings.prices)
+            .run(async |stream| {
+                let resp = RPCSettings::send_request(stream)
+                    .await?
+                    .complete(stream)
+                    .await?;
+                Ok(resp.settings.prices)
+            })
+            .await
     }
 
     pub(crate) async fn write_sector(
@@ -213,27 +251,33 @@ impl Client {
         prices: HostPrices,
         account_key: &PrivateKey,
         data: Bytes,
-        idle_timeout: Duration,
         metrics: Arc<Metrics>,
     ) -> Result<Hash256, TransportError> {
         let token = AccountToken::new(account_key, host.public_key);
-        let mut stream = self.host_stream(host).await?;
-        stream.set_idle_timeout(Some(idle_timeout));
-        let start = Instant::now();
-        let bytes = data.len() as u64;
-        let resp = RPCWriteSector::send_request(&mut stream, prices, token, data)
+        self.rpc_stream(host, metrics.clone())
             .await?
-            .complete(&mut stream)
-            .await?;
-        metrics.record_transfer(
-            host.public_key,
-            None,
-            TransferRate::try_new(bytes, start.elapsed()),
-        );
-        Ok(resp.root)
+            .run(async |stream| {
+                let tracked = RecordTransfer {
+                    stream,
+                    record: |stream: &Stream| {
+                        let (bytes, elapsed) = stream.write_metric();
+                        metrics.record_transfer(
+                            host.public_key,
+                            None,
+                            TransferRate::try_new(bytes, elapsed),
+                        );
+                    },
+                };
+                let stream = &mut *tracked.stream;
+                let resp = RPCWriteSector::send_request(stream, prices, token, data)
+                    .await?
+                    .complete(stream)
+                    .await?;
+                Ok(resp.root)
+            })
+            .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn read_sector(
         &self,
         host: &HostEndpoint,
@@ -241,26 +285,40 @@ impl Client {
         tokens: &AccountTokenSource,
         root: Hash256,
         range: Range<usize>,
-        idle_timeout: Duration,
         metrics: Arc<Metrics>,
     ) -> Result<Bytes, TransportError> {
-        let mut stream = self.host_stream(host).await?;
-        let token = tokens
-            .token(host.public_key)
-            .map_err(|_| TransportError::NoToken(host.public_key))?;
-        stream.set_idle_timeout(Some(idle_timeout));
-        let start = Instant::now();
-        let resp =
-            RPCReadSector::send_request(&mut stream, prices, token, root, range.start, range.len())
+        self.rpc_stream(host, metrics.clone())
+            .await?
+            .run(async |stream| {
+                let tracked = RecordTransfer {
+                    stream,
+                    record: |stream: &Stream| {
+                        let (bytes, elapsed) = stream.read_metric();
+                        metrics.record_transfer(
+                            host.public_key,
+                            TransferRate::try_new(bytes, elapsed),
+                            None,
+                        );
+                    },
+                };
+                let stream = &mut *tracked.stream;
+                let token = tokens
+                    .token(host.public_key)
+                    .map_err(|_| TransportError::NoToken(host.public_key))?;
+                let resp = RPCReadSector::send_request(
+                    stream,
+                    prices,
+                    token,
+                    root,
+                    range.start,
+                    range.len(),
+                )
                 .await?
-                .complete(&mut stream)
+                .complete(stream)
                 .await?;
-        metrics.record_transfer(
-            host.public_key,
-            TransferRate::try_new(resp.data.len() as u64, start.elapsed()),
-            None,
-        );
-        Ok(resp.data)
+                Ok(resp.data)
+            })
+            .await
     }
 }
 
@@ -274,6 +332,160 @@ mod test {
 
     use super::*;
     use crate::time::sleep;
+
+    #[tokio::test(start_paused = true)]
+    async fn control_traffic_does_not_change_transfer_averages() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (a, b) = tokio::io::duplex(64 * 1024);
+        let (client, server) =
+            tokio::join!(sia_mux::dial_anonymous(a), sia_mux::accept_anonymous(b));
+        let client = client.unwrap();
+        let server = server.unwrap();
+        let host = PublicKey::new([1; 32]);
+        let rate = TransferRate::try_new(4 * 1024 * 1024, Duration::from_secs(1));
+        for (read, write) in [(false, false), (true, false), (false, true)] {
+            let metrics = Arc::new(Metrics::default());
+            metrics.record_transfer(host, rate, rate);
+            for _ in 0..20 {
+                let rpc = RpcStream {
+                    stream: client.dial_stream().unwrap(),
+                    metrics: metrics.clone(),
+                    host,
+                }
+                .run(async |stream| {
+                    let tracked = RecordTransfer {
+                        stream,
+                        record: |stream: &Stream| {
+                            let (read_bytes, read_elapsed) = stream.read_metric();
+                            let (write_bytes, write_elapsed) = stream.write_metric();
+                            metrics.record_transfer(
+                                host,
+                                TransferRate::try_new(read_bytes, read_elapsed).filter(|_| read),
+                                TransferRate::try_new(write_bytes, write_elapsed).filter(|_| write),
+                            );
+                        },
+                    };
+                    let stream = &mut *tracked.stream;
+                    stream.write_all(b"request").await?;
+                    tokio::time::advance(Duration::from_millis(1)).await;
+                    stream.read_exact(&mut [0; 3]).await?;
+                    assert_eq!(stream.read_metric().0, 3);
+                    assert_eq!(stream.write_metric().0, 7);
+                    assert!(!stream.read_metric().1.is_zero());
+                    assert!(!stream.write_metric().1.is_zero());
+                    Ok(())
+                });
+                let peer = async {
+                    let mut stream = server.accept_stream().await.unwrap();
+                    stream.read_exact(&mut [0; 7]).await.unwrap();
+                    sleep(Duration::from_millis(100)).await;
+                    stream.write_all(b"ack").await.unwrap();
+                };
+                let (result, ()) = tokio::join!(rpc, peer);
+                result.unwrap();
+            }
+            let rates = metrics.transfer_rates();
+            assert_eq!(rates.read != rate, read);
+            assert_eq!(rates.write != rate, write);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_read_metrics_survive_timeout_and_cancellation() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for cancel in [false, true] {
+            let (a, b) = tokio::io::duplex(64 * 1024);
+            let (client, server) =
+                tokio::join!(sia_mux::dial_anonymous(a), sia_mux::accept_anonymous(b));
+            let client = client.unwrap();
+            let server = server.unwrap();
+            let metrics = Arc::new(Metrics::default());
+            let host = PublicKey::new([1; 32]);
+            metrics.record_result(host, Ok(())).unwrap();
+            let read = RpcStream {
+                stream: client.dial_stream().unwrap(),
+                metrics: metrics.clone(),
+                host,
+            }
+            .run(async |stream| {
+                let tracked = RecordTransfer {
+                    stream,
+                    record: |stream: &Stream| {
+                        let (bytes, elapsed) = stream.read_metric();
+                        metrics.record_transfer(host, TransferRate::try_new(bytes, elapsed), None);
+                    },
+                };
+                let stream = &mut *tracked.stream;
+                stream.set_idle_timeout(Some(Duration::from_secs(2)));
+                stream.write_all(b"request").await?;
+                stream.read_exact(&mut [0; 2]).await?;
+                Ok(())
+            });
+            let peer = async {
+                let mut stream = server.accept_stream().await.unwrap();
+                sleep(Duration::from_secs(1)).await;
+                stream.write_all(b"a").await.unwrap();
+                sleep(Duration::from_secs(5)).await;
+            };
+            let (result, _) = tokio::join!(
+                timeout(Duration::from_secs(if cancel { 2 } else { 10 }), read),
+                peer,
+            );
+            if cancel {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().unwrap_err().is_timeout());
+            }
+            assert_eq!(metrics.failure_rate(host), if cancel { 0 } else { 20 });
+            assert_eq!(
+                metrics.transfer_rates().read.unwrap(),
+                crate::client::metrics::Transfer::new(
+                    1,
+                    Duration::from_secs(if cancel { 2 } else { 3 })
+                )
+                .rate()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_records_each_outcome_once() {
+        let (a, b) = tokio::io::duplex(64 * 1024);
+        let (client, server) =
+            tokio::join!(sia_mux::dial_anonymous(a), sia_mux::accept_anonymous(b));
+        let client = client.unwrap();
+        let _server = server.unwrap();
+        let metrics = Arc::new(Metrics::default());
+        let host = PublicKey::new([1; 32]);
+        for (result, expected_rate) in [
+            (Err(TransportError::Transport("failed".into())), 100),
+            (Ok(()), 80),
+            (Err(TransportError::NoToken(host)), 80),
+        ] {
+            let stream = RpcStream {
+                stream: client.dial_stream().unwrap(),
+                metrics: metrics.clone(),
+                host,
+            };
+            let success = result.is_ok();
+            assert_eq!(stream.run(async |_| result).await.is_ok(), success);
+            assert_eq!(metrics.failure_rate(host), expected_rate);
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_open_failure_is_recorded_once() {
+        let client = Client::new();
+        let host = HostEndpoint {
+            public_key: PublicKey::new([1; 32]),
+            addresses: vec![],
+        };
+        let metrics = Arc::new(Metrics::default());
+        metrics.record_result(host.public_key, Ok(())).unwrap();
+        assert!(client.host_prices(&host, metrics.clone()).await.is_err());
+        assert_eq!(metrics.failure_rate(host.public_key), 20);
+    }
 
     /// Accepts mux connections for `seed`'s key, counting TCP accepts and
     /// finishing each handshake only after `delay`.

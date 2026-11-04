@@ -75,10 +75,10 @@ impl Client {
     }
 
     /// Sleeps out the host's configured slow delay. A delay longer than
-    /// `idle_timeout` is a stall, which the real transports report once
+    /// `RPC_IDLE_TIMEOUT` is a stall, which the real transports report once
     /// the idle limit passes. The error takes the shape a stalled response
     /// has after passing through the protocol decoder.
-    async fn stall(&self, host: &PublicKey, idle_timeout: Duration) -> Result<(), RHP4Error> {
+    async fn stall(&self, host: &PublicKey) -> Result<(), RHP4Error> {
         let delay = {
             let slow_hosts = self.slow_hosts.read().unwrap();
             if slow_hosts.contains(host) {
@@ -90,8 +90,8 @@ impl Client {
         let Some(delay) = delay else {
             return Ok(());
         };
-        if delay > idle_timeout {
-            sleep(idle_timeout).await;
+        if delay > super::RPC_IDLE_TIMEOUT {
+            sleep(super::RPC_IDLE_TIMEOUT).await;
             let io = std::io::Error::new(std::io::ErrorKind::TimedOut, "stream idle");
             return Err(ProtocolError::from(encoding::Error::from(io)).into());
         }
@@ -142,33 +142,37 @@ impl Client {
 impl Client {
     pub(crate) async fn host_prices(
         &self,
-        _: &HostEndpoint,
-        _: Duration,
+        host: &HostEndpoint,
+        metrics: Arc<Metrics>,
     ) -> Result<HostPrices, RHP4Error> {
-        self.price_requests.fetch_add(1, Ordering::Relaxed);
-        let delay = *self.price_delay.read().unwrap();
-        if !delay.is_zero() {
-            sleep(delay).await;
+        let result = async {
+            self.price_requests.fetch_add(1, Ordering::Relaxed);
+            let delay = *self.price_delay.read().unwrap();
+            if !delay.is_zero() {
+                sleep(delay).await;
+            }
+            if self
+                .price_failures
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(RHP4Error::Transport("price fetch failed".to_string()));
+            }
+            let prices = HostPrices {
+                contract_price: Currency::zero(),
+                collateral: Currency::zero(),
+                ingress_price: Currency::zero(),
+                egress_price: Currency::zero(),
+                storage_price: Currency::zero(),
+                free_sector_price: Currency::zero(),
+                tip_height: 1,
+                signature: Signature::default(),
+                valid_until: Utc::now() + chrono::Duration::days(1),
+            };
+            Ok(prices)
         }
-        if self
-            .price_failures
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
-            .is_ok()
-        {
-            return Err(RHP4Error::Transport("price fetch failed".to_string()));
-        }
-        let prices = HostPrices {
-            contract_price: Currency::zero(),
-            collateral: Currency::zero(),
-            ingress_price: Currency::zero(),
-            egress_price: Currency::zero(),
-            storage_price: Currency::zero(),
-            free_sector_price: Currency::zero(),
-            tip_height: 1,
-            signature: Signature::default(),
-            valid_until: Utc::now() + chrono::Duration::days(1),
-        };
-        Ok(prices)
+        .await;
+        metrics.record_result(host.public_key, result)
     }
 
     pub(crate) async fn write_sector(
@@ -177,33 +181,35 @@ impl Client {
         _: HostPrices,
         _: &PrivateKey,
         sector: Bytes,
-        idle_timeout: Duration,
         metrics: Arc<Metrics>,
     ) -> Result<Hash256, RHP4Error> {
-        if host.addresses.is_empty() {
-            return Err(RHP4Error::Transport("host has no addresses".to_string()));
-        }
-        let start = Instant::now();
-        let bytes = sector.len() as u64;
-        self.stall(&host.public_key, idle_timeout).await?;
+        let result = async {
+            if host.addresses.is_empty() {
+                return Err(RHP4Error::Transport("host has no addresses".to_string()));
+            }
+            let start = Instant::now();
+            let bytes = sector.len() as u64;
+            self.stall(&host.public_key).await?;
 
-        sleep(Duration::from_millis(3)).await; // simulate network latency ~ 10Gbps
-        let sector_root = sia_core::rhp4::sector_root(&sector);
-        let mut sectors = self.sectors.write().unwrap();
-        let host_sectors = sectors.entry(host.public_key).or_default();
-        host_sectors.insert(sector_root, sector);
-        if let Some(delay) = *self.initial_read_delay.read().unwrap() {
-            self.read_delays.write().unwrap().insert(sector_root, delay);
+            sleep(Duration::from_millis(3)).await; // simulate network latency ~ 10Gbps
+            let sector_root = sia_core::rhp4::sector_root(&sector);
+            let mut sectors = self.sectors.write().unwrap();
+            let host_sectors = sectors.entry(host.public_key).or_default();
+            host_sectors.insert(sector_root, sector);
+            if let Some(delay) = *self.initial_read_delay.read().unwrap() {
+                self.read_delays.write().unwrap().insert(sector_root, delay);
+            }
+            metrics.record_transfer(
+                host.public_key,
+                None,
+                TransferRate::try_new(bytes, start.elapsed()),
+            );
+            Ok(sector_root)
         }
-        metrics.record_transfer(
-            host.public_key,
-            None,
-            TransferRate::try_new(bytes, start.elapsed()),
-        );
-        Ok(sector_root)
+        .await;
+        metrics.record_result(host.public_key, result)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn read_sector(
         &self,
         host: &HostEndpoint,
@@ -211,60 +217,63 @@ impl Client {
         tokens: &AccountTokenSource,
         root: Hash256,
         range: Range<usize>,
-        idle_timeout: Duration,
         metrics: Arc<Metrics>,
     ) -> Result<Bytes, RHP4Error> {
-        self.read_requests.fetch_add(1, Ordering::Relaxed);
-        if host.addresses.is_empty() {
-            return Err(RHP4Error::Transport("host has no addresses".to_string()));
-        }
-        let start = Instant::now();
-        self.stall(&host.public_key, idle_timeout).await?;
-        tokens
-            .token(host.public_key)
-            .map_err(|_| RHP4Error::NoToken(host.public_key))?;
-
-        let fail = {
-            let mut failures = self.read_failures.write().unwrap();
-            match failures.get_mut(&host.public_key) {
-                Some(remaining) if *remaining > 0 => {
-                    *remaining -= 1;
-                    true
-                }
-                _ => false,
+        let result = async {
+            self.read_requests.fetch_add(1, Ordering::Relaxed);
+            if host.addresses.is_empty() {
+                return Err(RHP4Error::Transport("host has no addresses".to_string()));
             }
-        };
-        if fail {
-            return Err(RHP4Error::Transport("injected read failure".to_string()));
-        }
+            let start = Instant::now();
+            self.stall(&host.public_key).await?;
+            tokens
+                .token(host.public_key)
+                .map_err(|_| RHP4Error::NoToken(host.public_key))?;
 
-        // per-sector decreasing delay (used to simulate out-of-order chunk completion)
-        let read_delay = {
-            let mut delays = self.read_delays.write().unwrap();
-            delays.get(&root).copied().inspect(|&delay| {
-                delays.insert(root, delay / 2);
-            })
-        };
-        if let Some(delay) = read_delay {
-            sleep(delay).await;
-        }
+            let fail = {
+                let mut failures = self.read_failures.write().unwrap();
+                match failures.get_mut(&host.public_key) {
+                    Some(remaining) if *remaining > 0 => {
+                        *remaining -= 1;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if fail {
+                return Err(RHP4Error::Transport("injected read failure".to_string()));
+            }
 
-        let sector = {
-            let sectors = self.sectors.read().unwrap();
-            let host_sectors = sectors
-                .get(&host.public_key)
-                .ok_or_else(|| RHP4Error::Transport("host not found".to_string()))?;
-            let sector = host_sectors
-                .get(&root)
-                .ok_or_else(|| RHP4Error::Transport("sector not found".to_string()))?;
-            Bytes::copy_from_slice(&sector[range])
-        };
-        sleep(Duration::from_nanos(sector.len() as u64 * 8 / 10)).await; // simulate network latency ~ 10Gbps
-        metrics.record_transfer(
-            host.public_key,
-            TransferRate::try_new(sector.len() as u64, start.elapsed()),
-            None,
-        );
-        Ok(sector)
+            // per-sector decreasing delay (used to simulate out-of-order chunk completion)
+            let read_delay = {
+                let mut delays = self.read_delays.write().unwrap();
+                delays.get(&root).copied().inspect(|&delay| {
+                    delays.insert(root, delay / 2);
+                })
+            };
+            if let Some(delay) = read_delay {
+                sleep(delay).await;
+            }
+
+            let sector = {
+                let sectors = self.sectors.read().unwrap();
+                let host_sectors = sectors
+                    .get(&host.public_key)
+                    .ok_or_else(|| RHP4Error::Transport("host not found".to_string()))?;
+                let sector = host_sectors
+                    .get(&root)
+                    .ok_or_else(|| RHP4Error::Transport("sector not found".to_string()))?;
+                Bytes::copy_from_slice(&sector[range])
+            };
+            sleep(Duration::from_nanos(sector.len() as u64 * 8 / 10)).await; // simulate network latency ~ 10Gbps
+            metrics.record_transfer(
+                host.public_key,
+                TransferRate::try_new(sector.len() as u64, start.elapsed()),
+                None,
+            );
+            Ok(sector)
+        }
+        .await;
+        metrics.record_result(host.public_key, result)
     }
 }
