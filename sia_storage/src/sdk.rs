@@ -28,6 +28,7 @@ use crate::{
 /// The `Sdk` sharing methods live here so they can reach this module's private
 /// fields.
 mod sharing_key;
+mod spaces;
 
 /// Errors that can occur when using the SDK.
 #[derive(Error, Debug)]

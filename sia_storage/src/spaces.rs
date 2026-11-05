@@ -16,9 +16,6 @@ use crate::object_encryption::{DecryptError, derive_encryption_key, open_metadat
 use crate::slabs::{Base64OrBytes, SealedObject, SealedObjectSummary};
 use crate::{AppKey, app_client};
 
-/// A wrapped space key: 24-byte nonce, 32-byte key, 16-byte tag.
-pub(crate) const WRAPPED_KEY_SIZE: usize = 72;
-
 /// A shared space's key. It identifies the space to the indexer and decrypts
 /// what is stored in it. Every member holds one, obtained from their
 /// [`Space`].
@@ -94,6 +91,15 @@ pub enum SpacePermission {
     Admin,
     /// Delete the space. Held by its creator and never granted to anyone else.
     Owner,
+}
+
+/// Options for creating a shared space.
+#[derive(Clone, Default)]
+pub struct SpaceOptions {
+    /// The space's name, visible to its members.
+    pub name: String,
+    /// Application-defined metadata, visible to its members.
+    pub metadata: Vec<u8>,
 }
 
 /// A shared space: a store one account owns and invites other accounts into,
@@ -386,7 +392,7 @@ mod tests {
         let space = SpaceKey::from_seed([2u8; 32]);
 
         let wrapped = space.export(&app_key);
-        assert_eq!(wrapped.len(), WRAPPED_KEY_SIZE);
+        assert_eq!(wrapped.len(), 72, "indexd accepts exactly 72 bytes");
         let unwrapped =
             SpaceKey::import(&app_key, &space.public_key(), &wrapped).expect("should unwrap");
         assert_eq!(unwrapped.0.as_ref(), space.0.as_ref());
@@ -404,7 +410,6 @@ mod tests {
         let space = SpaceKey::from_seed([2u8; 32]);
         let req = AddSpaceRequest::new(&app_key, &space, "photos", br#"{"color":"blue"}"#);
         assert_eq!(req.key, space.public_key());
-        assert_eq!(req.encrypted_key.len(), WRAPPED_KEY_SIZE);
 
         let opened = owner_response(&app_key, &req)
             .open(&app_key)

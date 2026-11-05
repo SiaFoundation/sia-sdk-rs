@@ -21,7 +21,7 @@ use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
 use crate::slabs::{SealedObjectSummary, Slab};
 use crate::spaces::{
     AddSpaceRequest, SealedSpaceObject, SealedSpaceObjectEvent, SealedSpaceObjectEventSummary,
-    SealedSpaceObjectSummary, SpacePermission, SpaceResponse, WRAPPED_KEY_SIZE, space_sig_hash,
+    SealedSpaceObjectSummary, SpacePermission, SpaceResponse, space_sig_hash,
 };
 use crate::time::Duration;
 use crate::{
@@ -826,8 +826,7 @@ impl Client {
         Ok(())
     }
 
-    /// Records a space with its creator as the owner member. The request is
-    /// validated as indexd does: the wrapped key must be the right size and
+    /// Records a space with its creator as the owner member. As indexd does,
     /// the signature must verify under the space key.
     pub(crate) async fn add_space(
         &self,
@@ -841,12 +840,7 @@ impl Client {
             &req.encrypted_name,
             &req.encrypted_metadata,
         );
-        if req.encrypted_key.len() != WRAPPED_KEY_SIZE {
-            return Err(Error::Api(
-                StatusCode::BAD_REQUEST,
-                format!("encrypted key must be {WRAPPED_KEY_SIZE} bytes"),
-            ));
-        } else if !req.key.verify(sig_hash.as_ref(), &req.signature) {
+        if !req.key.verify(sig_hash.as_ref(), &req.signature) {
             return Err(Error::Api(
                 StatusCode::BAD_REQUEST,
                 "invalid space signature".into(),

@@ -75,7 +75,7 @@ pub mod mock;
 pub use sdk::{Error, Sdk};
 pub use shared_sdk::SharedSdk;
 pub use sharing::{KeyRecord, SharingError, SharingKey};
-pub use spaces::{Space, SpaceError, SpaceKey, SpacePermission};
+pub use spaces::{Space, SpaceError, SpaceKey, SpaceOptions, SpacePermission};
 
 use std::sync::Arc;
 
