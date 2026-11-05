@@ -21,10 +21,7 @@ use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
 use crate::preauthorized_keys::PreAuthorizedKey;
 use crate::sharing::{KeyRequest, SharedObjectRequest};
-use crate::spaces::{
-    AddSpaceRequest, SealedSpaceObject, SealedSpaceObjectEvent, SealedSpaceObjectEventSummary,
-    SpaceResponse,
-};
+use crate::spaces::{AddSpaceRequest, SpaceResponse};
 use crate::time::Duration;
 use crate::{
     Account, AppKey, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject,
@@ -716,7 +713,7 @@ impl Client {
         app_key: &AppKey,
         space: &PublicKey,
         key: &Hash256,
-    ) -> Result<SealedSpaceObject, Error> {
+    ) -> Result<SealedObject, Error> {
         self.get_json::<_, ()>(&format!("spaces/{space}/objects/{key}"), &app_key.0, None)
             .await
     }
@@ -728,7 +725,7 @@ impl Client {
         space: &PublicKey,
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
-    ) -> Result<Vec<SealedSpaceObjectEvent>, Error> {
+    ) -> Result<Vec<SealedObjectEvent>, Error> {
         let query = Self::objects_query(cursor, limit);
         self.get_list(&format!("spaces/{space}/objects"), &app_key.0, Some(&query))
             .await
@@ -741,7 +738,7 @@ impl Client {
         space: &PublicKey,
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
-    ) -> Result<Vec<SealedSpaceObjectEventSummary>, Error> {
+    ) -> Result<Vec<SealedObjectEventSummary>, Error> {
         let mut query = Self::objects_query(cursor, limit);
         query.push(("includeslabs", "false".to_string()));
         self.get_list(&format!("spaces/{space}/objects"), &app_key.0, Some(&query))
@@ -958,7 +955,7 @@ mod native_tests {
     use crate::AppKey;
     use crate::sharing::Nonce;
     use crate::slabs::SealedObjectSummary;
-    use crate::spaces::{SealedSpaceObjectSummary, SpaceKey, SpacePermission};
+    use crate::spaces::{SpaceKey, SpacePermission};
 
     use crate::app_client::cross_target_test::{ACCOUNT_CBOR, STATUS_CBOR};
     use crate::app_client::{
@@ -2562,9 +2559,9 @@ mod native_tests {
         }
     }
 
-    /// A sealed object with one slab, as a space would return it.
-    fn space_object(account: PublicKey) -> SealedSpaceObject {
-        let object = SealedObject {
+    /// A sealed object with one slab.
+    fn space_object() -> SealedObject {
+        SealedObject {
             encrypted_data_key: vec![1u8; 72],
             encrypted_metadata_key: vec![1u8; 72],
             encrypted_metadata: b"hello world!".to_vec(),
@@ -2587,11 +2584,6 @@ mod native_tests {
             }],
             created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
             updated_at: DateTime::from_timestamp(1_700_000_100, 0).unwrap(),
-        };
-        SealedSpaceObject {
-            key: object.id(),
-            account,
-            object,
         }
     }
 
@@ -2690,7 +2682,7 @@ mod native_tests {
     async fn test_pin_space_object() {
         let app_key = AppKey::import(rand::random());
         let space = PrivateKey::from_seed(&rand::random()).public_key();
-        let object = space_object(app_key.public_key()).object;
+        let object = space_object();
         let pin_request = serde_json::to_string(&PinObjectRequest::from(&object)).unwrap();
 
         for (status, body, unpinned) in [
@@ -2747,12 +2739,12 @@ mod native_tests {
     async fn test_space_object() {
         let app_key = AppKey::import(rand::random());
         let space = PrivateKey::from_seed(&rand::random()).public_key();
-        let object = space_object(app_key.public_key());
+        let object = space_object();
 
         let server = Server::run();
         server.expect(
             Expectation::matching(signed_get(
-                format!("/spaces/{space}/objects/{}", object.key),
+                format!("/spaces/{space}/objects/{}", object.id()),
                 app_key.public_key(),
             ))
             .respond_with(ok_body(serde_json::to_string(&object).unwrap())),
@@ -2761,7 +2753,7 @@ mod native_tests {
         let client = Client::new(server.url("/").to_string()).unwrap();
         assert_eq!(
             client
-                .space_object(&app_key, &space, &object.key)
+                .space_object(&app_key, &space, &object.id())
                 .await
                 .unwrap(),
             object
@@ -2772,15 +2764,15 @@ mod native_tests {
     async fn test_space_objects() {
         let app_key = AppKey::import(rand::random());
         let space = PrivateKey::from_seed(&rand::random()).public_key();
-        let object = space_object(app_key.public_key());
+        let object = space_object();
         let events = vec![
-            SealedSpaceObjectEvent {
-                id: object.key,
+            SealedObjectEvent {
+                id: object.id(),
                 deleted: false,
                 updated_at: DateTime::from_timestamp(1_700_000_200, 0).unwrap(),
                 object: Some(object),
             },
-            SealedSpaceObjectEvent {
+            SealedObjectEvent {
                 id: hash_256!("0404040404040404040404040404040404040404040404040404040404040404"),
                 deleted: true,
                 updated_at: DateTime::from_timestamp(1_700_000_300, 0).unwrap(),
@@ -2791,62 +2783,50 @@ mod native_tests {
         let cursor_id =
             hash_256!("0505050505050505050505050505050505050505050505050505050505050505");
 
-        let json = serde_json::to_vec(&events).unwrap();
-        let mut cbor = Vec::new();
-        ciborium::into_writer(&events, &mut cbor).unwrap();
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                signed_get(format!("/spaces/{space}/objects"), app_key.public_key()),
+                request::query(url_decoded(contains(("limit", "10")))),
+                request::query(url_decoded(contains(("after", cursor_after.to_rfc3339())))),
+                request::query(url_decoded(contains(("key", cursor_id.to_string())))),
+                request::query(url_decoded(not(contains(key("includeslabs"))))),
+            ])
+            .respond_with(ok_body(serde_json::to_string(&events).unwrap())),
+        );
 
-        // The object is flattened into the event, which hides the response
-        // encoding from its fields, so both encodings are exercised.
-        for (content_type, body) in [("application/json", json), ("application/cbor", cbor)] {
-            let server = Server::run();
-            server.expect(
-                Expectation::matching(all_of![
-                    signed_get(format!("/spaces/{space}/objects"), app_key.public_key()),
-                    request::query(url_decoded(contains(("limit", "10")))),
-                    request::query(url_decoded(contains(("after", cursor_after.to_rfc3339())))),
-                    request::query(url_decoded(contains(("key", cursor_id.to_string())))),
-                    request::query(url_decoded(not(contains(key("includeslabs"))))),
-                ])
-                .respond_with(ok_typed(content_type, body)),
-            );
-
-            let client = Client::new(server.url("/").to_string()).unwrap();
-            let got = client
-                .space_objects(
-                    &app_key,
-                    &space,
-                    Some(ObjectsCursor {
-                        after: cursor_after,
-                        id: cursor_id,
-                    }),
-                    Some(10),
-                )
-                .await
-                .unwrap_or_else(|e| panic!("{content_type}: {e}"));
-            assert_eq!(got, events, "{content_type}");
-        }
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        let got = client
+            .space_objects(
+                &app_key,
+                &space,
+                Some(ObjectsCursor {
+                    after: cursor_after,
+                    id: cursor_id,
+                }),
+                Some(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(got, events);
     }
 
     #[tokio::test]
     async fn test_space_object_summaries() {
         let app_key = AppKey::import(rand::random());
         let space = PrivateKey::from_seed(&rand::random()).public_key();
-        let object = space_object(app_key.public_key());
-        let summaries = vec![SealedSpaceObjectEventSummary {
-            id: object.key,
+        let object = space_object();
+        let summaries = vec![SealedObjectEventSummary {
+            id: object.id(),
             deleted: false,
             updated_at: DateTime::from_timestamp(1_700_000_200, 0).unwrap(),
-            object: Some(SealedSpaceObjectSummary {
-                key: object.key,
-                account: object.account,
-                object: SealedObjectSummary {
-                    encrypted_metadata_key: object.object.encrypted_metadata_key,
-                    encrypted_metadata: object.object.encrypted_metadata,
-                    metadata_signature: object.object.metadata_signature,
-                    created_at: object.object.created_at,
-                    updated_at: object.object.updated_at,
-                    size: 7,
-                },
+            object: Some(SealedObjectSummary {
+                encrypted_metadata_key: object.encrypted_metadata_key,
+                encrypted_metadata: object.encrypted_metadata,
+                metadata_signature: object.metadata_signature,
+                created_at: object.created_at,
+                updated_at: object.updated_at,
+                size: 7,
             }),
         }];
 

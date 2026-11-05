@@ -17,10 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::object_encryption::DecryptError;
 use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
 use crate::slabs::{Base64OrBytes, SealedObjectSummary, Sector, SlabVersion};
-use crate::spaces::{
-    AddSpaceRequest, SealedSpaceObject, SealedSpaceObjectEvent, SealedSpaceObjectEventSummary,
-    SpaceResponse,
-};
+use crate::spaces::{AddSpaceRequest, SpaceResponse};
 use crate::{
     Account, AppKey, AppMetadata, HostQuery, Object, ObjectSummary, ObjectsCursor, SealedObject,
     SealedObjectError, Slab,
@@ -974,7 +971,7 @@ impl Client {
         app_key: &AppKey,
         space: &PublicKey,
         key: &Hash256,
-    ) -> Result<SealedSpaceObject, Error> {
+    ) -> Result<SealedObject, Error> {
         match self {
             Self::Http(c) => c.space_object(app_key, space, key).await,
             #[cfg(any(test, feature = "mock"))]
@@ -989,7 +986,7 @@ impl Client {
         space: &PublicKey,
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
-    ) -> Result<Vec<SealedSpaceObjectEvent>, Error> {
+    ) -> Result<Vec<SealedObjectEvent>, Error> {
         match self {
             Self::Http(c) => c.space_objects(app_key, space, cursor, limit).await,
             #[cfg(any(test, feature = "mock"))]
@@ -1004,7 +1001,7 @@ impl Client {
         space: &PublicKey,
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
-    ) -> Result<Vec<SealedSpaceObjectEventSummary>, Error> {
+    ) -> Result<Vec<SealedObjectEventSummary>, Error> {
         match self {
             Self::Http(c) => {
                 c.space_object_summaries(app_key, space, cursor, limit)

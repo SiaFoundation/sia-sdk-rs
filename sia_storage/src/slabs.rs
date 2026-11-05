@@ -257,27 +257,29 @@ impl SealedObject {
         state.finalize().into()
     }
 
+    /// Verifies that `signer` made both signatures over the object's contents,
+    /// returning the id they cover.
     pub(crate) fn verify_signatures(
         &self,
-        app_key: &PublicKey,
-        object_id: &Hash256,
-    ) -> Result<(), SealedObjectError> {
-        let data_sig_hash = Self::data_sig_hash(object_id, &self.encrypted_data_key);
+        signer: &PublicKey,
+    ) -> Result<Hash256, SealedObjectError> {
+        let object_id = self.id();
+        let data_sig_hash = Self::data_sig_hash(&object_id, &self.encrypted_data_key);
         let meta_sig_hash = Self::meta_sig_hash(
-            object_id,
+            &object_id,
             &self.encrypted_metadata_key,
             &self.encrypted_metadata,
         );
 
-        if !app_key.verify(data_sig_hash.as_ref(), &self.data_signature) {
+        if !signer.verify(data_sig_hash.as_ref(), &self.data_signature) {
             return Err(SealedObjectError::InvalidSignature);
         }
 
-        if !app_key.verify(meta_sig_hash.as_ref(), &self.metadata_signature) {
+        if !signer.verify(meta_sig_hash.as_ref(), &self.metadata_signature) {
             return Err(SealedObjectError::InvalidSignature);
         }
 
-        Ok(())
+        Ok(object_id)
     }
 
     /// Returns the unique identifier of the sealed object.
@@ -293,8 +295,7 @@ impl SealedObject {
     /// Decrypts and verifies the sealed object with the private key it was sealed
     /// under, returning the underlying [Object].
     pub(crate) fn open_with(self, key: &PrivateKey) -> Result<Object, SealedObjectError> {
-        let object_id = self.id();
-        self.verify_signatures(&key.public_key(), &object_id)?;
+        let object_id = self.verify_signatures(&key.public_key())?;
 
         let data_key = open_data_key(key, &object_id, &self.encrypted_data_key)?;
         let metadata = if !self.encrypted_metadata.is_empty() {

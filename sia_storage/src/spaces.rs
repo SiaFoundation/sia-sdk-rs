@@ -13,7 +13,7 @@ use sia_core::types::Hash256;
 
 use crate::encryption::EncryptionKey;
 use crate::object_encryption::{DecryptError, derive_encryption_key, open_metadata, seal_metadata};
-use crate::slabs::{Base64OrBytes, SealedObject, SealedObjectSummary};
+use crate::slabs::Base64OrBytes;
 use crate::{AppKey, app_client};
 
 /// A shared space's key. It identifies the space to the indexer and decrypts
@@ -296,51 +296,6 @@ impl SpaceResponse {
             updated_at: self.updated_at,
         })
     }
-}
-
-/// A space object as the indexer returns it, with the member that wrote it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SealedSpaceObject {
-    pub key: Hash256,
-    pub account: PublicKey,
-    #[serde(flatten)]
-    pub object: SealedObject,
-}
-
-/// A space object listed without its slabs.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SealedSpaceObjectSummary {
-    pub key: Hash256,
-    pub account: PublicKey,
-    #[serde(flatten)]
-    pub object: SealedObjectSummary,
-}
-
-/// A change to a space object: the current object, or a tombstone once it is
-/// deleted.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SealedSpaceObjectEvent {
-    #[serde(rename = "key")]
-    pub id: Hash256,
-    pub deleted: bool,
-    #[serde(with = "sia_core::types::null_as_zero_time")]
-    pub updated_at: DateTime<Utc>,
-    pub object: Option<SealedSpaceObject>,
-}
-
-/// A [`SealedSpaceObjectEvent`] listed without the object's slabs.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SealedSpaceObjectEventSummary {
-    #[serde(rename = "key")]
-    pub id: Hash256,
-    pub deleted: bool,
-    #[serde(with = "sia_core::types::null_as_zero_time")]
-    pub updated_at: DateTime<Utc>,
-    pub object: Option<SealedSpaceObjectSummary>,
 }
 
 #[cfg(test)]

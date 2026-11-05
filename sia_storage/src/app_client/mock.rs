@@ -19,10 +19,7 @@ use crate::hosts::Host;
 use crate::preauthorized_keys::PreAuthorizedKey;
 use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
 use crate::slabs::{SealedObjectSummary, Slab};
-use crate::spaces::{
-    AddSpaceRequest, SealedSpaceObject, SealedSpaceObjectEvent, SealedSpaceObjectEventSummary,
-    SealedSpaceObjectSummary, SpacePermission, SpaceResponse, space_sig_hash,
-};
+use crate::spaces::{AddSpaceRequest, SpacePermission, SpaceResponse, space_sig_hash};
 use crate::time::Duration;
 use crate::{
     Account, App, AppKey, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject,
@@ -85,7 +82,7 @@ struct StoredSpace {
     members: HashMap<PublicKey, StoredMember>,
     /// Slabs pinned to the space itself rather than to a member's account.
     slabs: HashSet<Hash256>,
-    objects: HashMap<Hash256, StoredSpaceObject>,
+    objects: HashMap<Hash256, StoredObject>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -94,16 +91,6 @@ struct StoredSpace {
 struct StoredMember {
     encrypted_key: Vec<u8>,
     permission: SpacePermission,
-}
-
-/// A space object, kept as the sealed object it was pinned with and the
-/// account that signed it.
-#[derive(Debug)]
-struct StoredSpaceObject {
-    /// `None` once the object has been deleted, as with [`StoredObject`].
-    sealed: Option<SealedObject>,
-    account: PublicKey,
-    updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Default)]
@@ -265,17 +252,7 @@ impl Client {
         limit: Option<usize>,
     ) -> Result<Vec<SealedObjectEvent>, Error> {
         let state = self.state.read().unwrap();
-        let events: Vec<SealedObjectEvent> = state
-            .objects
-            .iter()
-            .map(|(id, stored)| SealedObjectEvent {
-                id: *id,
-                deleted: stored.sealed.is_none(),
-                updated_at: stored.updated_at,
-                object: stored.sealed.clone(),
-            })
-            .collect();
-        Ok(page_events(events, |e| (e.updated_at, e.id), cursor, limit))
+        Ok(object_events(&state.objects, cursor, limit))
     }
 
     /// Reports each object's size, as indexers that include it in listings
@@ -286,17 +263,9 @@ impl Client {
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
     ) -> Result<Vec<SealedObjectEventSummary>, Error> {
-        Ok(self
-            .objects(app_key, cursor, limit)
-            .await?
-            .into_iter()
-            .map(|event| SealedObjectEventSummary {
-                id: event.id,
-                deleted: event.deleted,
-                updated_at: event.updated_at,
-                object: event.object.map(Self::summarize),
-            })
-            .collect())
+        Ok(summarize_events(
+            self.objects(app_key, cursor, limit).await?,
+        ))
     }
 
     pub(crate) async fn pin_object(
@@ -958,7 +927,7 @@ impl Client {
     }
 
     /// Pins an object to a space. Every slab must be pinned to the space or
-    /// to an account, the signatures must be the caller's, and an existing
+    /// to an account, the signatures must be the space key's, and an existing
     /// object's encrypted data key cannot change. Account slabs are not
     /// scoped to their account here, so "pinned by the caller" is "pinned by
     /// anyone".
@@ -968,11 +937,10 @@ impl Client {
         space_key: &PublicKey,
         object: &SealedObject,
     ) -> Result<(), PinObjectError> {
-        let account = app_key.public_key();
         let id = object.id();
         let mut state = self.state.write().unwrap();
         let (space, _) = Self::space_access(&state, app_key, space_key, SpacePermission::Write)?;
-        if object.verify_signatures(&account, &id).is_err() {
+        if object.verify_signatures(space_key).is_err() {
             return Err(PinObjectError::Client(Error::Api(
                 StatusCode::BAD_REQUEST,
                 "invalid object signature".into(),
@@ -1003,15 +971,13 @@ impl Client {
             }
             Some(stored) => {
                 stored.sealed = Some(object.clone());
-                stored.account = account;
                 stored.updated_at = now;
             }
             None => {
                 space.objects.insert(
                     id,
-                    StoredSpaceObject {
+                    StoredObject {
                         sealed: Some(object.clone()),
-                        account,
                         updated_at: now,
                     },
                 );
@@ -1050,19 +1016,13 @@ impl Client {
         app_key: &AppKey,
         space_key: &PublicKey,
         key: &Hash256,
-    ) -> Result<SealedSpaceObject, Error> {
+    ) -> Result<SealedObject, Error> {
         let state = self.state.read().unwrap();
         let (space, _) = Self::space_access(&state, app_key, space_key, SpacePermission::Read)?;
         space
             .objects
             .get(key)
-            .and_then(|stored| {
-                stored.sealed.clone().map(|sealed| SealedSpaceObject {
-                    key: *key,
-                    account: stored.account,
-                    object: sealed,
-                })
-            })
+            .and_then(|stored| stored.sealed.clone())
             .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("object {key} not found")))
     }
 
@@ -1072,24 +1032,10 @@ impl Client {
         space_key: &PublicKey,
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
-    ) -> Result<Vec<SealedSpaceObjectEvent>, Error> {
+    ) -> Result<Vec<SealedObjectEvent>, Error> {
         let state = self.state.read().unwrap();
         let (space, _) = Self::space_access(&state, app_key, space_key, SpacePermission::Read)?;
-        let events: Vec<SealedSpaceObjectEvent> = space
-            .objects
-            .iter()
-            .map(|(id, stored)| SealedSpaceObjectEvent {
-                id: *id,
-                deleted: stored.sealed.is_none(),
-                updated_at: stored.updated_at,
-                object: stored.sealed.clone().map(|sealed| SealedSpaceObject {
-                    key: *id,
-                    account: stored.account,
-                    object: sealed,
-                }),
-            })
-            .collect();
-        Ok(page_events(events, |e| (e.updated_at, e.id), cursor, limit))
+        Ok(object_events(&space.objects, cursor, limit))
     }
 
     pub(crate) async fn space_object_summaries(
@@ -1098,22 +1044,11 @@ impl Client {
         space_key: &PublicKey,
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
-    ) -> Result<Vec<SealedSpaceObjectEventSummary>, Error> {
-        Ok(self
-            .space_objects(app_key, space_key, cursor, limit)
-            .await?
-            .into_iter()
-            .map(|event| SealedSpaceObjectEventSummary {
-                id: event.id,
-                deleted: event.deleted,
-                updated_at: event.updated_at,
-                object: event.object.map(|o| SealedSpaceObjectSummary {
-                    key: o.key,
-                    account: o.account,
-                    object: Self::summarize(o.object),
-                }),
-            })
-            .collect())
+    ) -> Result<Vec<SealedObjectEventSummary>, Error> {
+        Ok(summarize_events(
+            self.space_objects(app_key, space_key, cursor, limit)
+                .await?,
+        ))
     }
 }
 
@@ -1138,23 +1073,46 @@ fn record_pin_slabs(state: &mut State) -> Result<(), Error> {
     }
 }
 
-/// Orders events by stream position, keeps those after `cursor`, and
-/// truncates to `limit`. Hash256 is not Ord, so ids are ordered by their raw
-/// bytes to give the cursor a total order to compare against.
-fn page_events<T>(
-    mut events: Vec<T>,
-    position: impl Fn(&T) -> (DateTime<Utc>, Hash256),
+/// Builds the event stream for a set of objects as `GET /objects` does:
+/// ordered by stream position, after `cursor`, at most `limit` long.
+fn object_events(
+    objects: &HashMap<Hash256, StoredObject>,
     cursor: Option<ObjectsCursor>,
     limit: Option<usize>,
-) -> Vec<T> {
-    let order = |(at, id): (DateTime<Utc>, Hash256)| (at, *AsRef::<[u8; 32]>::as_ref(&id));
-    events.sort_by_key(|e| order(position(e)));
+) -> Vec<SealedObjectEvent> {
+    let mut events: Vec<SealedObjectEvent> = objects
+        .iter()
+        .map(|(id, stored)| SealedObjectEvent {
+            id: *id,
+            deleted: stored.sealed.is_none(),
+            updated_at: stored.updated_at,
+            object: stored.sealed.clone(),
+        })
+        .collect();
+    // Hash256 is not Ord; order by its raw bytes so the cursor has a
+    // total order to compare against.
+    let position = |e: &SealedObjectEvent| (e.updated_at, *AsRef::<[u8; 32]>::as_ref(&e.id));
+    events.sort_by_key(position);
     if let Some(ObjectsCursor { after, id }) = cursor {
-        let cursor = order((after, id));
-        events.retain(|e| order(position(e)) > cursor);
+        let cursor = (after, *AsRef::<[u8; 32]>::as_ref(&id));
+        events.retain(|e| position(e) > cursor);
     }
     events.truncate(limit.unwrap_or(usize::MAX));
     events
+}
+
+/// Leaves the slabs out of each event, as a listing with
+/// `includeslabs=false` does.
+fn summarize_events(events: Vec<SealedObjectEvent>) -> Vec<SealedObjectEventSummary> {
+    events
+        .into_iter()
+        .map(|event| SealedObjectEventSummary {
+            id: event.id,
+            deleted: event.deleted,
+            updated_at: event.updated_at,
+            object: event.object.map(Client::summarize),
+        })
+        .collect()
 }
 
 impl StoredSpace {
@@ -1344,7 +1302,7 @@ mod space_tests {
             slabs: vec![slab.clone()],
             ..Default::default()
         };
-        let sealed = object.seal(&owner);
+        let sealed = object.seal_with(&space.0);
         assert!(matches!(
             client.pin_space_object(&owner, &key, &sealed).await,
             Err(PinObjectError::UnpinnedSlab)
@@ -1361,14 +1319,14 @@ mod space_tests {
         );
         assert_eq!(client.pin_slabs_calls(), 1);
 
-        // the caller must be a member and the signatures must be theirs
+        // the caller must be a member, and the signatures must be the space key's
         assert!(matches!(
             client.pin_space_object(&other, &key, &sealed).await,
             Err(PinObjectError::Client(Error::Api(StatusCode::FORBIDDEN, _)))
         ));
         assert!(matches!(
             client
-                .pin_space_object(&owner, &key, &object.seal(&other))
+                .pin_space_object(&owner, &key, &object.seal(&owner))
                 .await,
             Err(PinObjectError::Client(Error::Api(
                 StatusCode::BAD_REQUEST,
@@ -1384,13 +1342,11 @@ mod space_tests {
             .space_object(&owner, &key, &object.id())
             .await
             .unwrap();
-        assert_eq!(fetched.key, object.id());
-        assert_eq!(fetched.account, owner.public_key());
-        assert_eq!(fetched.object, sealed);
+        assert_eq!(fetched, sealed);
 
         // re-sealing wraps the data key under a fresh nonce, which indexd
         // rejects for an existing object
-        let resealed = object.seal(&owner);
+        let resealed = object.seal_with(&space.0);
         assert_ne!(resealed.encrypted_data_key, sealed.encrypted_data_key);
         assert!(matches!(
             client.pin_space_object(&owner, &key, &resealed).await,
@@ -1410,7 +1366,7 @@ mod space_tests {
             .unwrap();
         assert_eq!(events.len(), 1);
         assert!(!events[0].deleted);
-        assert_eq!(events[0].object.as_ref().map(|o| o.key), Some(object.id()));
+        assert_eq!(events[0].object.as_ref().map(|o| o.id()), Some(object.id()));
         let cursor = ObjectsCursor {
             after: events[0].updated_at,
             id: events[0].id,
