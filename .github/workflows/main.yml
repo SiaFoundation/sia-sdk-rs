@@ -26,7 +26,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features --workspace -- -D warnings
       - name: Clippy (wasm)
-        run: cargo clippy --target wasm32-unknown-unknown --lib --tests --package sia_core --package sia_storage --package sia_storage_wasm --no-default-features -- -D warnings
+        run: |
+          cargo clippy --target wasm32-unknown-unknown --lib --tests --package sia_core --package sia_storage --package sia_storage_wasm --no-default-features --features sia_storage/mock -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown --lib --package browser_harness -- -D warnings
       - name: Build docs
         run: cargo doc --all-features --no-deps
         env:
@@ -84,6 +86,21 @@ jobs:
         run: cd sia_core && wasm-pack test --release $WASM_FLAGS -- --lib
       - name: Test sia_storage
         run: cd sia_storage && wasm-pack test --release $WASM_FLAGS -- --lib
+
+  test-browser:
+    name: Test browser behaviour
+    runs-on: tenki-standard-medium-4c-8g
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Setup Environment
+        run: |
+          rustup update stable
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-pack --locked
+          sudo apt-get update
+          sudo apt-get install -y libnss3-tools
+      - name: Test
+        run: cargo run -p browser_harness
 
   # The generated .d.ts is assembled from wasm-bindgen's output plus the
   # `typescript_custom_section` blocks, and nothing else in this workflow ever
@@ -182,7 +199,7 @@ jobs:
   # non-passing) whenever any upstream job fails.
   success:
     name: success
-    needs: [lint, test, test-wasm, typecheck-bindings, simd]
+    needs: [lint, test, test-wasm, test-browser, typecheck-bindings, simd]
     runs-on: tenki-standard-medium-4c-8g
     steps:
       - run: echo success
