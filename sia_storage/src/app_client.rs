@@ -17,8 +17,12 @@ use serde::{Deserialize, Serialize};
 use crate::object_encryption::DecryptError;
 use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
 use crate::slabs::{Base64OrBytes, SealedObjectSummary, Sector, SlabVersion};
+use crate::spaces::{
+    AddSpaceRequest, SealedSpaceObject, SealedSpaceObjectEvent, SealedSpaceObjectEventSummary,
+    SpaceResponse,
+};
 use crate::{
-    Account, AppMetadata, HostQuery, Object, ObjectSummary, ObjectsCursor, SealedObject,
+    Account, AppKey, AppMetadata, HostQuery, Object, ObjectSummary, ObjectsCursor, SealedObject,
     SealedObjectError, Slab,
 };
 use sia_core::rhp4::AccountToken;
@@ -876,6 +880,139 @@ impl Client {
             #[cfg(any(test, feature = "mock"))]
             Self::Mock(c) => {
                 c.delete_shared_object(app_key, sharing_key, object_key)
+                    .await
+            }
+        }
+    }
+
+    /// Creates a space owned by the account.
+    pub(crate) async fn add_space(
+        &self,
+        app_key: &AppKey,
+        req: &AddSpaceRequest,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Http(c) => c.add_space(app_key, req).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.add_space(app_key, req).await,
+        }
+    }
+
+    /// Lists the spaces the account owns or has joined.
+    pub(crate) async fn spaces(
+        &self,
+        app_key: &AppKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<SpaceResponse>, Error> {
+        match self {
+            Self::Http(c) => c.spaces(app_key, offset, limit).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.spaces(app_key, offset, limit).await,
+        }
+    }
+
+    /// Retrieves a space the account is a member of.
+    pub(crate) async fn space(
+        &self,
+        app_key: &AppKey,
+        key: &PublicKey,
+    ) -> Result<SpaceResponse, Error> {
+        match self {
+            Self::Http(c) => c.space(app_key, key).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.space(app_key, key).await,
+        }
+    }
+
+    /// Pins slabs to a space, charged to its owner.
+    pub(crate) async fn pin_space_slabs(
+        &self,
+        app_key: &AppKey,
+        space: &PublicKey,
+        slabs: &[SlabPinParams],
+    ) -> Result<Vec<Hash256>, Error> {
+        match self {
+            Self::Http(c) => c.pin_space_slabs(app_key, space, slabs).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.pin_space_slabs(app_key, space, slabs).await,
+        }
+    }
+
+    /// Pins an object to a space. An object with the same ID is overwritten,
+    /// as long as its encrypted data key is unchanged.
+    pub(crate) async fn pin_space_object(
+        &self,
+        app_key: &AppKey,
+        space: &PublicKey,
+        object: &SealedObject,
+    ) -> Result<(), PinObjectError> {
+        match self {
+            Self::Http(c) => c.pin_space_object(app_key, space, object).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.pin_space_object(app_key, space, object).await,
+        }
+    }
+
+    /// Deletes an object from a space.
+    pub(crate) async fn delete_space_object(
+        &self,
+        app_key: &AppKey,
+        space: &PublicKey,
+        key: &Hash256,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Http(c) => c.delete_space_object(app_key, space, key).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.delete_space_object(app_key, space, key).await,
+        }
+    }
+
+    /// Retrieves an object from a space by its key.
+    pub(crate) async fn space_object(
+        &self,
+        app_key: &AppKey,
+        space: &PublicKey,
+        key: &Hash256,
+    ) -> Result<SealedSpaceObject, Error> {
+        match self {
+            Self::Http(c) => c.space_object(app_key, space, key).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.space_object(app_key, space, key).await,
+        }
+    }
+
+    /// Fetches a page of a space's object events.
+    pub(crate) async fn space_objects(
+        &self,
+        app_key: &AppKey,
+        space: &PublicKey,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SealedSpaceObjectEvent>, Error> {
+        match self {
+            Self::Http(c) => c.space_objects(app_key, space, cursor, limit).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.space_objects(app_key, space, cursor, limit).await,
+        }
+    }
+
+    /// Fetches a page of a space's object events without the objects' slabs.
+    pub(crate) async fn space_object_summaries(
+        &self,
+        app_key: &AppKey,
+        space: &PublicKey,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SealedSpaceObjectEventSummary>, Error> {
+        match self {
+            Self::Http(c) => {
+                c.space_object_summaries(app_key, space, cursor, limit)
+                    .await
+            }
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => {
+                c.space_object_summaries(app_key, space, cursor, limit)
                     .await
             }
         }

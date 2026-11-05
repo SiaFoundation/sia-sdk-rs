@@ -65,6 +65,7 @@ mod sdk;
 mod shared_sdk;
 mod sharing;
 mod slabs;
+mod spaces;
 mod tokens;
 mod upload;
 
@@ -74,6 +75,7 @@ pub mod mock;
 pub use sdk::{Error, Sdk};
 pub use shared_sdk::SharedSdk;
 pub use sharing::{KeyRecord, SharingError, SharingKey};
+pub use spaces::{Space, SpaceError, SpaceKey, SpacePermission};
 
 use std::sync::Arc;
 

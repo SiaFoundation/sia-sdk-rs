@@ -257,7 +257,7 @@ impl SealedObject {
         state.finalize().into()
     }
 
-    fn verify_signatures(
+    pub(crate) fn verify_signatures(
         &self,
         app_key: &PublicKey,
         object_id: &Hash256,

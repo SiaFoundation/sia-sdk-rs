@@ -6,7 +6,7 @@ use base64::prelude::*;
 use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode};
 use sia_core::rhp4::{AccountToken, SECTOR_SIZE};
-use sia_core::signing::{PrivateKey, PublicKey};
+use sia_core::signing::{PrivateKey, PublicKey, Signature};
 use sia_core::types::Hash256;
 
 use super::{
@@ -19,8 +19,14 @@ use crate::hosts::Host;
 use crate::preauthorized_keys::PreAuthorizedKey;
 use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
 use crate::slabs::{SealedObjectSummary, Slab};
+use crate::spaces::{
+    AddSpaceRequest, SealedSpaceObject, SealedSpaceObjectEvent, SealedSpaceObjectEventSummary,
+    SealedSpaceObjectSummary, SpacePermission, SpaceResponse, WRAPPED_KEY_SIZE, space_sig_hash,
+};
 use crate::time::Duration;
-use crate::{Account, App, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject};
+use crate::{
+    Account, App, AppKey, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject,
+};
 
 /// The moment, truncated to microseconds.
 ///
@@ -68,6 +74,38 @@ struct StoredSlab {
     sectors: usize,
 }
 
+/// A space, its members, and its objects.
+#[derive(Debug)]
+struct StoredSpace {
+    owner: PublicKey,
+    encrypted_name: Vec<u8>,
+    encrypted_metadata: Vec<u8>,
+    signature: Signature,
+    /// Every member including the owner, each with the key wrapped for them.
+    members: HashMap<PublicKey, StoredMember>,
+    /// Slabs pinned to the space itself rather than to a member's account.
+    slabs: HashSet<Hash256>,
+    objects: HashMap<Hash256, StoredSpaceObject>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug)]
+struct StoredMember {
+    encrypted_key: Vec<u8>,
+    permission: SpacePermission,
+}
+
+/// A space object, kept as the sealed object it was pinned with and the
+/// account that signed it.
+#[derive(Debug)]
+struct StoredSpaceObject {
+    /// `None` once the object has been deleted, as with [`StoredObject`].
+    sealed: Option<SealedObject>,
+    account: PublicKey,
+    updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Default)]
 struct State {
     hosts: Vec<Host>,
@@ -79,6 +117,7 @@ struct State {
     pin_slabs_requests: Vec<Vec<SlabPinParams>>,
     pin_slabs_errors: VecDeque<Error>,
     sharing_keys: HashMap<PublicKey, StoredSharingKey>,
+    spaces: HashMap<PublicKey, StoredSpace>,
 }
 
 /// An in-memory stand-in for the indexer API.
@@ -226,7 +265,7 @@ impl Client {
         limit: Option<usize>,
     ) -> Result<Vec<SealedObjectEvent>, Error> {
         let state = self.state.read().unwrap();
-        let mut events: Vec<SealedObjectEvent> = state
+        let events: Vec<SealedObjectEvent> = state
             .objects
             .iter()
             .map(|(id, stored)| SealedObjectEvent {
@@ -236,16 +275,7 @@ impl Client {
                 object: stored.sealed.clone(),
             })
             .collect();
-        // Hash256 is not Ord; order by its raw bytes so the cursor has a
-        // total order to compare against.
-        let sort_key = |e: &SealedObjectEvent| (e.updated_at, *AsRef::<[u8; 32]>::as_ref(&e.id));
-        events.sort_by_key(sort_key);
-        if let Some(ObjectsCursor { after, id }) = cursor {
-            let cursor = (after, *AsRef::<[u8; 32]>::as_ref(&id));
-            events.retain(|e| sort_key(e) > cursor);
-        }
-        events.truncate(limit.unwrap_or(usize::MAX));
-        Ok(events)
+        Ok(page_events(events, |e| (e.updated_at, e.id), cursor, limit))
     }
 
     /// Reports each object's size, as indexers that include it in listings
@@ -320,12 +350,9 @@ impl Client {
         slabs: &[SlabPinParams],
     ) -> Result<Vec<Hash256>, Error> {
         let mut state = self.state.write().unwrap();
-        state.pin_slabs_calls += 1;
         #[cfg(test)]
         state.pin_slabs_requests.push(slabs.to_vec());
-        if let Some(error) = state.pin_slabs_errors.pop_front() {
-            return Err(error);
-        }
+        record_pin_slabs(&mut state)?;
         Ok(slabs
             .iter()
             .map(|params| {
@@ -798,6 +825,302 @@ impl Client {
         }
         Ok(())
     }
+
+    /// Records a space with its creator as the owner member. The request is
+    /// validated as indexd does: the wrapped key must be the right size and
+    /// the signature must verify under the space key.
+    pub(crate) async fn add_space(
+        &self,
+        app_key: &AppKey,
+        req: &AddSpaceRequest,
+    ) -> Result<(), Error> {
+        let owner = app_key.public_key();
+        let sig_hash = space_sig_hash(
+            &req.key,
+            &owner,
+            &req.encrypted_name,
+            &req.encrypted_metadata,
+        );
+        if req.encrypted_key.len() != WRAPPED_KEY_SIZE {
+            return Err(Error::Api(
+                StatusCode::BAD_REQUEST,
+                format!("encrypted key must be {WRAPPED_KEY_SIZE} bytes"),
+            ));
+        } else if !req.key.verify(sig_hash.as_ref(), &req.signature) {
+            return Err(Error::Api(
+                StatusCode::BAD_REQUEST,
+                "invalid space signature".into(),
+            ));
+        }
+        let mut state = self.state.write().unwrap();
+        if state.spaces.contains_key(&req.key) {
+            return Err(Error::Api(
+                StatusCode::CONFLICT,
+                "space already exists".into(),
+            ));
+        }
+        let now = now_micros();
+        state.spaces.insert(
+            req.key,
+            StoredSpace {
+                owner,
+                encrypted_name: req.encrypted_name.clone(),
+                encrypted_metadata: req.encrypted_metadata.clone(),
+                signature: req.signature.clone(),
+                members: HashMap::from([(
+                    owner,
+                    StoredMember {
+                        encrypted_key: req.encrypted_key.clone(),
+                        permission: SpacePermission::Owner,
+                    },
+                )]),
+                slabs: HashSet::new(),
+                objects: HashMap::new(),
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        Ok(())
+    }
+
+    /// Lists the spaces the caller is a member of, newest first, each with
+    /// the caller's own wrapped key and permission.
+    pub(crate) async fn spaces(
+        &self,
+        app_key: &AppKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<SpaceResponse>, Error> {
+        let caller = app_key.public_key();
+        let state = self.state.read().unwrap();
+        let mut spaces: Vec<_> = state
+            .spaces
+            .iter()
+            .filter_map(|(key, space)| {
+                space
+                    .members
+                    .get(&caller)
+                    .map(|member| (key, space, member))
+            })
+            .collect();
+        // Newest first, matching indexd, with the key's bytes breaking ties.
+        spaces.sort_by_key(|(key, space, _)| (space.created_at, key.as_ref().to_vec()));
+        spaces.reverse();
+        Ok(spaces
+            .into_iter()
+            .skip(offset.unwrap_or(0) as usize)
+            .take(limit.map_or(usize::MAX, |l| l as usize))
+            .map(|(key, space, member)| space.response(*key, member))
+            .collect())
+    }
+
+    pub(crate) async fn space(
+        &self,
+        app_key: &AppKey,
+        key: &PublicKey,
+    ) -> Result<SpaceResponse, Error> {
+        let state = self.state.read().unwrap();
+        let (space, member) = Self::space_access(&state, app_key, key, SpacePermission::Read)?;
+        Ok(space.response(*key, member))
+    }
+
+    /// Resolves the caller's access to a space the way indexd does: a missing
+    /// space is not found, while a non-member or a member below `required`
+    /// is forbidden.
+    fn space_access<'a>(
+        state: &'a State,
+        app_key: &AppKey,
+        key: &PublicKey,
+        required: SpacePermission,
+    ) -> Result<(&'a StoredSpace, &'a StoredMember), Error> {
+        let space = state.spaces.get(key).ok_or_else(|| space_not_found(key))?;
+        match space.members.get(&app_key.public_key()) {
+            Some(member) if member.permission >= required => Ok((space, member)),
+            _ => Err(Error::Api(
+                StatusCode::FORBIDDEN,
+                "insufficient space permission".into(),
+            )),
+        }
+    }
+
+    pub(crate) async fn pin_space_slabs(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        slabs: &[SlabPinParams],
+    ) -> Result<Vec<Hash256>, Error> {
+        let mut state = self.state.write().unwrap();
+        Self::space_access(&state, app_key, space_key, SpacePermission::Write)?;
+        #[cfg(test)]
+        state.pin_slabs_requests.push(slabs.to_vec());
+        record_pin_slabs(&mut state)?;
+        let ids: Vec<Hash256> = slabs.iter().map(SlabPinParams::digest).collect();
+        let space = state
+            .spaces
+            .get_mut(space_key)
+            .expect("checked by space_access");
+        space.slabs.extend(ids.iter().copied());
+        Ok(ids)
+    }
+
+    /// Pins an object to a space. Every slab must be pinned to the space or
+    /// to an account, the signatures must be the caller's, and an existing
+    /// object's encrypted data key cannot change. Account slabs are not
+    /// scoped to their account here, so "pinned by the caller" is "pinned by
+    /// anyone".
+    pub(crate) async fn pin_space_object(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        object: &SealedObject,
+    ) -> Result<(), PinObjectError> {
+        let account = app_key.public_key();
+        let id = object.id();
+        let mut state = self.state.write().unwrap();
+        let (space, _) = Self::space_access(&state, app_key, space_key, SpacePermission::Write)?;
+        if object.verify_signatures(&account, &id).is_err() {
+            return Err(PinObjectError::Client(Error::Api(
+                StatusCode::BAD_REQUEST,
+                "invalid object signature".into(),
+            )));
+        }
+        if object.slabs.iter().any(|slab| {
+            let digest = slab.digest();
+            !space.slabs.contains(&digest) && !state.slabs.contains_key(&digest)
+        }) {
+            return Err(PinObjectError::UnpinnedSlab);
+        }
+        let space = state
+            .spaces
+            .get_mut(space_key)
+            .expect("checked by space_access");
+        let now = now_micros();
+        match space.objects.get_mut(&id) {
+            Some(stored)
+                if stored
+                    .sealed
+                    .as_ref()
+                    .is_some_and(|s| s.encrypted_data_key != object.encrypted_data_key) =>
+            {
+                return Err(PinObjectError::Client(Error::Api(
+                    StatusCode::CONFLICT,
+                    "space object encrypted data key cannot change".into(),
+                )));
+            }
+            Some(stored) => {
+                stored.sealed = Some(object.clone());
+                stored.account = account;
+                stored.updated_at = now;
+            }
+            None => {
+                space.objects.insert(
+                    id,
+                    StoredSpaceObject {
+                        sealed: Some(object.clone()),
+                        account,
+                        updated_at: now,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn delete_space_object(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        key: &Hash256,
+    ) -> Result<(), Error> {
+        let mut state = self.state.write().unwrap();
+        Self::space_access(&state, app_key, space_key, SpacePermission::Delete)?;
+        let space = state
+            .spaces
+            .get_mut(space_key)
+            .expect("checked by space_access");
+        match space.objects.get_mut(key) {
+            Some(stored) if stored.sealed.is_some() => {
+                stored.sealed = None;
+                stored.updated_at = now_micros();
+                Ok(())
+            }
+            _ => Err(Error::Api(
+                StatusCode::NOT_FOUND,
+                format!("object {key} not found"),
+            )),
+        }
+    }
+
+    pub(crate) async fn space_object(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        key: &Hash256,
+    ) -> Result<SealedSpaceObject, Error> {
+        let state = self.state.read().unwrap();
+        let (space, _) = Self::space_access(&state, app_key, space_key, SpacePermission::Read)?;
+        space
+            .objects
+            .get(key)
+            .and_then(|stored| {
+                stored.sealed.clone().map(|sealed| SealedSpaceObject {
+                    key: *key,
+                    account: stored.account,
+                    object: sealed,
+                })
+            })
+            .ok_or_else(|| Error::Api(StatusCode::NOT_FOUND, format!("object {key} not found")))
+    }
+
+    pub(crate) async fn space_objects(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SealedSpaceObjectEvent>, Error> {
+        let state = self.state.read().unwrap();
+        let (space, _) = Self::space_access(&state, app_key, space_key, SpacePermission::Read)?;
+        let events: Vec<SealedSpaceObjectEvent> = space
+            .objects
+            .iter()
+            .map(|(id, stored)| SealedSpaceObjectEvent {
+                id: *id,
+                deleted: stored.sealed.is_none(),
+                updated_at: stored.updated_at,
+                object: stored.sealed.clone().map(|sealed| SealedSpaceObject {
+                    key: *id,
+                    account: stored.account,
+                    object: sealed,
+                }),
+            })
+            .collect();
+        Ok(page_events(events, |e| (e.updated_at, e.id), cursor, limit))
+    }
+
+    pub(crate) async fn space_object_summaries(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SealedSpaceObjectEventSummary>, Error> {
+        Ok(self
+            .space_objects(app_key, space_key, cursor, limit)
+            .await?
+            .into_iter()
+            .map(|event| SealedSpaceObjectEventSummary {
+                id: event.id,
+                deleted: event.deleted,
+                updated_at: event.updated_at,
+                object: event.object.map(|o| SealedSpaceObjectSummary {
+                    key: o.key,
+                    account: o.account,
+                    object: Self::summarize(o.object),
+                }),
+            })
+            .collect())
+    }
 }
 
 fn key_not_found(public_key: &PublicKey) -> Error {
@@ -805,6 +1128,74 @@ fn key_not_found(public_key: &PublicKey) -> Error {
         StatusCode::NOT_FOUND,
         format!("sharing key {public_key} not found"),
     )
+}
+
+fn space_not_found(key: &PublicKey) -> Error {
+    Error::Api(StatusCode::NOT_FOUND, format!("space {key} not found"))
+}
+
+/// Counts a slab pin request, failing it with the next injected error if
+/// there is one.
+fn record_pin_slabs(state: &mut State) -> Result<(), Error> {
+    state.pin_slabs_calls += 1;
+    match state.pin_slabs_errors.pop_front() {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Orders events by stream position, keeps those after `cursor`, and
+/// truncates to `limit`. Hash256 is not Ord, so ids are ordered by their raw
+/// bytes to give the cursor a total order to compare against.
+fn page_events<T>(
+    mut events: Vec<T>,
+    position: impl Fn(&T) -> (DateTime<Utc>, Hash256),
+    cursor: Option<ObjectsCursor>,
+    limit: Option<usize>,
+) -> Vec<T> {
+    let order = |(at, id): (DateTime<Utc>, Hash256)| (at, *AsRef::<[u8; 32]>::as_ref(&id));
+    events.sort_by_key(|e| order(position(e)));
+    if let Some(ObjectsCursor { after, id }) = cursor {
+        let cursor = order((after, id));
+        events.retain(|e| order(position(e)) > cursor);
+    }
+    events.truncate(limit.unwrap_or(usize::MAX));
+    events
+}
+
+impl StoredSpace {
+    /// Builds the record the space API returns to `member`, with figures
+    /// derived from the objects currently in the space. A slab repeated
+    /// within an object counts once per object.
+    fn response(&self, key: PublicKey, member: &StoredMember) -> SpaceResponse {
+        let (mut object_count, mut object_size, mut pinned_data, mut pinned_size) = (0, 0, 0, 0);
+        for sealed in self.objects.values().filter_map(|o| o.sealed.as_ref()) {
+            object_count += 1;
+            let mut seen = HashSet::new();
+            for slab in &sealed.slabs {
+                object_size += slab.length as u64;
+                if seen.insert(slab.digest()) {
+                    pinned_data += slab.min_shards as u64 * SECTOR_SIZE as u64;
+                    pinned_size += slab.sectors.len() as u64 * SECTOR_SIZE as u64;
+                }
+            }
+        }
+        SpaceResponse {
+            key,
+            owner: self.owner,
+            encrypted_name: self.encrypted_name.clone(),
+            encrypted_metadata: self.encrypted_metadata.clone(),
+            encrypted_key: member.encrypted_key.clone(),
+            permission: member.permission,
+            signature: self.signature.clone(),
+            object_count,
+            object_size,
+            pinned_data,
+            pinned_size,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
 }
 
 impl StoredSharingKey {
@@ -894,5 +1285,172 @@ mod timestamp_tests {
     fn now_micros_is_truncated() {
         let t = now_micros();
         assert_eq!(t.timestamp_subsec_nanos() % 1_000, 0);
+    }
+}
+
+#[cfg(test)]
+mod space_tests {
+    use super::*;
+    use crate::slabs::SlabVersion::V0;
+    use crate::spaces::SpaceKey;
+    use crate::{Sector, Slab};
+
+    /// The whole space flow against the mock, with the checks indexd makes:
+    /// membership scoping, slab pinning, signatures, and the data key rule.
+    #[sia_core_derive::cross_target_test]
+    async fn test_space_flow() {
+        let client = Client::new();
+        let owner = AppKey::import(rand::random());
+        let other = AppKey::import(rand::random());
+        let space = SpaceKey::from_seed(rand::random());
+        let key = space.public_key();
+
+        let req = AddSpaceRequest::new(&owner, &space, "photos", b"");
+        client.add_space(&owner, &req).await.expect("create failed");
+        assert!(matches!(
+            client.add_space(&owner, &req).await,
+            Err(Error::Api(StatusCode::CONFLICT, _))
+        ));
+        let mut tampered = req.clone();
+        tampered.encrypted_name = b"tampered".to_vec();
+        assert!(matches!(
+            client.add_space(&owner, &tampered).await,
+            Err(Error::Api(StatusCode::BAD_REQUEST, _))
+        ));
+
+        // only members see the space
+        let listed = client.spaces(&owner, None, None).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].permission, SpacePermission::Owner);
+        assert_eq!(listed[0].clone().open(&owner).unwrap().name, "photos");
+        assert!(client.spaces(&other, None, None).await.unwrap().is_empty());
+        assert!(matches!(
+            client.space(&other, &key).await,
+            Err(Error::Api(StatusCode::FORBIDDEN, _))
+        ));
+        assert!(matches!(
+            client.space(&owner, &PublicKey::new([9u8; 32])).await,
+            Err(Error::Api(StatusCode::NOT_FOUND, _))
+        ));
+
+        // an object's slabs must be pinned before it is
+        let slab = Slab {
+            version: V0,
+            encryption_key: [1u8; 32].into(),
+            min_shards: 1,
+            sectors: vec![Sector {
+                root: Hash256::new([2u8; 32]),
+                host_key: PublicKey::new([3u8; 32]),
+            }],
+            offset: 0,
+            length: 256,
+        };
+        let object = Object {
+            data_key: [9u8; 32].into(),
+            slabs: vec![slab.clone()],
+            ..Default::default()
+        };
+        let sealed = object.seal(&owner);
+        assert!(matches!(
+            client.pin_space_object(&owner, &key, &sealed).await,
+            Err(PinObjectError::UnpinnedSlab)
+        ));
+        let ids = client
+            .pin_space_slabs(&owner, &key, &[SlabPinParams::from(&slab)])
+            .await
+            .unwrap();
+        assert_eq!(ids, vec![slab.digest()]);
+        assert_eq!(
+            client.pinned_slabs(),
+            0,
+            "space slabs are not account slabs"
+        );
+        assert_eq!(client.pin_slabs_calls(), 1);
+
+        // the caller must be a member and the signatures must be theirs
+        assert!(matches!(
+            client.pin_space_object(&other, &key, &sealed).await,
+            Err(PinObjectError::Client(Error::Api(StatusCode::FORBIDDEN, _)))
+        ));
+        assert!(matches!(
+            client
+                .pin_space_object(&owner, &key, &object.seal(&other))
+                .await,
+            Err(PinObjectError::Client(Error::Api(
+                StatusCode::BAD_REQUEST,
+                _
+            )))
+        ));
+        client
+            .pin_space_object(&owner, &key, &sealed)
+            .await
+            .expect("pin failed");
+
+        let fetched = client
+            .space_object(&owner, &key, &object.id())
+            .await
+            .unwrap();
+        assert_eq!(fetched.key, object.id());
+        assert_eq!(fetched.account, owner.public_key());
+        assert_eq!(fetched.object, sealed);
+
+        // re-sealing wraps the data key under a fresh nonce, which indexd
+        // rejects for an existing object
+        let resealed = object.seal(&owner);
+        assert_ne!(resealed.encrypted_data_key, sealed.encrypted_data_key);
+        assert!(matches!(
+            client.pin_space_object(&owner, &key, &resealed).await,
+            Err(PinObjectError::Client(Error::Api(StatusCode::CONFLICT, _)))
+        ));
+
+        let record = client.space(&owner, &key).await.unwrap();
+        assert_eq!(record.object_count, 1);
+        assert_eq!(record.object_size, 256);
+        assert_eq!(record.pinned_data, SECTOR_SIZE as u64);
+        assert_eq!(record.pinned_size, SECTOR_SIZE as u64);
+
+        // events page from the cursor, and deletion leaves a tombstone
+        let events = client
+            .space_objects(&owner, &key, None, None)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].deleted);
+        assert_eq!(events[0].object.as_ref().map(|o| o.key), Some(object.id()));
+        let cursor = ObjectsCursor {
+            after: events[0].updated_at,
+            id: events[0].id,
+        };
+        assert!(
+            client
+                .space_objects(&owner, &key, Some(cursor), None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        assert!(matches!(
+            client.delete_space_object(&other, &key, &object.id()).await,
+            Err(Error::Api(StatusCode::FORBIDDEN, _))
+        ));
+        client
+            .delete_space_object(&owner, &key, &object.id())
+            .await
+            .expect("delete failed");
+        assert!(matches!(
+            client.delete_space_object(&owner, &key, &object.id()).await,
+            Err(Error::Api(StatusCode::NOT_FOUND, _))
+        ));
+        assert!(matches!(
+            client.space_object(&owner, &key, &object.id()).await,
+            Err(Error::Api(StatusCode::NOT_FOUND, _))
+        ));
+        let summaries = client
+            .space_object_summaries(&owner, &key, None, None)
+            .await
+            .unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert!(summaries[0].deleted && summaries[0].object.is_none());
+        assert_eq!(client.space(&owner, &key).await.unwrap().object_count, 0);
     }
 }
