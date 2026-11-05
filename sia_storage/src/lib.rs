@@ -63,6 +63,7 @@ pub mod preauthorized_keys;
 mod rhp4;
 mod sdk;
 mod shared_sdk;
+mod shared_space;
 mod sharing;
 mod slabs;
 mod spaces;
@@ -74,6 +75,7 @@ pub mod mock;
 
 pub use sdk::{Error, Sdk};
 pub use shared_sdk::SharedSdk;
+pub use shared_space::SharedSpace;
 pub use sharing::{KeyRecord, SharingError, SharingKey};
 pub use spaces::{Space, SpaceError, SpaceKey, SpaceOptions, SpacePermission};
 

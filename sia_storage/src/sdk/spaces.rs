@@ -1,10 +1,8 @@
 //! The `Sdk` shared space methods. A descendant of the `sdk` module so they
 //! can reach [`Sdk`]'s private fields.
 
-use sia_core::signing::PublicKey;
-
 use crate::spaces::{AddSpaceRequest, SpaceError, SpaceKey};
-use crate::{Sdk, Space, SpaceOptions};
+use crate::{Sdk, SharedSpace, Space, SpaceOptions};
 
 impl Sdk {
     /// Creates a shared space owned by the account, with the account as its
@@ -13,7 +11,10 @@ impl Sdk {
         let key = SpaceKey::from_seed(rand::random());
         let req = AddSpaceRequest::new(&self.app_key, &key, &options.name, &options.metadata);
         self.api_client.add_space(&self.app_key, &req).await?;
-        self.space(&key.public_key()).await
+        self.api_client
+            .space(&self.app_key, &key.public_key())
+            .await?
+            .open(&self.app_key, &key.public_key())
     }
 
     /// Lists the spaces the account owns or has joined, newest first. Omit
@@ -27,17 +28,17 @@ impl Sdk {
             .spaces(&self.app_key, offset, limit)
             .await?
             .into_iter()
-            .map(|record| record.open(&self.app_key))
+            .map(|record| {
+                let key = record.key;
+                record.open(&self.app_key, &key)
+            })
             .collect()
     }
 
-    /// Fetches the indexer's current record of the space identified by `key`.
-    async fn space(&self, key: &PublicKey) -> Result<Space, SpaceError> {
-        let record = self.api_client.space(&self.app_key, key).await?;
-        if record.key != *key {
-            return Err(SpaceError::KeyMismatch);
-        }
-        record.open(&self.app_key)
+    /// Opens the space `key` for this account's use. The account must be a
+    /// member, which the indexer checks on each request.
+    pub fn shared_space(&self, key: SpaceKey) -> SharedSpace {
+        SharedSpace::new(key, self.app_key.clone(), self.api_client.clone())
     }
 }
 

@@ -19,7 +19,9 @@ use crate::hosts::Host;
 use crate::preauthorized_keys::PreAuthorizedKey;
 use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
 use crate::slabs::{SealedObjectSummary, Slab};
-use crate::spaces::{AddSpaceRequest, SpacePermission, SpaceResponse, space_sig_hash};
+use crate::spaces::{
+    AddSpaceRequest, SpacePermission, SpaceResponse, UpdateSpaceRequest, space_sig_hash,
+};
 use crate::time::Duration;
 use crate::{
     Account, App, AppKey, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject,
@@ -880,11 +882,57 @@ impl Client {
     pub(crate) async fn space(
         &self,
         app_key: &AppKey,
-        key: &PublicKey,
+        space_key: &PublicKey,
     ) -> Result<SpaceResponse, Error> {
         let state = self.state.read().unwrap();
-        let (space, member) = Self::space_access(&state, app_key, key, SpacePermission::Read)?;
-        Ok(space.response(*key, member))
+        let (space, member) =
+            Self::space_access(&state, app_key, space_key, SpacePermission::Read)?;
+        Ok(space.response(*space_key, member))
+    }
+
+    /// Replaces a space's name and metadata. Admins only, and the signature
+    /// must verify under the space key for the space's owner.
+    pub(crate) async fn update_space(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        req: &UpdateSpaceRequest,
+    ) -> Result<(), Error> {
+        let mut state = self.state.write().unwrap();
+        Self::space_access(&state, app_key, space_key, SpacePermission::Admin)?;
+        let space = state
+            .spaces
+            .get_mut(space_key)
+            .expect("checked by space_access");
+        let sig_hash = space_sig_hash(
+            space_key,
+            &space.owner,
+            &req.encrypted_name,
+            &req.encrypted_metadata,
+        );
+        if !space_key.verify(sig_hash.as_ref(), &req.signature) {
+            return Err(Error::Api(
+                StatusCode::BAD_REQUEST,
+                "invalid space signature".into(),
+            ));
+        }
+        space.encrypted_name = req.encrypted_name.clone();
+        space.encrypted_metadata = req.encrypted_metadata.clone();
+        space.signature = req.signature.clone();
+        space.updated_at = now_micros();
+        Ok(())
+    }
+
+    /// Deletes a space. Only its owner may.
+    pub(crate) async fn delete_space(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+    ) -> Result<(), Error> {
+        let mut state = self.state.write().unwrap();
+        Self::space_access(&state, app_key, space_key, SpacePermission::Owner)?;
+        state.spaces.remove(space_key);
+        Ok(())
     }
 
     /// Resolves the caller's access to a space the way indexd does: a missing
@@ -893,10 +941,15 @@ impl Client {
     fn space_access<'a>(
         state: &'a State,
         app_key: &AppKey,
-        key: &PublicKey,
+        space_key: &PublicKey,
         required: SpacePermission,
     ) -> Result<(&'a StoredSpace, &'a StoredMember), Error> {
-        let space = state.spaces.get(key).ok_or_else(|| space_not_found(key))?;
+        let space = state.spaces.get(space_key).ok_or_else(|| {
+            Error::Api(
+                StatusCode::NOT_FOUND,
+                format!("space {space_key} not found"),
+            )
+        })?;
         match space.members.get(&app_key.public_key()) {
             Some(member) if member.permission >= required => Ok((space, member)),
             _ => Err(Error::Api(
@@ -1057,10 +1110,6 @@ fn key_not_found(public_key: &PublicKey) -> Error {
         StatusCode::NOT_FOUND,
         format!("sharing key {public_key} not found"),
     )
-}
-
-fn space_not_found(key: &PublicKey) -> Error {
-    Error::Api(StatusCode::NOT_FOUND, format!("space {key} not found"))
 }
 
 /// Counts a slab pin request, failing it with the next injected error if
@@ -1274,7 +1323,7 @@ mod space_tests {
         let listed = client.spaces(&owner, None, None).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].permission, SpacePermission::Owner);
-        assert_eq!(listed[0].clone().open(&owner).unwrap().name, "photos");
+        assert_eq!(listed[0].clone().open(&owner, &key).unwrap().name, "photos");
         assert!(client.spaces(&other, None, None).await.unwrap().is_empty());
         assert!(matches!(
             client.space(&other, &key).await,
@@ -1402,5 +1451,37 @@ mod space_tests {
         assert_eq!(summaries.len(), 1);
         assert!(summaries[0].deleted && summaries[0].object.is_none());
         assert_eq!(client.space(&owner, &key).await.unwrap().object_count, 0);
+
+        // only admins rename the space, and only the owner deletes it
+        let update = UpdateSpaceRequest::new(&space, &owner.public_key(), "team", b"");
+        assert!(matches!(
+            client.update_space(&other, &key, &update).await,
+            Err(Error::Api(StatusCode::FORBIDDEN, _))
+        ));
+        let mut forged = update.clone();
+        forged.encrypted_name = b"forged".to_vec();
+        assert!(matches!(
+            client.update_space(&owner, &key, &forged).await,
+            Err(Error::Api(StatusCode::BAD_REQUEST, _))
+        ));
+        client
+            .update_space(&owner, &key, &update)
+            .await
+            .expect("update failed");
+        let renamed = client.space(&owner, &key).await.unwrap();
+        assert_eq!(renamed.open(&owner, &key).unwrap().name, "team");
+
+        assert!(matches!(
+            client.delete_space(&other, &key).await,
+            Err(Error::Api(StatusCode::FORBIDDEN, _))
+        ));
+        client
+            .delete_space(&owner, &key)
+            .await
+            .expect("delete failed");
+        assert!(matches!(
+            client.space(&owner, &key).await,
+            Err(Error::Api(StatusCode::NOT_FOUND, _))
+        ));
     }
 }

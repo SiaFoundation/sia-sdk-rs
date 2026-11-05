@@ -21,7 +21,7 @@ use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
 use crate::preauthorized_keys::PreAuthorizedKey;
 use crate::sharing::{KeyRequest, SharedObjectRequest};
-use crate::spaces::{AddSpaceRequest, SpaceResponse};
+use crate::spaces::{AddSpaceRequest, SpaceResponse, UpdateSpaceRequest};
 use crate::time::Duration;
 use crate::{
     Account, AppKey, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject,
@@ -174,9 +174,15 @@ impl Client {
             app_key: app_key.public_key(),
             signature: app_key.sign(sig_hash.as_ref()),
         };
-        post_json::<_, EmptyResponse>(&self.client, register_url, signing_key, Some(&body))
-            .await
-            .map(|_| ())
+        send_json::<_, EmptyResponse>(
+            &self.client,
+            register_url,
+            Method::POST,
+            signing_key,
+            Some(&body),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Returns all usable hosts.
@@ -292,7 +298,7 @@ impl Client {
             url.query_pairs_mut()
                 .append_pair("before", &before.to_rfc3339()); // indexd expects RFC3339
         }
-        post_json::<(), EmptyResponse>(&self.client, url, app_key, None)
+        send_json::<(), EmptyResponse>(&self.client, url, Method::POST, app_key, None)
             .await
             .map(|_| ())
     }
@@ -367,7 +373,19 @@ impl Client {
         body: Option<&S>,
     ) -> Result<D, Error> {
         let url = self.url.join(path)?;
-        post_json(&self.client, url, signing_key, body).await
+        send_json(&self.client, url, Method::POST, signing_key, body).await
+    }
+
+    /// Helper to send a signed PUT request with a JSON body and parse the
+    /// JSON or CBOR response.
+    async fn put_json<S: Serialize, D: DeserializeOwned>(
+        &self,
+        path: &str,
+        signing_key: &PrivateKey,
+        body: Option<&S>,
+    ) -> Result<D, Error> {
+        let url = self.url.join(path)?;
+        send_json(&self.client, url, Method::PUT, signing_key, body).await
     }
 
     /// Creates a signed url that can be shared with others
@@ -658,9 +676,31 @@ impl Client {
     pub(crate) async fn space(
         &self,
         app_key: &AppKey,
-        key: &PublicKey,
+        space_key: &PublicKey,
     ) -> Result<SpaceResponse, Error> {
-        self.get_json::<_, ()>(&format!("spaces/{key}"), &app_key.0, None)
+        self.get_json::<_, ()>(&format!("spaces/{space_key}"), &app_key.0, None)
+            .await
+    }
+
+    /// Replaces a space's name and metadata.
+    pub(crate) async fn update_space(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        req: &UpdateSpaceRequest,
+    ) -> Result<(), Error> {
+        self.put_json::<_, EmptyResponse>(&format!("spaces/{space_key}"), &app_key.0, Some(req))
+            .await
+            .map(|_| ())
+    }
+
+    /// Deletes a space along with its objects, members, and invitations.
+    pub(crate) async fn delete_space(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+    ) -> Result<(), Error> {
+        self.delete(&format!("spaces/{space_key}"), &app_key.0)
             .await
     }
 
@@ -668,13 +708,17 @@ impl Client {
     pub(crate) async fn pin_space_slabs(
         &self,
         app_key: &AppKey,
-        space: &PublicKey,
+        space_key: &PublicKey,
         slabs: &[SlabPinParams],
     ) -> Result<Vec<Hash256>, Error> {
         // indexd encodes an empty list as null
-        self.post_json(&format!("spaces/{space}/slabs"), &app_key.0, Some(&slabs))
-            .await
-            .map(Option::unwrap_or_default)
+        self.post_json(
+            &format!("spaces/{space_key}/slabs"),
+            &app_key.0,
+            Some(&slabs),
+        )
+        .await
+        .map(Option::unwrap_or_default)
     }
 
     /// Pins an object to a space. An object with the same ID is overwritten,
@@ -682,12 +726,12 @@ impl Client {
     pub(crate) async fn pin_space_object(
         &self,
         app_key: &AppKey,
-        space: &PublicKey,
+        space_key: &PublicKey,
         object: &SealedObject,
     ) -> Result<(), PinObjectError> {
         let req = PinObjectRequest::from(object);
         self.post_json::<_, EmptyResponse>(
-            &format!("spaces/{space}/objects"),
+            &format!("spaces/{space_key}/objects"),
             &app_key.0,
             Some(&req),
         )
@@ -700,10 +744,10 @@ impl Client {
     pub(crate) async fn delete_space_object(
         &self,
         app_key: &AppKey,
-        space: &PublicKey,
+        space_key: &PublicKey,
         key: &Hash256,
     ) -> Result<(), Error> {
-        self.delete(&format!("spaces/{space}/objects/{key}"), &app_key.0)
+        self.delete(&format!("spaces/{space_key}/objects/{key}"), &app_key.0)
             .await
     }
 
@@ -711,38 +755,50 @@ impl Client {
     pub(crate) async fn space_object(
         &self,
         app_key: &AppKey,
-        space: &PublicKey,
+        space_key: &PublicKey,
         key: &Hash256,
     ) -> Result<SealedObject, Error> {
-        self.get_json::<_, ()>(&format!("spaces/{space}/objects/{key}"), &app_key.0, None)
-            .await
+        self.get_json::<_, ()>(
+            &format!("spaces/{space_key}/objects/{key}"),
+            &app_key.0,
+            None,
+        )
+        .await
     }
 
     /// Fetches a page of a space's object events.
     pub(crate) async fn space_objects(
         &self,
         app_key: &AppKey,
-        space: &PublicKey,
+        space_key: &PublicKey,
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
     ) -> Result<Vec<SealedObjectEvent>, Error> {
         let query = Self::objects_query(cursor, limit);
-        self.get_list(&format!("spaces/{space}/objects"), &app_key.0, Some(&query))
-            .await
+        self.get_list(
+            &format!("spaces/{space_key}/objects"),
+            &app_key.0,
+            Some(&query),
+        )
+        .await
     }
 
     /// Fetches a page of a space's object events without the objects' slabs.
     pub(crate) async fn space_object_summaries(
         &self,
         app_key: &AppKey,
-        space: &PublicKey,
+        space_key: &PublicKey,
         cursor: Option<ObjectsCursor>,
         limit: Option<usize>,
     ) -> Result<Vec<SealedObjectEventSummary>, Error> {
         let mut query = Self::objects_query(cursor, limit);
         query.push(("includeslabs", "false".to_string()));
-        self.get_list(&format!("spaces/{space}/objects"), &app_key.0, Some(&query))
-            .await
+        self.get_list(
+            &format!("spaces/{space_key}/objects"),
+            &app_key.0,
+            Some(&query),
+        )
+        .await
     }
 }
 
@@ -806,9 +862,10 @@ async fn get_json<D: DeserializeOwned, Q: Serialize + ?Sized>(
     Client::handle_response(builder.send().await?).await
 }
 
-async fn post_json<S: Serialize, D: DeserializeOwned>(
+async fn send_json<S: Serialize, D: DeserializeOwned>(
     client: &reqwest::Client,
     url: Url,
+    method: Method,
     signing_key: &PrivateKey,
     body: Option<&S>,
 ) -> Result<D, Error> {
@@ -816,11 +873,14 @@ async fn post_json<S: Serialize, D: DeserializeOwned>(
     let params = &sign(
         signing_key,
         &url,
-        Method::POST,
+        method.clone(),
         body.as_deref(),
         Utc::now() + Duration::from_secs(60),
     );
-    let mut builder = client.post(url).timeout(DEFAULT_API_TIMEOUT).query(params);
+    let mut builder = client
+        .request(method, url)
+        .timeout(DEFAULT_API_TIMEOUT)
+        .query(params);
     if let Some(body) = body {
         builder = builder.body(body);
     }
@@ -2645,6 +2705,48 @@ mod native_tests {
             client.space(&app_key, &spaces[0].key).await.unwrap(),
             spaces[0]
         );
+    }
+
+    #[tokio::test]
+    async fn test_update_space() {
+        let app_key = AppKey::import(rand::random());
+        let space = SpaceKey::from_seed(rand::random());
+        let req = UpdateSpaceRequest::new(&space, &app_key.public_key(), "team", b"meta");
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("PUT", format!("/spaces/{}", space.public_key())),
+                request::body(serde_json::to_string(&req).unwrap()),
+            ])
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::NO_CONTENT)
+                    .body("")
+                    .unwrap(),
+            ),
+        );
+
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        client
+            .update_space(&app_key, &space.public_key(), &req)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_space() {
+        let app_key = AppKey::import(rand::random());
+        let space = PrivateKey::from_seed(&rand::random()).public_key();
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("DELETE", format!("/spaces/{space}")))
+                .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        client.delete_space(&app_key, &space).await.unwrap();
     }
 
     #[tokio::test]

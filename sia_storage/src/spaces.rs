@@ -166,7 +166,7 @@ pub enum SpaceError {
 /// The hash the space key signs over a space's identity, name, and metadata.
 /// The indexer verifies it on create and update; members verify it on read.
 pub(crate) fn space_sig_hash(
-    key: &PublicKey,
+    space_key: &PublicKey,
     owner: &PublicKey,
     encrypted_name: &[u8],
     encrypted_metadata: &[u8],
@@ -174,7 +174,7 @@ pub(crate) fn space_sig_hash(
     let mut state = Params::new().hash_length(32).to_state();
     // length-prefixed string and byte slices, raw fixed-size keys
     "indexd/space/v1".to_string().encode(&mut state).unwrap();
-    key.encode(&mut state).unwrap();
+    space_key.encode(&mut state).unwrap();
     owner.encode(&mut state).unwrap();
     encrypted_name.encode(&mut state).unwrap();
     encrypted_metadata.encode(&mut state).unwrap();
@@ -202,9 +202,35 @@ impl AddSpaceRequest {
     /// Builds the request that creates `space`, owned by the account holding
     /// `app_key`.
     pub(crate) fn new(app_key: &AppKey, space: &SpaceKey, name: &str, metadata: &[u8]) -> Self {
-        let key = space.public_key();
-        let owner = app_key.public_key();
-        let encrypted_key = space.export(app_key);
+        let fields = UpdateSpaceRequest::new(space, &app_key.public_key(), name, metadata);
+        Self {
+            key: space.public_key(),
+            encrypted_key: space.export(app_key),
+            encrypted_name: fields.encrypted_name,
+            encrypted_metadata: fields.encrypted_metadata,
+            signature: fields.signature,
+        }
+    }
+}
+
+/// The body of a request to replace a space's name and metadata.
+#[serde_as]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateSpaceRequest {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde_as(as = "Base64")]
+    pub encrypted_name: Vec<u8>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde_as(as = "Base64")]
+    pub encrypted_metadata: Vec<u8>,
+    pub signature: Signature,
+}
+
+impl UpdateSpaceRequest {
+    /// Encrypts `name` and `metadata` for `space` and signs them with its key.
+    /// `owner` is the account the space belongs to, which the signature covers.
+    pub(crate) fn new(space: &SpaceKey, owner: &PublicKey, name: &str, metadata: &[u8]) -> Self {
         let cipher_key = space.cipher_key();
         let encrypted_name = if name.is_empty() {
             Vec::new()
@@ -216,10 +242,13 @@ impl AddSpaceRequest {
         } else {
             seal_metadata(&cipher_key, metadata)
         };
-        let sig_hash = space_sig_hash(&key, &owner, &encrypted_name, &encrypted_metadata);
+        let sig_hash = space_sig_hash(
+            &space.public_key(),
+            owner,
+            &encrypted_name,
+            &encrypted_metadata,
+        );
         Self {
-            key,
-            encrypted_key,
             encrypted_name,
             encrypted_metadata,
             signature: space.0.sign(sig_hash.as_ref()),
@@ -255,8 +284,12 @@ pub(crate) struct SpaceResponse {
 }
 
 impl SpaceResponse {
-    /// Verifies and decrypts the space for the member holding `app_key`.
-    pub(crate) fn open(self, app_key: &AppKey) -> Result<Space, SpaceError> {
+    /// Verifies and decrypts the space `space_key` for the member holding
+    /// `app_key`.
+    pub(crate) fn open(self, app_key: &AppKey, space_key: &PublicKey) -> Result<Space, SpaceError> {
+        if self.key != *space_key {
+            return Err(SpaceError::KeyMismatch);
+        }
         let sig_hash = space_sig_hash(
             &self.key,
             &self.owner,
@@ -367,7 +400,7 @@ mod tests {
         assert_eq!(req.key, space.public_key());
 
         let opened = owner_response(&app_key, &req)
-            .open(&app_key)
+            .open(&app_key, &space.public_key())
             .expect("should open");
         assert_eq!(opened.key.0.as_ref(), space.0.as_ref());
         assert_eq!(opened.owner, app_key.public_key());
@@ -381,7 +414,7 @@ mod tests {
         tampered.encrypted_name =
             AddSpaceRequest::new(&app_key, &space, "videos", b"").encrypted_name;
         assert!(matches!(
-            owner_response(&app_key, &tampered).open(&app_key),
+            owner_response(&app_key, &tampered).open(&app_key, &space.public_key()),
             Err(SpaceError::InvalidSignature)
         ));
 
@@ -393,14 +426,20 @@ mod tests {
             &[9u8; 32],
         );
         assert!(matches!(
-            owner_response(&app_key, &swapped).open(&app_key),
+            owner_response(&app_key, &swapped).open(&app_key, &space.public_key()),
+            Err(SpaceError::KeyMismatch)
+        ));
+
+        // a record for some other space is rejected before anything is checked
+        assert!(matches!(
+            owner_response(&app_key, &req).open(&app_key, &PublicKey::new([8u8; 32])),
             Err(SpaceError::KeyMismatch)
         ));
 
         // only the member the key was wrapped for can unwrap it
         let other = AppKey::import([3u8; 32]);
         assert!(matches!(
-            owner_response(&app_key, &req).open(&other),
+            owner_response(&app_key, &req).open(&other, &space.public_key()),
             Err(SpaceError::Decryption(_))
         ));
     }
@@ -418,7 +457,7 @@ mod tests {
         assert!(json.get("encryptedMetadata").is_none());
 
         let opened = owner_response(&app_key, &req)
-            .open(&app_key)
+            .open(&app_key, &space.public_key())
             .expect("should open");
         assert_eq!(opened.name, "");
         assert!(opened.metadata.is_empty());
@@ -446,5 +485,35 @@ mod tests {
 
         // each level includes the ones before it
         assert!(Read < Write && Write < Delete && Delete < Admin && Admin < Owner);
+    }
+
+    #[sia_core_derive::cross_target_test]
+    fn test_update_space_request_opens_as_space() {
+        let app_key = AppKey::import([1u8; 32]);
+        let space = SpaceKey::from_seed([2u8; 32]);
+        let mut response = owner_response(
+            &app_key,
+            &AddSpaceRequest::new(&app_key, &space, "photos", b"old"),
+        );
+
+        let update = UpdateSpaceRequest::new(&space, &app_key.public_key(), "team", b"new");
+        response.encrypted_name = update.encrypted_name;
+        response.encrypted_metadata = update.encrypted_metadata;
+        response.signature = update.signature;
+        let opened = response
+            .clone()
+            .open(&app_key, &space.public_key())
+            .expect("should open");
+        assert_eq!(opened.name, "team");
+        assert_eq!(opened.metadata, b"new");
+
+        // signed for a different owner, the update does not verify for this space
+        let other_owner =
+            UpdateSpaceRequest::new(&space, &PublicKey::new([3u8; 32]), "team", b"new");
+        response.signature = other_owner.signature;
+        assert!(matches!(
+            response.open(&app_key, &space.public_key()),
+            Err(SpaceError::InvalidSignature)
+        ));
     }
 }
