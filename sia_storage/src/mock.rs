@@ -113,3 +113,31 @@ impl Default for MockNetwork {
         Self::new()
     }
 }
+
+/// A mock indexer that lists hosts the caller runs, such as fake hosts that
+/// speak the real protocol. The [`Sdk`] it builds reaches them over the real
+/// transport: WebTransport in the browser and SiaMux elsewhere.
+pub struct MockIndexer {
+    api: app_client::mock::Client,
+}
+
+impl MockIndexer {
+    /// A mock indexer that lists `hosts`.
+    pub fn new(hosts: Vec<Host>) -> Self {
+        let api = app_client::mock::Client::new();
+        api.add_hosts(hosts);
+        Self { api }
+    }
+
+    /// Builds an [`Sdk`] with a connection pool and price cache of its own.
+    /// SDKs that [`Builder`](crate::Builder) makes share one per tokio
+    /// runtime, or per page in the browser.
+    pub async fn sdk(&self, app_key: AppKey) -> Result<Sdk, BuilderError> {
+        Sdk::with_backends(
+            app_client::Client::Mock(self.api.clone()),
+            Client::new(),
+            Arc::new(app_key),
+        )
+        .await
+    }
+}
