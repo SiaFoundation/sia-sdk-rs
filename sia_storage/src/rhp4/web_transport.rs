@@ -278,6 +278,20 @@ impl Stream {
         }
         Ok(())
     }
+
+    /// Writes `request`, then starts closing the sending side without
+    /// waiting for it. Hosts on coreutils 0.25.1 and later stop reading a
+    /// stream when an RPC ends, and if that reaches Firefox while this side
+    /// is still open, Firefox errors the readable side and the rest of the
+    /// response is lost.
+    async fn write_request(&mut self, request: &[u8]) -> Result<(), std::io::Error> {
+        self.write_chunks(request).await?;
+        let close = JsFuture::from(self.writer.close());
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = close.await;
+        });
+        Ok(())
+    }
 }
 
 /// Explicitly close both halves of the bidirectional stream when dropped.
@@ -520,7 +534,8 @@ impl Client {
 }
 
 // RPC writes: encode request into a Vec<u8> (instant — Vec impls AsyncWrite),
-// then send bounded chunks, awaiting each JS Promise for backpressure.
+// then send bounded chunks, awaiting each JS Promise for backpressure, and
+// close the writer.
 //
 // RPC reads: use AsyncRead on Stream directly. The JS reader.read() already
 // returns large chunks from the network buffer, which Stream keeps a view of
@@ -537,7 +552,7 @@ impl Client {
         stream.set_idle_timeout(Some(idle_timeout));
         let mut buf = Vec::new();
         let req = RPCSettings::send_request(&mut buf).await?;
-        stream.write_chunks(&buf).await?;
+        stream.write_request(&buf).await?;
         let resp = req.complete(&mut stream).await?;
         Ok(resp.settings.prices)
     }
@@ -559,7 +574,7 @@ impl Client {
         let bytes = data.len() as u64;
         let req = RPCWriteSector::send_request(&mut buf, prices, token, data.clone()).await?;
         let start = Instant::now();
-        stream.write_chunks(&buf).await?;
+        stream.write_request(&buf).await?;
         let resp = req.complete(&mut stream).await?;
         metrics.record_transfer(
             host.public_key,
@@ -591,7 +606,7 @@ impl Client {
             RPCReadSector::send_request(&mut buf, prices, token, root, range.start, range.len())
                 .await?;
         let start = Instant::now();
-        stream.write_chunks(&buf).await?;
+        stream.write_request(&buf).await?;
         let resp = req.complete(&mut stream).await?;
         metrics.record_transfer(
             host.public_key,
