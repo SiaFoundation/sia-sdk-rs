@@ -3,7 +3,7 @@
 //! uses, and behaves as its [`HostSpec`] says.
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -13,7 +13,7 @@ use chrono::Utc;
 use sia_core::encoding::SiaEncodable;
 use sia_core::encoding_async::AsyncSiaDecodable;
 use sia_core::rhp4::protocol::RPCError;
-use sia_core::rhp4::{AccountToken, HostPrices, HostSettings, SECTOR_SIZE};
+use sia_core::rhp4::{AccountToken, HostPrices, HostSettings, SECTOR_SIZE, sector_root};
 use sia_core::signing::PrivateKey;
 use sia_core::types::{Address, Currency, Hash256, Specifier};
 use tokio::task::JoinHandle;
@@ -28,8 +28,16 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 pub struct Host {
     pub info: FakeHost,
     state: Arc<State>,
-    endpoint: Arc<Endpoint<Server>>,
-    accepting: JoinHandle<()>,
+    listener: Listener,
+}
+
+enum Listener {
+    Serving {
+        endpoint: Arc<Endpoint<Server>>,
+        accepting: JoinHandle<()>,
+    },
+    /// A bound socket nothing reads, so packets to the port go unanswered.
+    Ignoring { _socket: UdpSocket },
 }
 
 struct State {
@@ -42,6 +50,7 @@ struct State {
 #[derive(Default)]
 struct Counters {
     handshakes: AtomicU64,
+    sessions: AtomicU64,
     open_streams: AtomicU64,
     settings: AtomicU64,
     expired_tokens: AtomicU64,
@@ -49,58 +58,82 @@ struct Counters {
 
 impl Host {
     pub fn start(spec: HostSpec, identity: &Identity) -> Result<Self, Error> {
-        let endpoint = Arc::new(Endpoint::server(
-            ServerConfig::builder()
-                .with_bind_address((Ipv4Addr::LOCALHOST, 0).into())
-                .with_identity(identity.clone_identity())
-                // Keeps sessions open while they sit idle between a test's
-                // steps.
-                .keep_alive_interval(Some(Duration::from_secs(3)))
-                .build(),
-        )?);
-        let key = PrivateKey::from_seed(&rand::random());
-        let info = FakeHost {
-            public_key: key.public_key(),
-            address: ([127, 0, 0, 1], endpoint.local_addr()?.port()).into(),
-        };
+        let ignoring = spec.handshake == Handshake::Ignore;
         let state = Arc::new(State {
-            key,
+            key: PrivateKey::from_seed(&rand::random()),
             spec: RwLock::new(spec),
             counters: Counters::default(),
             sectors: Mutex::default(),
         });
-        let accepting = tokio::spawn({
-            let endpoint = endpoint.clone();
-            let state = state.clone();
-            async move {
-                loop {
-                    let incoming = endpoint.accept().await;
-                    tokio::spawn(serve_session(state.clone(), incoming));
+        let (listener, port) = if ignoring {
+            let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+            let port = socket.local_addr()?.port();
+            (Listener::Ignoring { _socket: socket }, port)
+        } else {
+            let endpoint = Arc::new(Endpoint::server(
+                ServerConfig::builder()
+                    .with_bind_address((Ipv4Addr::LOCALHOST, 0).into())
+                    .with_identity(identity.clone_identity())
+                    // Keeps sessions open while they sit idle between a
+                    // test's steps.
+                    .keep_alive_interval(Some(Duration::from_secs(3)))
+                    .build(),
+            )?);
+            let port = endpoint.local_addr()?.port();
+            let accepting = tokio::spawn({
+                let endpoint = endpoint.clone();
+                let state = state.clone();
+                async move {
+                    loop {
+                        let incoming = endpoint.accept().await;
+                        tokio::spawn(serve_session(state.clone(), incoming));
+                    }
                 }
-            }
-        });
+            });
+            (
+                Listener::Serving {
+                    endpoint,
+                    accepting,
+                },
+                port,
+            )
+        };
         Ok(Self {
-            info,
+            info: FakeHost {
+                public_key: state.key.public_key(),
+                address: ([127, 0, 0, 1], port).into(),
+            },
             state,
-            endpoint,
-            accepting,
+            listener,
         })
     }
 
     pub async fn stop(self) {
-        self.accepting.abort();
-        self.endpoint.close(0u32.into(), b"host stopped");
-        self.endpoint.wait_idle().await;
+        if let Listener::Serving {
+            endpoint,
+            accepting,
+        } = self.listener
+        {
+            accepting.abort();
+            endpoint.close(0u32.into(), b"host stopped");
+            endpoint.wait_idle().await;
+        }
     }
 
-    pub fn set(&self, spec: HostSpec) {
-        *self.state.spec.write().unwrap() = spec;
+    pub fn set(&self, spec: HostSpec) -> Result<(), Error> {
+        let mut current = self.state.spec.write().unwrap();
+        if (current.handshake == Handshake::Ignore) != (spec.handshake == Handshake::Ignore) {
+            return Err("a host can't switch to or from ignoring handshakes".into());
+        }
+        *current = spec;
+        Ok(())
     }
 
     pub fn stats(&self) -> HostStats {
         let c = &self.state.counters;
         HostStats {
             handshakes: c.handshakes.load(Ordering::Relaxed),
+            sessions: c.sessions.load(Ordering::Relaxed),
             open_streams: c.open_streams.load(Ordering::Relaxed),
             settings: c.settings.load(Ordering::Relaxed),
             expired_tokens: c.expired_tokens.load(Ordering::Relaxed),
@@ -122,6 +155,7 @@ async fn serve_session(state: Arc<State>, incoming: IncomingSession) {
     let Ok(connection) = request.accept().await else {
         return;
     };
+    state.counters.sessions.fetch_add(1, Ordering::Relaxed);
     while let Ok((send, recv)) = connection.accept_bi().await {
         let state = state.clone();
         tokio::spawn(async move {
@@ -156,6 +190,9 @@ async fn serve_stream(
             let mut data = vec![0u8; length];
             recv.read_exact(&mut data).await?;
             check_token(state, &spec, &token).map(|()| {
+                if spec.discard_sectors {
+                    return encode(&sector_root(&data));
+                }
                 let sector = Sector::new(data.into());
                 let root = sector.root();
                 state.sectors.lock().unwrap().insert(root, Arc::new(sector));

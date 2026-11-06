@@ -200,8 +200,7 @@ impl HostMetric {
     }
 
     /// Combined read + write throughput average. `None` only when neither side
-    /// has been sampled. Used by [`HostScore`] for the discovery preference
-    /// (unsampled outranks sampled).
+    /// has been sampled, which [`HostScore`] ranks below any sampled host.
     pub(crate) fn combined_throughput(&self) -> Option<TransferRate> {
         match (self.rpc_write_avg.avg(), self.rpc_read_avg.avg()) {
             (None, None) => None,
@@ -215,9 +214,10 @@ impl HostMetric {
 ///
 /// Sort order:
 /// 1. Lower `failure_rate` wins.
-/// 2. Unsampled hosts (no throughput data) outrank sampled ones — this is
-///    the "discovery" preference so every available host eventually gets
-///    tried at least once.
+/// 2. Sampled hosts outrank unsampled ones (no throughput data). In the
+///    browser each new host costs a WebTransport handshake, and Chrome
+///    delays every handshake while it counts failed ones, so an upload that
+///    kept trying new hosts stalled on the ones that never answer.
 /// 3. Among sampled hosts, higher `throughput / (inflight + 1)` wins —
 ///    the expected per-shard throughput if you added one more shard. That
 ///    penalizes already-busy hosts proportionally to load, so a saturated
@@ -258,9 +258,8 @@ impl Ord for HostScore {
         match other.failure_rate.cmp(&self.failure_rate) {
             std::cmp::Ordering::Equal => match (self.throughput, other.throughput) {
                 (None, None) => other.inflight.cmp(&self.inflight),
-                // discovery: unsampled outranks sampled
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
                 (Some(_), Some(_)) => self
                     .weighted_throughput()
                     .unwrap()
@@ -607,7 +606,7 @@ mod test {
         let unsampled_b = HostScore::new(&HostMetric::default(), 0);
         assert_eq!(unsampled_a.cmp(&unsampled_b), std::cmp::Ordering::Equal);
 
-        // Sample one host: unsampled now outranks it (discovery preference).
+        // Sample one host: it now outranks the unsampled ones.
         let sampled_slow = {
             let mut m = HostMetric::default();
             m.add_write_sample(Transfer::new(100, Duration::from_secs(1)));
@@ -615,8 +614,8 @@ mod test {
         };
         let sampled_slow_score = HostScore::new(&sampled_slow, 0);
         assert!(
-            unsampled_a > sampled_slow_score,
-            "unsampled should outrank sampled (discovery)",
+            sampled_slow_score > unsampled_a,
+            "sampled should outrank unsampled",
         );
 
         // Among sampled, faster wins.

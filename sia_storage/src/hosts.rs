@@ -140,7 +140,7 @@ impl Hosts {
 
     /// Sorts a list of items by their host's download score (descending).
     /// Score is `throughput / (inflight_downloads + 1)`, lower failure_rate
-    /// wins first, and unsampled hosts get discovery priority. Used by the
+    /// wins first, and unsampled hosts come after sampled ones. Used by the
     /// download path so concurrent slab downloads spread initial picks
     /// across less-busy hosts.
     ///
@@ -473,9 +473,10 @@ impl HostQueue {
     }
 
     /// Picks the best surplus host and reserves an inflight slot. Best
-    /// follows [`HostScore`]: lowest failure rate, then unsampled hosts,
-    /// then weighted throughput. The winner leaves `available`; hold the
-    /// returned [`InflightGuard`] for the RPC so concurrent picks see the load.
+    /// follows [`HostScore`]: lowest failure rate, then sampled hosts by
+    /// weighted throughput, then unsampled hosts. The winner leaves
+    /// `available`. Hold the returned [`InflightGuard`] for the RPC so
+    /// concurrent picks see the load.
     pub(crate) fn pick(&mut self) -> Option<(PublicKey, InflightGuard)> {
         if self.available.len() <= self.pending_initial {
             return None;
@@ -715,9 +716,9 @@ mod test {
 
     /// A timing out sector RPC must cost the host a failure sample.
     ///
-    /// Without one its rate stays 0, and `HostScore` ranks an unsampled host
-    /// above every measured one as a discovery preference, so the host that
-    /// just timed out is picked first again.
+    /// Without one its rate stays 0, so `HostScore` ranks it above every host
+    /// with a failure on record, and the host that just timed out is picked
+    /// again.
     ///
     /// Each RPC gets its own host, so each starts unsampled and the assertion
     /// cannot be satisfied by the other RPC's failure.
@@ -764,7 +765,7 @@ mod test {
         );
         assert!(
             rate(write_host) > 0,
-            "the write timeout left the host unsampled, so it stays top ranked"
+            "the write timeout recorded no failure"
         );
 
         let err = hosts
@@ -782,10 +783,7 @@ mod test {
             matches!(&err, RPCError::Rhp(e) if e.is_timeout()),
             "expected the idle timeout, got {err:?}"
         );
-        assert!(
-            rate(read_host) > 0,
-            "the read timeout left the host unsampled, so it stays top ranked"
-        );
+        assert!(rate(read_host) > 0, "the read timeout recorded no failure");
     }
 
     /// Concurrent price lookups for one host share a single RPC, success or
