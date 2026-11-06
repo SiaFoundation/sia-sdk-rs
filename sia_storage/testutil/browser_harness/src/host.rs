@@ -232,11 +232,10 @@ async fn serve_stream(
             e.encode(&mut response)?;
         }
     }
-    send.write_all(&response).await?;
-    // Hosts on coreutils 0.25.1 and later stop reading a stream when they
-    // close it, which sends STOP_SENDING if the client has not closed its
-    // side yet.
+    // Coreutils 0.25.1 and later send STOP_SENDING once the response is queued, so over a real
+    // network it can beat a large response to the browser. Sending it first gives that order here.
     recv.stop(0u32.into());
+    send.write_all(&response).await?;
     send.finish().await?;
     Ok(())
 }

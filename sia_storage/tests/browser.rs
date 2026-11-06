@@ -474,15 +474,16 @@ mod chrome {
 mod firefox {
     use super::*;
 
-    /// Hosts on coreutils 0.25.1 and later stop reading a stream when they
-    /// close it. While the SDK's side of the stream was still open, Firefox
-    /// discarded the rest of the host's response, so sector writes failed
-    /// and uploads ran out of hosts.
+    /// Hosts on coreutils 0.25.1 and later stop reading a stream when an RPC
+    /// ends. While the SDK's side of the stream was still open, Firefox
+    /// discarded the rest of the host's response, so uploads ran out of hosts
+    /// and downloads failed with too few shards.
     #[wasm_bindgen_test]
     async fn test_firefox_keeps_responses_when_hosts_stop_reading() {
         let world = World::new(&accepting(30)).await;
-        world
-            .upload(&world.sdk(&[]).await, Object::default(), 4 * MIB)
-            .await;
+        let sdk = world.sdk(&[]).await;
+        let (object, data) = world.upload(&sdk, Object::default(), 4 * MIB).await;
+        let read = read_range(&sdk, &object, 0, data.len()).await;
+        assert_eq!(read.data, data);
     }
 }
