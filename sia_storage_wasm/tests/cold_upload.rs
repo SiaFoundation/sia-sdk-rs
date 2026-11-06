@@ -7,6 +7,7 @@ mod fixtures;
 use common::*;
 use fixtures::{Handshake, Harness, HostSpec};
 use sia_storage::{AppKey, Object, UploadOptions};
+use std::io::Cursor;
 use wasm_bindgen_test::wasm_bindgen_test;
 use web_time::Instant;
 
@@ -35,11 +36,21 @@ async fn test_cold_upload_keeps_to_hosts_it_reached() {
     let harness = Harness::default();
     let hosts = harness.reset(&specs).await;
     let app_key = AppKey::import(rand::random());
-    let options = UploadOptions::default();
+    // Finish the first slab before selecting hosts for later slabs, so
+    // reuse is measured after the SDK has learned which hosts work.
+    let options = UploadOptions {
+        max_buffered_slabs: Some(1),
+        ..Default::default()
+    };
     let shards = (options.data_shards + options.parity_shards) as usize;
     let size = options.optimal_data_size() * 6;
     let start = Instant::now();
-    upload(&sdk(&hosts, &app_key, &[]).await, Object::default(), size).await;
+    let mut data = vec![0; size];
+    rand::fill(&mut data[..]);
+    let sdk = sdk(&hosts, &app_key, &[]).await;
+    sdk.upload(Object::default(), Cursor::new(data), options)
+        .await
+        .expect("upload");
     let throughput = size as f64 / start.elapsed().as_secs_f64() / MIB as f64;
     let connected = harness
         .stats()

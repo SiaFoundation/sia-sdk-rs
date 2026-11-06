@@ -67,7 +67,27 @@ async fn browsers() -> Result<(), Box<dyn Error>> {
     );
 
     let listener = TcpListener::bind(fixtures::CONTROL_ADDR).await?;
-    tokio::select! {
+    // Safari uses macOS certificate trust; wasm-bindgen-test does not pass
+    // webdriver.json capabilities to Safari.
+    #[cfg(target_os = "macos")]
+    if !Command::new("security")
+        .args([
+            "add-trusted-cert",
+            "-r",
+            "trustRoot",
+            "-p",
+            "ssl",
+            "-s",
+            "127.0.0.1",
+        ])
+        .arg(&ca_pem)
+        .status()
+        .await?
+        .success()
+    {
+        return Err("could not trust the test CA for Safari".into());
+    }
+    let result = tokio::select! {
         result = server::serve(listener, identity) => {
             Err(format!("fake host server stopped: {result:?}").into())
         }
@@ -75,6 +95,7 @@ async fn browsers() -> Result<(), Box<dyn Error>> {
             let status = Command::new("wasm-pack")
                 .current_dir(env!("CARGO_MANIFEST_DIR"))
                 .args(["test", "--release", "--headless", "--chrome", "--firefox"])
+                .args(cfg!(target_os = "macos").then_some("--safari"))
                 .env("WASM_BINDGEN_USE_BROWSER", "1")
                 .env("WASM_BINDGEN_TEST_TIMEOUT", "600")
                 .env("WASM_BINDGEN_TEST_WEBDRIVER_JSON", &webdriver)
@@ -85,7 +106,18 @@ async fn browsers() -> Result<(), Box<dyn Error>> {
             }
             Ok(())
         } => result,
+    };
+    #[cfg(target_os = "macos")]
+    if !Command::new("security")
+        .arg("remove-trusted-cert")
+        .arg(&ca_pem)
+        .status()
+        .await?
+        .success()
+    {
+        return Err("could not remove the Safari test CA".into());
     }
+    result
 }
 
 /// Makes a Firefox profile whose certificate store trusts the CA in
