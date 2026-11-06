@@ -20,6 +20,10 @@ pub enum Handshake {
     /// Completes QUIC but answers the WebTransport request with 404, so the
     /// session's `ready` rejects.
     Refuse,
+    /// Never answers, like a host behind a firewall that drops UDP. Chrome
+    /// gives up when its QUIC handshake times out. A host can't switch to or
+    /// from this after it starts.
+    Ignore,
 }
 
 /// How a host behaves. It can change while the host runs, and the host keeps
@@ -33,6 +37,9 @@ pub struct HostSpec {
     pub read_delay: Duration,
     /// Judge account tokens as if the host's clock ran this far ahead.
     pub clock_ahead: Duration,
+    /// Answer writes without storing the sector, so reads of it fail. For
+    /// uploads too large to hold in memory.
+    pub discard_sectors: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +52,8 @@ pub struct FakeHost {
 pub struct HostStats {
     /// WebTransport requests received since the host started.
     pub handshakes: u64,
+    /// WebTransport sessions accepted since the host started.
+    pub sessions: u64,
     /// Streams open now.
     pub open_streams: u64,
     /// Settings RPCs since the host started.

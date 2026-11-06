@@ -424,6 +424,50 @@ mod chrome {
             "a handshake after 11 failed ones took only {waited:?}"
         );
     }
+
+    /// A cold browser upload to a host list where some hosts never answered a
+    /// handshake stalled for minutes. Uploads ranked hosts they had never used
+    /// first, so every slab dialed new hosts, and each that never answered added
+    /// to Chrome's delay on the next handshake.
+    #[wasm_bindgen_test]
+    async fn test_cold_upload_keeps_to_hosts_it_reached() {
+        // 13 hosts never answer. An upload that dials most of them gets every
+        // later handshake held back by up to a minute and a half. One that keeps
+        // to the hosts it reached rarely meets more than 10, which hold each
+        // back by at most about 8 seconds.
+        let specs: Vec<HostSpec> = (0..100)
+            .map(|i| HostSpec {
+                handshake: if i % 8 == 0 {
+                    Handshake::Ignore
+                } else {
+                    Handshake::Accept
+                },
+                discard_sectors: true,
+                ..Default::default()
+            })
+            .collect();
+        let world = World::new(&specs).await;
+        let options = UploadOptions::default();
+        let shards = (options.data_shards + options.parity_shards) as usize;
+        let size = options.optimal_data_size() * 6;
+        let start = Instant::now();
+        world
+            .upload(&world.sdk(&[]).await, Object::default(), size)
+            .await;
+        let throughput = size as f64 / start.elapsed().as_secs_f64() / MIB as f64;
+        let connected = world
+            .harness
+            .stats()
+            .await
+            .iter()
+            .filter(|s| s.sessions > 0)
+            .count();
+        assert!(
+            connected < 2 * shards,
+            "connected to {connected} hosts for slabs of {shards} shards"
+        );
+        assert!(throughput > 3.0, "uploaded at {throughput:.1} MiB/s");
+    }
 }
 
 /// Tests of how Firefox treats WebTransport, which Chrome does not share.

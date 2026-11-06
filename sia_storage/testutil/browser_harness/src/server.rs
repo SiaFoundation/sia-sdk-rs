@@ -102,7 +102,7 @@ async fn route(
             let index: usize = index.parse()?;
             let hosts = hosts.lock().await;
             let host = hosts.get(index).ok_or(format!("no host {index}"))?;
-            host.set(serde_json::from_slice(body)?);
+            host.set(serde_json::from_slice(body)?)?;
             Ok(Value::Null)
         }
         ("GET", _) if path == "/stats" => {

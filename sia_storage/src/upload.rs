@@ -1128,9 +1128,9 @@ mod tests {
     /// Number of fast hosts [`racing_setup`] seeds alongside the slow one.
     const FAST_HOSTS: usize = 5;
 
-    /// Sets up [`FAST_HOSTS`] fast hosts with seeded write metrics plus one
-    /// unsampled slow host. The discovery preference guarantees the slow host
-    /// wins the initial pick, and the seeded p95 keeps the race timer near its
+    /// Sets up [`FAST_HOSTS`] fast hosts plus one slow host, all with seeded
+    /// write metrics. The slow host's seeded write is the fastest, so it wins
+    /// the initial pick, and the seeded p95 keeps the race timer near its
     /// 50ms floor so a racer (when allowed) beats the slow host comfortably.
     fn racing_setup(slow_delay: Duration) -> (Hosts, Arc<AppKey>, PublicKey) {
         let transport = mock::Client::new();
@@ -1150,6 +1150,7 @@ mod tests {
         for pk in &fast {
             hosts_manager.record_write_sample(*pk, SECTOR_SIZE as u32, Duration::from_millis(10));
         }
+        hosts_manager.record_write_sample(slow, SECTOR_SIZE as u32, Duration::from_millis(5));
         transport.set_slow_hosts([slow], slow_delay);
         (hosts_manager, app_key, slow)
     }
