@@ -1,14 +1,22 @@
 //! A member's access to one shared space.
 
+#[cfg(feature = "fs")]
+use std::path::Path;
 use std::sync::Arc;
 
 use sia_core::types::Hash256;
+use tokio::io::AsyncRead;
 
 use crate::app_client::{self, PinTarget};
+use crate::hosts::Hosts;
 use crate::sdk::pin_sealed_object;
 use crate::spaces::{SpaceError, SpaceKey, UpdateSpaceRequest};
+use crate::task::AbortOnDropHandle;
+use crate::upload::{PackedUpload, upload_object};
 use crate::{
-    AppKey, Error, Object, ObjectEvent, ObjectEventSummary, ObjectsCursor, Space, SpaceOptions,
+    AppKey, Download, DownloadError, DownloadOptions, Error, Object, ObjectEvent,
+    ObjectEventSummary, ObjectsCursor, PackedUploadOptions, Space, SpaceOptions, UploadError,
+    UploadOptions,
 };
 
 /// A shared space opened by one of its members. It reads and writes the
@@ -21,15 +29,29 @@ pub struct SharedSpace {
     key: SpaceKey,
     app_key: Arc<AppKey>,
     api_client: app_client::Client,
+    hosts: Hosts,
+    _refresh_task: Arc<AbortOnDropHandle<()>>,
 }
 
 impl SharedSpace {
-    pub(crate) fn new(key: SpaceKey, app_key: Arc<AppKey>, api_client: app_client::Client) -> Self {
+    pub(crate) fn new(
+        key: SpaceKey,
+        app_key: Arc<AppKey>,
+        api_client: app_client::Client,
+        hosts: Hosts,
+        refresh_task: Arc<AbortOnDropHandle<()>>,
+    ) -> Self {
         Self {
             key,
             app_key,
             api_client,
+            hosts,
+            _refresh_task: refresh_task,
         }
+    }
+
+    fn target(&self) -> PinTarget {
+        PinTarget::Space(self.key.public_key())
     }
 
     /// The key that identifies and opens the space.
@@ -66,17 +88,70 @@ impl SharedSpace {
         Ok(())
     }
 
+    /// Reads until EOF and uploads all slabs into the space. Behaves like
+    /// [`Sdk::upload`](crate::Sdk::upload), with the slabs pinned to the
+    /// space as they are uploaded. The caller must pin the object with
+    /// [`SharedSpace::pin_object`] afterwards. Requires write permission.
+    pub async fn upload<R: AsyncRead + Unpin + 'static>(
+        &self,
+        object: Object,
+        reader: R,
+        options: UploadOptions,
+    ) -> Result<Object, UploadError> {
+        upload_object(
+            self.hosts.clone(),
+            self.api_client.clone(),
+            self.app_key.clone(),
+            self.target(),
+            object,
+            reader,
+            options,
+        )
+        .await
+    }
+
+    /// Uploads the file at `path` into the space. Behaves like
+    /// [`upload`](Self::upload) otherwise.
+    #[cfg(feature = "fs")]
+    pub async fn upload_path<P: AsRef<Path>>(
+        &self,
+        object: Object,
+        path: P,
+        options: UploadOptions,
+    ) -> Result<Object, UploadError> {
+        let file = tokio::fs::File::open(path).await?;
+        self.upload(object, file, options).await
+    }
+
+    /// Creates a packed upload into the space. Behaves like
+    /// [`Sdk::upload_packed`](crate::Sdk::upload_packed), with the slabs
+    /// pinned to the space.
+    pub fn upload_packed(&self, options: PackedUploadOptions) -> Result<PackedUpload, UploadError> {
+        PackedUpload::new(
+            self.hosts.clone(),
+            self.api_client.clone(),
+            self.app_key.clone(),
+            self.target(),
+            options,
+        )
+    }
+
+    /// Returns a [`Download`] handle that streams an object's data, paid for
+    /// by this member's account. Behaves like
+    /// [`Sdk::download`](crate::Sdk::download).
+    pub fn download(
+        &self,
+        object: &Object,
+        options: DownloadOptions,
+    ) -> Result<Download, DownloadError> {
+        Download::new(object, self.hosts.clone(), self.app_key.clone(), options)
+    }
+
     /// Pins an object to the space, pinning any of its slabs that are not
     /// already pinned. Requires write permission.
     pub async fn pin_object(&self, object: &Object) -> Result<(), Error> {
         let sealed = object.seal_with(&self.key.0);
-        pin_sealed_object(
-            &self.api_client,
-            &self.app_key,
-            PinTarget::Space(self.key.public_key()),
-            &sealed,
-        )
-        .await
+        pin_sealed_object(&self.api_client, &self.app_key, self.target(), &sealed).await
     }
 
     /// Retrieves an object from the space by its id.
@@ -97,10 +172,6 @@ impl SharedSpace {
     /// Retrieves a list of the space's object events. This can be used to
     /// synchronize local state with the indexer. Use
     /// [`SharedSpace::object_event_summaries`] to leave out the objects' slabs.
-    ///
-    /// # Arguments
-    /// * `cursor` - An optional cursor to continue from a previous call.
-    /// * `limit` - An optional limit on the number of events to retrieve.
     pub async fn object_events(
         &self,
         cursor: Option<ObjectsCursor>,
@@ -130,10 +201,6 @@ impl SharedSpace {
     /// slabs, which makes the response a small fraction of the size of
     /// [`SharedSpace::object_events`]. Fetch the full object with
     /// [`SharedSpace::object`] to download it.
-    ///
-    /// # Arguments
-    /// * `cursor` - An optional cursor to continue from a previous call.
-    /// * `limit` - An optional limit on the number of events to retrieve.
     pub async fn object_event_summaries(
         &self,
         cursor: Option<ObjectsCursor>,
@@ -176,6 +243,8 @@ mod tests {
     use crate::{AppApiError, Sector, Slab, SpacePermission};
     use reqwest::StatusCode;
     use sia_core::signing::PublicKey;
+    use std::io::Cursor;
+    use tokio::io::AsyncReadExt;
 
     /// An object whose slab is pinned nowhere, so pinning it to a space has
     /// to pin the slab first.
@@ -308,5 +377,60 @@ mod tests {
                 .is_empty()
         );
         assert!(space.space().await.is_err());
+    }
+
+    #[sia_core_derive::cross_target_test]
+    async fn test_shared_space_upload_download() {
+        let network = MockNetwork::new();
+        network.add_hosts(40);
+        let sdk = network
+            .sdk(AppKey::import(rand::random()))
+            .await
+            .expect("sdk creation failed");
+        let created = sdk
+            .create_space(SpaceOptions::default())
+            .await
+            .expect("create failed");
+        let space = sdk.shared_space(created.key.clone());
+
+        let data: Vec<u8> = (0..(1 << 20)).map(|i| i as u8).collect();
+        let object = space
+            .upload(
+                Object::new(Some(b"metadata".to_vec())),
+                Cursor::new(data.clone()),
+                UploadOptions::default(),
+            )
+            .await
+            .expect("upload failed");
+        let mut packed = space
+            .upload_packed(PackedUploadOptions::default())
+            .expect("packed upload failed");
+        packed
+            .add(Cursor::new(data.clone()))
+            .await
+            .expect("add failed");
+        let packed = packed.finalize().await.expect("finalize failed");
+        assert_eq!(packed.len(), 1);
+
+        // the slabs were pinned to the space, not the account, so the objects
+        // pin without the slab fallback
+        assert_eq!(network.pinned_slabs(), 0);
+        space.pin_object(&object).await.expect("pin failed");
+        space.pin_object(&packed[0]).await.expect("pin failed");
+        assert_eq!(network.pinned_slabs(), 0);
+        assert_eq!(space.space().await.expect("space failed").object_count, 2);
+
+        for object in [&object, &packed[0]] {
+            let fetched = space.object(&object.id()).await.expect("fetch failed");
+            let mut reader = space
+                .download(&fetched, DownloadOptions::default())
+                .expect("download failed");
+            let mut downloaded = Vec::new();
+            reader
+                .read_to_end(&mut downloaded)
+                .await
+                .expect("read failed");
+            assert_eq!(downloaded, data);
+        }
     }
 }

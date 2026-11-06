@@ -38,7 +38,13 @@ impl Sdk {
     /// Opens the space `key` for this account's use. The account must be a
     /// member, which the indexer checks on each request.
     pub fn shared_space(&self, key: SpaceKey) -> SharedSpace {
-        SharedSpace::new(key, self.app_key.clone(), self.api_client.clone())
+        SharedSpace::new(
+            key,
+            self.app_key.clone(),
+            self.api_client.clone(),
+            self.hosts.clone(),
+            self._refresh_task.clone(),
+        )
     }
 }
 

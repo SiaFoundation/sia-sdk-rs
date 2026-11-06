@@ -151,6 +151,7 @@ impl Sdk {
             self.hosts.clone(),
             self.api_client.clone(),
             self.app_key.clone(),
+            PinTarget::Account,
             object,
             reader,
             options,
@@ -193,6 +194,7 @@ impl Sdk {
             self.hosts.clone(),
             self.api_client.clone(),
             self.app_key.clone(),
+            PinTarget::Account,
             options,
         )
     }

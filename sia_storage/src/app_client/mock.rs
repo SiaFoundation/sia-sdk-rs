@@ -73,7 +73,6 @@ struct StoredSlab {
     sectors: usize,
 }
 
-/// A space, its members, and its objects.
 #[derive(Debug)]
 struct StoredSpace {
     owner: PublicKey,
