@@ -26,9 +26,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features --workspace -- -D warnings
       - name: Clippy (wasm)
-        run: |
-          cargo clippy --target wasm32-unknown-unknown --lib --tests --package sia_core --package sia_storage --package sia_storage_wasm --no-default-features --features sia_storage/mock -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown --lib --package browser_harness -- -D warnings
+        run: cargo clippy --target wasm32-unknown-unknown --lib --tests --package sia_core --package sia_storage --package sia_storage_wasm --no-default-features -- -D warnings
       - name: Build docs
         run: cargo doc --all-features --no-deps
         env:
@@ -100,7 +98,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libnss3-tools
       - name: Test
-        run: cargo run -p browser_harness
+        run: cargo test -p sia_storage_wasm --test webtransport -- --nocapture
 
   # The generated .d.ts is assembled from wasm-bindgen's output plus the
   # `typescript_custom_section` blocks, and nothing else in this workflow ever

@@ -2,14 +2,14 @@
 //! test page the browser opens, so every response allows any origin.
 //!
 //! - `POST /hosts` with a list of [`HostSpec`] replaces every host and
-//!   returns the new hosts as [`FakeHost`](browser_harness::FakeHost)s.
+//!   returns the new hosts as [`FakeHost`](crate::fixtures::FakeHost)s.
 //! - `PUT /hosts/<i>` with a [`HostSpec`] changes host `i`.
 //! - `GET /stats` returns each host's
-//!   [`HostStats`](browser_harness::HostStats).
+//!   [`HostStats`](crate::fixtures::HostStats).
 
 use std::sync::Arc;
 
-use browser_harness::HostSpec;
+use crate::fixtures::HostSpec;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};

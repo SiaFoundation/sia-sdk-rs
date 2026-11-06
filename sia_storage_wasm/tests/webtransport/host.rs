@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use browser_harness::{FakeHost, Handshake, HostSpec, HostStats};
+use crate::fixtures::{FakeHost, Handshake, HostSpec, HostStats};
 use chrono::Utc;
 use sia_core::encoding::SiaEncodable;
 use sia_core::encoding_async::AsyncSiaDecodable;

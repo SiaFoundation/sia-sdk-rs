@@ -1,6 +1,8 @@
-//! The control API of the fake hosts that the `sia_storage` browser tests
-//! run against. The binary serves it, and the tests call it through
+//! The control API of the fake hosts used by the browser tests.
+//! The native integration test serves it, and the browser tests call it through
 //! `Harness`, which exists only in WASM builds, to set up each host.
+
+#![allow(dead_code)]
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -8,7 +10,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sia_core::signing::PublicKey;
 
-/// Where the binary serves the control API. The address is fixed, so only
+/// Where the fixture serves the control API. The address is fixed, so only
 /// one run at a time fits on a machine.
 pub const CONTROL_ADDR: &str = "127.0.0.1:48650";
 
@@ -111,18 +113,23 @@ mod client {
         }
 
         async fn call<T: DeserializeOwned>(&self, request: reqwest::RequestBuilder) -> T {
-            let response = request
-                .send()
-                .await
-                .unwrap_or_else(|e| panic!("browser_harness at {} did not answer: {e}", self.url));
+            let response = request.send().await.unwrap_or_else(|e| {
+                panic!(
+                    "WebTransport test hosts at {} did not answer: {e}",
+                    self.url
+                )
+            });
             let status = response.status();
             if !status.is_success() {
                 panic!(
-                    "browser_harness: {status} {}",
+                    "WebTransport test hosts: {status} {}",
                     response.text().await.unwrap_or_default()
                 );
             }
-            response.json().await.expect("browser_harness response")
+            response
+                .json()
+                .await
+                .expect("WebTransport test hosts response")
         }
     }
 }

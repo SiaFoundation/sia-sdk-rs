@@ -11,6 +11,11 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[test]]
+name = "webtransport"
+path = "tests/webtransport/main.rs"
+test = false
+
 [dependencies]
 sia_storage = { version = "0.13.6", path = "../sia_storage" }
 sia_core = { version = "0.6.1", path = "../sia_core" }
@@ -30,3 +35,23 @@ console_error_panic_hook = "0.1"
 log = "0.4"
 serde = "1.0.229"
 tsify = { version = "0.5", default-features = false, features = ["js"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+sia_storage = { path = "../sia_storage", features = ["mock"] }
+bytes = "1.12.1"
+rand = "0.10.2"
+reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
+tokio = { version = "1.53.1", features = ["macros"] }
+wasm-bindgen-test = "0.3"
+web-time = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+base64 = "0.23.0"
+blake2b_simd = "1.0.4"
+bytes = "1.12.1"
+rand = "0.10.2"
+rcgen = "0.14.10"
+sha2 = "0.10.9"
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["full"] }
+wtransport = { version = "0.7.2", features = ["quinn"] }

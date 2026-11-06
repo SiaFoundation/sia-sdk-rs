@@ -95,7 +95,6 @@ tempfile = "3.27.0"
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
-browser_harness = { path = "testutil/browser_harness" }
 
 [features]
 mock = []
@@ -108,10 +107,4 @@ fs = ["tokio/fs"]
 [[bench]]
 name = "upload"
 harness = false
-required-features = ["mock"]
-
-# Runs in a browser against the fake hosts of `testutil/browser_harness`,
-# which runs it.
-[[test]]
-name = "browser"
 required-features = ["mock"]
