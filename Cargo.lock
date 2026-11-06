@@ -356,26 +356,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "browser_harness"
-version = "0.0.0"
-dependencies = [
- "base64 0.23.1",
- "blake2b_simd",
- "bytes",
- "chrono",
- "rand",
- "rcgen",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sia_core",
- "tempfile",
- "tokio",
- "wtransport",
-]
-
-[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3060,7 +3040,6 @@ version = "0.13.6"
 dependencies = [
  "base64 0.23.1",
  "blake2b_simd",
- "browser_harness",
  "bytes",
  "chacha20",
  "chacha20poly1305",
@@ -3157,24 +3136,35 @@ dependencies = [
 name = "sia_storage_wasm"
 version = "0.8.5"
 dependencies = [
+ "base64 0.23.1",
+ "blake2b_simd",
+ "bytes",
  "chrono",
  "console_error_panic_hook",
  "futures-util",
  "hex",
  "js-sys",
  "log",
+ "rand",
+ "rcgen",
+ "reqwest",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "sha2 0.10.9",
  "sia_core",
  "sia_storage",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tsify",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-bindgen-test",
  "wasm-streams",
  "web-sys",
+ "web-time",
+ "wtransport",
 ]
 
 [[package]]
