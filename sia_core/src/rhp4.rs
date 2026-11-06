@@ -12,6 +12,9 @@ use crate::types::{Address, ChainIndex, Currency, Hash256};
 pub(crate) mod merkle;
 pub mod protocol;
 
+#[cfg(test)]
+mod golden;
+
 pub use merkle::sector_root;
 
 pub const SEGMENT_SIZE: usize = 64;

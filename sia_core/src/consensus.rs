@@ -51,6 +51,7 @@ pub struct HardforkASIC {
     #[serde(with = "crate::types::utils::nano_second_duration")]
     pub oak_time: Duration,
     pub oak_target: BlockID,
+    pub nonce_factor: u64,
 }
 
 /// HardforkFoundation contains the parameters for a hardfork that introduced the Foundation
@@ -69,6 +70,8 @@ pub struct HardforkFoundation {
 pub struct HardforkV2 {
     pub allow_height: u64,
     pub require_height: u64,
+    pub final_cut_height: u64,
+    pub ephemeral_output_height: u64,
 }
 
 /// Network contains consensus parameters that are network-specific.
@@ -132,6 +135,7 @@ impl Network {
             },
             hardfork_asic: HardforkASIC {
                 height: 179000,
+                nonce_factor: 1009,
                 oak_time: Duration::seconds(120000),
                 oak_target: BlockID::new([
                     0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -148,8 +152,10 @@ impl Network {
                 ),
             },
             hardfork_v2: HardforkV2 {
-                allow_height: 1000000,
-                require_height: 1025000,
+                allow_height: 526000,
+                require_height: 530000,
+                final_cut_height: 552100,
+                ephemeral_output_height: 583000,
             },
         }
     }
@@ -176,10 +182,11 @@ impl Network {
             hardfork_oak: HardforkOak {
                 height: 10,
                 fix_height: 12,
-                genesis_timestamp: unix_timestamp(1673600000), // January 13, 2023 @ 08:53 GMT
+                genesis_timestamp: unix_timestamp(1755216000), // August 15, 2025 @ 0:00 UTC
             },
             hardfork_asic: HardforkASIC {
                 height: 20,
+                nonce_factor: 100900000,
                 oak_time: Duration::seconds(10000),
                 oak_target: BlockID::new([
                     0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -194,54 +201,10 @@ impl Network {
                 failsafe_address: Address::new([0u8; 32]),
             },
             hardfork_v2: HardforkV2 {
-                allow_height: 100000,
-                require_height: 102000,
-            },
-        }
-    }
-
-    pub fn anagami() -> Self {
-        Network {
-            name: "anagami".to_string(),
-            initial_coinbase: Currency::siacoins(300_000),
-            minimum_coinbase: Currency::siacoins(300_000),
-            initial_target: BlockID::new([
-                0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0,
-            ]),
-            block_interval: Duration::minutes(10),
-            maturity_delay: 144,
-
-            hardfork_dev_addr: HardforkDevAddr {
-                height: 1,
-                old_address: Address::new([0u8; 32]),
-                new_address: Address::new([0u8; 32]),
-            },
-            hardfork_tax: HardforkTax { height: 2 },
-            hardfork_storage_proof: HardforkStorageProof { height: 5 },
-            hardfork_oak: HardforkOak {
-                height: 10,
-                fix_height: 12,
-                genesis_timestamp: unix_timestamp(1724284800), // August 22, 2024 @ 0:00 UTC
-            },
-            hardfork_asic: HardforkASIC {
-                height: 20,
-                oak_time: Duration::seconds(10000),
-                oak_target: BlockID::new([
-                    0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0,
-                ]),
-            },
-            hardfork_foundation: HardforkFoundation {
-                height: 30,
-                primary_address: address!(
-                    "241352c83da002e61f57e96b14f3a5f8b5de22156ce83b753ea495e64f1affebae88736b2347"
-                ),
-                failsafe_address: Address::new([0u8; 32]),
-            },
-            hardfork_v2: HardforkV2 {
-                allow_height: 2016,
-                require_height: 2016 + 288,
+                allow_height: 40,
+                require_height: 50,
+                final_cut_height: 1008,
+                ephemeral_output_height: 48000,
             },
         }
     }
@@ -553,11 +516,15 @@ impl ChainState {
         &[]
     }
 
+    pub(crate) fn v2_replay_prefix(&self) -> &[u8] {
+        &[2]
+    }
+
     pub fn nonce_factor(&self) -> u64 {
         if self.child_height() < self.network.hardfork_asic.height {
             return 1;
         }
-        1009
+        self.network.hardfork_asic.nonce_factor
     }
 
     pub fn max_block_weight(&self) -> u64 {
@@ -573,28 +540,18 @@ mod tests {
     use chrono::FixedOffset;
     use serde_json;
 
-    #[test]
-    fn test_serialize_network() {
-        let test_cases = vec![
-            (
-                Network::anagami(),
-                "{\"name\":\"anagami\",\"initialCoinbase\":\"300000000000000000000000000000\",\"minimumCoinbase\":\"300000000000000000000000000000\",\"initialTarget\":\"0000000100000000000000000000000000000000000000000000000000000000\",\"blockInterval\":600000000000,\"maturityDelay\":144,\"hardforkDevAddr\":{\"height\":1,\"oldAddress\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\",\"newAddress\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"hardforkTax\":{\"height\":2},\"hardforkStorageProof\":{\"height\":5},\"hardforkOak\":{\"height\":10,\"fixHeight\":12,\"genesisTimestamp\":\"2024-08-22T00:00:00Z\"},\"hardforkASIC\":{\"height\":20,\"oakTime\":10000000000000,\"oakTarget\":\"0000000100000000000000000000000000000000000000000000000000000000\"},\"hardforkFoundation\":{\"height\":30,\"primaryAddress\":\"241352c83da002e61f57e96b14f3a5f8b5de22156ce83b753ea495e64f1affebae88736b2347\",\"failsafeAddress\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"hardforkV2\":{\"allowHeight\":2016,\"requireHeight\":2304}}",
-            ),
-            (
-                Network::mainnet(),
-                "{\"name\":\"mainnet\",\"initialCoinbase\":\"300000000000000000000000000000\",\"minimumCoinbase\":\"30000000000000000000000000000\",\"initialTarget\":\"0000000020000000000000000000000000000000000000000000000000000000\",\"blockInterval\":600000000000,\"maturityDelay\":144,\"hardforkDevAddr\":{\"height\":10000,\"oldAddress\":\"7d0c44f7664e2d34e53efde0661a6f628ec9264785ae8e3cd7c973e8d190c3c97b5e3ecbc567\",\"newAddress\":\"f371c70bce9eb8979cd5099f599ec4e4fcb14e0afcf31f9791e03e6496a4c0b358c98279730b\"},\"hardforkTax\":{\"height\":21000},\"hardforkStorageProof\":{\"height\":100000},\"hardforkOak\":{\"height\":135000,\"fixHeight\":139000,\"genesisTimestamp\":\"2015-06-06T14:13:20Z\"},\"hardforkASIC\":{\"height\":179000,\"oakTime\":120000000000000,\"oakTarget\":\"0000000000000000200000000000000000000000000000000000000000000000\"},\"hardforkFoundation\":{\"height\":298000,\"primaryAddress\":\"053b2def3cbdd078c19d62ce2b4f0b1a3c5e0ffbeeff01280efb1f8969b2f5bb4fdc680f0807\",\"failsafeAddress\":\"27c22a6c6e6645802a3b8fa0e5374657438ef12716d2205d3e866272de1b644dbabd53d6d560\"},\"hardforkV2\":{\"allowHeight\":1000000,\"requireHeight\":1025000}}",
-            ),
-            (
-                Network::zen(),
-                "{\"name\":\"zen\",\"initialCoinbase\":\"300000000000000000000000000000\",\"minimumCoinbase\":\"300000000000000000000000000000\",\"initialTarget\":\"0000000100000000000000000000000000000000000000000000000000000000\",\"blockInterval\":600000000000,\"maturityDelay\":144,\"hardforkDevAddr\":{\"height\":1,\"oldAddress\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\",\"newAddress\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"hardforkTax\":{\"height\":2},\"hardforkStorageProof\":{\"height\":5},\"hardforkOak\":{\"height\":10,\"fixHeight\":12,\"genesisTimestamp\":\"2023-01-13T08:53:20Z\"},\"hardforkASIC\":{\"height\":20,\"oakTime\":10000000000000,\"oakTarget\":\"0000000100000000000000000000000000000000000000000000000000000000\"},\"hardforkFoundation\":{\"height\":30,\"primaryAddress\":\"053b2def3cbdd078c19d62ce2b4f0b1a3c5e0ffbeeff01280efb1f8969b2f5bb4fdc680f0807\",\"failsafeAddress\":\"000000000000000000000000000000000000000000000000000000000000000089eb0d6a8a69\"},\"hardforkV2\":{\"allowHeight\":100000,\"requireHeight\":102000}}",
-            ),
-        ];
-
-        for (network, expected) in test_cases {
-            let serialized = serde_json::to_string(&network).unwrap();
-            assert_eq!(expected, serialized, "{} failed", network.name);
-            let deserialized: Network = serde_json::from_str(&serialized).unwrap();
-            assert_eq!(network, deserialized, "{} failed", network.name);
+    #[sia_core_derive::cross_target_test]
+    fn test_go_network_goldens() {
+        let cases = crate::test_util::golden_cases::<crate::test_util::Json<Network>>("networks");
+        assert_eq!(cases.len(), 2);
+        for (network, expected) in [Network::mainnet(), Network::zen()].into_iter().zip(cases) {
+            assert_eq!(
+                serde_json::to_value(&network).unwrap(),
+                expected.raw,
+                "{}: JSON encoding",
+                network.name
+            );
+            assert_eq!(network, expected.value, "{}: JSON decoding", network.name);
         }
     }
 

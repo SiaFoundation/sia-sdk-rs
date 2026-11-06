@@ -37,14 +37,7 @@ impl AsyncSiaDecodable for DateTime<Utc> {
 
 impl AsyncSiaDecodable for Duration {
     async fn decode_async<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self, EncodingError> {
-        let ns = u64::decode_async(r).await?;
-        if ns > i64::MAX as u64 {
-            return Err(EncodingError::InvalidValue(format!(
-                "duration {ns} must be less than {}",
-                i64::MAX
-            )));
-        }
-        Ok(Duration::nanoseconds(ns as i64))
+        Ok(Duration::nanoseconds(i64::decode_async(r).await?))
     }
 }
 

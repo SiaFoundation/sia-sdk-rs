@@ -8,6 +8,7 @@ description = "Low-level SDK for interacting with the Sia decentralized storage 
 authors = ["The Sia Foundation"]
 categories = ["cryptography::cryptocurrencies"]
 keywords = ["sia", "decentralized", "blockchain", "depin", "storage"]
+exclude = ["testutil/"]
 
 [lib]
 path = "src/lib.rs"
@@ -37,6 +38,7 @@ tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "io-util", "ti
 tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "io-util"] }
 
 [dev-dependencies]
+flate2 = "1.1.10"
 rand = "0.10.2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
