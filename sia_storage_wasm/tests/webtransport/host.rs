@@ -142,7 +142,10 @@ impl Host {
 }
 
 async fn serve_session(state: Arc<State>, incoming: IncomingSession) {
-    let Ok(request) = incoming.await else {
+    let Ok(request) = incoming
+        .await
+        .inspect_err(|err| eprintln!("WebTransport handshake failed: {err}"))
+    else {
         return;
     };
     state.counters.handshakes.fetch_add(1, Ordering::Relaxed);
@@ -152,7 +155,11 @@ async fn serve_session(state: Arc<State>, incoming: IncomingSession) {
         request.not_found().await;
         return;
     }
-    let Ok(connection) = request.accept().await else {
+    let Ok(connection) = request
+        .accept()
+        .await
+        .inspect_err(|err| eprintln!("WebTransport session failed: {err}"))
+    else {
         return;
     };
     state.counters.sessions.fetch_add(1, Ordering::Relaxed);

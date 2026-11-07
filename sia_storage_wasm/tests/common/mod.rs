@@ -16,6 +16,7 @@ pub const MIB: usize = 1 << 20;
 
 /// An SDK with an indexer that lists every fake host except those in `skip`.
 pub async fn sdk(hosts: &[FakeHost], app_key: &AppKey, skip: &[usize]) -> Sdk {
+    let _ = console_log::init_with_level(log::Level::Debug);
     let hosts = hosts
         .iter()
         .enumerate()
