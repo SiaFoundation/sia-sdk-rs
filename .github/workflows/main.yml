@@ -87,6 +87,7 @@ jobs:
 
   test-browser:
     name: Test browser behaviour (${{ matrix.os }})
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -110,13 +111,8 @@ jobs:
           brew install nss
           printf '%s\n' "$CHROMEWEBDRIVER" "$GECKOWEBDRIVER" >> "$GITHUB_PATH"
           sudo safaridriver --enable
-          security authorizationdb read com.apple.trust-settings.user > "$RUNNER_TEMP/trust-settings.plist"
-          sudo security authorizationdb write com.apple.trust-settings.user allow
       - name: Test
         run: cargo test -p sia_storage_wasm --test webtransport -- --nocapture
-      - name: Restore certificate authorization
-        if: always() && runner.os == 'macOS'
-        run: cat "$RUNNER_TEMP/trust-settings.plist" | sudo security authorizationdb write com.apple.trust-settings.user
 
   # The generated .d.ts is assembled from wasm-bindgen's output plus the
   # `typescript_custom_section` blocks, and nothing else in this workflow ever
