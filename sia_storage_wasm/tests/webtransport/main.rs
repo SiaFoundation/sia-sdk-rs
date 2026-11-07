@@ -27,8 +27,9 @@ async fn browsers() -> Result<(), Box<dyn Error>> {
     let ca_key = KeyPair::generate()?;
     let mut ca = CertificateParams::default();
     ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca_cert = ca.self_signed(&ca_key)?;
     let ca_pem = dir.join("ca.pem");
-    std::fs::write(&ca_pem, ca.self_signed(&ca_key)?.pem())?;
+    std::fs::write(&ca_pem, ca_cert.pem())?;
     let key = KeyPair::generate()?;
     let cert = CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])?
         .signed_by(&key, &Issuer::new(ca, ca_key))?;
@@ -62,7 +63,10 @@ async fn browsers() -> Result<(), Box<dyn Error>> {
         .to_string(),
     )?;
     let identity = Identity::new(
-        CertificateChain::single(Certificate::from_der(cert.der().to_vec())?),
+        CertificateChain::new(vec![
+            Certificate::from_der(cert.der().to_vec())?,
+            Certificate::from_der(ca_cert.der().to_vec())?,
+        ]),
         PrivateKey::from_der_pkcs8(key.serialize_der()),
     );
 
@@ -106,14 +110,17 @@ async fn browsers() -> Result<(), Box<dyn Error>> {
         } => result,
     };
     #[cfg(target_os = "macos")]
-    if !Command::new(if ci { "sudo" } else { "security" })
-        .args(ci.then_some("-n"))
-        .args(ci.then_some("security"))
-        .arg("remove-trusted-cert")
-        .args(ci.then_some("-d"))
-        .arg(&ca_pem)
-        .status()
-        .await?
+    if !ci
+        && !tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            Command::new("security")
+                .arg("remove-trusted-cert")
+                .arg(&ca_pem)
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await
+        .map_err(|_| "timed out removing the Safari test CA")??
         .success()
     {
         return Err("could not remove the Safari test CA".into());
