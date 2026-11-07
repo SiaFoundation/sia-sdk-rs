@@ -21,8 +21,11 @@ use crate::encryption::EncryptionKey;
 use crate::hosts::Host;
 use crate::preauthorized_keys::PreAuthorizedKey;
 use crate::sharing::{KeyRequest, SharedObjectRequest};
+use crate::spaces::{AddSpaceRequest, SpaceResponse, UpdateSpaceRequest};
 use crate::time::Duration;
-use crate::{Account, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject};
+use crate::{
+    Account, AppKey, AppMetadata, HostQuery, KeyStats, Object, ObjectsCursor, SealedObject,
+};
 
 const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(45);
 const ACCEPT_CBOR: &str = "application/cbor, application/json;q=0.9";
@@ -171,9 +174,15 @@ impl Client {
             app_key: app_key.public_key(),
             signature: app_key.sign(sig_hash.as_ref()),
         };
-        post_json::<_, EmptyResponse>(&self.client, register_url, signing_key, Some(&body))
-            .await
-            .map(|_| ())
+        send_json::<_, EmptyResponse>(
+            &self.client,
+            register_url,
+            Method::POST,
+            signing_key,
+            Some(&body),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Returns all usable hosts.
@@ -251,12 +260,7 @@ impl Client {
         self.post_json::<_, EmptyResponse>("objects", app_key, Some(&req))
             .await
             .map(|_| ())
-            .map_err(|e| match &e {
-                Error::Api(_, message) if message.contains(ERROR_OBJECT_UNPINNED_SLAB) => {
-                    PinObjectError::UnpinnedSlab
-                }
-                _ => PinObjectError::Client(e),
-            })
+            .map_err(pin_object_error)
     }
 
     /// Deletes an object from the indexer by its key.
@@ -294,7 +298,7 @@ impl Client {
             url.query_pairs_mut()
                 .append_pair("before", &before.to_rfc3339()); // indexd expects RFC3339
         }
-        post_json::<(), EmptyResponse>(&self.client, url, app_key, None)
+        send_json::<(), EmptyResponse>(&self.client, url, Method::POST, app_key, None)
             .await
             .map(|_| ())
     }
@@ -369,7 +373,19 @@ impl Client {
         body: Option<&S>,
     ) -> Result<D, Error> {
         let url = self.url.join(path)?;
-        post_json(&self.client, url, signing_key, body).await
+        send_json(&self.client, url, Method::POST, signing_key, body).await
+    }
+
+    /// Helper to send a signed PUT request with a JSON body and parse the
+    /// JSON or CBOR response.
+    async fn put_json<S: Serialize, D: DeserializeOwned>(
+        &self,
+        path: &str,
+        signing_key: &PrivateKey,
+        body: Option<&S>,
+    ) -> Result<D, Error> {
+        let url = self.url.join(path)?;
+        send_json(&self.client, url, Method::PUT, signing_key, body).await
     }
 
     /// Creates a signed url that can be shared with others
@@ -633,6 +649,168 @@ impl Client {
         )
         .await
     }
+
+    /// Creates a space owned by the account.
+    pub(crate) async fn add_space(
+        &self,
+        app_key: &AppKey,
+        req: &AddSpaceRequest,
+    ) -> Result<(), Error> {
+        self.post_json::<_, EmptyResponse>("spaces", &app_key.0, Some(req))
+            .await
+            .map(|_| ())
+    }
+
+    /// Lists the spaces the account owns or has joined.
+    pub(crate) async fn spaces(
+        &self,
+        app_key: &AppKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<SpaceResponse>, Error> {
+        let query = Self::pagination_query(offset, limit);
+        self.get_list("spaces", &app_key.0, Some(&query)).await
+    }
+
+    /// Retrieves a space the account is a member of.
+    pub(crate) async fn space(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+    ) -> Result<SpaceResponse, Error> {
+        self.get_json::<_, ()>(&format!("spaces/{space_key}"), &app_key.0, None)
+            .await
+    }
+
+    /// Replaces a space's name and metadata.
+    pub(crate) async fn update_space(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        req: &UpdateSpaceRequest,
+    ) -> Result<(), Error> {
+        self.put_json::<_, EmptyResponse>(&format!("spaces/{space_key}"), &app_key.0, Some(req))
+            .await
+            .map(|_| ())
+    }
+
+    /// Deletes a space along with its objects, members, and invitations.
+    pub(crate) async fn delete_space(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+    ) -> Result<(), Error> {
+        self.delete(&format!("spaces/{space_key}"), &app_key.0)
+            .await
+    }
+
+    /// Pins slabs to a space, charged to its owner.
+    pub(crate) async fn pin_space_slabs(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        slabs: &[SlabPinParams],
+    ) -> Result<Vec<Hash256>, Error> {
+        // indexd encodes an empty list as null
+        self.post_json(
+            &format!("spaces/{space_key}/slabs"),
+            &app_key.0,
+            Some(&slabs),
+        )
+        .await
+        .map(Option::unwrap_or_default)
+    }
+
+    /// Pins an object to a space. An object with the same ID is overwritten,
+    /// as long as its encrypted data key is unchanged.
+    pub(crate) async fn pin_space_object(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        object: &SealedObject,
+    ) -> Result<(), PinObjectError> {
+        let req = PinObjectRequest::from(object);
+        self.post_json::<_, EmptyResponse>(
+            &format!("spaces/{space_key}/objects"),
+            &app_key.0,
+            Some(&req),
+        )
+        .await
+        .map(|_| ())
+        .map_err(pin_object_error)
+    }
+
+    /// Deletes an object from a space.
+    pub(crate) async fn delete_space_object(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        key: &Hash256,
+    ) -> Result<(), Error> {
+        self.delete(&format!("spaces/{space_key}/objects/{key}"), &app_key.0)
+            .await
+    }
+
+    /// Retrieves an object from a space by its key.
+    pub(crate) async fn space_object(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        key: &Hash256,
+    ) -> Result<SealedObject, Error> {
+        self.get_json::<_, ()>(
+            &format!("spaces/{space_key}/objects/{key}"),
+            &app_key.0,
+            None,
+        )
+        .await
+    }
+
+    /// Fetches a page of a space's object events.
+    pub(crate) async fn space_objects(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SealedObjectEvent>, Error> {
+        let query = Self::objects_query(cursor, limit);
+        self.get_list(
+            &format!("spaces/{space_key}/objects"),
+            &app_key.0,
+            Some(&query),
+        )
+        .await
+    }
+
+    /// Fetches a page of a space's object events without the objects' slabs.
+    pub(crate) async fn space_object_summaries(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SealedObjectEventSummary>, Error> {
+        let mut query = Self::objects_query(cursor, limit);
+        query.push(("includeslabs", "false".to_string()));
+        self.get_list(
+            &format!("spaces/{space_key}/objects"),
+            &app_key.0,
+            Some(&query),
+        )
+        .await
+    }
+}
+
+/// Maps the indexer's rejection of an object whose slabs are not all pinned
+/// to [`PinObjectError::UnpinnedSlab`].
+fn pin_object_error(e: Error) -> PinObjectError {
+    match &e {
+        Error::Api(_, message) if message.contains(ERROR_OBJECT_UNPINNED_SLAB) => {
+            PinObjectError::UnpinnedSlab
+        }
+        _ => PinObjectError::Client(e),
+    }
 }
 
 fn http_client() -> reqwest::Client {
@@ -684,9 +862,10 @@ async fn get_json<D: DeserializeOwned, Q: Serialize + ?Sized>(
     Client::handle_response(builder.send().await?).await
 }
 
-async fn post_json<S: Serialize, D: DeserializeOwned>(
+async fn send_json<S: Serialize, D: DeserializeOwned>(
     client: &reqwest::Client,
     url: Url,
+    method: Method,
     signing_key: &PrivateKey,
     body: Option<&S>,
 ) -> Result<D, Error> {
@@ -694,11 +873,14 @@ async fn post_json<S: Serialize, D: DeserializeOwned>(
     let params = &sign(
         signing_key,
         &url,
-        Method::POST,
+        method.clone(),
         body.as_deref(),
         Utc::now() + Duration::from_secs(60),
     );
-    let mut builder = client.post(url).timeout(DEFAULT_API_TIMEOUT).query(params);
+    let mut builder = client
+        .request(method, url)
+        .timeout(DEFAULT_API_TIMEOUT)
+        .query(params);
     if let Some(body) = body {
         builder = builder.body(body);
     }
@@ -832,6 +1014,8 @@ mod native_tests {
 
     use crate::AppKey;
     use crate::sharing::Nonce;
+    use crate::slabs::SealedObjectSummary;
+    use crate::spaces::{SpaceKey, SpacePermission};
 
     use crate::app_client::cross_target_test::{ACCOUNT_CBOR, STATUS_CBOR};
     use crate::app_client::{
@@ -2414,6 +2598,360 @@ mod native_tests {
             .register_app(&ephemeral_key, &app_key, register_url)
             .await
             .unwrap();
+    }
+
+    /// The record the indexer returns for a space owned by `owner`.
+    fn space_response(owner: PublicKey) -> SpaceResponse {
+        SpaceResponse {
+            key: PrivateKey::from_seed(&rand::random()).public_key(),
+            owner,
+            encrypted_name: vec![1u8; 40],
+            encrypted_metadata: vec![2u8; 40],
+            encrypted_key: vec![3u8; 72],
+            permission: SpacePermission::Owner,
+            signature: Signature::from([4u8; 64]),
+            object_count: 1,
+            object_size: 2,
+            pinned_data: 3,
+            pinned_size: 4,
+            created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            updated_at: DateTime::from_timestamp(1_700_000_100, 0).unwrap(),
+        }
+    }
+
+    /// A sealed object with one slab.
+    fn space_object() -> SealedObject {
+        SealedObject {
+            encrypted_data_key: vec![1u8; 72],
+            encrypted_metadata_key: vec![1u8; 72],
+            encrypted_metadata: b"hello world!".to_vec(),
+            data_signature: Signature::from([2u8; 64]),
+            metadata_signature: Signature::from([2u8; 64]),
+            slabs: vec![Slab {
+                version: V0,
+                encryption_key: [1u8; 32].into(),
+                min_shards: 1,
+                sectors: vec![Sector {
+                    root: hash_256!(
+                        "0202020202020202020202020202020202020202020202020202020202020202"
+                    ),
+                    host_key: public_key!(
+                        "ed25519:0303030303030303030303030303030303030303030303030303030303030303"
+                    ),
+                }],
+                offset: 6,
+                length: 7,
+            }],
+            created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            updated_at: DateTime::from_timestamp(1_700_000_100, 0).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_add_space() {
+        let app_key = AppKey::import(rand::random());
+        let space = SpaceKey::from_seed(rand::random());
+        let req = AddSpaceRequest::new(&app_key, &space, "photos", b"meta");
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/spaces"),
+                request::body(serde_json::to_string(&req).unwrap()),
+            ])
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::NO_CONTENT)
+                    .body("")
+                    .unwrap(),
+            ),
+        );
+
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        client.add_space(&app_key, &req).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_spaces() {
+        let app_key = AppKey::import(rand::random());
+        let spaces = vec![
+            space_response(app_key.public_key()),
+            space_response(app_key.public_key()),
+        ];
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                signed_get("/spaces", app_key.public_key()),
+                request::query(url_decoded(contains(("offset", "1")))),
+                request::query(url_decoded(contains(("limit", "2")))),
+            ])
+            .respond_with(ok_body(serde_json::to_string(&spaces).unwrap())),
+        );
+        server.expect(
+            Expectation::matching(signed_get(
+                format!("/spaces/{}", spaces[0].key),
+                app_key.public_key(),
+            ))
+            .respond_with(ok_body(serde_json::to_string(&spaces[0]).unwrap())),
+        );
+
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        assert_eq!(
+            client.spaces(&app_key, Some(1), Some(2)).await.unwrap(),
+            spaces
+        );
+        assert_eq!(
+            client.space(&app_key, &spaces[0].key).await.unwrap(),
+            spaces[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_space() {
+        let app_key = AppKey::import(rand::random());
+        let space = SpaceKey::from_seed(rand::random());
+        let req = UpdateSpaceRequest::new(&space, &app_key.public_key(), "team", b"meta");
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("PUT", format!("/spaces/{}", space.public_key())),
+                request::body(serde_json::to_string(&req).unwrap()),
+            ])
+            .respond_with(
+                Response::builder()
+                    .status(StatusCode::NO_CONTENT)
+                    .body("")
+                    .unwrap(),
+            ),
+        );
+
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        client
+            .update_space(&app_key, &space.public_key(), &req)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_space() {
+        let app_key = AppKey::import(rand::random());
+        let space = PrivateKey::from_seed(&rand::random()).public_key();
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("DELETE", format!("/spaces/{space}")))
+                .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        client.delete_space(&app_key, &space).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pin_space_slabs() {
+        let app_key = AppKey::import(rand::random());
+        let space = PrivateKey::from_seed(&rand::random()).public_key();
+        let params = vec![SlabPinParams {
+            version: V0,
+            encryption_key: [1u8; 32].into(),
+            min_shards: 2,
+            sectors: vec![],
+        }];
+        let ids = vec![params[0].digest()];
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", format!("/spaces/{space}/slabs")),
+                request::body(serde_json::to_string(&params).unwrap()),
+            ])
+            .respond_with(ok_body(serde_json::to_string(&ids).unwrap())),
+        );
+
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        assert_eq!(
+            client
+                .pin_space_slabs(&app_key, &space, &params)
+                .await
+                .unwrap(),
+            ids
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pin_space_object() {
+        let app_key = AppKey::import(rand::random());
+        let space = PrivateKey::from_seed(&rand::random()).public_key();
+        let object = space_object();
+        let pin_request = serde_json::to_string(&PinObjectRequest::from(&object)).unwrap();
+
+        for (status, body, unpinned) in [
+            (StatusCode::NO_CONTENT, "", false),
+            (
+                StatusCode::BAD_REQUEST,
+                "object contains unpinned slab",
+                true,
+            ),
+        ] {
+            let server = Server::run();
+            server.expect(
+                Expectation::matching(all_of![
+                    request::method_path("POST", format!("/spaces/{space}/objects")),
+                    request::body(pin_request.clone()),
+                ])
+                .respond_with(Response::builder().status(status).body(body).unwrap()),
+            );
+
+            let client = Client::new(server.url("/").to_string()).unwrap();
+            let result = client.pin_space_object(&app_key, &space, &object).await;
+            if unpinned {
+                assert!(matches!(result, Err(PinObjectError::UnpinnedSlab)));
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_space_object() {
+        let app_key = AppKey::import(rand::random());
+        let space = PrivateKey::from_seed(&rand::random()).public_key();
+        let object_key =
+            hash_256!("1a1fcd352cdf56f5da73a566b58d764afc8cd8bfb30ef4e786b031227356d2ef");
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path(
+                "DELETE",
+                format!("/spaces/{space}/objects/{object_key}"),
+            ))
+            .respond_with(Response::builder().status(StatusCode::OK).body("").unwrap()),
+        );
+
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        client
+            .delete_space_object(&app_key, &space, &object_key)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_space_object() {
+        let app_key = AppKey::import(rand::random());
+        let space = PrivateKey::from_seed(&rand::random()).public_key();
+        let object = space_object();
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(signed_get(
+                format!("/spaces/{space}/objects/{}", object.id()),
+                app_key.public_key(),
+            ))
+            .respond_with(ok_body(serde_json::to_string(&object).unwrap())),
+        );
+
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        assert_eq!(
+            client
+                .space_object(&app_key, &space, &object.id())
+                .await
+                .unwrap(),
+            object
+        );
+    }
+
+    #[tokio::test]
+    async fn test_space_objects() {
+        let app_key = AppKey::import(rand::random());
+        let space = PrivateKey::from_seed(&rand::random()).public_key();
+        let object = space_object();
+        let events = vec![
+            SealedObjectEvent {
+                id: object.id(),
+                deleted: false,
+                updated_at: DateTime::from_timestamp(1_700_000_200, 0).unwrap(),
+                object: Some(object),
+            },
+            SealedObjectEvent {
+                id: hash_256!("0404040404040404040404040404040404040404040404040404040404040404"),
+                deleted: true,
+                updated_at: DateTime::from_timestamp(1_700_000_300, 0).unwrap(),
+                object: None,
+            },
+        ];
+        let cursor_after = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let cursor_id =
+            hash_256!("0505050505050505050505050505050505050505050505050505050505050505");
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                signed_get(format!("/spaces/{space}/objects"), app_key.public_key()),
+                request::query(url_decoded(contains(("limit", "10")))),
+                request::query(url_decoded(contains(("after", cursor_after.to_rfc3339())))),
+                request::query(url_decoded(contains(("key", cursor_id.to_string())))),
+                request::query(url_decoded(not(contains(key("includeslabs"))))),
+            ])
+            .respond_with(ok_body(serde_json::to_string(&events).unwrap())),
+        );
+
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        let got = client
+            .space_objects(
+                &app_key,
+                &space,
+                Some(ObjectsCursor {
+                    after: cursor_after,
+                    id: cursor_id,
+                }),
+                Some(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(got, events);
+    }
+
+    #[tokio::test]
+    async fn test_space_object_summaries() {
+        let app_key = AppKey::import(rand::random());
+        let space = PrivateKey::from_seed(&rand::random()).public_key();
+        let object = space_object();
+        let summaries = vec![SealedObjectEventSummary {
+            id: object.id(),
+            deleted: false,
+            updated_at: DateTime::from_timestamp(1_700_000_200, 0).unwrap(),
+            object: Some(SealedObjectSummary {
+                encrypted_metadata_key: object.encrypted_metadata_key,
+                encrypted_metadata: object.encrypted_metadata,
+                metadata_signature: object.metadata_signature,
+                created_at: object.created_at,
+                updated_at: object.updated_at,
+                size: 7,
+            }),
+        }];
+
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                signed_get(format!("/spaces/{space}/objects"), app_key.public_key()),
+                request::query(url_decoded(contains(("limit", "5")))),
+                request::query(url_decoded(contains(("includeslabs", "false")))),
+                request::query(url_decoded(not(contains(key("after"))))),
+                request::query(url_decoded(not(contains(key("key"))))),
+            ])
+            .respond_with(ok_body(serde_json::to_string(&summaries).unwrap())),
+        );
+
+        let client = Client::new(server.url("/").to_string()).unwrap();
+        assert_eq!(
+            client
+                .space_object_summaries(&app_key, &space, None, Some(5))
+                .await
+                .unwrap(),
+            summaries
+        );
     }
 
     /// Matches a GET to `path` whose url signature was made by `by`.
