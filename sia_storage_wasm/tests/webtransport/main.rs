@@ -70,16 +70,14 @@ async fn browsers() -> Result<(), Box<dyn Error>> {
     // Safari uses macOS certificate trust; wasm-bindgen-test does not pass
     // webdriver.json capabilities to Safari.
     #[cfg(target_os = "macos")]
-    if !Command::new("security")
-        .args([
-            "add-trusted-cert",
-            "-r",
-            "trustRoot",
-            "-p",
-            "ssl",
-            "-s",
-            "127.0.0.1",
-        ])
+    let ci = std::env::var_os("CI").is_some();
+    #[cfg(target_os = "macos")]
+    if !Command::new(if ci { "sudo" } else { "security" })
+        .args(ci.then_some("-n"))
+        .args(ci.then_some("security"))
+        .arg("add-trusted-cert")
+        .args(ci.then_some("-d"))
+        .args(["-r", "trustRoot", "-p", "ssl", "-s", "127.0.0.1"])
         .arg(&ca_pem)
         .status()
         .await?
@@ -108,8 +106,11 @@ async fn browsers() -> Result<(), Box<dyn Error>> {
         } => result,
     };
     #[cfg(target_os = "macos")]
-    if !Command::new("security")
+    if !Command::new(if ci { "sudo" } else { "security" })
+        .args(ci.then_some("-n"))
+        .args(ci.then_some("security"))
         .arg("remove-trusted-cert")
+        .args(ci.then_some("-d"))
         .arg(&ca_pem)
         .status()
         .await?
