@@ -1,3 +1,21 @@
+## 0.8.6 (2026-11-09)
+
+### Features
+
+#### Add `Sdk::shared_object_summaries`, which lists the objects attached to one of the account's sharing keys without their slabs
+
+It returns the same `ObjectSummary` as `SharedSdk::object_summaries`, with each object's id, size, decrypted metadata and timestamps, so an owner can show what a key shares without fetching every object's slabs. The WASM and NAPI bindings expose it as `sharedObjectSummaries`, the FFI binding as `shared_object_summaries`, and the C ABI as `sia_sdk_shared_object_summaries`, which is read with the existing `sia_object_summaries_*` functions.
+
+### Fixes
+
+#### Fix Firefox uploads and downloads failing against hosts on coreutils 0.25.1 and later
+
+In Firefox, uploads could run out of hosts and downloads could fail with too few shards, because sector writes and reads failed with "Error in input stream". Hosts on coreutils 0.25.1 and later stop reading a stream when an RPC ends, and Firefox discarded the rest of the host's response when the SDK's side of the stream was still open. The SDK now closes its side as soon as the request is written.
+
+#### Keep browser uploads moving when some hosts do not answer
+
+In the browser, uploads stalled for minutes when some hosts never answered a WebTransport handshake. Uploads tried new hosts before ones they had measured, and in Chrome each handshake that never completes delays the next. Uploads and downloads on every platform now rank a measured host above an untried one with the same failure rate.
+
 ## 0.8.5 (2026-10-28)
 
 ### Features

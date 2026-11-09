@@ -1,3 +1,9 @@
+## 0.7.0 (2026-11-09)
+
+### Breaking Changes
+
+- Fixed incorrect consensus hashes and encodings
+
 ## 0.6.1 (2026-11-02)
 
 ### Fixes
