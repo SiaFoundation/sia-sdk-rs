@@ -141,7 +141,16 @@ pub unsafe extern "C" fn sia_pre_authorized_key_verify_signature(
         .verify(message, &sia_storage::Signature::from(bytes))
 }
 
-/// Returns the signed pre-authorized key registration request as JSON.
+/// Returns the signed pre-authorized key registration request as JSON, the
+/// body indexd's admin API takes to register the key, so it is sent as is
+/// rather than read:
+///
+/// - `publicKey`: `"ed25519:<hex>"`
+/// - `signature`: hex
+/// - `connectKey`: the connect key the request was signed with
+/// - `expiration`: RFC 3339 in UTC, at microsecond precision
+/// - `totalUses`: a number no larger than 2^32 - 1
+/// - `allowedAppID`: hex, omitted when any application is allowed
 ///
 /// # Safety
 /// - `key` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live

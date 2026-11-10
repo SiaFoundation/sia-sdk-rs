@@ -1829,10 +1829,51 @@ fn host_query_marshals_every_field() {
     }
 }
 
-/// The listing crosses as JSON in the shape a consumer decodes, and the paging
-/// the mock does honour reaches it.
+/// A host read out of a `HostC` array into owned values.
+struct ReadHost {
+    public_key: [u8; 32],
+    addresses: Vec<(u8, String)>,
+    country_code: String,
+    good_for_upload: bool,
+}
+
+/// Reads a host array into owned values and frees it, so a test asserts on
+/// plain Rust data.
+unsafe fn take_hosts(ptr: *mut HostC, len: usize) -> Vec<ReadHost> {
+    let read = |s: *const c_char| unsafe { CStr::from_ptr(s) }.to_str().unwrap().to_string();
+    let hosts = if ptr.is_null() {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, len) }
+    };
+    let out = hosts
+        .iter()
+        .map(|h| {
+            let addresses = if h.addresses.is_null() {
+                assert_eq!(h.addresses_len, 0, "a null address list must be empty");
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(h.addresses, h.addresses_len) }
+                    .iter()
+                    .map(|a| (a.protocol, read(a.address)))
+                    .collect()
+            };
+            ReadHost {
+                public_key: h.public_key,
+                addresses,
+                country_code: read(h.country_code),
+                good_for_upload: h.good_for_upload,
+            }
+        })
+        .collect();
+    unsafe { sia_host_array_free(ptr, len) };
+    out
+}
+
+/// The listing crosses as an array of structs carrying every field, and the
+/// paging the mock does honour reaches it.
 #[test]
-fn sdk_hosts_lists_as_json() {
+fn sdk_hosts_lists_as_structs() {
     unsafe {
         let mock = sia_mock_new(40);
         let mut sdk = std::ptr::null_mut();
@@ -1850,53 +1891,77 @@ fn sdk_hosts_lists_as_json() {
             take_err(err)
         );
 
-        let fetch = |q: &HostQueryC| -> serde_json::Value {
-            let mut out = std::ptr::null_mut();
+        let fetch = |q: &HostQueryC| {
+            let mut hosts = std::ptr::null_mut();
+            let mut len = 0usize;
             let mut err = std::ptr::null_mut();
             assert_eq!(
                 sia_sdk_hosts(
                     sdk,
                     &raw const *q,
                     std::ptr::null_mut(),
-                    &raw mut out,
+                    &raw mut hosts,
+                    &raw mut len,
                     &raw mut err
                 ),
                 SIA_OK,
                 "sia_sdk_hosts: {}",
                 take_err(err)
             );
-            let json = CStr::from_ptr(out).to_str().unwrap().to_string();
-            sia_string_free(out);
-            serde_json::from_str(&json).expect("hosts must be valid JSON")
+            take_hosts(hosts, len)
         };
 
         let all = fetch(&no_host_filters());
-        let hosts = all.as_array().expect("a JSON array");
-        assert_eq!(hosts.len(), 40, "every mock host should be listed");
+        assert_eq!(all.len(), 40, "every mock host should be listed");
 
-        // The field names a consumer decodes into, not just "it parsed".
-        let first = &hosts[0];
-        assert!(first["publicKey"].is_string(), "publicKey: {first}");
-        assert!(
-            first["goodForUpload"].is_boolean(),
-            "goodForUpload: {first}"
-        );
-        assert!(first["countryCode"].is_string(), "countryCode: {first}");
-        let addrs = first["addresses"].as_array().expect("addresses array");
-        assert!(!addrs.is_empty(), "a host must carry an address");
-        assert!(addrs[0]["protocol"].is_string(), "protocol: {first}");
-        assert!(addrs[0]["address"].is_string(), "address: {first}");
+        let keys: std::collections::HashSet<[u8; 32]> = all.iter().map(|h| h.public_key).collect();
+        assert_eq!(keys.len(), 40, "each host must carry its own key");
+        assert!(!keys.contains(&[0u8; 32]), "a key must be filled in");
+
+        // The mock announces every host on QUIC, which also covers the
+        // protocol mapping for the value that is not the zero default.
+        for host in &all {
+            assert!(host.good_for_upload);
+            assert_eq!(host.country_code, "US");
+            assert_eq!(
+                host.addresses,
+                vec![(SIA_PROTOCOL_QUIC, "localhost:9984".to_string())]
+            );
+        }
 
         let mut q = no_host_filters();
         q.limit = 5;
-        assert_eq!(fetch(&q).as_array().unwrap().len(), 5, "limit must apply");
+        assert_eq!(fetch(&q).len(), 5, "limit must apply");
         q.offset = 38;
         q.limit = 10;
         assert_eq!(
-            fetch(&q).as_array().unwrap().len(),
+            fetch(&q).len(),
             2,
             "offset must skip, and a limit past the end must not wrap"
         );
+
+        // An empty page is null rather than a dangling pointer, and freeing
+        // it is a no-op.
+        q.offset = 40;
+        let mut hosts = std::ptr::dangling_mut::<HostC>();
+        let mut len = usize::MAX;
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_hosts(
+                sdk,
+                &raw const q,
+                std::ptr::null_mut(),
+                &raw mut hosts,
+                &raw mut len,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_sdk_hosts: {}",
+            take_err(err)
+        );
+        assert!(hosts.is_null(), "an empty listing must be null");
+        assert_eq!(len, 0);
+        sia_host_array_free(hosts, len);
 
         sia_sdk_free(sdk);
         sia_mock_free(mock);
@@ -1960,6 +2025,7 @@ fn shared_sdk_hosts_are_scoped_to_the_key() {
 
         let q = no_host_filters();
         let mut out = std::ptr::null_mut();
+        let mut len = 0usize;
         let mut err = std::ptr::null_mut();
         assert_eq!(
             sia_shared_sdk_hosts(
@@ -1967,22 +2033,23 @@ fn shared_sdk_hosts_are_scoped_to_the_key() {
                 &raw const q,
                 std::ptr::null_mut(),
                 &raw mut out,
+                &raw mut len,
                 &raw mut err
             ),
             SIA_OK,
             "sia_shared_sdk_hosts: {}",
             take_err(err)
         );
-        let json = CStr::from_ptr(out).to_str().unwrap().to_string();
-        sia_string_free(out);
-        let hosts: serde_json::Value =
-            serde_json::from_str(&json).expect("hosts must be valid JSON");
-        let hosts = hosts.as_array().expect("a JSON array");
+        let hosts = take_hosts(out, len);
         assert!(
             !hosts.is_empty(),
             "a key with tokens must see the hosts serving it"
         );
-        assert!(hosts[0]["publicKey"].is_string());
+        assert_ne!(hosts[0].public_key, [0u8; 32]);
+        assert!(
+            !hosts[0].addresses.is_empty(),
+            "a host must carry an address"
+        );
 
         sia_shared_sdk_free(shared);
         sia_sharing_key_free(key);
@@ -1997,6 +2064,7 @@ fn hosts_reject_null_handles() {
     unsafe {
         let q = no_host_filters();
         let mut out = std::ptr::null_mut();
+        let mut len = 0usize;
         let mut err = std::ptr::null_mut();
         assert_eq!(
             sia_sdk_hosts(
@@ -2004,6 +2072,7 @@ fn hosts_reject_null_handles() {
                 &raw const q,
                 std::ptr::null_mut(),
                 &raw mut out,
+                &raw mut len,
                 &raw mut err
             ),
             SIA_ERR_INVALID_HANDLE,
@@ -2014,11 +2083,13 @@ fn hosts_reject_null_handles() {
                 &raw const q,
                 std::ptr::null_mut(),
                 &raw mut out,
+                &raw mut len,
                 &raw mut err
             ),
             SIA_ERR_INVALID_HANDLE,
         );
         assert!(err.is_null(), "an absent handle sets no message");
+        sia_host_array_free(std::ptr::null_mut(), 0);
     }
 }
 
@@ -3530,6 +3601,111 @@ fn shared_sdk_connect_validates_before_it_dials() {
     }
 }
 
+fn app_metadata_c(
+    name: &CStr,
+    description: &CStr,
+    service_url: &CStr,
+    logo_url: Option<&CStr>,
+    callback_url: Option<&CStr>,
+) -> AppMetadataC {
+    let opt = |s: Option<&CStr>| s.map_or(std::ptr::null(), CStr::as_ptr);
+    AppMetadataC {
+        id: [17u8; 32],
+        name: name.as_ptr(),
+        description: description.as_ptr(),
+        service_url: service_url.as_ptr(),
+        logo_url: opt(logo_url),
+        callback_url: opt(callback_url),
+    }
+}
+
+/// Every field of the C struct reaches the metadata the builder registers
+/// with, and a null optional stays absent rather than becoming "".
+#[test]
+fn app_metadata_copies_every_field() {
+    let full = app_metadata_c(
+        c"name",
+        c"description",
+        c"https://service.invalid",
+        Some(c"https://logo.invalid"),
+        Some(c"https://callback.invalid"),
+    );
+    let meta = unsafe { app_metadata(&full) }.expect("valid metadata");
+    assert_eq!(<[u8; 32]>::from(meta.id), [17u8; 32]);
+    assert_eq!(meta.name, "name");
+    assert_eq!(meta.description, "description");
+    assert_eq!(meta.service_url, "https://service.invalid");
+    assert_eq!(meta.logo_url, Some("https://logo.invalid"));
+    assert_eq!(meta.callback_url, Some("https://callback.invalid"));
+
+    let bare = app_metadata_c(
+        c"name",
+        c"description",
+        c"https://service.invalid",
+        None,
+        None,
+    );
+    let meta = unsafe { app_metadata(&bare) }.expect("valid metadata");
+    assert_eq!(meta.logo_url, None);
+    assert_eq!(meta.callback_url, None);
+}
+
+/// A builder comes from the struct alone, with no JSON to assemble. A missing
+/// struct is a missing handle, and a missing required string is refused by
+/// name rather than read through.
+#[test]
+fn builder_new_takes_metadata_as_a_struct() {
+    let url = c"https://example.invalid";
+    unsafe {
+        let meta = app_metadata_c(
+            c"name",
+            c"description",
+            c"https://service.invalid",
+            None,
+            None,
+        );
+        let mut b = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_new(url.as_ptr(), &raw const meta, &raw mut b, &raw mut err),
+            SIA_OK,
+            "sia_builder_new: {}",
+            take_err(err)
+        );
+        assert!(!b.is_null());
+        sia_builder_free(b);
+
+        let mut b = std::ptr::null_mut();
+        assert_eq!(
+            sia_builder_new(url.as_ptr(), std::ptr::null(), &raw mut b, &raw mut err),
+            SIA_ERR_INVALID_HANDLE,
+        );
+        assert!(err.is_null(), "an absent handle sets no message");
+
+        for field in ["name", "description", "service url"] {
+            let mut meta = app_metadata_c(
+                c"name",
+                c"description",
+                c"https://service.invalid",
+                None,
+                None,
+            );
+            match field {
+                "name" => meta.name = std::ptr::null(),
+                "description" => meta.description = std::ptr::null(),
+                _ => meta.service_url = std::ptr::null(),
+            }
+            let mut err = std::ptr::null_mut();
+            assert_eq!(
+                sia_builder_new(url.as_ptr(), &raw const meta, &raw mut b, &raw mut err),
+                SIA_ERR,
+            );
+            assert_eq!(take_err(err), format!("missing app {field}"));
+            assert!(b.is_null(), "a refused builder must not be written");
+        }
+    }
+}
+
 /// Both checks ask whether an account already exists, which only an approved
 /// connection can answer, so both refuse every other state. Nothing here
 /// touches the network: an unroutable host would surface as a different error.
@@ -4082,7 +4258,7 @@ fn events_at_rejects_a_second_read() {
     }
 }
 
-/// The header mirrors these five structs by hand, and the symbol parity test
+/// The header mirrors these structs, and the symbol parity test
 /// only covers function names. A field added, reordered or resized shifts
 /// every offset past it, which C reads as whatever now sits there.
 ///
@@ -4171,6 +4347,54 @@ fn header_structs_keep_their_layout() {
     assert_eq!(offset_of!(HostQueryC, offset), 24);
     assert_eq!(offset_of!(HostQueryC, limit), 32);
     assert_eq!(offset_of!(HostQueryC, country), 40);
+
+    // sia_app_metadata_t
+    assert_eq!(size_of::<AppMetadataC>(), 72, "sia_app_metadata_t");
+    assert_eq!(align_of::<AppMetadataC>(), 8, "sia_app_metadata_t");
+    assert_eq!(offset_of!(AppMetadataC, id), 0);
+    assert_eq!(offset_of!(AppMetadataC, name), 32);
+    assert_eq!(offset_of!(AppMetadataC, description), 40);
+    assert_eq!(offset_of!(AppMetadataC, service_url), 48);
+    assert_eq!(offset_of!(AppMetadataC, logo_url), 56);
+    assert_eq!(offset_of!(AppMetadataC, callback_url), 64);
+
+    // sia_net_address_t
+    assert_eq!(size_of::<NetAddressC>(), 16, "sia_net_address_t");
+    assert_eq!(align_of::<NetAddressC>(), 8, "sia_net_address_t");
+    assert_eq!(offset_of!(NetAddressC, protocol), 0);
+    assert_eq!(offset_of!(NetAddressC, address), 8);
+
+    // sia_host_t
+    assert_eq!(size_of::<HostC>(), 80, "sia_host_t");
+    assert_eq!(align_of::<HostC>(), 8, "sia_host_t");
+    assert_eq!(offset_of!(HostC, public_key), 0);
+    assert_eq!(offset_of!(HostC, addresses), 32);
+    assert_eq!(offset_of!(HostC, addresses_len), 40);
+    assert_eq!(offset_of!(HostC, country_code), 48);
+    assert_eq!(offset_of!(HostC, latitude), 56);
+    assert_eq!(offset_of!(HostC, longitude), 64);
+    assert_eq!(offset_of!(HostC, good_for_upload), 72);
+
+    // sia_app_t
+    assert_eq!(size_of::<AppC>(), 64, "sia_app_t");
+    assert_eq!(align_of::<AppC>(), 8, "sia_app_t");
+    assert_eq!(offset_of!(AppC, id), 0);
+    assert_eq!(offset_of!(AppC, name), 32);
+    assert_eq!(offset_of!(AppC, description), 40);
+    assert_eq!(offset_of!(AppC, logo_url), 48);
+    assert_eq!(offset_of!(AppC, service_url), 56);
+
+    // sia_account_t
+    assert_eq!(size_of::<AccountC>(), 144, "sia_account_t");
+    assert_eq!(align_of::<AccountC>(), 8, "sia_account_t");
+    assert_eq!(offset_of!(AccountC, account_key), 0);
+    assert_eq!(offset_of!(AccountC, max_pinned_data), 32);
+    assert_eq!(offset_of!(AccountC, remaining_storage), 40);
+    assert_eq!(offset_of!(AccountC, pinned_data), 48);
+    assert_eq!(offset_of!(AccountC, pinned_size), 56);
+    assert_eq!(offset_of!(AccountC, ready), 64);
+    assert_eq!(offset_of!(AccountC, app), 72);
+    assert_eq!(offset_of!(AccountC, last_used_unix_us), 136);
 
     // A NULL callback must be the all-zero pattern a zeroed C struct has.
     let zeroed: UploadOptionsC = unsafe { std::mem::zeroed() };
@@ -5977,6 +6201,77 @@ fn the_mock_slow_host_controls_are_callable() {
     }
 }
 
+/// The account crosses as a struct. The mock reports an unlimited account,
+/// whose `u64::MAX` limit is the value a JSON number could not carry.
+#[test]
+fn sdk_account_crosses_as_a_struct() {
+    unsafe {
+        let mock = sia_mock_new(10);
+        let seed = [137u8; 32];
+        let mut sdk = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_mock_sdk(
+                mock,
+                seed.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut sdk,
+                &raw mut err
+            ),
+            SIA_OK,
+            "sia_mock_sdk: {}",
+            take_err(err)
+        );
+
+        let mut account = std::ptr::null_mut();
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_account(sdk, std::ptr::null_mut(), &raw mut account, &raw mut err),
+            SIA_OK,
+            "sia_sdk_account: {}",
+            take_err(err)
+        );
+        let a = account.as_ref().expect("SIA_OK must write the account");
+        let want_key: [u8; 32] = sia_storage::AppKey::import(seed).public_key().into();
+        assert_eq!(a.account_key, want_key);
+        assert_eq!(a.max_pinned_data, u64::MAX);
+        assert_eq!(a.remaining_storage, u64::MAX);
+        assert_eq!(a.pinned_data, 0);
+        assert_eq!(a.pinned_size, 0);
+        assert!(a.ready);
+        assert_eq!(a.app.id, [0u8; 32]);
+        assert_eq!(CStr::from_ptr(a.app.name).to_str().unwrap(), "mock");
+        assert_eq!(
+            CStr::from_ptr(a.app.description).to_str().unwrap(),
+            "mock indexer"
+        );
+        assert!(a.app.logo_url.is_null(), "an absent logo must be null");
+        assert!(a.app.service_url.is_null(), "an absent url must be null");
+        let age = sia_storage::Utc::now().timestamp_micros() - a.last_used_unix_us;
+        assert!(
+            (0..60_000_000).contains(&age),
+            "last_used must be within the last minute"
+        );
+        sia_account_free(account);
+
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_sdk_account(
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                &raw mut account,
+                &raw mut err
+            ),
+            SIA_ERR_INVALID_HANDLE,
+        );
+        assert!(err.is_null(), "an absent handle sets no message");
+        sia_account_free(std::ptr::null_mut());
+
+        sia_sdk_free(sdk);
+        sia_mock_free(mock);
+    }
+}
+
 /// The header says a const handle may be used from several threads at once
 /// and a compile time assertion pins the Rust side. This runs it.
 #[test]
@@ -6008,13 +6303,17 @@ fn const_sdk_calls_run_concurrently() {
                     for _ in 0..50 {
                         let mut key = [0u8; 32];
                         sia_sdk_app_key(sdk, key.as_mut_ptr());
-                        let mut json = std::ptr::null_mut();
+                        let mut account = std::ptr::null_mut();
                         let mut err = std::ptr::null_mut();
-                        let code =
-                            sia_sdk_account(sdk, std::ptr::null_mut(), &raw mut json, &raw mut err);
+                        let code = sia_sdk_account(
+                            sdk,
+                            std::ptr::null_mut(),
+                            &raw mut account,
+                            &raw mut err,
+                        );
                         assert_eq!(code, SIA_OK, "sia_sdk_account from another thread");
-                        assert!(!json.is_null());
-                        sia_string_free(json);
+                        assert!(!account.is_null());
+                        sia_account_free(account);
                         seen = key;
                     }
                     seen

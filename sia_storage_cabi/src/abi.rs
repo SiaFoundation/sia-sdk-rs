@@ -138,6 +138,27 @@ pub(crate) fn lossy_cstring(s: impl Into<Vec<u8>>) -> CString {
     CString::new(bytes).expect("every NUL was replaced")
 }
 
+/// Moves `v` to the heap as a C array. An empty one is null rather than the
+/// dangling pointer an empty boxed slice carries, so C can test for it.
+pub(crate) fn into_raw_array<T>(v: Vec<T>) -> (*mut T, usize) {
+    if v.is_empty() {
+        return (std::ptr::null_mut(), 0);
+    }
+    let len = v.len();
+    (Box::into_raw(v.into_boxed_slice()).cast::<T>(), len)
+}
+
+/// Drops an array from [`into_raw_array`] and every element in it.
+///
+/// # Safety
+/// - `ptr` must be null, or come from `into_raw_array` along with `len`, and must not be used
+///   again after this returns.
+pub(crate) unsafe fn free_raw_array<T>(ptr: *mut T, len: usize) {
+    if !ptr.is_null() {
+        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) });
+    }
+}
+
 impl log::Log for CLogger {
     fn enabled(&self, _: &log::Metadata) -> bool {
         true
