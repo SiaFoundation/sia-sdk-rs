@@ -46,18 +46,54 @@ impl Drop for FfiBuilder {
     }
 }
 
-#[derive(serde::Deserialize)]
-pub(crate) struct AppMetadataIn {
-    #[serde(rename = "appID")]
-    pub(crate) id: Hash256,
-    pub(crate) name: String,
-    pub(crate) description: String,
-    #[serde(rename = "serviceURL")]
-    pub(crate) service_url: String,
-    #[serde(rename = "logoURL")]
-    pub(crate) logo_url: Option<String>,
-    #[serde(rename = "callbackURL")]
-    pub(crate) callback_url: Option<String>,
+/// What `sia_builder_new` registers the application as. The strings are
+/// copied, so they only need to outlive the call.
+#[repr(C)]
+pub(crate) struct AppMetadataC {
+    pub(crate) id: [u8; 32],
+    /// At most 128 characters.
+    pub(crate) name: *const c_char,
+    /// At most 1024 characters.
+    pub(crate) description: *const c_char,
+    /// At most 1024 characters.
+    pub(crate) service_url: *const c_char,
+    /// Null for none.
+    pub(crate) logo_url: *const c_char,
+    /// Null for none. The indexer calls it once the user approves the
+    /// connection.
+    pub(crate) callback_url: *const c_char,
+}
+
+/// Copies one of the metadata strings, leaking it because [`AppMetadata`]
+/// holds `'static` strings. A builder is created once per connection attempt,
+/// so the leak is bounded and deliberate.
+///
+/// # Safety
+/// - `ptr` must be null or NUL terminated.
+unsafe fn leak_meta_str(field: &str, ptr: *const c_char) -> Result<Option<&'static str>, String> {
+    if ptr.is_null() {
+        return Ok(None);
+    }
+    match unsafe { cstr(&ptr) } {
+        Ok(s) => Ok(Some(Box::leak(s.to_owned().into_boxed_str()))),
+        Err(e) => Err(format!("invalid app {field}: {e}")),
+    }
+}
+
+/// # Safety
+/// - Every string in `m` must be null or NUL terminated.
+pub(crate) unsafe fn app_metadata(m: &AppMetadataC) -> Result<AppMetadata, String> {
+    let required = |field: &str, ptr| {
+        unsafe { leak_meta_str(field, ptr) }?.ok_or_else(|| format!("missing app {field}"))
+    };
+    Ok(AppMetadata {
+        id: Hash256::new(m.id),
+        name: required("name", m.name)?,
+        description: required("description", m.description)?,
+        service_url: required("service url", m.service_url)?,
+        logo_url: unsafe { leak_meta_str("logo url", m.logo_url) }?,
+        callback_url: unsafe { leak_meta_str("callback url", m.callback_url) }?,
+    })
 }
 
 pub(crate) fn builder_error(err: ErrOut, e: BuilderError) -> i32 {
@@ -69,12 +105,12 @@ pub(crate) fn builder_error(err: ErrOut, e: BuilderError) -> i32 {
     set_err(err, code, e.to_string())
 }
 
-/// `app_meta_json` is `{"appID":"<hex>","name":...,"description":...,
-/// "serviceURL":...,"logoURL":...|null,"callbackURL":...|null}`.
+/// A required string in `meta` that is null is rejected with `SIA_ERR`.
 ///
 /// # Safety
 /// - `indexer_url` must be non null and NUL terminated.
-/// - `app_meta_json` must be non null and NUL terminated.
+/// - `meta` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must point to an
+///   initialised struct whose strings are each null or NUL terminated.
 /// - `out` must be non null and writable. On success it receives an owned handle that must be
 ///   released with `sia_builder_free`.
 /// - `err` may be null. Otherwise it receives an owned message on failure that must be released
@@ -82,33 +118,22 @@ pub(crate) fn builder_error(err: ErrOut, e: BuilderError) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_builder_new(
     indexer_url: *const c_char,
-    app_meta_json: *const c_char,
+    meta: *const AppMetadataC,
     out: *mut *mut FfiBuilder,
     err: *mut *mut c_char,
 ) -> i32 {
     let err = unsafe { ErrOut::new(err) };
     guarded(err, || {
+        let Some(meta) = (unsafe { meta.as_ref() }) else {
+            return SIA_ERR_INVALID_HANDLE;
+        };
         let url = match unsafe { cstr(&indexer_url) } {
             Ok(s) => s,
             Err(e) => return set_err(err, SIA_ERR, format!("invalid indexer url: {e}")),
         };
-        let meta_json = match unsafe { cstr(&app_meta_json) } {
-            Ok(s) => s,
-            Err(e) => return set_err(err, SIA_ERR, format!("invalid app metadata: {e}")),
-        };
-        let meta: AppMetadataIn = match serde_json::from_str(meta_json) {
+        let meta = match unsafe { app_metadata(meta) } {
             Ok(m) => m,
-            Err(e) => return set_err(err, SIA_ERR, format!("invalid app metadata: {e}")),
-        };
-        // AppMetadata requires 'static strings; a builder is created once per
-        // connection attempt, so the leak is bounded and deliberate.
-        let meta = AppMetadata {
-            id: meta.id,
-            name: Box::leak(meta.name.into_boxed_str()),
-            description: Box::leak(meta.description.into_boxed_str()),
-            service_url: Box::leak(meta.service_url.into_boxed_str()),
-            logo_url: meta.logo_url.map(|s| &*Box::leak(s.into_boxed_str())),
-            callback_url: meta.callback_url.map(|s| &*Box::leak(s.into_boxed_str())),
+            Err(msg) => return set_err(err, SIA_ERR, msg),
         };
         match Builder::new(url, meta) {
             Ok(b) => {

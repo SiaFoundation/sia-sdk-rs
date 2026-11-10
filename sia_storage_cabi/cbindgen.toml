@@ -13,6 +13,11 @@ header = """// C interface to the sia_storage Rust crate.
 //     sia_string_free.
 //   - Handles are opaque pointers owned by the caller and released with the
 //     matching *_free function.
+//   - Records holding strings or lists, such as sia_account_t and the
+//     sia_host_t array, are allocated by the library. Read their fields
+//     directly. The matching *_free releases the record and everything it
+//     points to, so copy a string to keep it longer. An optional string is
+//     null when absent.
 //   - Passing a null handle is reported rather than dereferenced. A fallible
 //     function returns SIA_ERR_INVALID_HANDLE without setting *err; a getter
 //     returns a zero value (0, false, or NULL); a void function does nothing.
@@ -80,6 +85,11 @@ parse_deps = false
 "FfiObjectSummaries" = "sia_object_summaries_t"
 "FfiMock" = "sia_mock_t"
 # Structs C reads or fills.
+"AccountC" = "sia_account_t"
+"AppC" = "sia_app_t"
+"AppMetadataC" = "sia_app_metadata_t"
+"HostC" = "sia_host_t"
+"NetAddressC" = "sia_net_address_t"
 "KeyStatsC" = "sia_key_stats_t"
 "ObjectSummaryC" = "sia_object_summary_t"
 "ShardProgressC" = "sia_shard_progress_t"

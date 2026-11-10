@@ -331,6 +331,9 @@ pub unsafe extern "C" fn sia_object_array_free(objs: *mut *mut Object, len: usiz
 /// Seals an object under the account's app key and encodes it as JSON.
 /// Free the result with `sia_string_free`.
 ///
+/// The JSON is indexd's sealed object. Store it unchanged and pass it to
+/// `sia_object_from_sealed_json` to get the object back.
+///
 /// # Safety
 /// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_builder_connect`, `sia_builder_register` or `sia_mock_sdk` that has not been freed.
@@ -359,7 +362,8 @@ pub unsafe extern "C" fn sia_object_seal_json(
 /// unreachable, which is what a process restarting from a saved seed needs to
 /// re-seal what it already has.
 ///
-/// Free the result with `sia_string_free`.
+/// The JSON is the same as `sia_object_seal_json` produces. Free the result
+/// with `sia_string_free`.
 ///
 /// # Safety
 /// - `app_key` must be readable for 32 bytes.
@@ -397,7 +401,8 @@ pub unsafe extern "C" fn sia_object_seal_json_with_key(
 
 /// Decodes a sealed object from JSON and opens it with the account's app key,
 /// verifying its signatures. This is how a caller that persisted the sealed
-/// form gets a usable object back.
+/// form gets a usable object back. `json` is what `sia_object_seal_json`
+/// produced, or indexd's sealed object from any other source.
 ///
 /// # Safety
 /// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle

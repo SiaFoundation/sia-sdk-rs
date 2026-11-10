@@ -1,6 +1,6 @@
 use crate::abi::*;
 use crate::object::{FfiEvent, FfiEventSummaries, FfiEvents};
-use sia_storage::{Object, ObjectsCursor, Sdk};
+use sia_storage::{Account, App, Object, ObjectsCursor, Sdk};
 use std::ffi::c_char;
 use tokio_util::sync::CancellationToken;
 
@@ -27,22 +27,94 @@ pub unsafe extern "C" fn sia_sdk_app_key(sdk: *const Sdk, out: *mut u8) {
     unsafe { std::slice::from_raw_parts_mut(out, 32) }.copy_from_slice(&seed);
 }
 
-/// `out_json` receives the account encoded as JSON.
-///
+/// The application an account is registered to. Every string is owned by the
+/// account it came from.
+#[repr(C)]
+pub(crate) struct AppC {
+    pub(crate) id: [u8; 32],
+    pub(crate) name: *const c_char,
+    pub(crate) description: *const c_char,
+    /// Null when the application has no logo.
+    pub(crate) logo_url: *const c_char,
+    /// Null when the application has no service URL.
+    pub(crate) service_url: *const c_char,
+}
+
+impl From<App> for AppC {
+    fn from(a: App) -> Self {
+        let opt = |s: Option<String>| {
+            s.map_or(std::ptr::null(), |s| {
+                lossy_cstring(s).into_raw().cast_const()
+            })
+        };
+        AppC {
+            id: a.id.into(),
+            name: lossy_cstring(a.name).into_raw(),
+            description: lossy_cstring(a.description).into_raw(),
+            logo_url: opt(a.logo_url),
+            service_url: opt(a.service_url),
+        }
+    }
+}
+
+impl Drop for AppC {
+    fn drop(&mut self) {
+        for s in [self.name, self.description, self.logo_url, self.service_url] {
+            unsafe { sia_string_free(s.cast_mut()) }
+        }
+    }
+}
+
+/// The indexer's view of the account behind an app key.
+#[repr(C)]
+pub(crate) struct AccountC {
+    pub(crate) account_key: [u8; 32],
+    /// The pinning limit in bytes. An unlimited account reports 2^63 - 1 or
+    /// more.
+    pub(crate) max_pinned_data: u64,
+    /// Bytes that can still be pinned under both the limit and the current
+    /// quota.
+    pub(crate) remaining_storage: u64,
+    /// Bytes pinned, which count towards `max_pinned_data`.
+    pub(crate) pinned_data: u64,
+    /// Bytes pinned after erasure coding, which is what sits on the network.
+    pub(crate) pinned_size: u64,
+    /// False while the indexer is still processing the registration.
+    pub(crate) ready: bool,
+    pub(crate) app: AppC,
+    /// -62135596800000000 (0001-01-01T00:00:00Z) for an account never used.
+    pub(crate) last_used_unix_us: i64,
+}
+
+impl From<Account> for AccountC {
+    fn from(a: Account) -> Self {
+        AccountC {
+            account_key: a.account_key.into(),
+            max_pinned_data: a.max_pinned_data,
+            remaining_storage: a.remaining_storage,
+            pinned_data: a.pinned_data,
+            pinned_size: a.pinned_size,
+            ready: a.ready,
+            app: a.app.into(),
+            last_used_unix_us: a.last_used.timestamp_micros(),
+        }
+    }
+}
+
 /// # Safety
 /// - `sdk` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live handle
 ///   from `sia_builder_connect`, `sia_builder_register` or `sia_mock_sdk` that has not been freed.
 /// - `cancel` may be null, which makes the call uncancellable. Otherwise it must be a live token
 ///   from `sia_cancel_new`.
-/// - `out_json` must be non null and writable. On success it receives an owned string that must be
-///   released with `sia_string_free`.
+/// - `out` must be non null and writable. On success it receives an owned account that must be
+///   released with `sia_account_free`.
 /// - `err` may be null. Otherwise it receives an owned message on failure that must be released
 ///   with `sia_string_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_sdk_account(
     sdk: *const Sdk,
     cancel: *mut CancellationToken,
-    out_json: *mut *mut c_char,
+    out: *mut *mut AccountC,
     err: *mut *mut c_char,
 ) -> i32 {
     let err = unsafe { ErrOut::new(err) };
@@ -53,16 +125,25 @@ pub unsafe extern "C" fn sia_sdk_account(
         };
         match block_on(cancel, sdk.account()) {
             None => set_cancelled(err),
-            Some(Ok(account)) => match serde_json::to_string(&account) {
-                Ok(js) => {
-                    unsafe { *out_json = lossy_cstring(js).into_raw() }
-                    SIA_OK
-                }
-                Err(e) => set_typed_err(err, &e),
-            },
+            Some(Ok(account)) => {
+                unsafe { *out = Box::into_raw(Box::new(account.into())) }
+                SIA_OK
+            }
             Some(Err(e)) => set_typed_err(err, &e),
         }
     })
+}
+
+/// Releases an account along with every string it points to.
+///
+/// # Safety
+/// - `account` may be null, which does nothing. Otherwise it must be an unmodified account from
+///   `sia_sdk_account`, and must not be used again after this returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sia_account_free(account: *mut AccountC) {
+    if !account.is_null() {
+        drop(unsafe { Box::from_raw(account) });
+    }
 }
 
 /// # Safety
