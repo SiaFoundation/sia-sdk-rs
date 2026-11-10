@@ -64,35 +64,51 @@ pub(crate) struct AppMetadataC {
     pub(crate) callback_url: *const c_char,
 }
 
-/// Copies one of the metadata strings, leaking it because [`AppMetadata`]
-/// holds `'static` strings. A builder is created once per connection attempt,
-/// so the leak is bounded and deliberate.
+/// Borrows one of the metadata strings, or `None` for a null one.
 ///
 /// # Safety
 /// - `ptr` must be null or NUL terminated.
-unsafe fn leak_meta_str(field: &str, ptr: *const c_char) -> Result<Option<&'static str>, String> {
+unsafe fn meta_str<'a>(field: &str, ptr: &'a *const c_char) -> Result<Option<&'a str>, String> {
     if ptr.is_null() {
         return Ok(None);
     }
-    match unsafe { cstr(&ptr) } {
-        Ok(s) => Ok(Some(Box::leak(s.to_owned().into_boxed_str()))),
+    match unsafe { cstr(ptr) } {
+        Ok(s) => Ok(Some(s)),
         Err(e) => Err(format!("invalid app {field}: {e}")),
     }
 }
 
 /// # Safety
+/// - `ptr` must be null or NUL terminated.
+unsafe fn required_meta_str<'a>(field: &str, ptr: &'a *const c_char) -> Result<&'a str, String> {
+    unsafe { meta_str(field, ptr) }?.ok_or_else(|| format!("missing app {field}"))
+}
+
+/// Copies a metadata string, leaking it because [`AppMetadata`] holds
+/// `'static` strings. A builder is created once per connection attempt, so
+/// the leak is bounded and deliberate.
+fn leak(s: &str) -> &'static str {
+    Box::leak(s.to_owned().into_boxed_str())
+}
+
+/// Every string is checked before any is copied, so metadata that is refused
+/// leaks nothing.
+///
+/// # Safety
 /// - Every string in `m` must be null or NUL terminated.
 pub(crate) unsafe fn app_metadata(m: &AppMetadataC) -> Result<AppMetadata, String> {
-    let required = |field: &str, ptr| {
-        unsafe { leak_meta_str(field, ptr) }?.ok_or_else(|| format!("missing app {field}"))
-    };
+    let name = unsafe { required_meta_str("name", &m.name) }?;
+    let description = unsafe { required_meta_str("description", &m.description) }?;
+    let service_url = unsafe { required_meta_str("service url", &m.service_url) }?;
+    let logo_url = unsafe { meta_str("logo url", &m.logo_url) }?;
+    let callback_url = unsafe { meta_str("callback url", &m.callback_url) }?;
     Ok(AppMetadata {
         id: Hash256::new(m.id),
-        name: required("name", m.name)?,
-        description: required("description", m.description)?,
-        service_url: required("service url", m.service_url)?,
-        logo_url: unsafe { leak_meta_str("logo url", m.logo_url) }?,
-        callback_url: unsafe { leak_meta_str("callback url", m.callback_url) }?,
+        name: leak(name),
+        description: leak(description),
+        service_url: leak(service_url),
+        logo_url: logo_url.map(leak),
+        callback_url: callback_url.map(leak),
     })
 }
 
