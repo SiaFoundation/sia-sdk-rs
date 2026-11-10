@@ -6231,7 +6231,7 @@ fn sdk_account_crosses_as_a_struct() {
             "sia_sdk_account: {}",
             take_err(err)
         );
-        let a = &*account;
+        let a = account.as_ref().expect("SIA_OK must write the account");
         let want_key: [u8; 32] = sia_storage::AppKey::import(seed).public_key().into();
         assert_eq!(a.account_key, want_key);
         assert_eq!(a.max_pinned_data, u64::MAX);
@@ -6250,7 +6250,7 @@ fn sdk_account_crosses_as_a_struct() {
         let age = sia_storage::Utc::now().timestamp_micros() - a.last_used_unix_us;
         assert!(
             (0..60_000_000).contains(&age),
-            "last_used must be recent, was {age}us ago"
+            "last_used must be within the last minute"
         );
         sia_account_free(account);
 
