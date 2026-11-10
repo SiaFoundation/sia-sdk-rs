@@ -69,8 +69,8 @@ impl Drop for AppC {
 #[repr(C)]
 pub(crate) struct AccountC {
     pub(crate) account_key: [u8; 32],
-    /// The pinning limit in bytes. An unlimited account reports 2^63 - 1 or
-    /// more.
+    /// The pinning limit in bytes. An account with no limit reports
+    /// 2^63 - 1.
     pub(crate) max_pinned_data: u64,
     /// Bytes that can still be pinned under both the limit and the current
     /// quota.

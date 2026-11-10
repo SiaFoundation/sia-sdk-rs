@@ -222,8 +222,8 @@ typedef struct {
 // The indexer's view of the account behind an app key.
 typedef struct {
     uint8_t account_key[32];
-    // The pinning limit in bytes. An unlimited account reports 2^63 - 1 or
-    // more.
+    // The pinning limit in bytes. An account with no limit reports
+    // 2^63 - 1.
     uint64_t max_pinned_data;
     // Bytes that can still be pinned under both the limit and the current
     // quota.
