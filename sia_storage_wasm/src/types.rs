@@ -59,8 +59,10 @@ impl From<sia_storage::App> for App {
 /// Information about the user's account on the indexer.
 #[derive(serde::Serialize, tsify::Tsify)]
 #[serde(rename_all = "camelCase")]
+#[tsify(large_number_types_as_bigints)]
 pub struct Account {
     pub account_key: String,
+    /// The pinning limit in bytes. An account with no limit reports 2^63 - 1.
     pub max_pinned_data: u64,
     pub remaining_storage: u64,
     pub pinned_data: u64,
@@ -140,6 +142,20 @@ fn get_function(obj: &js_sys::Object, key: &str) -> Option<js_sys::Function> {
         .and_then(|v| v.dyn_into::<js_sys::Function>().ok())
 }
 
+/// Reads a `bigint` as a u64. A number, a negative value or one above
+/// 2^64 - 1 is refused rather than rounded or wrapped, which is what
+/// wasm-bindgen does with a plain `u64` parameter.
+pub(crate) fn u64_from_js(v: JsValue, name: &str) -> Result<u64, JsError> {
+    if !v.is_bigint() {
+        return Err(JsError::new(&format!("{name} must be a bigint")));
+    }
+    u64::try_from(v.unchecked_into::<js_sys::BigInt>()).map_err(|_| {
+        JsError::new(&format!(
+            "{name} must be a non-negative integer that fits in u64"
+        ))
+    })
+}
+
 fn get_bigint_u64(obj: &js_sys::Object, key: &str) -> Result<Option<u64>, JsError> {
     let Ok(v) = js_sys::Reflect::get(obj, &key.into()) else {
         return Ok(None);
@@ -147,16 +163,7 @@ fn get_bigint_u64(obj: &js_sys::Object, key: &str) -> Result<Option<u64>, JsErro
     if v.is_undefined() || v.is_null() {
         return Ok(None);
     }
-    if !v.is_bigint() {
-        return Err(JsError::new(&format!("{key} must be a bigint")));
-    }
-    u64::try_from(v.unchecked_into::<js_sys::BigInt>())
-        .map(Some)
-        .map_err(|_| {
-            JsError::new(&format!(
-                "{key} must be a non-negative integer that fits in u64"
-            ))
-        })
+    u64_from_js(v, key).map(Some)
 }
 
 fn packed_options_from_obj(obj: &js_sys::Object) -> sia_storage::PackedUploadOptions {
@@ -191,28 +198,28 @@ pub(crate) fn upload_options_from_js(val: JsValue) -> Result<sia_storage::Upload
 const _: &str = r#"
 export interface DownloadOptions {
     maxBufferedChunks?: number;
-    offset?: number;
-    length?: number;
+    offset?: bigint;
+    length?: bigint;
     onShardDownloaded?: (progress: ShardProgress) => void;
 }
 "#;
 
-pub(crate) fn download_options_from_js(val: JsValue) -> sia_storage::DownloadOptions {
+pub(crate) fn download_options_from_js(
+    val: JsValue,
+) -> Result<sia_storage::DownloadOptions, JsError> {
     let obj = js_sys::Object::from(val);
     let mut options = sia_storage::DownloadOptions::default();
     if let Some(v) = get_f64(&obj, "maxBufferedChunks") {
         options.max_buffered_chunks = Some(v as usize);
     }
-    if let Some(v) = get_f64(&obj, "offset") {
-        options.offset = v as u64;
+    if let Some(v) = get_bigint_u64(&obj, "offset")? {
+        options.offset = v;
     }
-    if let Some(v) = get_f64(&obj, "length") {
-        options.length = Some(v as u64);
-    }
+    options.length = get_bigint_u64(&obj, "length")?;
     if let Some(cb) = get_function(&obj, "onShardDownloaded") {
         options.shard_downloaded = Some(shard_progress_callback(cb));
     }
-    options
+    Ok(options)
 }
 
 /// Query parameters for filtering hosts.
@@ -434,6 +441,7 @@ pub(crate) fn to_js<T: serde::Serialize + ?Sized>(val: &T) -> Result<JsValue, Js
 /// snapshot, not a live view.
 #[derive(serde::Serialize, tsify::Tsify)]
 #[serde(rename_all = "camelCase")]
+#[tsify(large_number_types_as_bigints)]
 pub struct KeyStats {
     pub object_count: u64,
     pub object_size: u64,
@@ -480,5 +488,109 @@ mod preserve_optional_date {
             Some(date) => serde_wasm_bindgen::preserve::serialize(date, serializer),
             None => serializer.serialize_none(),
         }
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use super::*;
+    use sia_storage::{PublicKey, Utc};
+    use tsify::Tsify;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    /// indexd reports an account with no limit as 2^63 - 1.
+    const NO_LIMIT: u64 = i64::MAX as u64;
+
+    fn bigint(v: &JsValue, key: &str) -> u64 {
+        let field = Reflect::get(v, &JsValue::from_str(key)).unwrap();
+        assert!(field.is_bigint(), "{key} is not a bigint");
+        u64::try_from(field.unchecked_into::<js_sys::BigInt>()).unwrap()
+    }
+
+    fn big(n: &str) -> JsValue {
+        js_sys::BigInt::new(&JsValue::from_str(n)).unwrap().into()
+    }
+
+    /// #404: serde_wasm_bindgen refused a u64 above 2^53, so `account()`
+    /// threw for every account with no limit.
+    #[wasm_bindgen_test]
+    fn account_with_no_limit() {
+        let account = sia_storage::Account {
+            account_key: PublicKey::new([1; 32]),
+            max_pinned_data: NO_LIMIT,
+            remaining_storage: NO_LIMIT - 4097,
+            pinned_data: 4097,
+            pinned_size: 12291,
+            ready: true,
+            app: sia_storage::App {
+                id: Hash256::default(),
+                name: "app".into(),
+                description: "".into(),
+                logo_url: None,
+                service_url: None,
+            },
+            last_used: Utc::now(),
+        };
+        let v: JsValue = Account::from(account).into_ts().unwrap().into();
+        assert_eq!(bigint(&v, "maxPinnedData"), NO_LIMIT);
+        assert_eq!(bigint(&v, "remainingStorage"), NO_LIMIT - 4097);
+        assert_eq!(bigint(&v, "pinnedData"), 4097);
+        assert_eq!(bigint(&v, "pinnedSize"), 12291);
+    }
+
+    #[wasm_bindgen_test]
+    fn key_stats_keep_every_bit() {
+        let stats = sia_storage::KeyStats {
+            object_count: u64::MAX,
+            object_size: u64::MAX - 1,
+            pinned_data: (1 << 53) + 1,
+            pinned_size: 1,
+            expires_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let v: JsValue = KeyStats::from(stats).into_ts().unwrap().into();
+        assert_eq!(bigint(&v, "objectCount"), u64::MAX);
+        assert_eq!(bigint(&v, "objectSize"), u64::MAX - 1);
+        assert_eq!(bigint(&v, "pinnedData"), (1 << 53) + 1);
+        assert_eq!(bigint(&v, "pinnedSize"), 1);
+    }
+
+    #[wasm_bindgen_test]
+    fn bigint_arguments_are_checked() {
+        assert_eq!(
+            u64_from_js(big("18446744073709551615"), "n").unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            u64_from_js(big("9007199254740993"), "n").unwrap(),
+            (1 << 53) + 1
+        );
+        assert!(
+            u64_from_js(big("18446744073709551616"), "n").is_err(),
+            "2^64 wrapped"
+        );
+        assert!(u64_from_js(big("-1"), "n").is_err(), "-1 wrapped");
+        assert!(
+            u64_from_js(JsValue::from(5.0), "n").is_err(),
+            "number accepted"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn download_range_is_exact() {
+        let obj = js_sys::Object::new();
+        Reflect::set(&obj, &"offset".into(), &big("9007199254740993")).unwrap();
+        Reflect::set(&obj, &"length".into(), &big("18446744073709551615")).unwrap();
+        let opts = download_options_from_js(obj.into()).unwrap();
+        assert_eq!(opts.offset, (1 << 53) + 1);
+        assert_eq!(opts.length, Some(u64::MAX));
+
+        let obj = js_sys::Object::new();
+        Reflect::set(&obj, &"offset".into(), &JsValue::from(1.5)).unwrap();
+        assert!(
+            download_options_from_js(obj.into()).is_err(),
+            "number accepted"
+        );
     }
 }
