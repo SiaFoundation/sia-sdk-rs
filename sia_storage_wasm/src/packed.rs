@@ -25,18 +25,18 @@ use crate::stream_reader::js_stream_reader;
 pub struct PackedUpload {
     inner: Rc<Mutex<Option<CorePackedUpload>>>,
     cancel: CancellationToken,
-    optimal_data_size: f64,
-    length: Cell<f64>,
+    optimal_data_size: u64,
+    length: Cell<u64>,
 }
 
 impl PackedUpload {
     pub(crate) fn new(inner: CorePackedUpload) -> Self {
-        let optimal_data_size = inner.optimal_data_size() as f64;
+        let optimal_data_size = inner.optimal_data_size() as u64;
         Self {
             inner: Rc::new(Mutex::new(Some(inner))),
             cancel: CancellationToken::new(),
             optimal_data_size,
-            length: Cell::new(0.0),
+            length: Cell::new(0),
         }
     }
 }
@@ -45,29 +45,23 @@ impl PackedUpload {
 impl PackedUpload {
     /// Bytes remaining until the current slab is full. Adding objects that
     /// fit within this size avoids starting a new slab and minimizes padding.
-    pub fn remaining(&self) -> f64 {
-        let length = self.length.get();
-        self.optimal_data_size - (length % self.optimal_data_size)
+    pub fn remaining(&self) -> u64 {
+        self.optimal_data_size - (self.length.get() % self.optimal_data_size)
     }
 
     /// Total bytes added so far across all objects.
-    pub fn length(&self) -> f64 {
+    pub fn length(&self) -> u64 {
         self.length.get()
     }
 
     /// Number of slabs in the upload.
-    pub fn slabs(&self) -> f64 {
-        let length = self.length.get();
-        if length == 0.0 {
-            0.0
-        } else {
-            (length / self.optimal_data_size).ceil()
-        }
+    pub fn slabs(&self) -> u64 {
+        self.length.get().div_ceil(self.optimal_data_size)
     }
 
     /// Optimal size of each slab in bytes.
     #[wasm_bindgen(js_name = "optimalDataSize")]
-    pub fn optimal_data_size(&self) -> f64 {
+    pub fn optimal_data_size(&self) -> u64 {
         self.optimal_data_size
     }
 
@@ -88,7 +82,7 @@ impl PackedUpload {
     /// await packed.add(blob.stream());
     /// const objects = await packed.finalize();
     /// ```
-    pub async fn add(&self, stream: web_sys::ReadableStream) -> Result<f64, JsError> {
+    pub async fn add(&self, stream: web_sys::ReadableStream) -> Result<u64, JsError> {
         if self.cancel.is_cancelled() {
             return Err(JsError::new("upload closed"));
         }
@@ -106,13 +100,13 @@ impl PackedUpload {
                 // Mirror pu.length() rather than accumulating the add's
                 // returned size, so partial bytes from an errored add (now
                 // kept in pu.length()) stay accounted for.
-                let total = pu.length() as f64;
+                let total = pu.length();
                 *guard = Some(pu);
                 self.length.set(total);
                 res
             } => r,
         };
-        Ok(result? as f64)
+        result
     }
 
     /// Finalizes the packed upload and returns the resulting objects.
@@ -151,7 +145,7 @@ impl PackedUpload {
 mod packed_remaining_tests {
     use super::*;
 
-    fn upload(length: f64, optimal_data_size: f64) -> PackedUpload {
+    fn upload(length: u64, optimal_data_size: u64) -> PackedUpload {
         PackedUpload {
             inner: Rc::new(Mutex::new(None)),
             cancel: CancellationToken::new(),
@@ -162,16 +156,12 @@ mod packed_remaining_tests {
 
     #[test]
     fn a_full_slab_reports_a_whole_slab_free() {
-        let optimal = (40 << 20) as f64;
-        assert_eq!(
-            upload(0.0, optimal).remaining(),
-            optimal,
-            "nothing added yet"
-        );
-        assert_eq!(upload(optimal / 2.0, optimal).remaining(), optimal / 2.0);
+        let optimal = 40 << 20;
+        assert_eq!(upload(0, optimal).remaining(), optimal, "nothing added yet");
+        assert_eq!(upload(optimal / 2, optimal).remaining(), optimal / 2);
         // The slab rolled over, so the next one is empty. Reporting 0 here
         // would tell a caller every further add starts a new slab.
         assert_eq!(upload(optimal, optimal).remaining(), optimal);
-        assert_eq!(upload(2.0 * optimal, optimal).remaining(), optimal);
+        assert_eq!(upload(2 * optimal, optimal).remaining(), optimal);
     }
 }

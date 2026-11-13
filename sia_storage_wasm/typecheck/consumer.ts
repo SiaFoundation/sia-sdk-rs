@@ -15,7 +15,7 @@
 // exported or all local", on the .d.ts itself. With it on, only the downstream
 // assignability failures appear, and they point at the consumer rather than at
 // the declaration that is wrong.
-import { PreAuthorizedKey, SharedSdk } from '../pkg/sia_storage_wasm'
+import { PreAuthorizedKey, SharedSdk, encodedSize } from '../pkg/sia_storage_wasm'
 import type {
   AppKey,
   Builder,
@@ -88,6 +88,13 @@ export async function check(
     useSdk(sdk)
     // A member that only the generated class declares.
     sdk.appKey()
+    // Byte counts are bigints, so the indexer's 64-bit values arrive exact.
+    const account = await sdk.account()
+    const limits: bigint[] = [account.maxPinnedData, account.remainingStorage, account.pinnedData, account.pinnedSize]
+    const packed = sdk.uploadPacked()
+    const packing: bigint[] = [packed.remaining(), packed.length(), packed.slabs(), packed.optimalDataSize()]
+    packed.cancel()
+    void [limits, packing]
     const key = await sdk.createSharingKey('photos', undefined)
     const attached = await sdk.sharedObjectSummaries(key, 0, 1)
     if (attached[0]) {
@@ -113,11 +120,25 @@ export async function check(
   const objects = await shared.objects(0, 1)
   if (objects[0]) {
     useObject(objects[0])
+    const sizes: bigint[] = [objects[0].size(), objects[0].encodedSize()]
+    const truncated: PinnedObject = objects[0].truncate(1n)
+    // @ts-expect-error Lengths are bigints.
+    objects[0].truncate(1)
+    const range = shared.download(objects[0], { offset: 1n, length: 2n })
+    // @ts-expect-error Offsets are bigints.
+    shared.download(objects[0], { offset: 1 })
+    void [sizes, truncated, range]
   }
+  const stats = await shared.stats()
+  const counts: bigint[] = [stats.objectCount, stats.objectSize, stats.pinnedData, stats.pinnedSize]
+  const encoded: bigint = encodedSize(1n, 10, 20)
+  // @ts-expect-error Sizes are bigints.
+  encodedSize(1, 10, 20)
+  void [counts, encoded]
   const summaries = await shared.objectSummaries(0, 1)
   if (summaries[0]) {
     useSummary(summaries[0])
-    const size: number = summaries[0].size
+    const size: bigint = summaries[0].size
     const metadata: Uint8Array = summaries[0].metadata
     const id: string = summaries[0].id
     const times: Date[] = [summaries[0].createdAt, summaries[0].updatedAt]
