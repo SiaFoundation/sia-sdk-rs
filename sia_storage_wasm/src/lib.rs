@@ -81,9 +81,27 @@ pub fn validate_recovery_phrase(phrase: &str) -> Result<(), JsError> {
 
 /// Calculates the encoded size of data after erasure coding.
 #[wasm_bindgen(js_name = "encodedSize")]
-pub fn encoded_size(data_size: f64, data_shards: u8, parity_shards: u8) -> Result<f64, JsError> {
+pub fn encoded_size(
+    #[wasm_bindgen(unchecked_param_type = "bigint")] data_size: JsValue,
+    data_shards: u8,
+    parity_shards: u8,
+) -> Result<u64, JsError> {
     if data_shards == 0 {
         return Err(JsError::new("data shards cannot be zero"));
     }
-    Ok(sia_storage::encoded_size(data_size as u64, data_shards, parity_shards) as f64)
+    let data_size = types::u64_from_js(data_size, "dataSize")?;
+    // sia_storage::encoded_size wraps on overflow in release builds.
+    let sector_size = sia_core::rhp4::SECTOR_SIZE as u64;
+    let slabs = data_size.div_ceil(data_shards as u64 * sector_size);
+    if slabs
+        .checked_mul((data_shards as u64 + parity_shards as u64) * sector_size)
+        .is_none()
+    {
+        return Err(JsError::new("encoded size does not fit in u64"));
+    }
+    Ok(sia_storage::encoded_size(
+        data_size,
+        data_shards,
+        parity_shards,
+    ))
 }

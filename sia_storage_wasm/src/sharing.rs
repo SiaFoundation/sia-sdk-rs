@@ -183,7 +183,10 @@ impl SharedSdk {
         #[wasm_bindgen(unchecked_optional_param_type = "DownloadOptions")] options: Option<JsValue>,
     ) -> Result<web_sys::ReadableStream, JsError> {
         const CHUNK_SIZE: usize = 1 << 18;
-        let opts = options.map(download_options_from_js).unwrap_or_default();
+        let opts = match options {
+            Some(v) => download_options_from_js(v)?,
+            None => Default::default(),
+        };
         let download = self.inner.download(&object.0, opts).map_err(to_js_err)?;
         Ok(wasm_streams::ReadableStream::from_async_read(download.compat(), CHUNK_SIZE).into_raw())
     }
