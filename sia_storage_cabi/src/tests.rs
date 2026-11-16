@@ -2436,6 +2436,14 @@ fn encoded_size_estimates_what_an_upload_will_occupy() {
         );
         assert!(take_err(err).contains("data shards"));
 
+        let mut err = std::ptr::null_mut();
+        assert_eq!(
+            sia_encoded_size(u64::MAX, 10, 20, &raw mut out, &raw mut err),
+            SIA_ERR,
+            "an estimate past u64 must be refused"
+        );
+        assert!(take_err(err).contains("does not fit"));
+
         sia_object_free(obj);
         sia_sdk_free(sdk);
         sia_mock_free(mock);

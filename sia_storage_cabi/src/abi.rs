@@ -380,6 +380,7 @@ pub unsafe extern "C" fn sia_generate_recovery_phrase() -> *mut c_char {
 /// Estimates what `data_size` bytes will occupy on the network once erasure
 /// coded, so a caller can price an upload before making it. The figure is the
 /// one `sia_object_encoded_size` reports for an object that already exists.
+/// Fails when the estimate does not fit in a `uint64_t`.
 ///
 /// # Safety
 /// - `out` must be non null and writable. It receives the estimate on success.
@@ -398,8 +399,13 @@ pub unsafe extern "C" fn sia_encoded_size(
         if data_shards == 0 {
             return set_err(err, SIA_ERR, "data shards cannot be zero");
         }
-        unsafe { *out = sia_storage::encoded_size(data_size, data_shards, parity_shards) }
-        SIA_OK
+        match sia_storage::encoded_size(data_size, data_shards, parity_shards) {
+            Some(size) => {
+                unsafe { *out = size }
+                SIA_OK
+            }
+            None => set_err(err, SIA_ERR, "encoded size does not fit in u64"),
+        }
     })
 }
 
