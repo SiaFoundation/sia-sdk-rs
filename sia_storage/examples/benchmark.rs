@@ -436,7 +436,8 @@ async fn warmup(
         size as u64,
         upload_options.data_shards,
         upload_options.parity_shards,
-    );
+    )
+    .expect("encoded size fits in u64");
     let upload_progress = progress_bar(size as u64, "warm up ");
     let upload_progress_cb = upload_progress.clone();
     let encoded_uploaded = Arc::new(AtomicU64::new(0));
@@ -526,7 +527,8 @@ async fn run_benchmark(
         size as u64,
         upload_options.data_shards,
         upload_options.parity_shards,
-    );
+    )
+    .expect("encoded size fits in u64");
 
     let upload_progress = progress_bar(size as u64, "upload  ");
     upload_progress.set_message("upload");

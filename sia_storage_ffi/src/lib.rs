@@ -1281,7 +1281,8 @@ pub fn encoded_size(size: u64, data_shards: u8, parity_shards: u8) -> Result<u64
     if data_shards == 0 {
         return Err(Error::Custom("data shards cannot be zero".into()));
     }
-    Ok(sia_storage::encoded_size(size, data_shards, parity_shards))
+    sia_storage::encoded_size(size, data_shards, parity_shards)
+        .ok_or_else(|| Error::Custom("encoded size does not fit in u64".into()))
 }
 
 #[cfg(test)]
@@ -1294,9 +1295,14 @@ mod tests {
     }
 
     #[test]
+    fn encoded_size_rejects_overflow() {
+        assert!(encoded_size(u64::MAX, 10, 20).is_err());
+    }
+
+    #[test]
     fn encoded_size_matches_core() {
         assert_eq!(
-            encoded_size(1 << 20, 10, 20).unwrap(),
+            encoded_size(1 << 20, 10, 20).ok(),
             sia_storage::encoded_size(1 << 20, 10, 20)
         );
     }

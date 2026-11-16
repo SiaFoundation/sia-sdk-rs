@@ -235,6 +235,7 @@ char *sia_generate_recovery_phrase(void);
 // Estimates what `data_size` bytes will occupy on the network once erasure
 // coded, so a caller can price an upload before making it. The figure is the
 // one `sia_object_encoded_size` reports for an object that already exists.
+// Fails when the estimate does not fit in a `uint64_t`.
 //
 // # Safety
 // - `out` must be non null and writable. It receives the estimate on success.

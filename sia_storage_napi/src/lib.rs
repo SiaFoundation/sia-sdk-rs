@@ -1112,7 +1112,9 @@ pub fn encoded_size(size: BigInt, data_shards: u8, parity_shards: u8) -> Result<
         return Err(Error::from_reason("data shards cannot be zero"));
     }
     let (_, size, _) = size.get_u64();
-    Ok(sia_storage::encoded_size(size, data_shards, parity_shards).into())
+    sia_storage::encoded_size(size, data_shards, parity_shards)
+        .map(BigInt::from)
+        .ok_or_else(|| Error::from_reason("encoded size does not fit in u64"))
 }
 
 #[cfg(test)]
