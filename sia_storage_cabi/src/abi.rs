@@ -340,6 +340,24 @@ pub(crate) unsafe fn cstr(ptr: &*const c_char) -> Result<&str, std::str::Utf8Err
     unsafe { CStr::from_ptr(*ptr) }.to_str()
 }
 
+/// [`cstr`] for a string that may be absent: `None` for null, and an error
+/// naming `field` for one that is not UTF-8.
+///
+/// # Safety
+/// - `ptr` must be null or point to a NUL terminated string that outlives the borrow.
+pub(crate) unsafe fn opt_cstr<'a>(
+    field: &str,
+    ptr: &'a *const c_char,
+) -> Result<Option<&'a str>, String> {
+    if ptr.is_null() {
+        return Ok(None);
+    }
+    match unsafe { cstr(ptr) } {
+        Ok(s) => Ok(Some(s)),
+        Err(e) => Err(format!("invalid {field}: {e}")),
+    }
+}
+
 /// Wraps an FFI entry point body, converting panics into `SIA_ERR`.
 pub(crate) fn guarded(err: ErrOut, body: impl FnOnce() -> i32) -> i32 {
     match catch_unwind(AssertUnwindSafe(body)) {

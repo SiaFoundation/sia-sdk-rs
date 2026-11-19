@@ -31,14 +31,7 @@ pub(crate) struct HostQueryC {
 /// - `c.country` must be null or point to a NUL terminated string.
 pub(crate) unsafe fn make_host_query(c: &HostQueryC) -> Result<HostQuery, String> {
     let (offset, limit) = paging(c.offset, c.limit);
-    let country = if c.country.is_null() {
-        None
-    } else {
-        match unsafe { cstr(&c.country) } {
-            Ok(s) => Some(s.to_string()),
-            Err(e) => return Err(format!("invalid country: {e}")),
-        }
-    };
+    let country = unsafe { opt_cstr("country", &c.country) }?.map(str::to_string);
     Ok(HostQuery {
         location: c.has_location.then_some(GeoLocation {
             latitude: c.latitude,

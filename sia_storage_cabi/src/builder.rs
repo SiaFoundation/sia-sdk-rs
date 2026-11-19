@@ -64,24 +64,10 @@ pub(crate) struct AppMetadataC {
     pub(crate) callback_url: *const c_char,
 }
 
-/// Borrows one of the metadata strings, or `None` for a null one.
-///
-/// # Safety
-/// - `ptr` must be null or NUL terminated.
-unsafe fn meta_str<'a>(field: &str, ptr: &'a *const c_char) -> Result<Option<&'a str>, String> {
-    if ptr.is_null() {
-        return Ok(None);
-    }
-    match unsafe { cstr(ptr) } {
-        Ok(s) => Ok(Some(s)),
-        Err(e) => Err(format!("invalid app {field}: {e}")),
-    }
-}
-
 /// # Safety
 /// - `ptr` must be null or NUL terminated.
 unsafe fn required_meta_str<'a>(field: &str, ptr: &'a *const c_char) -> Result<&'a str, String> {
-    unsafe { meta_str(field, ptr) }?.ok_or_else(|| format!("missing app {field}"))
+    unsafe { opt_cstr(field, ptr) }?.ok_or_else(|| format!("missing {field}"))
 }
 
 /// Copies a metadata string, leaking it because [`AppMetadata`] holds
@@ -97,11 +83,11 @@ fn leak(s: &str) -> &'static str {
 /// # Safety
 /// - Every string in `m` must be null or NUL terminated.
 pub(crate) unsafe fn app_metadata(m: &AppMetadataC) -> Result<AppMetadata, String> {
-    let name = unsafe { required_meta_str("name", &m.name) }?;
-    let description = unsafe { required_meta_str("description", &m.description) }?;
-    let service_url = unsafe { required_meta_str("service url", &m.service_url) }?;
-    let logo_url = unsafe { meta_str("logo url", &m.logo_url) }?;
-    let callback_url = unsafe { meta_str("callback url", &m.callback_url) }?;
+    let name = unsafe { required_meta_str("app name", &m.name) }?;
+    let description = unsafe { required_meta_str("app description", &m.description) }?;
+    let service_url = unsafe { required_meta_str("app service url", &m.service_url) }?;
+    let logo_url = unsafe { opt_cstr("app logo url", &m.logo_url) }?;
+    let callback_url = unsafe { opt_cstr("app callback url", &m.callback_url) }?;
     Ok(AppMetadata {
         id: Hash256::new(m.id),
         name: leak(name),

@@ -172,12 +172,10 @@ pub unsafe extern "C" fn sia_pre_authorized_key_sign_request_json(
         let (Some(key), Some(request)) = (unsafe { (key.as_ref(), request.as_ref()) }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        if request.connect_key.is_null() {
-            return set_err(err, SIA_ERR, "connect key is null");
-        }
-        let connect_key = match unsafe { cstr(&request.connect_key) } {
-            Ok(s) => s.to_string(),
-            Err(e) => return set_err(err, SIA_ERR, format!("invalid connect key: {e}")),
+        let connect_key = match unsafe { opt_cstr("connect key", &request.connect_key) } {
+            Ok(Some(s)) => s.to_string(),
+            Ok(None) => return set_err(err, SIA_ERR, "connect key is null"),
+            Err(msg) => return set_err(err, SIA_ERR, msg),
         };
         let expiration =
             match sia_storage::DateTime::from_timestamp_micros(request.expiration_unix_us) {
