@@ -323,9 +323,7 @@ pub unsafe extern "C" fn sia_event_summaries_free(evs: *mut FfiEventSummaries) {
 ///   one, and must not be used again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sia_object_array_free(objs: *mut *mut Object, len: usize) {
-    if !objs.is_null() {
-        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(objs, len)) });
-    }
+    unsafe { free_raw_array(objs, len) }
 }
 
 /// Seals an object under the account's app key and encodes it as JSON.
@@ -478,14 +476,14 @@ pub(crate) unsafe fn write_object_array(
     out_objs: *mut *mut *mut Object,
     out_len: *mut usize,
 ) {
-    let ptrs: Vec<*mut Object> = objects
-        .into_iter()
-        .map(|o| Box::into_raw(Box::new(o)))
-        .collect();
-    let mut ptrs = ptrs.into_boxed_slice();
+    let (ptr, len) = into_raw_array(
+        objects
+            .into_iter()
+            .map(|o| Box::into_raw(Box::new(o)))
+            .collect(),
+    );
     unsafe {
-        *out_len = ptrs.len();
-        *out_objs = ptrs.as_mut_ptr();
+        *out_objs = ptr;
+        *out_len = len;
     }
-    std::mem::forget(ptrs);
 }
