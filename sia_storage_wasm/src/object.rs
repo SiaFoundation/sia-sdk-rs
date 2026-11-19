@@ -28,19 +28,23 @@ impl PinnedObject {
     }
 
     /// Returns the total size of the object in bytes.
-    pub fn size(&self) -> f64 {
-        self.0.size() as f64
+    pub fn size(&self) -> u64 {
+        self.0.size()
     }
 
     /// Returns a new object truncated to the requested length.
-    pub fn truncate(&self, length: u64) -> PinnedObject {
-        PinnedObject(self.0.truncate(length))
+    pub fn truncate(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "bigint")] length: JsValue,
+    ) -> Result<PinnedObject, JsError> {
+        let length = types::u64_from_js(length, "length")?;
+        Ok(PinnedObject(self.0.truncate(length)))
     }
 
     /// Returns the encoded (on-network) size after erasure coding.
     #[wasm_bindgen(js_name = "encodedSize")]
-    pub fn encoded_size(&self) -> f64 {
-        self.0.encoded_size() as f64
+    pub fn encoded_size(&self) -> u64 {
+        self.0.encoded_size()
     }
 
     /// Returns the object's metadata as raw bytes.
@@ -102,8 +106,8 @@ impl ObjectSummary {
 
     /// The object's size in bytes.
     #[wasm_bindgen(getter)]
-    pub fn size(&self) -> f64 {
-        self.0.size as f64
+    pub fn size(&self) -> u64 {
+        self.0.size
     }
 
     /// The object's decrypted metadata.

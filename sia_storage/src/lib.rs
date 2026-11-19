@@ -577,17 +577,18 @@ fn default_memory_budget() -> u64 {
     (total / 10).min(MAX_BUDGET)
 }
 
-/// Estimates the on-network encoded size of data after erasure coding.
+/// Estimates the on-network encoded size of data after erasure coding, or
+/// `None` if it does not fit in a `u64`.
 ///
 /// # Panics
 ///
 /// Panics if `data_shards` is zero.
-pub fn encoded_size(data_size: u64, data_shards: u8, parity_shards: u8) -> u64 {
+pub fn encoded_size(data_size: u64, data_shards: u8, parity_shards: u8) -> Option<u64> {
     let total_shards = data_shards as u64 + parity_shards as u64;
     let sector_size = sia_core::rhp4::SECTOR_SIZE as u64;
     let slab_size = total_shards * sector_size;
     let slabs = data_size.div_ceil(data_shards as u64 * sector_size);
-    slabs * slab_size
+    slabs.checked_mul(slab_size)
 }
 
 /// Generates a new BIP-39 12-word recovery phrase.
@@ -637,6 +638,26 @@ mod test {
         let mut bytes = [0u8; 8];
         getrandom::fill(&mut bytes).unwrap();
         u64::from_le_bytes(bytes)
+    }
+
+    #[test]
+    fn encoded_size_overflow() {
+        let sector_size = SECTOR_SIZE as u64;
+        assert_eq!(encoded_size(0, 10, 20), Some(0));
+        assert_eq!(encoded_size(1, 10, 20), Some(30 * sector_size));
+        assert_eq!(
+            encoded_size(10 * sector_size + 1, 10, 20),
+            Some(60 * sector_size)
+        );
+        // u64::MAX needs more slabs than a u64 can count bytes for.
+        assert_eq!(encoded_size(u64::MAX, 10, 20), None);
+        // The largest size that still fits.
+        let max_slabs = u64::MAX / (30 * sector_size);
+        assert_eq!(
+            encoded_size(max_slabs * 10 * sector_size, 10, 20),
+            Some(max_slabs * 30 * sector_size)
+        );
+        assert_eq!(encoded_size(max_slabs * 10 * sector_size + 1, 10, 20), None);
     }
 
     #[sia_core_derive::cross_target_test]

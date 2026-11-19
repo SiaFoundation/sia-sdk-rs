@@ -91,7 +91,7 @@ async function main() {
   });
   const uploadElapsed = (performance.now() - uploadStart) / 1000;
   const rawMiB = uploadSize / 1024 / 1024;
-  const encodedMiB = obj.encodedSize() / 1024 / 1024;
+  const encodedMiB = Number(obj.encodedSize()) / 1024 / 1024;
   log(`Upload complete: ${obj.size()} bytes in ${uploadElapsed.toFixed(2)}s (raw: ${(rawMiB / uploadElapsed).toFixed(2)} MiB/s, encoded: ${(encodedMiB / uploadElapsed).toFixed(2)} MiB/s)`);
   await sdk.pinObject(obj);
   log('Pinned object:', obj.id());

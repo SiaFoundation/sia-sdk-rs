@@ -3,7 +3,7 @@ use std::str::FromStr;
 use sia_core::types::Hash256;
 use sia_storage::{self, Sdk as StorageSdk};
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
-use tsify::Ts;
+use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::*;
 
 use crate::app_key::AppKey;
@@ -150,14 +150,12 @@ impl Sdk {
     }
 
     /// Returns account information from the indexer.
-    #[wasm_bindgen(unchecked_return_type = "Account")]
-    pub async fn account(&self) -> Result<JsValue, JsError> {
+    pub async fn account(&self) -> Result<Ts<types::Account>, JsError> {
         let sdk = self.inner.clone();
         let a = run_local(async move { sdk.account().await })
             .await
             .map_err(to_js_err)?;
-        let wrapped: types::Account = a.into();
-        types::to_js(&wrapped)
+        Ok(types::Account::from(a).into_ts()?)
     }
 
     /// Returns a list of usable hosts, optionally filtered by a HostQuery.
@@ -266,7 +264,10 @@ impl Sdk {
     ) -> Result<web_sys::ReadableStream, JsError> {
         const CHUNK_SIZE: usize = 1 << 18; // matches sia_storage chunk size for optimal performance
         let obj = object.0.clone();
-        let opts = options.map(download_options_from_js).unwrap_or_default();
+        let opts = match options {
+            Some(v) => download_options_from_js(v)?,
+            None => Default::default(),
+        };
         let download = self.inner.download(&obj, opts).map_err(to_js_err)?;
         Ok(wasm_streams::ReadableStream::from_async_read(download.compat(), CHUNK_SIZE).into_raw())
     }
