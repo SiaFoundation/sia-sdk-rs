@@ -6202,7 +6202,7 @@ fn the_mock_slow_host_controls_are_callable() {
 }
 
 /// The account crosses as a struct. The mock reports an unlimited account,
-/// whose `u64::MAX` limit is the value a JSON number could not carry.
+/// whose 2^63 - 1 limit is a value a JSON number could not carry.
 #[test]
 fn sdk_account_crosses_as_a_struct() {
     unsafe {
@@ -6234,8 +6234,8 @@ fn sdk_account_crosses_as_a_struct() {
         let a = account.as_ref().expect("SIA_OK must write the account");
         let want_key: [u8; 32] = sia_storage::AppKey::import(seed).public_key().into();
         assert_eq!(a.account_key, want_key);
-        assert_eq!(a.max_pinned_data, u64::MAX);
-        assert_eq!(a.remaining_storage, u64::MAX);
+        assert_eq!(a.max_pinned_data, i64::MAX as u64);
+        assert_eq!(a.remaining_storage, i64::MAX as u64);
         assert_eq!(a.pinned_data, 0);
         assert_eq!(a.pinned_size, 0);
         assert!(a.ready);
