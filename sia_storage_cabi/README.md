@@ -58,6 +58,11 @@ they set `*err` to a heap-allocated message, which the caller frees with
 **Handles are opaque pointers the caller owns**, released with the matching
 `*_free`. There is one per type that outlives a call.
 
+**Records holding strings or lists are allocated by the library**, as
+`sia_account_t` and the `sia_host_t` array are. Read their fields directly. The
+matching `*_free` releases the record and everything it points to, so copy a
+string to keep it longer. An optional string is null when absent.
+
 **A null handle is reported, not dereferenced.** A fallible function returns
 `SIA_ERR_INVALID_HANDLE` without setting `*err`; a getter returns a zero value;
 a void function does nothing; a `*_free` accepts null, as `free(3)` does. This
@@ -95,7 +100,7 @@ The entry points, grouped by the handle they act on.
 |---|---|
 | `sia_builder_*` | connect to an indexer, walk the approval flow, register a key |
 | `sia_sdk_*` | account, objects, events, pinning, hosts, slabs, sharing keys |
-| `sia_object_*` | size, metadata, ids, truncation, the sealed JSON crossing |
+| `sia_object_*` | size, metadata, ids, truncation, sealing |
 | `sia_upload_*` / `sia_packed_upload_*` | streaming writes, and packing small objects into one slab |
 | `sia_download_*` | streaming reads |
 | `sia_shared_sdk_*` | the recipient side of a sharing key |
@@ -106,15 +111,6 @@ A `sia_shared_sdk_t` authenticates with a sharing key rather than an app key,
 so a process holding nothing but the 32 byte seed can list, fetch and download
 what the key grants, with no account, registration or approval step. It is read
 only.
-
-Host listings (`sia_sdk_hosts`, `sia_shared_sdk_hosts`) cross as JSON rather
-than as typed structs, because they carry a variable length list a flat C
-struct cannot hold. The shapes match what the indexer returns.
-
-Those two, plus `sia_sdk_account` and the sealed object crossing
-(`sia_object_seal_json`, `sia_object_from_sealed_json`), hand back or take a
-string, which the Go side decodes with `encoding/json`. Everything else on the
-surface is typed.
 
 ## The mock feature
 

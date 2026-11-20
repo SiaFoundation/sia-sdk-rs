@@ -138,6 +138,27 @@ pub(crate) fn lossy_cstring(s: impl Into<Vec<u8>>) -> CString {
     CString::new(bytes).expect("every NUL was replaced")
 }
 
+/// Moves `v` to the heap as a C array. An empty one is null rather than the
+/// dangling pointer an empty boxed slice carries, so C can test for it.
+pub(crate) fn into_raw_array<T>(v: Vec<T>) -> (*mut T, usize) {
+    if v.is_empty() {
+        return (std::ptr::null_mut(), 0);
+    }
+    let len = v.len();
+    (Box::into_raw(v.into_boxed_slice()).cast::<T>(), len)
+}
+
+/// Drops an array from [`into_raw_array`] and every element in it.
+///
+/// # Safety
+/// - `ptr` must be null, or come from `into_raw_array` along with `len`, and must not be used
+///   again after this returns.
+pub(crate) unsafe fn free_raw_array<T>(ptr: *mut T, len: usize) {
+    if !ptr.is_null() {
+        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) });
+    }
+}
+
 impl log::Log for CLogger {
     fn enabled(&self, _: &log::Metadata) -> bool {
         true
@@ -317,6 +338,24 @@ pub(crate) unsafe fn app_key_from_ptr(ptr: *const u8) -> AppKey {
 /// caller here is one entry point's body.
 pub(crate) unsafe fn cstr(ptr: &*const c_char) -> Result<&str, std::str::Utf8Error> {
     unsafe { CStr::from_ptr(*ptr) }.to_str()
+}
+
+/// [`cstr`] for a string that may be absent: `None` for null, and an error
+/// naming `field` for one that is not UTF-8.
+///
+/// # Safety
+/// - `ptr` must be null or point to a NUL terminated string that outlives the borrow.
+pub(crate) unsafe fn opt_cstr<'a>(
+    field: &str,
+    ptr: &'a *const c_char,
+) -> Result<Option<&'a str>, String> {
+    if ptr.is_null() {
+        return Ok(None);
+    }
+    match unsafe { cstr(ptr) } {
+        Ok(s) => Ok(Some(s)),
+        Err(e) => Err(format!("invalid {field}: {e}")),
+    }
 }
 
 /// Wraps an FFI entry point body, converting panics into `SIA_ERR`.

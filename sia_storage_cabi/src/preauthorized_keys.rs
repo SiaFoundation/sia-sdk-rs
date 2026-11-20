@@ -141,7 +141,16 @@ pub unsafe extern "C" fn sia_pre_authorized_key_verify_signature(
         .verify(message, &sia_storage::Signature::from(bytes))
 }
 
-/// Returns the signed pre-authorized key registration request as JSON.
+/// Returns the signed pre-authorized key registration request as JSON, the
+/// body indexd's admin API takes to register the key, so it is sent as is
+/// rather than read:
+///
+/// - `publicKey`: `"ed25519:<hex>"`
+/// - `signature`: hex
+/// - `connectKey`: the connect key the request was signed with
+/// - `expiration`: RFC 3339 in UTC, at microsecond precision
+/// - `totalUses`: a number no larger than 2^32 - 1
+/// - `allowedAppID`: hex, omitted when any application is allowed
 ///
 /// # Safety
 /// - `key` may be null, which returns `SIA_ERR_INVALID_HANDLE`. Otherwise it must be a live
@@ -163,12 +172,10 @@ pub unsafe extern "C" fn sia_pre_authorized_key_sign_request_json(
         let (Some(key), Some(request)) = (unsafe { (key.as_ref(), request.as_ref()) }) else {
             return SIA_ERR_INVALID_HANDLE;
         };
-        if request.connect_key.is_null() {
-            return set_err(err, SIA_ERR, "connect key is null");
-        }
-        let connect_key = match unsafe { cstr(&request.connect_key) } {
-            Ok(s) => s.to_string(),
-            Err(e) => return set_err(err, SIA_ERR, format!("invalid connect key: {e}")),
+        let connect_key = match unsafe { opt_cstr("connect key", &request.connect_key) } {
+            Ok(Some(s)) => s.to_string(),
+            Ok(None) => return set_err(err, SIA_ERR, "connect key is null"),
+            Err(msg) => return set_err(err, SIA_ERR, msg),
         };
         let expiration =
             match sia_storage::DateTime::from_timestamp_micros(request.expiration_unix_us) {

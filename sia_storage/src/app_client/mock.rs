@@ -375,8 +375,8 @@ impl Client {
             .sum();
         Ok(Account {
             account_key: app_key.public_key(),
-            max_pinned_data: u64::MAX,
-            remaining_storage: u64::MAX - pinned_data,
+            max_pinned_data: i64::MAX as u64, // 2^63-1
+            remaining_storage: i64::MAX as u64 - pinned_data,
             pinned_data,
             pinned_size,
             ready: true,
