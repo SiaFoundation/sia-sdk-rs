@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::app_client::{self, SectorPinParams, SlabPinParams};
+use crate::app_client::{self, PinTarget, SectorPinParams, SlabPinParams};
 use crate::congestion::{InflightController, SamplePermit};
 use crate::encryption::{EncryptionKey, encrypt_shard};
 use crate::erasure_coding::{self, ErasureCoder, ReadSlab, SlabReader};
@@ -535,6 +535,7 @@ const PIN_RETRY_DELAY: Duration = Duration::from_millis(250);
 async fn pin_uploaded_slab(
     api_client: &app_client::Client,
     app_key: &AppKey,
+    target: PinTarget,
     params: SlabPinParams,
 ) -> Result<(), UploadError> {
     let slab_id = params.digest();
@@ -542,7 +543,7 @@ async fn pin_uploaded_slab(
 
     let mut attempt = 0;
     loop {
-        match api_client.pin_slabs(&app_key.0, &params).await {
+        match api_client.pin_slabs_to(app_key, target, &params).await {
             Ok(ids) => {
                 if ids.len() != 1 || ids[0] != slab_id {
                     return Err(UploadError::InvalidSlabId);
@@ -574,6 +575,7 @@ pub(crate) struct Upload {
     client: Hosts,
     api_client: app_client::Client,
     app_key: Arc<AppKey>,
+    target: PinTarget,
     erasure_coder: Arc<ErasureCoder>,
     total_shards: usize,
     slab_buffer: Option<SlabReader>,
@@ -592,6 +594,7 @@ impl Upload {
         client: Hosts,
         api_client: app_client::Client,
         app_key: Arc<AppKey>,
+        target: PinTarget,
         options: UploadOptions,
     ) -> Result<Self, UploadError> {
         options.validate()?;
@@ -609,6 +612,7 @@ impl Upload {
             client,
             api_client,
             app_key,
+            target,
             slab_buffer: Some(SlabReader::new(
                 options.data_shards as usize,
                 options.parity_shards as usize,
@@ -640,6 +644,7 @@ impl Upload {
         let rs = self.erasure_coder.clone();
         let limiter = self.limiter.clone();
         let app_key = self.app_key.clone();
+        let target = self.target;
         let min_shards = self.erasure_coder.data_shards() as u8;
         let progress_callback = self.shard_uploaded.clone();
         let slab_index = self.slab_tasks.len();
@@ -755,7 +760,7 @@ impl Upload {
                     length: slab.length as u32,
                     ..Slab::from(&params)
                 };
-                match pin_uploaded_slab(&api_client, &app_key, params).await {
+                match pin_uploaded_slab(&api_client, &app_key, target, params).await {
                     Ok(()) => return Ok(uploaded),
                     Err(UploadError::ApiError(e)) if e.is_slab_upload_too_old() => {
                         debug!(
@@ -893,10 +898,11 @@ impl PackedUpload {
         client: Hosts,
         api_client: app_client::Client,
         app_key: Arc<AppKey>,
+        target: PinTarget,
         options: PackedUploadOptions,
     ) -> Result<Self, UploadError> {
         Ok(Self {
-            upload: Upload::new(client, api_client, app_key, options.into())?,
+            upload: Upload::new(client, api_client, app_key, target, options.into())?,
             objects: Vec::new(),
         })
     }
@@ -1005,6 +1011,7 @@ pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
     hosts: Hosts,
     api_client: app_client::Client,
     app_key: Arc<AppKey>,
+    target: PinTarget,
     mut object: Object,
     mut reader: R,
     options: UploadOptions,
@@ -1029,7 +1036,7 @@ pub(crate) async fn upload_object<R: AsyncRead + Unpin>(
         head_index -= 1;
         head_start -= last_slab.length as u64;
     }
-    let mut upload = Upload::new(hosts, api_client, app_key, options)?;
+    let mut upload = Upload::new(hosts, api_client, app_key, target, options)?;
     let mut first_byte = [0u8; 1];
     let prefix = if start_offset == object_size {
         if reader.read(&mut first_byte).await? == 0 {
@@ -1558,6 +1565,7 @@ mod tests {
                 hosts.clone(),
                 api_client.clone(),
                 app_key.clone(),
+                PinTarget::Account,
                 Object::default(),
                 Cursor::new(&expected),
                 options.clone(),
@@ -1572,6 +1580,7 @@ mod tests {
                 hosts.clone(),
                 api_client,
                 app_key.clone(),
+                PinTarget::Account,
                 base.clone(),
                 Cursor::new(vec![0xA5; append_len]),
                 UploadOptions {
@@ -1647,6 +1656,7 @@ mod tests {
             hosts.clone(),
             api_client.clone(),
             app_key.clone(),
+            PinTarget::Account,
             PackedUploadOptions::default(),
         )
         .unwrap();
@@ -1660,6 +1670,7 @@ mod tests {
             hosts.clone(),
             api_client,
             app_key.clone(),
+            PinTarget::Account,
             objects[1].clone(),
             Cursor::new(vec![4; 4321]),
             UploadOptions::default(),
@@ -1726,6 +1737,7 @@ mod tests {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(data.clone()),
             options.clone(),
@@ -1737,6 +1749,7 @@ mod tests {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             base.clone(),
             Cursor::new(vec![patch_byte; patch_len]),
             UploadOptions {
@@ -1865,9 +1878,14 @@ mod tests {
         let app_key = AppKey::import(rand::random());
 
         let slab = test_slab();
-        pin_uploaded_slab(&client, &app_key, SlabPinParams::from(&slab))
-            .await
-            .unwrap();
+        pin_uploaded_slab(
+            &client,
+            &app_key,
+            PinTarget::Account,
+            SlabPinParams::from(&slab),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(api.pin_slabs_calls(), MAX_PIN_RETRIES);
         assert_eq!(api.pinned_slabs(), 1);
@@ -1881,13 +1899,53 @@ mod tests {
         let app_key = AppKey::import(rand::random());
 
         let slab = test_slab();
-        let err = pin_uploaded_slab(&client, &app_key, SlabPinParams::from(&slab))
-            .await
-            .expect_err("pin to fail");
+        let err = pin_uploaded_slab(
+            &client,
+            &app_key,
+            PinTarget::Account,
+            SlabPinParams::from(&slab),
+        )
+        .await
+        .expect_err("pin to fail");
 
         assert!(matches!(err, UploadError::ApiError(_)));
         assert_eq!(api.pin_slabs_calls(), MAX_PIN_RETRIES);
         assert_eq!(api.pinned_slabs(), 0);
+    }
+
+    /// A space rejecting the pin for lack of permission is final: retrying
+    /// would only repeat the refusal, and here a retry would even succeed.
+    #[sia_core_derive::cross_target_test]
+    async fn test_pin_uploaded_slab_does_not_retry_space_permission_error() {
+        use crate::spaces::{AddSpaceRequest, SpaceKey};
+        use reqwest::StatusCode;
+
+        let api = app_client::mock::Client::new();
+        let client = app_client::Client::Mock(api.clone());
+        let app_key = AppKey::import(rand::random());
+        let space = SpaceKey::from_seed(rand::random());
+        api.add_space(&app_key, &AddSpaceRequest::new(&app_key, &space, "", b""))
+            .await
+            .unwrap();
+        api.set_pin_slabs_errors([app_client::Error::Api(
+            StatusCode::FORBIDDEN,
+            "insufficient space permission".into(),
+        )]);
+
+        let err = pin_uploaded_slab(
+            &client,
+            &app_key,
+            PinTarget::Space(space.public_key()),
+            SlabPinParams::from(&test_slab()),
+        )
+        .await
+        .expect_err("pin to fail");
+
+        assert!(matches!(
+            err,
+            UploadError::ApiError(app_client::Error::Api(StatusCode::FORBIDDEN, _))
+        ));
+        assert_eq!(api.pin_slabs_calls(), 1);
     }
 
     #[sia_core_derive::cross_target_test]
@@ -1919,6 +1977,7 @@ mod tests {
                 hosts,
                 app_client::Client::Mock(api.clone()),
                 Arc::new(AppKey::import(rand::random())),
+                PinTarget::Account,
                 Object::default(),
                 Cursor::new(vec![1; 4096]),
                 UploadOptions {
@@ -1961,6 +2020,7 @@ mod tests {
             hosts,
             app_client::Client::Mock(api.clone()),
             Arc::new(AppKey::import(rand::random())),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(data.freeze()),
             options,
@@ -2007,6 +2067,7 @@ mod tests {
             hosts.clone(),
             app_client::Client::Mock(api.clone()),
             app_key.clone(),
+            PinTarget::Account,
             UploadOptions {
                 shard_uploaded: Some(Arc::new(move |_| {
                     counter.fetch_add(1, Ordering::SeqCst);
@@ -2099,6 +2160,7 @@ mod tests {
             hosts,
             app_client::Client::Mock(api.clone()),
             Arc::new(AppKey::import(rand::random())),
+            PinTarget::Account,
             options,
         )
         .unwrap();

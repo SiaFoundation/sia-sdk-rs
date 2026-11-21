@@ -63,8 +63,10 @@ pub mod preauthorized_keys;
 mod rhp4;
 mod sdk;
 mod shared_sdk;
+mod shared_space;
 mod sharing;
 mod slabs;
+mod spaces;
 mod tokens;
 mod upload;
 
@@ -73,7 +75,9 @@ pub mod mock;
 
 pub use sdk::{Error, Sdk};
 pub use shared_sdk::SharedSdk;
+pub use shared_space::SharedSpace;
 pub use sharing::{KeyRecord, SharingError, SharingKey};
+pub use spaces::{Space, SpaceError, SpaceKey, SpaceOptions, SpacePermission};
 
 use std::sync::Arc;
 
@@ -621,6 +625,7 @@ mod test {
     use crate::time::Duration;
 
     use super::*;
+    use crate::app_client::PinTarget;
 
     const OPTIMAL_DATA_SIZE: u64 = SECTOR_SIZE as u64 * 10; // 10 sectors per slab
 
@@ -686,6 +691,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             PackedUploadOptions::default(),
         )
         .unwrap();
@@ -780,6 +786,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             PackedUploadOptions::default(),
         )
         .unwrap();
@@ -872,6 +879,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             PackedUploadOptions::default(),
         )
         .unwrap();
@@ -931,6 +939,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             PackedUploadOptions::default(),
         )
         .unwrap();
@@ -1023,6 +1032,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             PackedUploadOptions::default(),
         )
         .unwrap();
@@ -1099,6 +1109,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             PackedUploadOptions::default(),
         )
         .unwrap();
@@ -1165,6 +1176,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             PackedUploadOptions::default(),
         )
         .unwrap();
@@ -1221,6 +1233,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(input.clone()),
             UploadOptions::default(),
@@ -1295,6 +1308,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(part1.clone()),
             UploadOptions::default(),
@@ -1308,6 +1322,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             object,
             Cursor::new(part2.clone()),
             UploadOptions::default(),
@@ -1369,6 +1384,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(data.clone()),
             UploadOptions::default(),
@@ -1465,6 +1481,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(input.clone()),
             UploadOptions::default(),
@@ -1500,6 +1517,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(input.clone()),
             UploadOptions::default(),
@@ -1553,6 +1571,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(input.clone()),
             UploadOptions::default(),
@@ -1601,6 +1620,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(input.clone()),
             UploadOptions::default(),
@@ -1642,6 +1662,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(input.clone()),
             UploadOptions::default(),
@@ -1708,6 +1729,7 @@ mod test {
             hosts.clone(),
             app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(data.clone()),
             upload_opts,

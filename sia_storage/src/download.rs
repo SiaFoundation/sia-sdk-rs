@@ -805,6 +805,7 @@ impl Download {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::app_client::PinTarget;
     use std::io::Cursor;
     use std::sync::Arc;
 
@@ -856,6 +857,7 @@ mod test {
             hosts.clone(),
             crate::app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(data.clone()),
             UploadOptions::default(),
@@ -916,6 +918,7 @@ mod test {
             hosts.clone(),
             crate::app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(data.clone()),
             upload_options,
@@ -1116,6 +1119,7 @@ mod test {
             hosts.clone(),
             crate::app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(data.clone()),
             upload_options,
@@ -1216,6 +1220,7 @@ mod test {
             hosts.clone(),
             crate::app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(data.clone()),
             upload_options,
@@ -1310,6 +1315,7 @@ mod test {
             hosts.clone(),
             crate::app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(data.clone()),
             upload_options,
@@ -1370,6 +1376,7 @@ mod test {
             hosts.clone(),
             crate::app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(data.clone()),
             upload_options,
@@ -1479,6 +1486,7 @@ mod test {
             hosts.clone(),
             crate::app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(data.clone()),
             upload_options,
@@ -1580,6 +1588,7 @@ mod test {
             hosts.clone(),
             crate::app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(data),
             upload_options,
@@ -1796,6 +1805,7 @@ mod test {
             hosts.clone(),
             crate::app_client::Client::mock(),
             app_key.clone(),
+            PinTarget::Account,
             Object::default(),
             Cursor::new(data.freeze()),
             upload_options,

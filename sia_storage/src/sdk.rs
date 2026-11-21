@@ -12,7 +12,7 @@ use tokio::io::AsyncRead;
 use url::Url;
 
 use crate::app_client::PinObjectError::UnpinnedSlab;
-use crate::app_client::{self, KeyResponse, SLAB_PIN_BATCH_SIZE, SlabPinParams};
+use crate::app_client::{self, KeyResponse, PinTarget, SLAB_PIN_BATCH_SIZE, SlabPinParams};
 use crate::client::{Client, default_client};
 use crate::hosts::Hosts;
 use crate::sharing::{self, KeyRecord, KeyRequest, Nonce, SharingError, SharingKey};
@@ -21,13 +21,14 @@ use crate::time::Duration;
 use crate::upload::{PackedUpload, upload_object};
 use crate::{
     Account, AppKey, BuilderError, Download, DownloadError, DownloadOptions, Host, HostQuery,
-    Object, ObjectEvent, ObjectEventSummary, ObjectsCursor, PackedUploadOptions, SealedObjectError,
-    SharingKeyOptions, UploadError, UploadOptions,
+    Object, ObjectEvent, ObjectEventSummary, ObjectsCursor, PackedUploadOptions, SealedObject,
+    SealedObjectError, SharingKeyOptions, UploadError, UploadOptions,
 };
 
 /// The `Sdk` sharing methods live here so they can reach this module's private
 /// fields.
 mod sharing_key;
+mod spaces;
 
 /// Errors that can occur when using the SDK.
 #[derive(Error, Debug)]
@@ -150,6 +151,7 @@ impl Sdk {
             self.hosts.clone(),
             self.api_client.clone(),
             self.app_key.clone(),
+            PinTarget::Account,
             object,
             reader,
             options,
@@ -192,6 +194,7 @@ impl Sdk {
             self.hosts.clone(),
             self.api_client.clone(),
             self.app_key.clone(),
+            PinTarget::Account,
             options,
         )
     }
@@ -394,31 +397,7 @@ impl Sdk {
     /// already pinned.
     pub async fn pin_object(&self, object: &Object) -> Result<(), Error> {
         let sealed = object.seal(self.app_key.as_ref());
-        match self.api_client.pin_object(&self.app_key.0, &sealed).await {
-            Ok(()) => return Ok(()),
-            Err(UnpinnedSlab) => {}
-            Err(e) => return Err(Error::App(format!("{e:?}"))),
-        }
-
-        for slabs in object.slabs().chunks(SLAB_PIN_BATCH_SIZE) {
-            let params: Vec<SlabPinParams> = slabs.iter().map(SlabPinParams::from).collect();
-            let ids = self
-                .api_client
-                .pin_slabs(&self.app_key.0, &params)
-                .await
-                .map_err(|e| Error::App(format!("{e:?}")))?;
-            if ids.len() != slabs.len()
-                || ids.iter().zip(slabs).any(|(id, slab)| id != &slab.digest())
-            {
-                return Err(Error::App("slab id mismatch".to_string()));
-            }
-        }
-
-        self.api_client
-            .pin_object(&self.app_key.0, &sealed)
-            .await
-            .map_err(|e| Error::App(format!("{e:?}")))?;
-        Ok(())
+        pin_sealed_object(&self.api_client, &self.app_key, PinTarget::Account, &sealed).await
     }
 
     /// Creates a sharing key granting read-only access to the objects the
@@ -496,6 +475,39 @@ impl Sdk {
             stats: record.stats,
         })
     }
+}
+
+/// Pins a sealed object to `target`, first pinning any of its slabs the
+/// indexer reports as missing.
+pub(crate) async fn pin_sealed_object(
+    api_client: &app_client::Client,
+    app_key: &AppKey,
+    target: PinTarget,
+    sealed: &SealedObject,
+) -> Result<(), Error> {
+    match api_client.pin_object_to(app_key, target, sealed).await {
+        Ok(()) => return Ok(()),
+        Err(UnpinnedSlab) => {}
+        Err(e) => return Err(Error::App(format!("{e:?}"))),
+    }
+
+    for slabs in sealed.slabs.chunks(SLAB_PIN_BATCH_SIZE) {
+        let params: Vec<SlabPinParams> = slabs.iter().map(SlabPinParams::from).collect();
+        let ids = api_client
+            .pin_slabs_to(app_key, target, &params)
+            .await
+            .map_err(|e| Error::App(format!("{e:?}")))?;
+        if ids.len() != slabs.len() || ids.iter().zip(slabs).any(|(id, slab)| id != &slab.digest())
+        {
+            return Err(Error::App("slab id mismatch".to_string()));
+        }
+    }
+
+    api_client
+        .pin_object_to(app_key, target, sealed)
+        .await
+        .map_err(|e| Error::App(format!("{e:?}")))?;
+    Ok(())
 }
 
 #[cfg(test)]
