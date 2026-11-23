@@ -2,6 +2,8 @@ use std::io;
 
 use thiserror::Error;
 
+use crate::rhp4::SECTOR_SIZE;
+
 mod v1;
 mod v2;
 
@@ -29,6 +31,11 @@ impl Clone for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// The most a decoded length prefix may allocate before its bytes arrive.
+/// Lengths come from the peer, so longer values grow as data is read. One
+/// sector, so a sector read still allocates once.
+pub(crate) const MAX_PREALLOC: usize = SECTOR_SIZE;
 
 pub use sia_core_derive::{SiaDecode, SiaEncode};
 pub use v2::{SiaDecodable, SiaEncodable};
