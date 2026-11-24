@@ -17,8 +17,9 @@ use serde::{Deserialize, Serialize};
 use crate::object_encryption::DecryptError;
 use crate::sharing::{KeyRequest, Nonce, SharedObjectRequest};
 use crate::slabs::{Base64OrBytes, SealedObjectSummary, Sector, SlabVersion};
+use crate::spaces::{AddSpaceRequest, SpaceResponse, UpdateSpaceRequest};
 use crate::{
-    Account, AppMetadata, HostQuery, Object, ObjectSummary, ObjectsCursor, SealedObject,
+    Account, AppKey, AppMetadata, HostQuery, Object, ObjectSummary, ObjectsCursor, SealedObject,
     SealedObjectError, Slab,
 };
 use sia_core::rhp4::AccountToken;
@@ -421,6 +422,14 @@ where
 /// The indexer API client. The `mock` feature adds an in-memory backend
 /// alongside the HTTP one rather than replacing it, so a single build can
 /// drive both.
+/// Where slabs and objects are pinned: to the account itself, or to one of
+/// its spaces.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum PinTarget {
+    Account,
+    Space(PublicKey),
+}
+
 #[derive(Clone)]
 pub(crate) enum Client {
     Http(http::Client),
@@ -878,6 +887,194 @@ impl Client {
                 c.delete_shared_object(app_key, sharing_key, object_key)
                     .await
             }
+        }
+    }
+
+    /// Creates a space owned by the account.
+    pub(crate) async fn add_space(
+        &self,
+        app_key: &AppKey,
+        req: &AddSpaceRequest,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Http(c) => c.add_space(app_key, req).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.add_space(app_key, req).await,
+        }
+    }
+
+    /// Lists the spaces the account owns or has joined.
+    pub(crate) async fn spaces(
+        &self,
+        app_key: &AppKey,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<SpaceResponse>, Error> {
+        match self {
+            Self::Http(c) => c.spaces(app_key, offset, limit).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.spaces(app_key, offset, limit).await,
+        }
+    }
+
+    /// Retrieves a space the account is a member of.
+    pub(crate) async fn space(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+    ) -> Result<SpaceResponse, Error> {
+        match self {
+            Self::Http(c) => c.space(app_key, space_key).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.space(app_key, space_key).await,
+        }
+    }
+
+    /// Replaces a space's name and metadata. Only an admin may
+    /// update a space.
+    pub(crate) async fn update_space(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        req: &UpdateSpaceRequest,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Http(c) => c.update_space(app_key, space_key, req).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.update_space(app_key, space_key, req).await,
+        }
+    }
+
+    /// Deletes a space along with its objects, members, and invitations.
+    /// Only the owner may delete a space.
+    pub(crate) async fn delete_space(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Http(c) => c.delete_space(app_key, space_key).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.delete_space(app_key, space_key).await,
+        }
+    }
+
+    /// Pins slabs to a space, charged to its owner.
+    pub(crate) async fn pin_space_slabs(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        slabs: &[SlabPinParams],
+    ) -> Result<Vec<Hash256>, Error> {
+        match self {
+            Self::Http(c) => c.pin_space_slabs(app_key, space_key, slabs).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.pin_space_slabs(app_key, space_key, slabs).await,
+        }
+    }
+
+    /// Pins an object to a space. An object with the same ID is overwritten,
+    /// as long as its encrypted data key is unchanged.
+    pub(crate) async fn pin_space_object(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        object: &SealedObject,
+    ) -> Result<(), PinObjectError> {
+        match self {
+            Self::Http(c) => c.pin_space_object(app_key, space_key, object).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.pin_space_object(app_key, space_key, object).await,
+        }
+    }
+
+    /// Deletes an object from a space.
+    pub(crate) async fn delete_space_object(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        key: &Hash256,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Http(c) => c.delete_space_object(app_key, space_key, key).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.delete_space_object(app_key, space_key, key).await,
+        }
+    }
+
+    /// Retrieves an object from a space by its key.
+    pub(crate) async fn space_object(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        key: &Hash256,
+    ) -> Result<SealedObject, Error> {
+        match self {
+            Self::Http(c) => c.space_object(app_key, space_key, key).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.space_object(app_key, space_key, key).await,
+        }
+    }
+
+    /// Fetches a page of a space's object events.
+    pub(crate) async fn space_objects(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SealedObjectEvent>, Error> {
+        match self {
+            Self::Http(c) => c.space_objects(app_key, space_key, cursor, limit).await,
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => c.space_objects(app_key, space_key, cursor, limit).await,
+        }
+    }
+
+    /// Fetches a page of a space's object events without the objects' slabs.
+    pub(crate) async fn space_object_summaries(
+        &self,
+        app_key: &AppKey,
+        space_key: &PublicKey,
+        cursor: Option<ObjectsCursor>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SealedObjectEventSummary>, Error> {
+        match self {
+            Self::Http(c) => {
+                c.space_object_summaries(app_key, space_key, cursor, limit)
+                    .await
+            }
+            #[cfg(any(test, feature = "mock"))]
+            Self::Mock(c) => {
+                c.space_object_summaries(app_key, space_key, cursor, limit)
+                    .await
+            }
+        }
+    }
+
+    /// Pins slabs to `target`.
+    pub(crate) async fn pin_slabs_to(
+        &self,
+        app_key: &AppKey,
+        target: PinTarget,
+        slabs: &[SlabPinParams],
+    ) -> Result<Vec<Hash256>, Error> {
+        match target {
+            PinTarget::Account => self.pin_slabs(&app_key.0, slabs).await,
+            PinTarget::Space(space_key) => self.pin_space_slabs(app_key, &space_key, slabs).await,
+        }
+    }
+
+    /// Pins an object to `target`.
+    pub(crate) async fn pin_object_to(
+        &self,
+        app_key: &AppKey,
+        target: PinTarget,
+        object: &SealedObject,
+    ) -> Result<(), PinObjectError> {
+        match target {
+            PinTarget::Account => self.pin_object(&app_key.0, object).await,
+            PinTarget::Space(space_key) => self.pin_space_object(app_key, &space_key, object).await,
         }
     }
 }
