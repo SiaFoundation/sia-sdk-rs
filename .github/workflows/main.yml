@@ -81,9 +81,7 @@ jobs:
           rustup update stable
           rustup target add wasm32-unknown-unknown
       - name: Install wasm-pack
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        with:
-          tool: wasm-pack@0.15.1
+        uses: ./.github/actions/install-wasm-pack
       - name: Configure runtime
         run: |
           if [ "${{ matrix.runtime }}" = "node" ]; then
@@ -112,9 +110,7 @@ jobs:
           rustup update stable
           rustup target add wasm32-unknown-unknown
       - name: Install wasm-pack
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        with:
-          tool: wasm-pack@0.15.1
+        uses: ./.github/actions/install-wasm-pack
       - name: Cache Rust build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -148,9 +144,7 @@ jobs:
           rustup update stable
           rustup target add wasm32-unknown-unknown
       - name: Install wasm-pack
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        with:
-          tool: wasm-pack@0.15.1
+        uses: ./.github/actions/install-wasm-pack
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
