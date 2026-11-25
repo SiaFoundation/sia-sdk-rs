@@ -1,6 +1,4 @@
 use super::Error as EncodingError;
-use crate::encoding::MAX_PREALLOC;
-use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Duration, Utc};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -39,25 +37,6 @@ impl AsyncSiaDecodable for DateTime<Utc> {
 impl AsyncSiaDecodable for Duration {
     async fn decode_async<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self, EncodingError> {
         Ok(Duration::nanoseconds(i64::decode_async(r).await?))
-    }
-}
-
-impl AsyncSiaDecodable for Bytes {
-    async fn decode_async<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self, EncodingError> {
-        let mut remaining = u64::decode_async(r).await?;
-        // The first chunk is allocated zeroed, which calloc does without a fill.
-        let first = remaining.min(MAX_PREALLOC as u64) as usize;
-        let mut buf = BytesMut::zeroed(first);
-        r.read_exact(&mut buf).await?;
-        remaining -= first as u64;
-        while remaining > 0 {
-            let n = remaining.min(MAX_PREALLOC as u64) as usize;
-            let start = buf.len();
-            buf.resize(start + n, 0);
-            r.read_exact(&mut buf[start..]).await?;
-            remaining -= n as u64;
-        }
-        Ok(buf.freeze())
     }
 }
 
@@ -181,35 +160,5 @@ mod tests {
             ],
         )
         .await;
-    }
-
-    #[tokio::test]
-    async fn test_bytes() {
-        test_decode(
-            Bytes::from("hello"),
-            vec![5, 0, 0, 0, 0, 0, 0, 0, 104, 101, 108, 108, 111],
-        )
-        .await;
-        test_decode(Bytes::from(""), vec![0, 0, 0, 0, 0, 0, 0, 0]).await;
-    }
-
-    #[tokio::test]
-    async fn bytes_length_is_not_allocated_up_front() {
-        // The peer claims 2^62 bytes and sends ten.
-        let mut wire = (1u64 << 62).to_le_bytes().to_vec();
-        wire.extend_from_slice(&[7; 10]);
-        let err = Bytes::decode_async(&mut &wire[..]).await.unwrap_err();
-        assert!(
-            matches!(&err, EncodingError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof),
-            "{err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn bytes_longer_than_one_allocation() {
-        let value = Bytes::from(vec![9u8; MAX_PREALLOC * 2 + 5]);
-        let mut wire = Vec::new();
-        value.encode(&mut wire).unwrap();
-        assert_eq!(Bytes::decode_async(&mut &wire[..]).await.unwrap(), value);
     }
 }

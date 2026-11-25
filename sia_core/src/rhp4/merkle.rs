@@ -1,13 +1,13 @@
 use std::collections::VecDeque;
 
 use super::{LEAVES_PER_SECTOR, SECTOR_SIZE, SEGMENT_SIZE};
-use crate::encoding::{SiaDecodable, SiaDecode, SiaEncodable, SiaEncode};
-use crate::encoding_async::AsyncSiaDecode;
+use crate::encoding::{Error as EncodingError, SiaEncodable, SiaEncode};
+use crate::encoding_async::AsyncSiaDecodable;
 use crate::merkle::{self, Accumulator};
 use crate::types::Hash256;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use thiserror::Error;
-use tokio::io::{self};
+use tokio::io::{self, AsyncRead, AsyncReadExt};
 
 /// Calculates the Merkle root of a sector
 pub fn sector_root(sector: &[u8]) -> Hash256 {
@@ -50,8 +50,37 @@ impl Clone for ProofValidationError {
     }
 }
 
-#[derive(Debug, SiaEncode, SiaDecode, AsyncSiaDecode, PartialEq)]
+#[derive(Debug, SiaEncode, PartialEq)]
 pub struct RangeProof(Vec<Hash256>, Bytes);
+
+/// The most hashes a range proof within one sector can hold.
+pub(crate) const MAX_PROOF_HASHES: usize = 2 * LEAVES_PER_SECTOR.ilog2() as usize;
+
+impl AsyncSiaDecodable for RangeProof {
+    // Lengths come from the host, so they are bounded before allocating.
+    async fn decode_async<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self, EncodingError> {
+        let proof_len = usize::decode_async(r).await?;
+        if proof_len > MAX_PROOF_HASHES {
+            return Err(EncodingError::InvalidValue(format!(
+                "proof has too many hashes: {proof_len}"
+            )));
+        }
+        let mut proof = Vec::with_capacity(proof_len);
+        for _ in 0..proof_len {
+            proof.push(Hash256::decode_async(r).await?);
+        }
+
+        let data_len = usize::decode_async(r).await?;
+        if data_len > SECTOR_SIZE {
+            return Err(EncodingError::InvalidValue(format!(
+                "data is larger than a sector: {data_len}"
+            )));
+        }
+        let mut data = BytesMut::zeroed(data_len);
+        r.read_exact(&mut data).await?;
+        Ok(Self(proof, data.freeze()))
+    }
+}
 
 impl RangeProof {
     #[cfg(test)]
@@ -414,5 +443,23 @@ pub(crate) mod tests {
         let sector = fill_sector();
         let (golden, _, _) = sector_proof_24_42();
         assert_eq!(build_proof(&sector, 24, 42), golden);
+    }
+
+    // A prefix the decoder trusted would hit EOF or abort on allocation instead.
+    #[tokio::test]
+    async fn test_range_proof_rejects_large_proof_prefix() {
+        let mut wire = (1u64 << 62).to_le_bytes().to_vec();
+        wire.extend_from_slice(&[7; 10]);
+        let err = RangeProof::decode_async(&mut &wire[..]).await.unwrap_err();
+        assert_matches!(err, EncodingError::InvalidValue(_));
+    }
+
+    #[tokio::test]
+    async fn test_range_proof_rejects_large_data_prefix() {
+        let mut wire = 0u64.to_le_bytes().to_vec(); // empty proof
+        wire.extend_from_slice(&(1u64 << 62).to_le_bytes());
+        wire.extend_from_slice(&[7; 10]);
+        let err = RangeProof::decode_async(&mut &wire[..]).await.unwrap_err();
+        assert_matches!(err, EncodingError::InvalidValue(_));
     }
 }

@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 
-use super::{Error, MAX_PREALLOC, Result};
+use super::{Error, Result};
 use std::io::{Read, Write};
 
 pub trait SiaEncodable {
@@ -226,25 +226,6 @@ impl SiaEncodable for bytes::Bytes {
     }
 }
 
-impl SiaDecodable for bytes::Bytes {
-    fn decode<R: Read>(r: &mut R) -> Result<Self> {
-        let mut remaining = u64::decode(r)?;
-        // The first chunk is allocated zeroed, which calloc does without a fill.
-        let first = remaining.min(MAX_PREALLOC as u64) as usize;
-        let mut buf = vec![0u8; first];
-        r.read_exact(&mut buf)?;
-        remaining -= first as u64;
-        while remaining > 0 {
-            let n = remaining.min(MAX_PREALLOC as u64) as usize;
-            let start = buf.len();
-            buf.resize(start + n, 0);
-            r.read_exact(&mut buf[start..])?;
-            remaining -= n as u64;
-        }
-        Ok(bytes::Bytes::from(buf))
-    }
-}
-
 impl<const N: usize> SiaEncodable for [u8; N] {
     fn encoded_length(&self) -> usize {
         N
@@ -362,25 +343,5 @@ mod tests {
                 3, 4, // second inner vec contents
             ],
         );
-    }
-
-    #[test]
-    fn bytes_length_is_not_allocated_up_front() {
-        // The peer claims 2^62 bytes and sends ten.
-        let mut wire = (1u64 << 62).to_le_bytes().to_vec();
-        wire.extend_from_slice(&[7; 10]);
-        let err = bytes::Bytes::decode(&mut &wire[..]).unwrap_err();
-        assert!(
-            matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof),
-            "{err:?}"
-        );
-    }
-
-    #[test]
-    fn bytes_longer_than_one_allocation() {
-        let value = bytes::Bytes::from(vec![9u8; MAX_PREALLOC * 2 + 5]);
-        let mut wire = Vec::new();
-        value.encode(&mut wire).unwrap();
-        assert_eq!(bytes::Bytes::decode(&mut &wire[..]).unwrap(), value);
     }
 }
