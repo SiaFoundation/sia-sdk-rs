@@ -92,7 +92,8 @@ impl Client {
 
             for socket in resolved_addrs {
                 match TcpStream::connect(socket).await {
-                    Ok(tcp) => match sia_mux::dial(tcp, &verifying_key).await {
+                    // Hosts never open streams to the SDK.
+                    Ok(tcp) => match sia_mux::dial_refusing_streams(tcp, &verifying_key).await {
                         Ok(mux_conn) => {
                             debug!(
                                 "established siamux connection to {} via {socket}",

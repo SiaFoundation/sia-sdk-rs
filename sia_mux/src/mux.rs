@@ -54,6 +54,8 @@ pub enum MuxError {
     TooManyStreams,
     #[error("peer sent invalid frame ID: {0}")]
     InvalidFrameId(u32),
+    #[error("peer opened stream {0} on a connection that does not accept streams")]
+    PeerOpenedStream(u32),
     #[error("read deadline exceeded")]
     ReadDeadlineExceeded,
     #[error("write deadline exceeded")]
@@ -159,6 +161,10 @@ struct MuxState {
 
     /// Next stream ID to assign. Incremented by 2 to preserve dialer/acceptor parity.
     next_id: u32,
+
+    /// Whether the peer may open streams. When it may not, a stream it opens
+    /// is a protocol violation that closes the connection.
+    accept_streams: bool,
 }
 
 /// Join handles for the background read and write loop tasks.
@@ -684,7 +690,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     Action::Data(ss.clone())
                 }
             } else if h.flags & FLAG_FIRST != 0 {
-                if s.streams.len() >= MAX_STREAMS {
+                if !s.accept_streams {
+                    Action::Fatal(MuxError::PeerOpenedStream(h.id))
+                } else if s.streams.len() >= MAX_STREAMS {
                     Action::Fatal(MuxError::TooManyStreams)
                 } else {
                     let ss = Arc::new(StdMutex::new(StreamState {
@@ -762,6 +770,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
             }
             Action::Fatal(err) => {
                 set_fatal_error(&mux_state, err);
+                // The write loop exits on the error, which closes the connection.
+                write_notify.notify_one();
                 return;
             }
             Action::Continue => {}
@@ -954,6 +964,7 @@ pub(crate) fn new_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     result: HandshakeResult,
     settings: ConnSettings,
     id_offset: u32,
+    accept_streams: bool,
 ) -> Mux {
     let (read_half, write_half) = tokio::io::split(conn);
 
@@ -981,6 +992,7 @@ pub(crate) fn new_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         err: None,
         shutdown: false,
         next_id: ID_LOWEST_STREAM + id_offset,
+        accept_streams,
     }));
 
     let write_notify = Arc::new(Notify::new());
@@ -1096,6 +1108,55 @@ mod tests {
         assert!(wakes.0.load(Ordering::SeqCst));
     }
 
+    async fn refusing_pair() -> (super::Mux, super::Mux) {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (client, server) = tokio::join!(
+            crate::dial_refusing_streams(client, &crate::ANON_VERIFYING_KEY),
+            crate::accept_anonymous(server),
+        );
+        (client.unwrap(), server.unwrap())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refused_stream_closes_the_connection() {
+        let (client, server) = refusing_pair().await;
+        let mut unsolicited = server.dial_stream().unwrap();
+        unsolicited.write_all(b"unsolicited").await.unwrap();
+
+        // The peer sees the connection close.
+        timeout(Duration::from_secs(1), async {
+            while server.state.lock().unwrap().err.is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the refusing side kept the connection open");
+
+        let s = client.state.lock().unwrap();
+        assert!(
+            matches!(s.err, Some(MuxError::PeerOpenedStream(_))),
+            "{:?}",
+            s.err
+        );
+        assert!(s.accept_queue.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refusing_side_still_gets_replies() {
+        let (client, server) = refusing_pair().await;
+        let mut request = client.dial_stream().unwrap();
+        request.write_all(b"ping").await.unwrap();
+
+        let mut peer = server.accept_stream().await.unwrap();
+        let mut buf = [0u8; 4];
+        peer.read_exact(&mut buf).await.unwrap();
+        peer.write_all(b"pong").await.unwrap();
+
+        request.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"pong");
+        assert!(client.state.lock().unwrap().err.is_none());
+    }
+
     async fn backpressured_writer() -> (super::Mux, tokio::io::DuplexStream, super::Stream) {
         use std::pin::Pin;
         use std::task::{Context, Poll, Waker};
@@ -1111,6 +1172,7 @@ mod tests {
             },
             crate::ConnSettings::default(),
             0,
+            true,
         );
         let mut stream = mux.dial_stream().unwrap();
         let payload = vec![42; mux.settings.max_payload_size()];
@@ -1325,6 +1387,7 @@ mod tests {
                 },
                 crate::ConnSettings::default(),
                 0,
+                true,
             );
             let mut stream = mux.dial_stream().unwrap();
             stream.set_idle_timeout(Some(limit));
@@ -1547,6 +1610,7 @@ mod tests {
             },
             crate::ConnSettings::default(),
             0,
+            true,
         );
         let mut stream = mux.dial_stream().unwrap();
         let limit = Duration::from_secs(4);
