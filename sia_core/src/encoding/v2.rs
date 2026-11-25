@@ -226,15 +226,6 @@ impl SiaEncodable for bytes::Bytes {
     }
 }
 
-impl SiaDecodable for bytes::Bytes {
-    fn decode<R: Read>(r: &mut R) -> Result<Self> {
-        let len = u64::decode(r)? as usize;
-        let mut buf = vec![0u8; len];
-        r.read_exact(&mut buf)?;
-        Ok(bytes::Bytes::from(buf))
-    }
-}
-
 impl<const N: usize> SiaEncodable for [u8; N] {
     fn encoded_length(&self) -> usize {
         N

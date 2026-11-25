@@ -1,5 +1,4 @@
 use super::Error as EncodingError;
-use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Duration, Utc};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -38,15 +37,6 @@ impl AsyncSiaDecodable for DateTime<Utc> {
 impl AsyncSiaDecodable for Duration {
     async fn decode_async<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self, EncodingError> {
         Ok(Duration::nanoseconds(i64::decode_async(r).await?))
-    }
-}
-
-impl AsyncSiaDecodable for Bytes {
-    async fn decode_async<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self, EncodingError> {
-        let len = usize::decode_async(r).await?;
-        let mut buf = BytesMut::zeroed(len);
-        r.read_exact(&mut buf).await?;
-        Ok(buf.freeze())
     }
 }
 
@@ -170,15 +160,5 @@ mod tests {
             ],
         )
         .await;
-    }
-
-    #[tokio::test]
-    async fn test_bytes() {
-        test_decode(
-            Bytes::from("hello"),
-            vec![5, 0, 0, 0, 0, 0, 0, 0, 104, 101, 108, 108, 111],
-        )
-        .await;
-        test_decode(Bytes::from(""), vec![0, 0, 0, 0, 0, 0, 0, 0]).await;
     }
 }

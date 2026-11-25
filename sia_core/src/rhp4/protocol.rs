@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::marker::PhantomData;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::{
     AccountDeposit, AccountToken, HostPrices, HostSettings, RenterContractSigner, SEGMENT_SIZE,
@@ -751,7 +751,7 @@ struct RPCReadSectorRequest {
 
 /// RPCReadSectorResponse contains the proof and data for a sector read request.
 /// The renter must validate the proof against the root hash.
-#[derive(Debug, PartialEq, SiaEncode, SiaDecode, AsyncSiaDecode)]
+#[derive(Debug, PartialEq, SiaEncode, AsyncSiaDecode)]
 struct RPCReadSectorResponse {
     pub data: merkle::RangeProof,
 }
@@ -808,15 +808,18 @@ impl RPCReadSector<RPCComplete> {
         self,
         r: &mut (impl AsyncRead + Unpin),
     ) -> Result<RPCReadSectorResult, Error> {
-        let response: RPCReadSectorResponse = read_response(r).await?;
-
-        // verify proof
         let offset = self.offset;
         let length = self.length;
         let root = self.root;
         let start = offset / SEGMENT_SIZE;
         let end = (offset + length).div_ceil(SEGMENT_SIZE);
 
+        // A valid response is the error flag, the proof and the requested
+        // segments, so stop reading once a host sends more than that.
+        let max_len = 1 + 8 + merkle::MAX_PROOF_HASHES * 32 + 8 + (end - start) * SEGMENT_SIZE;
+        let response: RPCReadSectorResponse = read_response(&mut r.take(max_len as u64)).await?;
+
+        // verify proof
         let data_start = offset % SEGMENT_SIZE;
         let data_end = data_start + length;
         let data = maybe_spawn_blocking!(
@@ -1363,23 +1366,22 @@ mod test {
     }
 
     #[cross_target_test]
-    async fn test_rpc_read_sector_discards_unproven_trailing_data() {
+    async fn test_rpc_read_sector_rejects_trailing_data() {
         let sector = random_sector();
         let offset = SEGMENT_SIZE;
         let length = SEGMENT_SIZE;
 
-        // the proof only covers the requested range, so anything the host
-        // appends past it is unauthenticated and must not reach the caller
-        let data = read_sector_rpc(&sector, offset, length, |_, data, _| {
+        // the proof only covers the requested range, so a host that appends
+        // data past it is cut off before the extra data is read
+        let err = read_sector_rpc(&sector, offset, length, |_, data, _| {
             let mut oversized = Vec::from(data.clone());
             oversized.extend_from_slice(&[0xAA; 4096]);
             *data = Bytes::from(oversized);
         })
         .await
-        .expect("trailing data must not invalidate the proof");
+        .expect_err("trailing data must be rejected");
 
-        assert_eq!(data.len(), length);
-        assert_eq!(&data[..], &sector[offset..offset + length]);
+        assert_matches!(err, Error::Encoding(_));
     }
 
     #[cross_target_test]
@@ -1394,6 +1396,41 @@ mod test {
         assert_matches!(
             err,
             Error::ProofValidation(ProofValidationError::NotSegmentAligned)
+        );
+    }
+
+    #[cross_target_test]
+    async fn test_rpc_read_sector_stops_reading_oversized_error() {
+        let sector = random_sector();
+        let (offset, length) = (SEGMENT_SIZE, SEGMENT_SIZE);
+
+        // the host answers with an error whose description claims, and
+        // sends, far more than a valid response could hold
+        let mut response = vec![1u8, 1u8]; // is_error = true, code
+        (1u64 << 40).encode(&mut response).unwrap();
+        response.resize(response.len() + 4 * SECTOR_SIZE, b'A');
+
+        let mut request = Vec::new();
+        let rpc = RPCReadSector::send_request(
+            &mut request,
+            TEST_PRICES,
+            TEST_ACCOUNT_TOKEN,
+            merkle::sector_root(&sector),
+            offset,
+            length,
+        )
+        .await
+        .unwrap();
+        let mut r = Cursor::new(response);
+        assert!(
+            rpc.complete(&mut r).await.is_err(),
+            "an oversized error must be rejected"
+        );
+
+        let read = r.position() as usize;
+        assert!(
+            read < SECTOR_SIZE,
+            "read {read} bytes for a {length} byte request"
         );
     }
 
@@ -1441,6 +1478,42 @@ mod test {
         assert_matches!(
             err,
             Error::ProofValidation(ProofValidationError::InvalidProofLength)
+        );
+    }
+
+    #[cross_target_test]
+    async fn test_rpc_read_sector_stops_reading_oversized_response() {
+        let sector = random_sector();
+        let (offset, length) = (SEGMENT_SIZE, SEGMENT_SIZE);
+        let proof = merkle::build_proof(&sector, 1, 2);
+
+        // the host requests one segment but claims, and sends, far more
+        let mut response = vec![0u8]; // is_error = false
+        proof.encode(&mut response).unwrap();
+        (1u64 << 40).encode(&mut response).unwrap();
+        response.resize(response.len() + 4 * SECTOR_SIZE, 0xAA);
+
+        let mut request = Vec::new();
+        let rpc = RPCReadSector::send_request(
+            &mut request,
+            TEST_PRICES,
+            TEST_ACCOUNT_TOKEN,
+            merkle::sector_root(&sector),
+            offset,
+            length,
+        )
+        .await
+        .unwrap();
+        let mut r = Cursor::new(response);
+        assert!(
+            rpc.complete(&mut r).await.is_err(),
+            "an oversized response must be rejected"
+        );
+
+        let read = r.position() as usize;
+        assert!(
+            read < SECTOR_SIZE,
+            "read {read} bytes for a {length} byte request"
         );
     }
 }
