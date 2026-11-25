@@ -1,0 +1,39 @@
+name: Install wasm-pack
+description: Install a prebuilt wasm-pack release, checked against its published SHA-256.
+
+# The org only allows listed third-party actions, so the release is fetched
+# directly rather than through an installer action.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        VERSION: v0.15.1
+      run: |
+        case "$(uname -s)-$(uname -m)" in
+          Linux-x86_64)
+            target=x86_64-unknown-linux-musl
+            sum=410101009739b9d01c7d5affaaad6e9c9a24b4cba6791a4805db8e89b9bf7af2 ;;
+          Linux-aarch64)
+            target=aarch64-unknown-linux-musl
+            sum=7004853c7925ae1984033b5f25866ec604bbc921ef956d5e6c5595bc5af6d30c ;;
+          Darwin-arm64)
+            target=aarch64-apple-darwin
+            sum=bcaf2a418ae39c874b072ea122fec58e11970862cbd8fd4eca2f00a17f76c536 ;;
+          Darwin-x86_64)
+            target=x86_64-apple-darwin
+            sum=9387715ad345a1fe58751d60c80f49d9139957540728bafd0668d005a37cef62 ;;
+          *)
+            echo "no wasm-pack release for $(uname -s)-$(uname -m)" >&2
+            exit 1 ;;
+        esac
+        name="wasm-pack-$VERSION-$target"
+        archive="$RUNNER_TEMP/$name.tar.gz"
+        curl -sSfL --retry 3 -o "$archive" "https://github.com/rustwasm/wasm-pack/releases/download/$VERSION/$name.tar.gz"
+        if command -v sha256sum >/dev/null; then
+          echo "$sum  $archive" | sha256sum -c -
+        else
+          echo "$sum  $archive" | shasum -a 256 -c -
+        fi
+        tar -xzf "$archive" -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
