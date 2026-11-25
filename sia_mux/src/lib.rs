@@ -69,9 +69,26 @@ pub async fn dial<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
 
 /// Perform the mux handshake as the initiating (dialing) peer with custom settings.
 pub async fn dial_with_settings<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    conn: T,
+    their_key: &VerifyingKey,
+    settings: ConnSettings,
+) -> Result<Mux, DialError> {
+    dial_inner(conn, their_key, settings, true).await
+}
+
+/// Dial a peer and close the connection if the peer opens an incoming stream.
+pub async fn dial_refusing_streams<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    conn: T,
+    their_key: &VerifyingKey,
+) -> Result<Mux, DialError> {
+    dial_inner(conn, their_key, ConnSettings::default(), false).await
+}
+
+async fn dial_inner<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     mut conn: T,
     their_key: &VerifyingKey,
     settings: ConnSettings,
+    accept_streams: bool,
 ) -> Result<Mux, DialError> {
     conn.write_u8(OUR_VERSION)
         .await
@@ -80,7 +97,7 @@ pub async fn dial_with_settings<T: AsyncRead + AsyncWrite + Unpin + Send + 'stat
     validate_peer_version(their_version)?;
 
     let (result, merged) = initiate_handshake(&mut conn, their_key, settings).await?;
-    Ok(new_mux(conn, result, merged, 0))
+    Ok(new_mux(conn, result, merged, 0, accept_streams))
 }
 
 /// Perform the mux handshake as the accepting (listening) peer.
@@ -104,7 +121,7 @@ pub async fn accept_with_settings<T: AsyncRead + AsyncWrite + Unpin + Send + 'st
         .map_err(DialError::WriteVersion)?;
 
     let (result, merged) = accept_handshake(&mut conn, our_key, settings).await?;
-    Ok(new_mux(conn, result, merged, 1))
+    Ok(new_mux(conn, result, merged, 1, true))
 }
 
 /// Dial without identity verification (anonymous mode).
